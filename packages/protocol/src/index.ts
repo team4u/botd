@@ -318,6 +318,10 @@ export interface MessageRecord {
   sessionId: string;
   role: MessageRole;
   senderBotId?: string;
+  /** 多人协同会话中人类发送者的用户 ID（仅 role === 'user' 时可能出现） */
+  senderUserId?: string;
+  /** 多人协同会话中人类发送者的用户名（仅 role === 'user' 时可能出现） */
+  senderUsername?: string;
   modelBadge?: string;
   content: string;
   mentions: string[];

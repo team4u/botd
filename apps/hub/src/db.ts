@@ -78,6 +78,8 @@ type MessageRow = {
   session_id: string;
   role: string;
   sender_bot_id: string | null;
+  sender_user_id: string | null;
+  sender_username: string | null;
   model_badge: string | null;
   content: string;
   mentions_json: string;
@@ -96,6 +98,8 @@ const mapMessageRow = (row: MessageRow): MessageRecord => {
     sessionId: row.session_id,
     role: row.role as MessageRole,
     senderBotId: row.sender_bot_id ?? undefined,
+    ...(row.sender_user_id ? { senderUserId: row.sender_user_id } : {}),
+    ...(row.sender_username ? { senderUsername: row.sender_username } : {}),
     modelBadge: row.model_badge ?? undefined,
     content: row.content,
     mentions: parseOptionalJson<string[]>(row.mentions_json) ?? [],
@@ -350,6 +354,8 @@ export class HubDatabase {
         session_id TEXT NOT NULL,
         role TEXT NOT NULL,
         sender_bot_id TEXT,
+        sender_user_id TEXT,
+        sender_username TEXT,
         model_badge TEXT,
         content TEXT NOT NULL,
         mentions_json TEXT NOT NULL DEFAULT '[]',
@@ -467,6 +473,8 @@ export class HubDatabase {
       `ALTER TABLE bots ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`,
       `ALTER TABLE pending_asks ADD COLUMN preview_type TEXT`,
       `ALTER TABLE pending_asks ADD COLUMN preview_content TEXT`,
+      `ALTER TABLE messages ADD COLUMN sender_user_id TEXT`,
+      `ALTER TABLE messages ADD COLUMN sender_username TEXT`,
     ];
 
     for (const sql of migrations) {
@@ -1769,6 +1777,8 @@ export class HubDatabase {
     sessionId: string;
     role: MessageRole;
     senderBotId?: string;
+    senderUserId?: string;
+    senderUsername?: string;
     modelBadge?: string;
     content: string;
     mentions?: string[];
@@ -1782,14 +1792,16 @@ export class HubDatabase {
     const usageJson = msg.usage ? JSON.stringify(msg.usage) : null;
     const attachmentsJson = msg.attachments ? JSON.stringify(msg.attachments) : null;
     const stmt = this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       msg.id,
       msg.sessionId,
       msg.role,
       msg.senderBotId ?? null,
+      msg.senderUserId ?? null,
+      msg.senderUsername ?? null,
       msg.modelBadge ?? null,
       msg.content,
       JSON.stringify(msg.mentions || []),
@@ -1811,6 +1823,8 @@ export class HubDatabase {
         modelBadge: msg.modelBadge ?? undefined,
         content: msg.content,
         mentions: msg.mentions || [],
+        ...(msg.senderUserId ? { senderUserId: msg.senderUserId } : {}),
+        ...(msg.senderUsername ? { senderUsername: msg.senderUsername } : {}),
         ...(msg.toolCalls ? { toolCalls: msg.toolCalls } : {}),
         ...(msg.usage ? { usage: msg.usage } : {}),
         ...(msg.attachments ? { attachments: msg.attachments } : {}),
@@ -1821,7 +1835,7 @@ export class HubDatabase {
 
   getMessages(sessionId: string): MessageRecord[] {
     const stmt = this.db.prepare(`
-      SELECT id, session_id, role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
+      SELECT id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
       FROM messages
       WHERE session_id = ?
       ORDER BY rowid ASC
@@ -1841,7 +1855,7 @@ export class HubDatabase {
     opts: { beforeRowid?: number; aroundRowid?: number; limit?: number }
   ): { messages: MessageRecord[]; hasMore: boolean } {
     const limit = opts.limit && Number.isFinite(opts.limit) && opts.limit > 0 ? Math.min(Math.floor(opts.limit), 200) : 60;
-    const columns = 'rowid, id, session_id, role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at';
+    const columns = 'rowid, id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at';
 
     if (opts.aroundRowid !== undefined) {
       const around = Math.floor(opts.aroundRowid);
@@ -1891,7 +1905,7 @@ export class HubDatabase {
 
   getIncrementalMessages(sessionId: string, afterRowid: number): IncrementalMessageResult[] {
     const stmt = this.db.prepare(`
-      SELECT rowid, id, session_id, role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
+      SELECT rowid, id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
       FROM messages
       WHERE session_id = ? AND rowid > ?
       ORDER BY rowid ASC
@@ -1935,7 +1949,7 @@ export class HubDatabase {
 
   getMessageById(messageId: string): { rowid: number; message: MessageRecord } | undefined {
     const stmt = this.db.prepare(`
-      SELECT rowid, id, session_id, role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
+      SELECT rowid, id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
       FROM messages
       WHERE id = ?
     `);
@@ -1959,7 +1973,7 @@ export class HubDatabase {
     const pattern = `%${escaped}%`;
     const params: (string | number)[] = [ownerId];
     let sql = `
-      SELECT m.id, m.session_id, m.role, m.sender_bot_id, m.model_badge, m.content, m.mentions_json, m.tool_calls_json, m.usage_json, m.attachments_json, m.created_at,
+      SELECT m.id, m.session_id, m.role, m.sender_bot_id, m.sender_user_id, m.sender_username, m.model_badge, m.content, m.mentions_json, m.tool_calls_json, m.usage_json, m.attachments_json, m.created_at,
         s.title AS session_title, s.mode AS session_mode, s.archived AS session_archived
       FROM messages m JOIN sessions s ON m.session_id = s.id
       WHERE s.owner_id = ?
