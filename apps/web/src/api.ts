@@ -16,6 +16,7 @@ import type {
   ArtifactRecord,
   MessageAttachment,
   PendingAskRecord,
+  SessionParticipantRecord,
   TriggerRecord,
   CreateTriggerInput,
   MessageSearchHit,
@@ -38,6 +39,7 @@ export type {
   CreateNotificationChannelInput,
   NotificationChannelKind,
   NotificationEventKind,
+  SessionParticipantRecord,
 };
 
 export class ApiError extends Error {
@@ -567,6 +569,10 @@ export const api = {
     );
   },
 
+  async listPendingApprovals(): Promise<PendingAskRecord[]> {
+    return request<PendingAskRecord[]>('/api/approvals/pending');
+  },
+
   async respondToAsk(
     sessionId: string,
     askId: string,
@@ -577,6 +583,35 @@ export const api = {
       {
         method: 'POST',
         body: JSON.stringify({ answer }),
+      }
+    );
+  },
+
+  // Session Participants
+  async listSessionParticipants(sessionId: string): Promise<SessionParticipantRecord[]> {
+    return request<SessionParticipantRecord[]>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/participants`
+    );
+  },
+
+  async addSessionParticipant(
+    sessionId: string,
+    usernameOrUserId: string
+  ): Promise<SessionParticipantRecord[]> {
+    return request<SessionParticipantRecord[]>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/participants`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ userId: usernameOrUserId, username: usernameOrUserId }),
+      }
+    );
+  },
+
+  async removeSessionParticipant(sessionId: string, userId: string): Promise<void> {
+    return request<void>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/participants/${encodeURIComponent(userId)}`,
+      {
+        method: 'DELETE',
       }
     );
   },
