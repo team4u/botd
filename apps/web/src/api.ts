@@ -6,6 +6,8 @@ import type {
   CreateSessionInput,
   MessageRecord,
   SessionSseEvent,
+  GlobalSseEvent,
+  BgJobRecord,
   PairingResult,
   ModelCatalog,
   ProviderAuthType,
@@ -369,6 +371,16 @@ export const api = {
     );
   },
 
+  async deleteBotEnvKey(
+    botId: string,
+    key: string
+  ): Promise<{ ok: boolean; keys: string[]; env: Record<string, string> }> {
+    return request<{ ok: boolean; keys: string[]; env: Record<string, string> }>(
+      `/api/bots/${encodeURIComponent(botId)}/env/${encodeURIComponent(key)}`,
+      { method: 'DELETE' }
+    );
+  },
+
   // Sessions
   async getSessions(): Promise<SessionRecord[]> {
     return request<SessionRecord[]>('/api/sessions');
@@ -395,10 +407,31 @@ export const api = {
     });
   },
 
+  async updateSessionPinned(sessionId: string, pinned: boolean): Promise<SessionRecord> {
+    return request<SessionRecord>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ pinned }),
+    });
+  },
+
   async getSessionMessages(sessionId: string, signal?: AbortSignal): Promise<MessageRecord[]> {
     return request<MessageRecord[]>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
       signal,
     });
+  },
+
+  async getSessionMessagesPage(
+    sessionId: string,
+    opts: { before?: string; around?: string; limit?: number }
+  ): Promise<{ messages: MessageRecord[]; hasMore: boolean }> {
+    const params = new URLSearchParams();
+    if (opts.before) params.set('before', opts.before);
+    if (opts.around) params.set('around', opts.around);
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    const query = params.toString();
+    return request<{ messages: MessageRecord[]; hasMore: boolean }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/messages${query ? `?${query}` : ''}`
+    );
   },
 
   async sendMessage(
@@ -520,6 +553,7 @@ export const api = {
       name?: string;
       prompt?: string;
       cronExpr?: string;
+      runAt?: string;
     }
   ): Promise<TriggerRecord> {
     return request<TriggerRecord>(
@@ -529,6 +563,13 @@ export const api = {
         body: JSON.stringify(patch),
       }
     );
+  },
+
+  async runTrigger(triggerId: string): Promise<{ ok: true }> {
+    return request<{ ok: true }>(`/api/triggers/${encodeURIComponent(triggerId)}/run`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
   },
 
   async deleteTrigger(triggerId: string): Promise<{ ok: boolean }> {
@@ -549,6 +590,35 @@ export const api = {
     if (options?.sessionId) params.set('sessionId', options.sessionId);
     if (options?.limit !== undefined) params.set('limit', String(options.limit));
     return request<MessageSearchHit[]>(`/api/messages/search?${params.toString()}`);
+  },
+
+  // Background jobs (Node bg-jobs 面板)
+  async listBgJobs(
+    nodeId: string,
+    filter?: { sessionId?: string }
+  ): Promise<BgJobRecord[]> {
+    const query = filter?.sessionId
+      ? `?sessionId=${encodeURIComponent(filter.sessionId)}`
+      : '';
+    return request<BgJobRecord[]>(`/api/nodes/${encodeURIComponent(nodeId)}/bg-jobs${query}`);
+  },
+
+  async getBgJobLogs(
+    nodeId: string,
+    jobId: string,
+    lines?: number
+  ): Promise<{ job: BgJobRecord; logs: string }> {
+    const query = lines !== undefined ? `?lines=${encodeURIComponent(String(lines))}` : '';
+    return request<{ job: BgJobRecord; logs: string }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/bg-jobs/${encodeURIComponent(jobId)}/logs${query}`
+    );
+  },
+
+  async killBgJob(nodeId: string, jobId: string): Promise<{ job: BgJobRecord }> {
+    return request<{ job: BgJobRecord }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/bg-jobs/${encodeURIComponent(jobId)}/kill`,
+      { method: 'POST', body: JSON.stringify({}) }
+    );
   },
 };
 
@@ -578,6 +648,43 @@ export function subscribeSessionEvents(
       callbacks.onEvent(parsed);
     } catch (err) {
       console.warn('[SSE] Failed to parse message data:', err, event.data);
+    }
+  };
+
+  eventSource.onerror = (err) => {
+    callbacks.onError?.(err);
+  };
+
+  return () => {
+    eventSource.close();
+  };
+}
+
+/**
+ * Subscribe to the per-user global SSE stream (/api/events):
+ * session events for all of the user's sessions plus node online/offline notifications.
+ * Returns an unsubscribe callback to cleanly close the connection.
+ */
+export function subscribeGlobalEvents(
+  callbacks: {
+    onEvent: (event: GlobalSseEvent) => void;
+    onError?: (error: Event) => void;
+    onOpen?: () => void;
+  }
+): () => void {
+  const eventSource = new EventSource('/api/events', { withCredentials: true });
+
+  eventSource.onopen = () => {
+    callbacks.onOpen?.();
+  };
+
+  eventSource.onmessage = (event) => {
+    try {
+      if (!event.data) return;
+      const parsed = JSON.parse(event.data) as GlobalSseEvent;
+      callbacks.onEvent(parsed);
+    } catch (err) {
+      console.warn('[SSE] Failed to parse global event data:', err, event.data);
     }
   };
 

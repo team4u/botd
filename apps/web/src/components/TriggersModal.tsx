@@ -11,6 +11,8 @@ import {
   Loader2,
   Timer,
   CheckCircle2,
+  Pencil,
+  Check,
 } from 'lucide-react';
 import type {
   SessionRecord,
@@ -21,6 +23,8 @@ import type {
 } from '@botd/protocol';
 import { isValidCronExpr, describeCronExpr } from '@botd/protocol';
 import { api } from '../api';
+import { copyText } from '../utils/clipboard';
+import { ConfirmDialog } from './ConfirmDialog';
 
 const CRON_PRESETS = [
   { expr: '*/5 * * * *', label: '每 5 分钟' },
@@ -72,6 +76,22 @@ function parseOnceRunAt(raw: string): string | null {
   return null;
 }
 
+/** ISO 时间 → datetime-local 输入值（本地时区，分钟粒度） */
+function isoToLocalDatetimeInput(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** datetime-local 输入值（本地时区）→ ISO 时间 */
+function localDatetimeInputToIso(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const ts = new Date(trimmed).getTime();
+  return Number.isFinite(ts) ? new Date(ts).toISOString() : null;
+}
+
 export interface TriggersModalProps {
   isOpen: boolean;
   session: SessionRecord;
@@ -91,8 +111,9 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // New trigger form state
+  // New trigger form state (also reused as edit form via editingTrigger)
   const [showAddForm, setShowAddForm] = useState(false);
+  const [editingTrigger, setEditingTrigger] = useState<TriggerRecord | null>(null);
   const [name, setName] = useState('');
   const [botId, setBotId] = useState(session.leadBotId || memberBots[0]?.id || '');
   const [kind, setKind] = useState<TriggerKind>('webhook');
@@ -104,6 +125,13 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
   // Action loading state (toggling or deleting)
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  // Run-now confirm dialog state
+  const [runConfirmTrigger, setRunConfirmTrigger] = useState<TriggerRecord | null>(null);
+  const [runningTrigger, setRunningTrigger] = useState(false);
+
+  // Inline copy feedback for webhook URL (briefly swaps Copy icon for Check)
+  const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null);
 
   const fetchTriggers = async () => {
     setLoading(true);
@@ -118,27 +146,76 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
     }
   };
 
+  const resetForm = () => {
+    setName('');
+    setPrompt('');
+    setKind('webhook');
+    setCronExpr('*/30 * * * *');
+    setRunAtInput('15m');
+    setBotId(session.leadBotId || memberBots[0]?.id || '');
+  };
+
   useEffect(() => {
     if (isOpen) {
       fetchTriggers();
       setShowAddForm(false);
-      setName('');
-      setPrompt('');
-      setKind('webhook');
-      setCronExpr('*/30 * * * *');
-      setRunAtInput('15m');
-      setBotId(session.leadBotId || memberBots[0]?.id || '');
+      setEditingTrigger(null);
+      setRunConfirmTrigger(null);
+      setCopiedUrlId(null);
+      resetForm();
     }
   }, [isOpen, session.id]);
 
   if (!isOpen) return null;
 
   const handleCopy = async (text: string, label: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
+    const ok = await copyText(text);
+    if (ok) {
       onAddToast('success', `已复制 ${label}`);
-    } catch {
+    } else {
       onAddToast('error', `复制 ${label} 失败，请手动复制`);
+    }
+  };
+
+  const handleCopyUrl = async (triggerId: string, url: string) => {
+    const ok = await copyText(url);
+    if (ok) {
+      setCopiedUrlId(triggerId);
+      window.setTimeout(() => setCopiedUrlId((cur) => (cur === triggerId ? null : cur)), 1500);
+    } else {
+      onAddToast('error', '复制 Webhook URL 失败，请手动复制');
+    }
+  };
+
+  const handleStartEdit = (trigger: TriggerRecord) => {
+    setEditingTrigger(trigger);
+    setError(null);
+    setShowAddForm(true);
+    setName(trigger.name);
+    setBotId(trigger.botId);
+    setKind(trigger.kind);
+    setPrompt(trigger.prompt);
+    setCronExpr(trigger.cronExpr || '*/30 * * * *');
+    setRunAtInput(trigger.runAt ? isoToLocalDatetimeInput(trigger.runAt) : '');
+  };
+
+  const handleCancelEdit = () => {
+    setEditingTrigger(null);
+    resetForm();
+    setShowAddForm(false);
+  };
+
+  const handleRunTrigger = async () => {
+    if (!runConfirmTrigger || runningTrigger) return;
+    setRunningTrigger(true);
+    try {
+      await api.runTrigger(runConfirmTrigger.id);
+      onAddToast('success', '已触发，请留意会话消息');
+      setRunConfirmTrigger(null);
+    } catch (err: any) {
+      onAddToast('error', err?.message || '触发执行失败');
+    } finally {
+      setRunningTrigger(false);
     }
   };
 
@@ -153,7 +230,9 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
     }
   }
 
-  const parsedRunAt = kind === 'once' ? parseOnceRunAt(runAtInput) : null;
+  const isEditing = Boolean(editingTrigger);
+  const parsedRunAt =
+    kind === 'once' ? (isEditing ? localDatetimeInputToIso(runAtInput) : parseOnceRunAt(runAtInput)) : null;
   const isRunAtValid = kind !== 'once' || Boolean(parsedRunAt);
 
   const handleCreateTrigger = async (e: React.FormEvent) => {
@@ -200,15 +279,26 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
     setError(null);
 
     try {
-      const created = await api.createSessionTrigger(session.id, payload);
-      setTriggers((prev) => [created, ...prev]);
+      if (editingTrigger) {
+        // kind/botId 不可变，仅提交可变字段
+        const updated = await api.updateTrigger(editingTrigger.id, {
+          name: trimmedName,
+          prompt: trimmedPrompt,
+          ...(kind === 'cron' ? { cronExpr: trimmedCron } : {}),
+          ...(kind === 'once' && parsedRunAt ? { runAt: parsedRunAt } : {}),
+        });
+        setTriggers((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+        onAddToast('success', '触发器已更新');
+      } else {
+        const created = await api.createSessionTrigger(session.id, payload);
+        setTriggers((prev) => [created, ...prev]);
+        onAddToast('success', `触发器「${created.name}」已创建`);
+      }
       setShowAddForm(false);
-      setName('');
-      setPrompt('');
-      setCronExpr('*/30 * * * *');
-      onAddToast('success', `触发器「${created.name}」已创建`);
+      setEditingTrigger(null);
+      resetForm();
     } catch (err: any) {
-      setError(err?.message || '创建触发器失败');
+      setError(err?.message || (editingTrigger ? '更新触发器失败' : '创建触发器失败'));
     } finally {
       setSubmitting(false);
     }
@@ -232,6 +322,7 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
     try {
       await api.deleteTrigger(trigger.id);
       setTriggers((prev) => prev.filter((t) => t.id !== trigger.id));
+      if (editingTrigger?.id === trigger.id) handleCancelEdit();
       onAddToast('success', `已删除触发器「${trigger.name}」`);
     } catch (err: any) {
       onAddToast('error', err?.message || '删除触发器失败');
@@ -284,7 +375,11 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
             {!showAddForm && (
               <button
                 type="button"
-                onClick={() => setShowAddForm(true)}
+                onClick={() => {
+                  setEditingTrigger(null);
+                  resetForm();
+                  setShowAddForm(true);
+                }}
                 className="h-8 px-2.5 text-xs font-medium rounded-lg bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white flex items-center gap-1.5 transition-colors cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
@@ -298,18 +393,39 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
             <form onSubmit={handleCreateTrigger} className="p-4 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/40 space-y-3.5 animate-in fade-in">
               <div className="flex items-center justify-between border-b border-zinc-200/80 dark:border-zinc-800 pb-2.5">
                 <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                  新建触发器
+                  {isEditing ? '编辑触发器' : '新建触发器'}
                 </span>
                 <button
                   type="button"
-                  onClick={() => setShowAddForm(false)}
+                  onClick={handleCancelEdit}
                   className="text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
                 >
-                  取消
+                  {isEditing ? '取消编辑' : '取消'}
                 </button>
               </div>
 
-              {/* Kind selector */}
+              {/* Kind selector (readonly badge when editing) */}
+              {isEditing ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">类型</span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[11px] font-medium border shrink-0 ${
+                      editingTrigger?.kind === 'webhook'
+                        ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-900/60'
+                        : editingTrigger?.kind === 'cron'
+                        ? 'bg-purple-50 dark:bg-purple-950/50 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-900/60'
+                        : 'bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/60'
+                    }`}
+                  >
+                    {editingTrigger?.kind === 'webhook'
+                      ? 'Webhook'
+                      : editingTrigger?.kind === 'cron'
+                      ? 'Cron 定时'
+                      : '一次性延时 (Once)'}
+                  </span>
+                  <span className="text-[11px] text-zinc-400 dark:text-zinc-500">创建后不可修改</span>
+                </div>
+              ) : (
               <div>
                 <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
                   触发器类型
@@ -355,6 +471,7 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                   </button>
                 </div>
               </div>
+              )}
 
               {/* Name & Bot */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -376,12 +493,16 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                 <div>
                   <label htmlFor="trigger-bot" className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
                     响应智能体
+                    {isEditing && (
+                      <span className="ml-1.5 text-[11px] font-normal text-zinc-400 dark:text-zinc-500">创建后不可修改</span>
+                    )}
                   </label>
                   <select
                     id="trigger-bot"
                     value={botId}
                     onChange={(e) => setBotId(e.target.value)}
-                    className="w-full h-8 px-2.5 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    disabled={isEditing}
+                    className="w-full h-8 px-2.5 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60 disabled:cursor-not-allowed"
                   >
                     {memberBots.map((b) => (
                       <option key={b.id} value={b.id}>
@@ -463,15 +584,20 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                       延时 / 目标时间
                     </label>
                     <span className="text-[11px] text-zinc-400 dark:text-zinc-500 font-mono">
-                      相对延时或 ISO 时间
+                      {isEditing ? '本地时间' : '相对延时或 ISO 时间'}
                     </span>
                   </div>
                   <input
                     id="trigger-runat"
-                    type="text"
+                    type={isEditing ? 'datetime-local' : 'text'}
                     value={runAtInput}
                     onChange={(e) => setRunAtInput(e.target.value)}
-                    placeholder="例如：30s、15m、2h、1d 或 2025-06-01T09:00:00"
+                    placeholder={
+                      isEditing
+                        ? undefined
+                        : '例如：30s、15m、2h、1d 或 2025-06-01T09:00:00'
+                    }
+                    step={60}
                     className={`w-full h-8 px-2.5 text-xs font-mono bg-white dark:bg-zinc-900 border rounded-lg text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-2 ${
                       runAtInput.trim() && !parsedRunAt
                         ? 'border-rose-400 dark:border-rose-600 focus:ring-rose-500'
@@ -479,7 +605,13 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                     }`}
                   />
 
-                  {runAtInput.trim() && !parsedRunAt ? (
+                  {isEditing ? (
+                    parsedRunAt ? (
+                      <p className="text-[11px] text-emerald-600 dark:text-emerald-400 mt-1">
+                        将于 {new Date(parsedRunAt).toLocaleString()} 触发（仅一次）
+                      </p>
+                    ) : null
+                  ) : runAtInput.trim() && !parsedRunAt ? (
                     <p className="text-[11px] text-rose-500 dark:text-rose-400 mt-1">
                       无效的延时或时间（支持 30s / 15m / 2h / 1d 或 ISO 时间）
                     </p>
@@ -489,7 +621,8 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                     </p>
                   ) : null}
 
-                  {/* Quick preset chips */}
+                  {/* Quick preset chips (new mode only) */}
+                  {!isEditing && (
                   <div className="flex flex-wrap items-center gap-1.5 mt-2">
                     <span className="text-[11px] text-zinc-400 dark:text-zinc-500 mr-0.5">常用预设:</span>
                     {ONCE_PRESETS.map((preset) => (
@@ -508,6 +641,7 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                       </button>
                     ))}
                   </div>
+                  )}
                 </div>
               )}
 
@@ -537,10 +671,10 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
               <div className="flex justify-end gap-2 pt-1">
                 <button
                   type="button"
-                  onClick={() => setShowAddForm(false)}
+                  onClick={handleCancelEdit}
                   className="h-8 px-2.5 text-xs font-medium rounded-lg text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
                 >
-                  取消
+                  {isEditing ? '取消编辑' : '取消'}
                 </button>
                 <button
                   type="submit"
@@ -548,7 +682,7 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                   className="h-8 px-3 text-xs font-medium rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 dark:disabled:bg-blue-900/50 dark:disabled:text-blue-400/50 text-white flex items-center gap-1.5 transition-colors cursor-pointer disabled:cursor-not-allowed"
                 >
                   {submitting && <Loader2 className="w-3.5 h-3.5 animate-spin-fast" />}
-                  <span>保存触发器</span>
+                  <span>{isEditing ? '保存修改' : '保存触发器'}</span>
                 </button>
               </div>
             </form>
@@ -615,10 +749,10 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                               {cronBadgeText}
                             </span>
                           )}
-                          {trigger.kind === 'once' && !trigger.enabled && trigger.lastTriggeredAt && (
+                          {trigger.kind === 'once' && trigger.lastTriggeredAt && (
                             <span className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/60 shrink-0 inline-flex items-center gap-1">
                               <CheckCircle2 className="w-3 h-3" />
-                              已触发完成
+                              已执行
                             </span>
                           )}
 
@@ -637,17 +771,19 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                           </div>
                         )}
                         {trigger.kind === 'once' && (
-                          <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5 flex items-center gap-1">
-                            <Timer className="w-3 h-3" />
-                            <span>一次性延时</span>
+                          <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5 flex items-center gap-1 flex-wrap">
+                            <Timer className="w-3 h-3 shrink-0" />
                             {trigger.runAt && (
-                              <span className="font-mono">· {new Date(trigger.runAt).toLocaleString()}</span>
+                              <span className="font-mono">{new Date(trigger.runAt).toLocaleString()}</span>
+                            )}
+                            {!trigger.lastTriggeredAt && trigger.enabled && (
+                              <span className="text-amber-600 dark:text-amber-400">等待执行</span>
                             )}
                           </div>
                         )}
                       </div>
 
-                      {/* Switch and delete button */}
+                      {/* Switch, run, edit and delete buttons */}
                       <div className="flex items-center gap-1.5 shrink-0">
                         <button
                           type="button"
@@ -667,6 +803,26 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                           ) : (
                             '已停用'
                           )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setRunConfirmTrigger(trigger)}
+                          className="p-1.5 text-zinc-400 hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-950/50 rounded-lg transition-colors cursor-pointer"
+                          title="立即触发（手动执行一次）"
+                          aria-label={`立即触发 ${trigger.name}`}
+                        >
+                          <Zap className="w-3.5 h-3.5" />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleStartEdit(trigger)}
+                          className="p-1.5 text-zinc-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/50 rounded-lg transition-colors cursor-pointer"
+                          title="编辑触发器"
+                          aria-label={`编辑触发器 ${trigger.name}`}
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
                         </button>
 
                         <button
@@ -695,19 +851,24 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                     {trigger.kind === 'webhook' && webhookUrl && (
                       <div className="mt-2 space-y-1.5 pt-2 border-t border-zinc-100 dark:border-zinc-800/60">
                         <div className="flex items-center gap-1.5">
-                          <input
-                            type="text"
-                            readOnly
-                            value={webhookUrl}
-                            className="flex-1 h-8 px-2.5 text-[11px] font-mono bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg text-zinc-600 dark:text-zinc-400 select-all"
-                          />
+                          <span
+                            className="flex-1 min-w-0 h-8 px-2.5 text-[11px] font-mono bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg text-zinc-600 dark:text-zinc-400 truncate flex items-center select-all"
+                            title={webhookUrl}
+                          >
+                            {webhookUrl}
+                          </span>
                           <button
                             type="button"
-                            onClick={() => handleCopy(webhookUrl, 'Webhook URL')}
-                            className="h-8 px-2.5 text-xs font-medium rounded-lg border border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 flex items-center gap-1 shrink-0 cursor-pointer"
+                            onClick={() => handleCopyUrl(trigger.id, webhookUrl)}
+                            className="h-8 w-8 rounded-lg border border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 flex items-center justify-center shrink-0 cursor-pointer transition-colors"
+                            title={copiedUrlId === trigger.id ? '已复制' : '复制 URL'}
+                            aria-label="复制 Webhook URL"
                           >
-                            <Copy className="w-3 h-3" />
-                            <span>复制 URL</span>
+                            {copiedUrlId === trigger.id ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-500" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
                           </button>
                           <button
                             type="button"
@@ -747,6 +908,28 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Run-now confirm dialog */}
+      <ConfirmDialog
+        isOpen={Boolean(runConfirmTrigger)}
+        title="立即触发"
+        message={
+          <>
+            立即执行一次该触发器的指令？不会影响定时计划。
+            {runConfirmTrigger && (
+              <span className="block mt-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                触发器「{runConfirmTrigger.name}」· 指令将发送给 @{runConfirmTrigger.botId}
+              </span>
+            )}
+          </>
+        }
+        confirmText="立即执行"
+        busy={runningTrigger}
+        onConfirm={handleRunTrigger}
+        onClose={() => {
+          if (!runningTrigger) setRunConfirmTrigger(null);
+        }}
+      />
     </div>
   );
 };

@@ -3,18 +3,9 @@ import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import type { BotConfig, NodeIdentity } from '@botd/protocol';
+import { isSafeId, isValidBotEnvKey, type BotConfig, type NodeIdentity } from '@botd/protocol';
 
-const SAFE_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
-
-const BOT_ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const RESERVED_BOT_ENV_KEYS = new Set(['path', 'pwd', 'home', 'user', 'shell']);
-
-export function isValidBotEnvKey(key: string): boolean {
-  if (!BOT_ENV_KEY_REGEX.test(key)) return false;
-  if (RESERVED_BOT_ENV_KEYS.has(key.toLowerCase())) return false;
-  return !key.toUpperCase().startsWith('BOTD_');
-}
+export { isValidBotEnvKey } from '@botd/protocol';
 
 export async function readBotEnv(dataDir: string, botId: string): Promise<Record<string, string>> {
   assertSafeId(botId, 'Bot ID');
@@ -53,7 +44,7 @@ export async function writeBotEnv(
 }
 
 export function assertSafeId(id: string, label = 'Identifier'): string {
-  if (!id || typeof id !== 'string' || !SAFE_ID_REGEX.test(id)) {
+  if (!isSafeId(id)) {
     throw new Error(`${label} "${id}" is invalid. Only alphanumeric, underscore and dash characters are allowed.`);
   }
   return id;

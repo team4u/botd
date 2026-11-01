@@ -14,6 +14,7 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import { api } from '../api';
+import { copyText } from '../utils/clipboard';
 import type {
   ProviderAuthType,
   ProviderLoginState,
@@ -77,16 +78,12 @@ export const ProviderAuthModal: React.FC<ProviderAuthModalProps> = ({
   const onSuccessRef = useRef(onSuccess);
   onSuccessRef.current = onSuccess;
 
-  const copyToClipboard = (text: string, label: string) => {
-    if (navigator?.clipboard?.writeText) {
-      navigator.clipboard
-        .writeText(text)
-        .then(() => {
-          if (isMountedRef.current) setCopiedKey(label);
-        })
-        .catch(() => setError('浏览器未允许复制，请手动选择并复制'));
+  const copyToClipboard = async (text: string, label: string) => {
+    const ok = await copyText(text);
+    if (ok) {
+      if (isMountedRef.current) setCopiedKey(label);
     } else {
-      setError('当前浏览器环境无法自动复制，请手动选择并复制');
+      setError('浏览器未允许复制，请手动选择并复制');
     }
     setTimeout(() => {
       if (isMountedRef.current) setCopiedKey(null);

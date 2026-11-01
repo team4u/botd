@@ -4,9 +4,11 @@ import { cronMatches, isValidCronExpr, parseDelayDuration } from '@botd/protocol
 import type { TriggerKind, TriggerRecord, UserRecord } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
 import type { GroupRouter } from './group-router.js';
+import { resolveOwnedSession } from './http-helpers.js';
 
 const VALID_KINDS = new Set<TriggerKind>(['webhook', 'cron', 'once']);
-const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
 
 export interface TriggerSchedulerHandle {
   stop: () => void;
@@ -16,8 +18,17 @@ export function registerTriggerRoutes(
   app: Hono<{ Variables: { user: UserRecord } }>,
   db: HubDatabase,
   router: GroupRouter,
-  getSessionOwnerId: (sessionId: string) => string | undefined
+  getSessionOwnerId?: (sessionId: string) => string | undefined
 ): TriggerSchedulerHandle {
+  const getOwner = getSessionOwnerId ?? ((sid: string) => db.getSessionOwner(sid));
+  const hasValidTarget = (trigger: TriggerRecord & { ownerId: string }): boolean => {
+    if (getOwner(trigger.sessionId) === trigger.ownerId && router.canRunBot(trigger.sessionId, trigger.botId)) {
+      return true;
+    }
+    db.updateTrigger(trigger.id, { enabled: false });
+    return false;
+  };
+
   // --- 公共 Webhook 入口（鉴权靠 :token，在 index.ts 的认证中间件白名单中放行） ---
   app.post('/api/webhooks/:token', async (c) => {
     const token = c.req.param('token');
@@ -27,6 +38,9 @@ export function registerTriggerRoutes(
     }
     if (!trigger.enabled) {
       return c.json({ error: 'Trigger is disabled' }, 403);
+    }
+    if (!hasValidTarget(trigger)) {
+      return c.json({ error: 'Trigger target is no longer a session member' }, 403);
     }
 
     const raw = await c.req.text().catch(() => '');
@@ -60,26 +74,17 @@ export function registerTriggerRoutes(
   // --- 会话触发器 CRUD（Cookie 鉴权） ---
   app.get('/api/sessions/:id/triggers', (c) => {
     const id = c.req.param('id');
-    const session = db.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
-    if (getSessionOwnerId(id) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
     return c.json(db.listSessionTriggers(id));
   });
 
   app.post('/api/sessions/:id/triggers', async (c) => {
     const id = c.req.param('id');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    const session = sRes.session;
     const user = c.get('user');
-    const session = db.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
-    if (getSessionOwnerId(id) !== user.id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
 
     const body = await c.req.json<{
       name?: string;
@@ -216,6 +221,24 @@ export function registerTriggerRoutes(
     return c.json(updated);
   });
 
+  app.post('/api/triggers/:triggerId/run', async (c) => {
+    const triggerId = c.req.param('triggerId');
+    const trigger = db.getTrigger(triggerId);
+    if (!trigger) {
+      return c.json({ error: 'Trigger not found' }, 404);
+    }
+    if (trigger.ownerId !== c.get('user').id) {
+      return c.json({ error: 'Forbidden' }, 403);
+    }
+
+    // fire-and-forget：立即返回，唤醒回合在后台异步执行
+    void router
+      .handleWakeup(trigger.sessionId, trigger.botId, `[手动触发: ${trigger.name}] ${trigger.prompt}`)
+      .catch(() => {});
+
+    return c.json({ ok: true });
+  });
+
   app.delete('/api/triggers/:triggerId', (c) => {
     const triggerId = c.req.param('triggerId');
     const trigger = db.getTrigger(triggerId);
@@ -238,6 +261,7 @@ export function registerTriggerRoutes(
       const nowMinute = Math.floor(now.getTime() / 60_000);
       for (const t of triggers) {
         try {
+          if (!hasValidTarget(t)) continue;
           if (t.kind === 'once') {
             if (!t.runAt || Date.now() < Date.parse(t.runAt)) continue;
             // 先落库再触发：标记 fired 并停用，确保一次性触发器只触发一次

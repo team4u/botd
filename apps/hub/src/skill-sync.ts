@@ -1,34 +1,28 @@
 import type { Hono } from 'hono';
-import type { PendingAskRecord, UserRecord } from '@botd/protocol';
+import type { UserRecord } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
 import type { NodeConnectionManager } from './ws-hub.js';
 import type { GroupRouter } from './group-router.js';
+import { resolveOwnedNodeRpc, resolveOwnedSession } from './http-helpers.js';
 
-const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
 
 export function registerSkillSyncAndAskRoutes(
   app: Hono<{ Variables: { user: UserRecord } }>,
   db: HubDatabase,
   connections: NodeConnectionManager,
   router: GroupRouter,
-  getSessionOwnerId: (sessionId: string) => string | undefined
+  _getSessionOwnerId?: (sessionId: string) => string | undefined
 ): void {
   // --- 跨节点技能同步 ---
   app.post('/api/nodes/:nodeId/skills/:skillId/sync', async (c) => {
     const { nodeId, skillId } = c.req.param();
     const user = c.get('user');
 
-    const sourceNode = db.getNode(nodeId);
-    if (!sourceNode) {
-      return c.json({ error: 'Source node not found' }, 404);
-    }
-    if (db.getNodeOwner(nodeId) !== user.id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    const sourceRpc = connections.getNodeRpc(nodeId);
-    if (!sourceRpc) {
-      return c.json({ error: 'Source node is offline' }, 503);
-    }
+    const sourceRes = resolveOwnedNodeRpc(c, db, connections, nodeId);
+    if (!sourceRes.ok) return sourceRes.response;
+    const sourceRpc = sourceRes.rpc;
 
     const body = await c.req.json<{ targetNodeIds?: string[] }>().catch(() => null);
     if (!isObject(body) || !Array.isArray(body.targetNodeIds) || body.targetNodeIds.length === 0
@@ -67,35 +61,25 @@ export function registerSkillSyncAndAskRoutes(
   // --- botd ask 人机协同交互 ---
   app.get('/api/sessions/:id/asks', (c) => {
     const id = c.req.param('id');
-    const session = db.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
-    if (getSessionOwnerId(id) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    const asks = (router as unknown as { getPendingAsks?: (sessionId: string) => PendingAskRecord[] }).getPendingAsks?.(id) ?? [];
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+
+    const asks = router.getPendingAsks(id);
     return c.json(asks);
   });
 
   app.post('/api/sessions/:id/asks/:askId/respond', async (c) => {
     const id = c.req.param('id');
     const askId = c.req.param('askId');
-    const session = db.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
-    if (getSessionOwnerId(id) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
 
     const body = await c.req.json<{ answer?: string }>().catch(() => null);
     if (!isObject(body) || typeof body.answer !== 'string' || !body.answer.trim()) {
       return c.json({ error: 'Missing answer' }, 400);
     }
 
-    const resolved = (router as unknown as { respondToAsk?: (sessionId: string, askId: string, answer: string) => PendingAskRecord | undefined })
-      .respondToAsk?.(id, askId, body.answer.trim());
+    const resolved = router.respondToAsk(id, askId, body.answer.trim());
     if (!resolved) {
       return c.json({ error: 'Ask not found' }, 404);
     }

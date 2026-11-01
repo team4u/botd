@@ -7,6 +7,12 @@ import { CliError } from '../errors.js';
 import { getDaemonSocketPath } from '../../storage.js';
 import { postJsonOverSocket, requestOverSocket } from './node.js';
 
+export interface DaemonArtifactListResponse {
+  ok: boolean;
+  artifacts: ArtifactRecord[];
+  error?: string;
+}
+
 export function registerArtifactsCommands(program: Command): void {
   const artifacts = program
     .command('artifact')
@@ -173,7 +179,11 @@ export function registerArtifactsCommands(program: Command): void {
           if (status !== 200) {
             throw new Error(`Daemon returned status ${status}: ${body}`);
           }
-          list = JSON.parse(body) as ArtifactRecord[];
+          const response = JSON.parse(body) as DaemonArtifactListResponse;
+          if (!response || !Array.isArray(response.artifacts)) {
+            throw new Error(`Daemon returned unexpected response structure: ${body}`);
+          }
+          list = response.artifacts;
         } catch (err: unknown) {
           throw new CliError(
             `Artifact list failed: ${err instanceof Error ? err.message : String(err)}`,

@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import type {
-  MessageAttachment,
   MessageRecord,
   PendingAskRecord,
   SessionRecord,
@@ -35,6 +34,15 @@ export interface QueueItem {
   commandMessageId?: string;
   parallelGroupId?: string;
   replyToBotId?: string;
+}
+
+export interface PreparedTurnItem {
+  item: QueueItem;
+  bot: NonNullable<ReturnType<HubDatabase['getBot']>>;
+  rpc: NonNullable<ReturnType<NodeConnectionManager['getNodeRpc']>>;
+  incrementalText: string;
+  deliveredSnapshotRowid: number;
+  attachments: NonNullable<MessageRecord['attachments']>;
 }
 
 export interface SessionRuntimeState {
@@ -167,6 +175,18 @@ export class GroupRouter {
     this.db = db;
     this.connections = connections;
     this.sseHub = sseHub;
+  }
+
+  private getSessionOwner(sessionId: string, _session?: SessionRecord): string | undefined {
+    return this.db.getSessionOwner(sessionId);
+  }
+
+  canRunBot(sessionId: string, botId: string): boolean {
+    const session = this.db.getSession(sessionId);
+    const bot = this.db.getBot(botId);
+    if (!session || !bot || ![session.leadBotId, ...session.memberBotIds].includes(botId)) return false;
+    const ownerId = this.getSessionOwner(sessionId, session);
+    return ownerId !== undefined && this.db.getNodeOwner(bot.nodeId) === ownerId;
   }
 
   private getOrCreateState(sessionId: string): SessionRuntimeState {
@@ -337,7 +357,7 @@ export class GroupRouter {
         } else {
           // roundtable: members except leadBotId first, then leadBotId at the end
           const others = session.memberBotIds.filter((id) => id !== session.leadBotId);
-          if (Boolean((session as any).parallelRoundtable) && others.length > 0) {
+          if (Boolean(session.parallelRoundtable) && others.length > 0) {
             const parallelGroupId = `pg_${randomUUID()}`;
             const chainBudget = new ChainBudget(MAX_RELAY_TURNS);
             for (const botId of others) {
@@ -388,8 +408,12 @@ export class GroupRouter {
     const session = this.db.getSession(sessionId);
     if (!session) return;
 
-    const state = this.getOrCreateState(sessionId);
     const validBotIds = new Set([session.leadBotId, ...session.memberBotIds]);
+    if (!this.canRunBot(sessionId, botId)) {
+      throw new Error(`Forbidden: bot @${botId} cannot run in session ${sessionId}`);
+    }
+
+    const state = this.getOrCreateState(sessionId);
 
     const isValidReplyTo = replyToBotId && validBotIds.has(replyToBotId);
     let callbackContent = `[Wake-up] ${wakeupMessage}`;
@@ -400,7 +424,7 @@ export class GroupRouter {
     const mentions = extractMentions(callbackContent, validBotIds);
 
     // Insert callback message into DB
-    const callbackMsg = (this.db as any).createMessage({
+    const callbackMsg = this.db.createMessage({
       id: `msg_${randomUUID()}`,
       sessionId,
       role: 'callback',
@@ -472,12 +496,17 @@ export class GroupRouter {
     }
   }
 
-  /** 通知会话全部成员所在的节点归档其本地会话文件（best-effort：离线节点/已删除 bot 不阻塞流程） */
+  /** 通知会话全部成员所在的节点归档其本地会话文件（持久化待重置标记并在成功后清除） */
   async resetMemberSessions(sessionId: string): Promise<void> {
     const session = this.db.getSession(sessionId);
     if (!session) return;
 
     const memberIds = [...new Set([session.leadBotId, ...session.memberBotIds])];
+    const state = this.getOrCreateState(sessionId);
+    const generation = state.generation;
+    for (const botId of memberIds) {
+      this.db.markSessionResetPending(sessionId, botId);
+    }
     const results = await Promise.allSettled(memberIds.map(async (botId) => {
       const bot = this.db.getBot(botId);
       if (!bot) return; // 节点已删除该 bot，跳过
@@ -487,12 +516,172 @@ export class GroupRouter {
         return;
       }
       await rpc.resetSession(sessionId, botId);
+      if (state.generation === generation) this.db.clearSessionResetPending(sessionId, botId);
     }));
     for (const result of results) {
       if (result.status === 'rejected') {
         console.warn(`[group-router] resetSession failed for session ${sessionId}:`, result.reason);
       }
     }
+  }
+
+  private prepareTurnInput(
+    session: NonNullable<ReturnType<HubDatabase['getSession']>>,
+    item: QueueItem
+  ): {
+    incrementalText: string;
+    deliveredSnapshotRowid: number;
+    attachments: NonNullable<MessageRecord['attachments']>;
+  } {
+    const lastRowid = session.cursorMap[item.botId] ?? 0;
+    const rawIncResult = this.db.getIncrementalMessages(session.id, lastRowid);
+    const incResult = rawIncResult.filter(
+      (r) =>
+        !(r.message.role === 'assistant' && r.message.senderBotId === item.botId) &&
+        !(item.commandMessageId && r.message.id === item.commandMessageId)
+    );
+    const incrementalText = formatIncrementalMessages(incResult.map((r) => r.message));
+    const deliveredSnapshotRowid =
+      rawIncResult.length > 0 ? Math.max(...rawIncResult.map((r) => r.rowid)) : lastRowid;
+    const attachments = incResult.flatMap((r) => r.message.attachments ?? []);
+    return {
+      incrementalText,
+      deliveredSnapshotRowid,
+      attachments,
+    };
+  }
+
+  private async executeTurn(
+    session: NonNullable<ReturnType<HubDatabase['getSession']>>,
+    state: SessionRuntimeState,
+    prep: PreparedTurnItem,
+    groupContextPrompt: string,
+    validBotIds: Set<string>,
+    turnGen: number,
+    isParallel: boolean
+  ): Promise<'success' | 'failed' | 'cancelled'> {
+    const { item, rpc } = prep;
+    const sessionId = session.id;
+
+    if (this.db.hasPendingSessionReset(sessionId, item.botId)) {
+      try {
+        await rpc.resetSession(sessionId, item.botId);
+        if (turnGen !== state.generation) return 'cancelled';
+        this.db.clearSessionResetPending(sessionId, item.botId);
+      } catch (err: any) {
+        if (turnGen !== state.generation) return 'cancelled';
+        const errorText = err?.message || String(err);
+        const sysMsg = this.db.createMessage({
+          id: `msg_${randomUUID()}`,
+          sessionId,
+          role: 'system',
+          content: `Error resetting session for @${item.botId}: ${errorText}`,
+        });
+        this.sseHub.broadcast(sessionId, { type: 'message_created', message: sysMsg.message });
+        if (!isParallel) {
+          this.db.updateSessionStatus(sessionId, 'failed', undefined);
+          this.sseHub.broadcast(sessionId, {
+            type: 'session_status',
+            sessionId,
+            status: 'failed',
+            activeBotId: undefined,
+          });
+          state.queue = [];
+        }
+        return 'failed';
+      }
+    }
+
+    if (turnGen !== state.generation) return 'cancelled';
+
+    let turnResult: { replyText: string; modelBadge: string; toolCalls?: ToolCallRecord[]; usage?: TurnUsage };
+    try {
+      turnResult = await rpc.runTurn({
+        sessionId,
+        botId: item.botId,
+        groupContextPrompt,
+        incrementalMessages: prep.incrementalText,
+        ...(item.commandText ? { commandText: item.commandText } : {}),
+        ...(prep.attachments.length > 0 ? { attachments: prep.attachments } : {}),
+      });
+    } catch (err: any) {
+      if (turnGen !== state.generation) return 'cancelled';
+      const errorText = err?.message || String(err);
+      const sysMsg = this.db.createMessage({
+        id: `msg_${randomUUID()}`,
+        sessionId,
+        role: 'system',
+        content: `Error executing turn for @${item.botId}: ${errorText}`,
+      });
+      this.sseHub.broadcast(sessionId, { type: 'message_created', message: sysMsg.message });
+      if (!isParallel) {
+        this.db.updateSessionStatus(sessionId, 'failed', undefined);
+        this.sseHub.broadcast(sessionId, {
+          type: 'session_status',
+          sessionId,
+          status: 'failed',
+          activeBotId: undefined,
+        });
+        state.queue = [];
+      }
+      return 'failed';
+    }
+
+    if (turnGen !== state.generation) return 'cancelled';
+
+    const replyMentions = extractMentions(turnResult.replyText, validBotIds);
+    const maxRowidBeforeInsert = this.db.getMaxMessageRowid(sessionId);
+
+    const newMsg = this.db.createMessage({
+      id: `msg_${randomUUID()}`,
+      sessionId,
+      role: 'assistant',
+      senderBotId: item.botId,
+      modelBadge: turnResult.modelBadge,
+      content: turnResult.replyText,
+      mentions: replyMentions,
+      toolCalls: turnResult.toolCalls,
+      usage: turnResult.usage,
+    });
+
+    if (maxRowidBeforeInsert > prep.deliveredSnapshotRowid) {
+      this.db.updateSessionCursor(sessionId, item.botId, prep.deliveredSnapshotRowid);
+    } else {
+      this.db.updateSessionCursor(sessionId, item.botId, Math.max(prep.deliveredSnapshotRowid, newMsg.rowid));
+    }
+
+    this.sseHub.broadcast(sessionId, {
+      type: 'message_created',
+      message: {
+        ...newMsg.message,
+        ...(turnResult.toolCalls ? { toolCalls: turnResult.toolCalls } : {}),
+        ...(turnResult.usage ? { usage: turnResult.usage } : {}),
+      },
+    });
+
+    if (item.replyToBotId && !replyMentions.includes(item.replyToBotId)) {
+      if (item.chainBudget.consumeRelay()) {
+        state.queue.push({
+          botId: item.replyToBotId,
+          chainBudget: item.chainBudget,
+          generation: state.generation,
+        });
+      }
+    }
+
+    if (replyMentions.length > 0) {
+      for (const nextBotId of replyMentions) {
+        if (item.chainBudget.consumeRelay()) {
+          state.queue.push({
+            botId: nextBotId,
+            chainBudget: item.chainBudget,
+            generation: state.generation,
+          });
+        }
+      }
+    }
+
+    return 'success';
   }
 
   private async processQueue(sessionId: string): Promise<void> {
@@ -504,31 +693,40 @@ export class GroupRouter {
     try {
       while (!this.closed && state.queue.length > 0) {
         const frontItem = state.queue[0];
-        if (frontItem.parallelGroupId) {
-          const groupId = frontItem.parallelGroupId;
-          const batch: QueueItem[] = [];
+        const isParallel = Boolean(frontItem.parallelGroupId);
+        const rawBatch: QueueItem[] = [];
+        if (isParallel) {
+          const groupId = frontItem.parallelGroupId!;
           while (state.queue.length > 0 && state.queue[0].parallelGroupId === groupId) {
-            batch.push(state.queue.shift()!);
+            rawBatch.push(state.queue.shift()!);
           }
-          const validBatch = batch.filter((item) => item.generation === state.generation);
-          if (validBatch.length === 0) continue;
+        } else {
+          rawBatch.push(state.queue.shift()!);
+        }
 
-          const session = this.db.getSession(sessionId);
-          if (!session) break;
+        const validBatch = rawBatch.filter((item) => item.generation === state.generation);
+        if (validBatch.length === 0) continue;
 
-          let missingBotId: string | undefined;
-          for (const it of validBatch) {
-            if (!this.db.getBot(it.botId)) {
-              missingBotId = it.botId;
-              break;
-            }
+        const session = this.db.getSession(sessionId);
+        if (!session) break;
+
+        const validBotIds = new Set([session.leadBotId, ...session.memberBotIds]);
+        const sessionOwner = this.getSessionOwner(sessionId, session);
+
+        const activeBatch: QueueItem[] = [];
+        if (!isParallel) {
+          const item = validBatch[0];
+          if (!validBotIds.has(item.botId)) {
+            console.warn(`[group-router] Skipping turn for bot @${item.botId}: no longer a member of session ${sessionId}`);
+            continue;
           }
-          if (missingBotId) {
-            const sysMsg = (this.db as any).createMessage({
+          const bot = this.db.getBot(item.botId);
+          if (!bot) {
+            const sysMsg = this.db.createMessage({
               id: `msg_${randomUUID()}`,
               sessionId,
               role: 'system',
-              content: `Bot @${missingBotId} not found.`,
+              content: `Bot @${item.botId} not found.`,
             });
             this.sseHub.broadcast(sessionId, { type: 'message_created', message: sysMsg.message });
             this.db.updateSessionStatus(sessionId, 'failed', undefined);
@@ -536,299 +734,97 @@ export class GroupRouter {
             state.queue = [];
             break;
           }
-
-          let anyOffline = false;
-          for (const it of validBatch) {
-            const bot = this.db.getBot(it.botId)!;
-            const rpc = this.connections.getNodeRpc(bot.nodeId);
-            if (!rpc) {
-              anyOffline = true;
-              break;
-            }
+          const botOwner = this.db.getNodeOwner(bot.nodeId);
+          if (sessionOwner && botOwner && botOwner !== sessionOwner) {
+            console.warn(`[group-router] Skipping turn for bot @${item.botId}: owner mismatch (session: ${sessionOwner}, bot: ${botOwner})`);
+            continue;
           }
-          if (anyOffline) {
-            state.queue.unshift(...validBatch);
-            this.db.updateSessionStatus(sessionId, 'queued', undefined);
-            this.sseHub.broadcast(sessionId, {
-              type: 'session_status',
-              sessionId,
-              status: 'queued',
-              activeBotId: undefined,
-            });
+          activeBatch.push(item);
+        } else {
+          for (const item of validBatch) {
+            if (!validBotIds.has(item.botId)) {
+              console.warn(`[group-router] Skipping turn for bot @${item.botId}: no longer a member of session ${sessionId}`);
+              continue;
+            }
+            const bot = this.db.getBot(item.botId);
+            if (!bot) continue;
+            const botOwner = this.db.getNodeOwner(bot.nodeId);
+            if (sessionOwner && botOwner && botOwner !== sessionOwner) continue;
+            activeBatch.push(item);
+          }
+        }
+
+        if (activeBatch.length === 0) continue;
+
+        let anyOffline = false;
+        for (const item of activeBatch) {
+          const bot = this.db.getBot(item.botId)!;
+          const rpc = this.connections.getNodeRpc(bot.nodeId);
+          if (!rpc) {
+            anyOffline = true;
             break;
           }
-
-          state.activeBotIds = new Set(validBatch.map((item) => item.botId));
-          state.activeBotId = validBatch[0].botId;
-          this.db.updateSessionStatus(sessionId, 'running', state.activeBotId);
+        }
+        if (anyOffline) {
+          state.queue.unshift(...activeBatch);
+          this.db.updateSessionStatus(sessionId, 'queued', undefined);
           this.sseHub.broadcast(sessionId, {
             type: 'session_status',
             sessionId,
-            status: 'running',
-            activeBotId: state.activeBotId,
+            status: 'queued',
+            activeBotId: undefined,
           });
-
-          const groupContextPrompt = buildGroupContextPrompt(session);
-          const turnGen = state.generation;
-
-          // Snapshot incremental messages for each bot BEFORE any turn starts (Blind Review)
-          const preparedItems = validBatch.map((item) => {
-            const lastRowid = session.cursorMap[item.botId] ?? 0;
-            const rawIncResult = this.db.getIncrementalMessages(sessionId, lastRowid);
-            const incResult = rawIncResult.filter(
-              (r) => !(r.message.role === 'assistant' && r.message.senderBotId === item.botId) &&
-                     !(item.commandMessageId && r.message.id === item.commandMessageId)
-            );
-            const incrementalText = formatIncrementalMessages(incResult.map((r) => r.message));
-            const deliveredSnapshotRowid =
-              rawIncResult.length > 0 ? Math.max(...rawIncResult.map((r) => r.rowid)) : lastRowid;
-            const attachments = incResult.flatMap((r) => r.message.attachments ?? []);
-            const bot = this.db.getBot(item.botId)!;
-            const rpc = this.connections.getNodeRpc(bot.nodeId)!;
-            return {
-              item,
-              bot,
-              rpc,
-              incrementalText,
-              deliveredSnapshotRowid,
-              attachments,
-            };
-          });
-
-          await Promise.all(
-            preparedItems.map(async (prep) => {
-              const { item, rpc } = prep;
-              let turnResult: { replyText: string; modelBadge: string; toolCalls?: ToolCallRecord[]; usage?: TurnUsage };
-              try {
-                turnResult = await rpc.runTurn({
-                  sessionId,
-                  botId: item.botId,
-                  groupContextPrompt,
-                  incrementalMessages: prep.incrementalText,
-                  ...(item.commandText ? { commandText: item.commandText } : {}),
-                  ...(prep.attachments.length > 0 ? { attachments: prep.attachments } : {}),
-                });
-              } catch (err: any) {
-                if (turnGen !== state.generation) return;
-                const errorText = err?.message || String(err);
-                const sysMsg = (this.db as any).createMessage({
-                  id: `msg_${randomUUID()}`,
-                  sessionId,
-                  role: 'system',
-                  content: `Error executing turn for @${item.botId}: ${errorText}`,
-                });
-                this.sseHub.broadcast(sessionId, { type: 'message_created', message: sysMsg.message });
-                return;
-              }
-
-              if (turnGen !== state.generation) return;
-
-              const validBotIds = new Set([session.leadBotId, ...session.memberBotIds]);
-              const replyMentions = extractMentions(turnResult.replyText, validBotIds);
-              const maxRowidBeforeInsert = this.db.getMaxMessageRowid(sessionId);
-
-              const newMsg = (this.db as any).createMessage({
-                id: `msg_${randomUUID()}`,
-                sessionId,
-                role: 'assistant',
-                senderBotId: item.botId,
-                modelBadge: turnResult.modelBadge,
-                content: turnResult.replyText,
-                mentions: replyMentions,
-                toolCalls: turnResult.toolCalls,
-                usage: turnResult.usage,
-              });
-
-              if (maxRowidBeforeInsert > prep.deliveredSnapshotRowid) {
-                this.db.updateSessionCursor(sessionId, item.botId, prep.deliveredSnapshotRowid);
-              } else {
-                this.db.updateSessionCursor(sessionId, item.botId, Math.max(prep.deliveredSnapshotRowid, newMsg.rowid));
-              }
-
-              this.sseHub.broadcast(sessionId, {
-                type: 'message_created',
-                message: {
-                  ...newMsg.message,
-                  ...(turnResult.toolCalls ? { toolCalls: turnResult.toolCalls } : {}),
-                  ...(turnResult.usage ? { usage: turnResult.usage } : {}),
-                },
-              });
-
-              if (item.replyToBotId && !replyMentions.includes(item.replyToBotId)) {
-                if (item.chainBudget.consumeRelay()) {
-                  state.queue.push({
-                    botId: item.replyToBotId,
-                    chainBudget: item.chainBudget,
-                    generation: state.generation,
-                  });
-                }
-              }
-
-              if (replyMentions.length > 0) {
-                for (const nextBotId of replyMentions) {
-                  if (item.chainBudget.consumeRelay()) {
-                    state.queue.push({
-                      botId: nextBotId,
-                      chainBudget: item.chainBudget,
-                      generation: state.generation,
-                    });
-                  }
-                }
-              }
-            })
-          );
-
-          state.activeBotIds.clear();
-          state.activeBotId = undefined;
-          continue;
-        }
-
-        const item = state.queue.shift()!;
-        if (item.generation !== state.generation) continue;
-
-        const session = this.db.getSession(sessionId);
-        if (!session) break;
-
-        const bot = this.db.getBot(item.botId);
-        if (!bot) {
-          const sysMsg = (this.db as any).createMessage({
-            id: `msg_${randomUUID()}`,
-            sessionId,
-            role: 'system',
-            content: `Bot @${item.botId} not found.`,
-          });
-          this.sseHub.broadcast(sessionId, { type: 'message_created', message: sysMsg.message });
-          this.db.updateSessionStatus(sessionId, 'failed', undefined);
-          this.sseHub.broadcast(sessionId, { type: 'session_status', sessionId, status: 'failed', activeBotId: undefined });
-          state.queue = [];
           break;
         }
 
-        const rpc = this.connections.getNodeRpc(bot.nodeId);
-        if (!rpc) {
-          state.queue.unshift(item);
-          this.db.updateSessionStatus(sessionId, 'queued', undefined);
-          this.sseHub.broadcast(sessionId, { type: 'session_status', sessionId, status: 'queued', activeBotId: undefined });
-          break;
-        }
-
-        state.activeBotId = item.botId;
-        state.activeBotIds = new Set([item.botId]);
-        this.db.updateSessionStatus(sessionId, 'running', item.botId);
+        state.activeBotId = activeBatch[0].botId;
+        state.activeBotIds = new Set(activeBatch.map((item) => item.botId));
+        this.db.updateSessionStatus(sessionId, 'running', state.activeBotId);
         this.sseHub.broadcast(sessionId, {
           type: 'session_status',
           sessionId,
           status: 'running',
-          activeBotId: item.botId,
+          activeBotId: state.activeBotId,
         });
-
-        const lastRowid = session.cursorMap[item.botId] ?? 0;
-        const rawIncResult = this.db.getIncrementalMessages(sessionId, lastRowid);
-        // Filter out bot's own already-persisted assistant output,
-        // and filter out the current user command message from formatted history if commandText is being passed separately
-        const incResult = rawIncResult.filter(
-          (r) => !(r.message.role === 'assistant' && r.message.senderBotId === item.botId) &&
-                 !(item.commandMessageId && r.message.id === item.commandMessageId)
-        );
-        const incrementalText = formatIncrementalMessages(incResult.map((r) => r.message));
-        // Snapshot max delivered rowid at the time of building the input
-        const deliveredSnapshotRowid =
-          rawIncResult.length > 0 ? Math.max(...rawIncResult.map((r) => r.rowid)) : lastRowid;
-        const attachments = incResult.flatMap((r) => r.message.attachments ?? []);
 
         const groupContextPrompt = buildGroupContextPrompt(session);
         const turnGen = state.generation;
 
-        let turnResult: { replyText: string; modelBadge: string; toolCalls?: ToolCallRecord[]; usage?: TurnUsage };
-        try {
-          turnResult = await rpc.runTurn({
-            sessionId,
-            botId: item.botId,
-            groupContextPrompt,
-            incrementalMessages: incrementalText,
-            ...(item.commandText ? { commandText: item.commandText } : {}),
-            ...(attachments.length > 0 ? { attachments } : {}),
-          });
-        } catch (err: any) {
-          if (turnGen !== state.generation) {
-            // Cancelled during execution - continue loop to drain new items if any
-            continue;
-          }
-          const errorText = err?.message || String(err);
-          const sysMsg = (this.db as any).createMessage({
-            id: `msg_${randomUUID()}`,
-            sessionId,
-            role: 'system',
-            content: `Error executing turn for @${item.botId}: ${errorText}`,
-          });
-          this.sseHub.broadcast(sessionId, { type: 'message_created', message: sysMsg.message });
-          this.db.updateSessionStatus(sessionId, 'failed', undefined);
-          this.sseHub.broadcast(sessionId, { type: 'session_status', sessionId, status: 'failed', activeBotId: undefined });
-          state.queue = [];
-          break;
-        }
-
-        // Suppress late reply if turn was cancelled while executing
-        if (turnGen !== state.generation) {
-          continue;
-        }
-
-        const validBotIds = new Set([session.leadBotId, ...session.memberBotIds]);
-        const replyMentions = extractMentions(turnResult.replyText, validBotIds);
-
-        // Check if new public rows arrived during turn execution
-        const maxRowidBeforeInsert = this.db.getMaxMessageRowid(sessionId);
-
-        const newMsg = (this.db as any).createMessage({
-          id: `msg_${randomUUID()}`,
-          sessionId,
-          role: 'assistant',
-          senderBotId: item.botId,
-          modelBadge: turnResult.modelBadge,
-          content: turnResult.replyText,
-          mentions: replyMentions,
-          toolCalls: turnResult.toolCalls,
-          usage: turnResult.usage,
+        const preparedItems: PreparedTurnItem[] = activeBatch.map((item) => {
+          const turnInput = this.prepareTurnInput(session, item);
+          const bot = this.db.getBot(item.botId)!;
+          const rpc = this.connections.getNodeRpc(bot.nodeId)!;
+          return {
+            item,
+            bot,
+            rpc,
+            ...turnInput,
+          };
         });
 
-        // Advance cursor through delivered rows if unseen public rows arrived; else advance to reply rowid
-        if (maxRowidBeforeInsert > deliveredSnapshotRowid) {
-          this.db.updateSessionCursor(sessionId, item.botId, deliveredSnapshotRowid);
+        if (isParallel) {
+          await Promise.all(
+            preparedItems.map((prep) =>
+              this.executeTurn(session, state, prep, groupContextPrompt, validBotIds, turnGen, true)
+            )
+          );
         } else {
-          this.db.updateSessionCursor(sessionId, item.botId, Math.max(deliveredSnapshotRowid, newMsg.rowid));
-        }
-
-        this.sseHub.broadcast(sessionId, {
-          type: 'message_created',
-          message: {
-            ...newMsg.message,
-            ...(turnResult.toolCalls ? { toolCalls: turnResult.toolCalls } : {}),
-            ...(turnResult.usage ? { usage: turnResult.usage } : {}),
-          },
-        });
-
-        if (item.replyToBotId && !replyMentions.includes(item.replyToBotId)) {
-          if (item.chainBudget.consumeRelay()) {
-            state.queue.push({
-              botId: item.replyToBotId,
-              chainBudget: item.chainBudget,
-              generation: state.generation,
-            });
+          const result = await this.executeTurn(
+            session,
+            state,
+            preparedItems[0],
+            groupContextPrompt,
+            validBotIds,
+            turnGen,
+            false
+          );
+          if (result === 'failed') {
+            break;
           }
         }
 
-        // Relay budget shared across the chain
-        if (replyMentions.length > 0) {
-          for (const nextBotId of replyMentions) {
-            if (item.chainBudget.consumeRelay()) {
-              state.queue.push({
-                botId: nextBotId,
-                chainBudget: item.chainBudget,
-                generation: state.generation,
-              });
-            }
-          }
-        }
+        state.activeBotIds.clear();
+        state.activeBotId = undefined;
       }
     } finally {
       state.isRunning = false;
@@ -860,7 +856,7 @@ export class GroupRouter {
 
   close(): void {
     this.closed = true;
-    for (const [askId, entry] of this.pendingAsks.entries()) {
+    for (const entry of this.pendingAsks.values()) {
       clearTimeout(entry.timer);
       entry.reject(new Error('Hub closed'));
     }

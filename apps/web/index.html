@@ -2,7 +2,10 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <meta name="theme-color" content="#ffffff" />
     <meta name="description" content="botd · 多节点个人智能体平台" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -15,9 +18,26 @@
     <script>
       (function () {
         try {
+          // 初始化可视高度，避免首屏渲染与软键盘弹起瞬间闪烁
+          var syncHeight = function () {
+            var h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+            document.documentElement.style.setProperty('--app-height', h + 'px');
+          };
+          syncHeight();
+          if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', syncHeight);
+          }
+
           var mq = window.matchMedia('(prefers-color-scheme: dark)');
           var apply = function () {
-            var dark = mq.matches;
+            var stored = null;
+            try { stored = localStorage.getItem('botd-theme'); } catch (e) {}
+            var dark;
+            if (stored === 'light' || stored === 'dark') {
+              dark = stored === 'dark';
+            } else {
+              dark = mq.matches;
+            }
             document.documentElement.classList.toggle('dark', dark);
             var meta = document.querySelector('meta[name="theme-color"]');
             if (meta) meta.setAttribute('content', dark ? '#09090b' : '#ffffff');

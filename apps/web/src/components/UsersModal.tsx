@@ -11,6 +11,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { api } from '../api';
+import { ConfirmDialog } from './ConfirmDialog';
 import type { UserInfo } from '../types';
 
 interface UsersModalProps {
@@ -43,6 +44,12 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, currentUser, onC
   const [creating, setCreating] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
+
+  // ConfirmDialog state
+  const [deleteTarget, setDeleteTarget] = useState<UserInfo | null>(null);
+  const [deletingUser, setDeletingUser] = useState(false);
+  const [resetTarget, setResetTarget] = useState<UserInfo | null>(null);
+  const [resettingPassword, setResettingPassword] = useState(false);
 
   const fetchUsers = useCallback(async () => {
     setLoading(true);
@@ -103,40 +110,52 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, currentUser, onC
 
   const handleDeleteUser = async (user: UserInfo) => {
     if (user.id === currentUser.id) return; // 当前登录用户禁删，后端亦会拦截
-    if (!window.confirm(`确定要删除用户「${user.username}」吗？\n该用户名下仍有节点时将无法删除。`)) return;
+    setDeleteTarget(user);
+  };
 
+  const confirmDeleteUser = async () => {
+    if (!deleteTarget) return;
+    setDeletingUser(true);
     setError(null);
     try {
-      await api.deleteUser(user.id);
+      await api.deleteUser(deleteTarget.id);
+      setDeleteTarget(null);
       await fetchUsers();
     } catch (err: any) {
       if (err?.status === 409) {
-        setError(`用户 "${user.username}" 名下还有节点，无法删除`);
+        setError(`用户 "${deleteTarget.username}" 名下还有节点，无法删除`);
       } else {
         setError(err?.message || '删除用户失败');
       }
+      setDeleteTarget(null);
+    } finally {
+      setDeletingUser(false);
     }
   };
 
-  const handleResetPassword = async (user: UserInfo) => {
-    const password = window.prompt(`请输入用户「${user.username}」的新密码（至少 4 位）：`);
-    if (password === null) return;
-    if (password.length < 4) {
-      setError('密码至少需要 4 位');
-      return;
-    }
+  const handleResetPassword = (user: UserInfo) => {
+    setResetTarget(user);
+  };
 
+  const confirmResetPassword = async (password?: string) => {
+    if (!resetTarget || password === undefined) return;
+    setResettingPassword(true);
     setError(null);
     try {
-      await api.resetUserPassword(user.id, password);
+      await api.resetUserPassword(resetTarget.id, password);
+      setResetTarget(null);
       setError(null);
       await fetchUsers();
     } catch (err: any) {
       setError(err?.message || '重置密码失败');
+      setResetTarget(null);
+    } finally {
+      setResettingPassword(false);
     }
   };
 
   return (
+    <>
     <div
       className="fixed inset-0 z-50 bg-black/40 dark:bg-black/70 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4 overflow-y-auto animate-in fade-in"
       role="dialog"
@@ -336,5 +355,45 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, currentUser, onC
         </div>
       </div>
     </div>
+
+    {/* 删除用户确认 */}
+    <ConfirmDialog
+      isOpen={Boolean(deleteTarget)}
+      title="删除用户"
+      message={
+        <>
+          确定要删除用户「{deleteTarget?.username}」吗？
+          <br />
+          删除后不可恢复。
+        </>
+      }
+      confirmText="删除"
+      danger
+      busy={deletingUser}
+      onConfirm={confirmDeleteUser}
+      onClose={() => setDeleteTarget(null)}
+    />
+
+    {/* 重置密码：弹窗内置密码输入 */}
+    <ConfirmDialog
+      isOpen={Boolean(resetTarget)}
+      title="重置密码"
+      message={
+        <>
+          为用户「{resetTarget?.username}」设置新密码。
+        </>
+      }
+      confirmText="重置"
+      busy={resettingPassword}
+      prompt={{
+        type: 'password',
+        label: '新密码（至少 4 位）',
+        placeholder: '输入新密码（至少 4 位）',
+      }}
+      validatePrompt={(v) => v.length >= 4}
+      onConfirm={confirmResetPassword}
+      onClose={() => setResetTarget(null)}
+    />
+    </>
   );
 };

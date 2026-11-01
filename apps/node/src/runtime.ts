@@ -116,6 +116,38 @@ export async function ensureBotdBinWrapper(dataDir: string): Promise<string> {
   return binDir;
 }
 
+export function buildBotShellEnv(
+  baseEnv: Record<string, string | undefined>,
+  options: {
+    dataDir: string;
+    binDir: string;
+    sessionId: string;
+    botId: string;
+    botEnv: Record<string, string>;
+  }
+): Record<string, string | undefined> {
+  const isWin = isWindows;
+  const pathKey = isWin
+    ? (Object.keys(baseEnv).find((key) => key.toLowerCase() === 'path') ??
+       Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ??
+       'PATH')
+    : 'PATH';
+  const shellPathPrefix = isWin ? windowsShellPathPrefix(options.dataDir) : [];
+  const currentPath = baseEnv[pathKey] ?? baseEnv.PATH ?? '';
+  const prefix = [options.binDir, ...shellPathPrefix].filter(Boolean);
+  const nextPath = [...prefix, ...currentPath.split(path.delimiter).filter(Boolean)].join(path.delimiter);
+
+  return {
+    ...baseEnv,
+    [pathKey]: nextPath,
+    PATH: nextPath,
+    ...options.botEnv,
+    BOTD_SESSION_ID: options.sessionId,
+    BOTD_BOT_ID: options.botId,
+    BOTD_DATA_DIR: options.dataDir,
+  };
+}
+
 export function extractToolSummary(toolName: string, args: any): string | undefined {
   if (!args || typeof args !== 'object') return undefined;
   if (toolName === 'bash' && typeof args.command === 'string') {
@@ -206,7 +238,7 @@ export async function executeBotTurn(
     // 2. Setup isolated ModelRuntime under .agent and configure provider auth.
     //    Extension-registered providers (e.g. magpie gateway) activate on demand.
     const modelRuntime = await createRuntimeForProvider(dataDir, bot.modelProvider);
-    await configureProviderAuth(modelRuntime, dataDir, bot.modelProvider);
+    await configureProviderAuth(modelRuntime, bot.modelProvider);
 
     // 3. Resolve model
     let model: ReturnType<typeof getModel> | undefined =
@@ -280,29 +312,18 @@ export async function executeBotTurn(
     //    PATH with the POSIX delimiter while preserving the platform's Path casing.
     const isWin = isWindows;
     const shellPath = isWin ? resolveWindowsBash(dataDir) : undefined;
-    const pathKey = isWin
-      ? (Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ?? 'PATH')
-      : 'PATH';
-    const shellPathPrefix = isWin ? windowsShellPathPrefix(dataDir) : [];
-
-    const buildShellEnv = (env: Record<string, string | undefined>) => {
-      const currentPath = env[pathKey] ?? env.PATH ?? '';
-      const prefix = [binDir, ...shellPathPrefix].filter(Boolean);
-      const nextPath = [...prefix, ...currentPath.split(path.delimiter).filter(Boolean)].join(path.delimiter);
-      return { ...env, [pathKey]: nextPath, PATH: nextPath };
-    };
 
     const rawBashDef = createBashToolDefinition(workspaceDir, {
       ...(shellPath ? { shellPath } : {}),
       spawnHook: (ctx) => ({
         ...ctx,
-        env: {
-          ...buildShellEnv(ctx.env),
-          ...botEnv,
-          BOTD_SESSION_ID: input.sessionId,
-          BOTD_BOT_ID: bot.id,
-          BOTD_DATA_DIR: dataDir,
-        },
+        env: buildBotShellEnv(ctx.env, {
+          dataDir,
+          binDir,
+          sessionId: input.sessionId,
+          botId: bot.id,
+          botEnv,
+        }),
       }),
     });
     // Omit optional UI renderers to satisfy invariant ToolDefinition generic bounds
@@ -316,13 +337,13 @@ export async function executeBotTurn(
         const rawPsDef = createPowerShellToolDefinition(workspaceDir, {
           spawnHook: (ctx) => ({
             ...ctx,
-            env: {
-              ...buildShellEnv(ctx.env),
-              ...botEnv,
-              BOTD_SESSION_ID: input.sessionId,
-              BOTD_BOT_ID: bot.id,
-              BOTD_DATA_DIR: dataDir,
-            },
+            env: buildBotShellEnv(ctx.env, {
+              dataDir,
+              binDir,
+              sessionId: input.sessionId,
+              botId: bot.id,
+              botEnv,
+            }),
           }),
         });
         const { renderCall: _prc, renderResult: _prr, ...headlessPsTool } = rawPsDef;
@@ -548,8 +569,7 @@ export async function executeBotTurn(
 }
 
 /**
- * 归档 (sessionId, botId) 的本地 Pi 会话文件（改名为 `.jsonl.bak-<ts>`，不删除），
- * 下一回合将从 Hub 历史全量重建上下文。文件不存在时静默成功（幂等）。
+ * 删除 (sessionId, botId) 的本地 Pi 会话文件（.jsonl），下一回合将从 Hub 历史全量重建上下文。文件不存在时静默成功（幂等）。
  */
 export async function resetBotSession(dataDir: string, sessionId: string, botId: string): Promise<void> {
   assertSafeId(sessionId, 'Session ID');

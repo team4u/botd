@@ -18,6 +18,16 @@ import {
 import type { BotConfig, NodeRecord, ChatCommand, MessageRecord, MessageAttachment } from '@botd/protocol';
 import { api } from '../api';
 import { formatFileSize } from './MessageItem';
+import {
+  canSubmitMessage,
+  consumeSubmittedAttachments,
+  consumeSubmittedDraft,
+  createUploadTaskTracker,
+  startUploadTask,
+  finishUploadTask,
+  resetUploadTasksOnSessionChange,
+  isUploadResultValid,
+} from '../utils/input-uploads';
 
 interface ChatInputProps {
   onSendMessage: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
@@ -92,7 +102,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
   // 待发送附件（图片/文件）：上传完成后暂存，随消息一并发送
   const [pendingAttachments, setPendingAttachments] = useState<MessageAttachment[]>([]);
-  const [uploadingFile, setUploadingFile] = useState(false);
+  // 上传任务计数与会话 generation 跟踪（防异步多批并发与切会话 ABA 竞态）
+  const uploadTrackerRef = useRef(createUploadTaskTracker(0));
+  const [uploadingCount, setUploadingCount] = useState(0);
+  const uploadingFile = uploadingCount > 0;
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Mention 下拉菜单状态
@@ -124,7 +137,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mentionDropdownRef = useRef<HTMLDivElement>(null);
   const slashDropdownRef = useRef<HTMLDivElement>(null);
-  const slashListRef = useRef<HTMLDivElement>(null);
   const slashItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const mentionItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
@@ -186,6 +198,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   // 切换会话时重置所有状态、请求版本及草稿内容
   useEffect(() => {
     fetchRequestIdRef.current++;
+    resetUploadTasksOnSessionChange(uploadTrackerRef.current);
+    setUploadingCount(0);
     activeTargetBotIdRef.current = null;
     setContent('');
     setSending(false);
@@ -198,7 +212,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     setShowMentions(false);
     setValidationNotice(null);
     setPendingAttachments([]);
-    setUploadingFile(false);
     dismissedSlashRef.current = null;
     draftBeforeEditRef.current = null;
     if (fileInputRef.current) {
@@ -523,8 +536,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       return;
     }
 
-    // 4. 常规发送消息（编辑态下为提交编辑）
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // 4. Ctrl+Enter / Command+Enter 发送消息（编辑态下为提交编辑）；普通 Enter 保持默认换行
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
       handleSubmit();
     }
@@ -552,7 +565,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       const list = Array.from(files);
       if (list.length === 0) return;
 
-      setUploadingFile(true);
+      const { generation: taskGen } = startUploadTask(uploadTrackerRef.current);
+      setUploadingCount(uploadTrackerRef.current.activeCount);
+
       try {
         for (const file of list) {
           const contentBase64 = await new Promise<string>((resolve, reject) => {
@@ -571,14 +586,35 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             reader.readAsDataURL(file);
           });
 
+          // 上传前再检查一次会话与 generation 是否有效
+          if (
+            !isUploadResultValid(
+              taskGen,
+              uploadTrackerRef.current.generation,
+              sessionIdForUpload,
+              currentSessionIdRef.current
+            )
+          ) {
+            return;
+          }
+
           const uploaded = await api.uploadArtifact(sessionIdForUpload, {
             filename: file.name,
             mimeType: file.type || undefined,
             contentBase64,
           });
 
-          // 防竞态：上传期间切换会话则丢弃结果
-          if (currentSessionIdRef.current !== sessionIdForUpload) return;
+          // 防竞态：上传期间切换会话（或切走再切回 ABA）则丢弃结果
+          if (
+            !isUploadResultValid(
+              taskGen,
+              uploadTrackerRef.current.generation,
+              sessionIdForUpload,
+              currentSessionIdRef.current
+            )
+          ) {
+            return;
+          }
 
           setPendingAttachments((prev) => [
             ...prev,
@@ -592,12 +628,20 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           ]);
         }
       } catch (err: any) {
-        if (currentSessionIdRef.current === sessionIdForUpload) {
+        if (
+          isUploadResultValid(
+            taskGen,
+            uploadTrackerRef.current.generation,
+            sessionIdForUpload,
+            currentSessionIdRef.current
+          )
+        ) {
           setValidationNotice(err?.message || '附件上传失败，请重试');
         }
       } finally {
-        if (currentSessionIdRef.current === sessionIdForUpload) {
-          setUploadingFile(false);
+        const { valid, activeCount } = finishUploadTask(uploadTrackerRef.current, taskGen);
+        if (valid) {
+          setUploadingCount(activeCount);
         }
       }
     },
@@ -622,22 +666,41 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   };
 
   const handleSubmit = async () => {
+    // 统一提交守卫：检查文本/附件、发送中、禁用状态，以及真实的上传任务状态（同时检查 state 与 ref）
+    if (
+      !canSubmitMessage({
+        content,
+        hasAttachments: pendingAttachments.length > 0,
+        disabled,
+        sending,
+        uploadingCount: uploadTrackerRef.current.activeCount,
+        isUploading: uploadingFile || uploadTrackerRef.current.activeCount > 0,
+        isEditing: Boolean(editingMessage),
+      })
+    ) {
+      return;
+    }
+
     const trimmed = content.trim();
-    if ((!trimmed && pendingAttachments.length === 0) || sending || disabled) return;
 
     // 编辑态优先：提交编辑，成功后由服务端截断后续回复并重新生成
     if (editingMessage) {
       if (!onSubmitEditing) return;
       const targetSessionId = sessionId;
+      const submitGen = uploadTrackerRef.current.generation;
+      const submittedDraft = content;
       setSending(true);
       setShowMentions(false);
       setShowSlashMenu(false);
       setValidationNotice(null);
       try {
         await onSubmitEditing(trimmed);
-        // 成功：清空输入与编辑草稿；编辑目标（editingMessage）由 ChatView 负责清除
-        if (currentSessionIdRef.current === targetSessionId) {
-          setContent('');
+        // 成功：仅在当前会话未变更且未发生 ABA 切换时消费草稿；编辑目标（editingMessage）由 ChatView 负责清除
+        if (
+          currentSessionIdRef.current === targetSessionId &&
+          uploadTrackerRef.current.generation === submitGen
+        ) {
+          setContent((prev) => consumeSubmittedDraft(prev, submittedDraft));
           draftBeforeEditRef.current = null;
           if (textareaRef.current) {
             textareaRef.current.style.height = 'auto';
@@ -646,7 +709,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       } catch {
         // 失败：保留编辑内容与编辑态，错误提示由上层 App toast 展示
       } finally {
-        if (currentSessionIdRef.current === targetSessionId) {
+        if (
+          currentSessionIdRef.current === targetSessionId &&
+          uploadTrackerRef.current.generation === submitGen
+        ) {
           setSending(false);
           setTimeout(() => textareaRef.current?.focus(), 10);
         }
@@ -665,6 +731,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     }
 
     const targetSessionId = sessionId;
+    const submitGen = uploadTrackerRef.current.generation;
     setSending(true);
     setShowMentions(false);
     setShowSlashMenu(false);
@@ -672,14 +739,21 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
     // 纯附件发送时自动补充占位正文，保证消息流可读
     const outgoingContent = trimmed || `[已发送附件: ${pendingAttachments.map((a) => a.filename).join(', ')}]`;
-    const outgoingAttachments = pendingAttachments;
+    const outgoingAttachments = [...pendingAttachments];
+    const submittedDraft = content;
+    const submittedAttachments = [...pendingAttachments];
 
     try {
       await onSendMessage(outgoingContent, outgoingAttachments);
-      // 仅在当前会话未变更时清空输入框与附件，防止切会话后把新会话草稿清掉
-      if (currentSessionIdRef.current === targetSessionId) {
-        setContent('');
-        setPendingAttachments([]);
+      // 发送完成仅消费当次发送的附件与草稿，不能抹掉发送期间新追加的附件或草稿
+      if (
+        currentSessionIdRef.current === targetSessionId &&
+        uploadTrackerRef.current.generation === submitGen
+      ) {
+        setContent((prev) => consumeSubmittedDraft(prev, submittedDraft));
+        setPendingAttachments((prev) =>
+          consumeSubmittedAttachments(prev, submittedAttachments)
+        );
         if (fileInputRef.current) {
           fileInputRef.current.value = '';
         }
@@ -689,11 +763,17 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       }
     } catch (err: any) {
       // onSendMessage reject 时保留用户输入，捕获异常并在输入框 notice 展示错误
-      if (currentSessionIdRef.current === targetSessionId) {
+      if (
+        currentSessionIdRef.current === targetSessionId &&
+        uploadTrackerRef.current.generation === submitGen
+      ) {
         setValidationNotice(err?.message || '发送消息失败，请重试');
       }
     } finally {
-      if (currentSessionIdRef.current === targetSessionId) {
+      if (
+        currentSessionIdRef.current === targetSessionId &&
+        uploadTrackerRef.current.generation === submitGen
+      ) {
         setSending(false);
         setTimeout(() => textareaRef.current?.focus(), 10);
       }
@@ -736,8 +816,19 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     }
   };
 
+  // 按钮禁用与提交守卫条件复用
+  const canSubmit = canSubmitMessage({
+    content,
+    hasAttachments: pendingAttachments.length > 0,
+    disabled,
+    sending,
+    uploadingCount,
+    isUploading: uploadingFile || uploadTrackerRef.current.activeCount > 0,
+    isEditing: Boolean(editingMessage),
+  });
+
   return (
-    <div className="relative border-t border-zinc-200/80 dark:border-zinc-800/80 bg-white/95 dark:bg-zinc-950/95 backdrop-blur-xs p-2.5 sm:p-3 shrink-0 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))]">
+    <div className="chat-input-container relative border-t border-zinc-200/80 dark:border-zinc-800/80 bg-white/95 dark:bg-zinc-950/95 backdrop-blur-xs p-2.5 sm:p-3 shrink-0 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))]">
       {/* 校验错误提示条 */}
       {validationNotice && (
         <div className="max-w-4xl mx-auto mb-2 px-3 py-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/50 text-xs text-amber-800 dark:text-amber-300 flex items-center justify-between animate-in fade-in">
@@ -819,7 +910,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           </div>
 
           {/* 浮层内容区域 */}
-          <div ref={slashListRef} className="p-1 space-y-0.5 overflow-y-auto flex-1">
+          <div className="p-1 space-y-0.5 overflow-y-auto flex-1">
             {isMultiTarget ? (
               <div className="p-3 text-xs text-amber-700 dark:text-amber-400 bg-amber-50/70 dark:bg-amber-950/30 rounded-lg flex items-start gap-2 m-1">
                 <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
@@ -1030,7 +1121,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           </div>
         )}
 
-        <div className="relative flex items-end gap-2 bg-zinc-50 dark:bg-zinc-900 border border-zinc-300/80 dark:border-zinc-700/80 rounded-2xl p-1.5 sm:p-2 focus-within:bg-white dark:focus-within:bg-zinc-900 focus-within:border-zinc-400 dark:focus-within:border-zinc-600 focus-within:ring-2 focus-within:ring-zinc-100 dark:focus-within:ring-zinc-800 transition-all shadow-xs">
+        <div className="relative flex items-center gap-2 bg-zinc-50 dark:bg-zinc-900 border border-zinc-300/80 dark:border-zinc-700/80 rounded-2xl p-1.5 sm:p-2 focus-within:bg-white dark:focus-within:bg-zinc-900 focus-within:border-zinc-400 dark:focus-within:border-zinc-600 focus-within:ring-2 focus-within:ring-zinc-100 dark:focus-within:ring-zinc-800 transition-all shadow-xs">
           {/* 附件上传：编辑态不提供（编辑仅重写文本），选择后立即上传为会话产物 */}
           {!editingMessage && (
             <>
@@ -1046,10 +1137,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={disabled || uploadingFile}
+                disabled={disabled || uploadingFile || sending}
                 aria-label="上传附件"
                 title="上传附件（支持图片与文件，也可直接粘贴截图）"
-                className="h-8 w-8 rounded-lg flex items-center justify-center text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0 cursor-pointer self-end mb-[3px]"
+                className="h-8 w-8 rounded-lg flex items-center justify-center text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0 cursor-pointer"
               >
                 {uploadingFile ? (
                   <Loader2 className="w-4 h-4 animate-spin-fast text-blue-600 dark:text-blue-400" />
@@ -1083,8 +1174,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             }}
             placeholder={
               editingMessage
-                ? '编辑消息，Enter 保存并重新生成，Esc 取消...'
-                : '发消息，输入 / 调用命令，@ 提及成员...'
+                ? '编辑消息，Ctrl+Enter 保存，Esc 取消...'
+                : '输入 / 命令，@ 提及成员...'
             }
             rows={1}
             disabled={disabled || sending}
@@ -1106,7 +1197,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                 ? `mention-bot-${filteredBots[mentionIndex].id}`
                 : undefined
             }
-            className="w-full resize-none bg-transparent h-8 px-2.5 text-xs text-zinc-800 dark:text-zinc-100 placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none min-h-[38px] max-h-[180px] leading-relaxed"
+            className="w-full resize-none bg-transparent px-2.5 py-1.5 sm:py-2 text-base sm:text-xs text-zinc-800 dark:text-zinc-100 placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none max-h-[180px] leading-relaxed"
             aria-label="消息输入框"
           />
 
@@ -1115,9 +1206,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             <button
               type="button"
               onClick={handleSubmit}
-              disabled={!content.trim() || sending}
+              disabled={!canSubmit}
               aria-label="保存并重新生成"
-              title="保存并重新生成"
+              title="保存并重新生成（Ctrl+Enter）"
               className="p-2 sm:p-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-200 dark:disabled:bg-zinc-800 disabled:text-zinc-400 dark:disabled:text-zinc-600 text-white shadow-xs transition-colors shrink-0 flex items-center justify-center cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               {sending ? (
@@ -1145,9 +1236,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             <button
               type="button"
               onClick={handleSubmit}
-              disabled={(!content.trim() && pendingAttachments.length === 0) || sending || disabled || uploadingFile}
+              disabled={!canSubmit}
               aria-label="发送消息"
-              title="发送消息"
+              title="发送消息（Ctrl+Enter）"
               className="p-2 sm:p-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-200 dark:disabled:bg-zinc-800 disabled:text-zinc-400 dark:disabled:text-zinc-600 text-white shadow-xs transition-colors shrink-0 flex items-center justify-center cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               {sending ? (
@@ -1162,7 +1253,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         {/* 仅在桌面端显示的极简小提示 */}
         <div className="hidden sm:flex items-center justify-between text-[11px] text-zinc-400 dark:text-zinc-500 px-2 mt-1">
           <span>支持 / 调用命令与技能</span>
-          <span>Enter 发送 · Shift+Enter 换行</span>
+          <span>Ctrl+Enter 发送 · Enter 换行</span>
         </div>
       </div>
     </div>

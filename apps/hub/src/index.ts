@@ -5,7 +5,11 @@ import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { serve } from '@hono/node-server';
-import { isThinkingLevel } from '@botd/protocol';
+import {
+  isBotConfig,
+  isSafeId,
+  isValidBotEnvKey,
+} from '@botd/protocol';
 import type {
   BotConfig,
   CreateSessionInput,
@@ -16,7 +20,7 @@ import type {
   UserRecord,
   UserRole,
 } from '@botd/protocol';
-import { HubDatabase, isValidCommandName } from './db.js';
+import { HubDatabase } from './db.js';
 import { AuthManager } from './auth.js';
 import { SseHub } from './sse.js';
 import { NodeConnectionManager } from './ws-hub.js';
@@ -24,13 +28,24 @@ import { GroupRouter, extractMentions, parseSlashCommand } from './group-router.
 import { createStaticMiddleware } from './static.js';
 import { registerProviderRoutes } from './providers.js';
 import { registerArtifactRoutes } from './artifacts.js';
+import { ArtifactService } from './artifact-service.js';
 import { registerTriggerRoutes } from './triggers.js';
+import { registerBgJobRoutes } from './bg-jobs.js';
 import { registerSkillSyncAndAskRoutes } from './skill-sync.js';
+import {
+  requireAdmin,
+  resolveOwnedBotRpc,
+  resolveOwnedNode,
+  resolveOwnedNodeRpc,
+  resolveOwnedSession,
+  type NodeRpc,
+} from './http-helpers.js';
 
 export interface HubOptions {
   dbPath?: string;
   adminPassword?: string;
   webDir?: string;
+  artifactsDir?: string;
 }
 
 export interface StartHubOptions extends HubOptions {
@@ -52,42 +67,83 @@ export interface StartHubResult extends HubInstance {
 }
 
 const VALID_MODES = new Set<SessionMode>(['direct', 'lead', 'roundtable']);
-const ID_REGEX = /^[a-zA-Z0-9_-]+$/;
 const USERNAME_REGEX = /^[a-zA-Z0-9_-]{2,32}$/;
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isText = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
-const isId = (value: unknown): value is string => typeof value === 'string' && ID_REGEX.test(value);
-const isBotConfig = (value: unknown): value is BotConfig => {
-  if (!isObject(value)) return false;
-  return isId(value.id) && isId(value.nodeId) && isText(value.name) && typeof value.description === 'string'
-    && isText(value.modelProvider) && isText(value.modelId)
-    && (value.thinkingLevel === undefined || isThinkingLevel(value.thinkingLevel))
-    && Array.isArray(value.enabledSkills) && value.enabledSkills.every(isId)
-    && (value.enabledExtensions === undefined || (Array.isArray(value.enabledExtensions) && value.enabledExtensions.every(isId)))
-    && (value.webCommandNames === undefined || (Array.isArray(value.webCommandNames) && value.webCommandNames.every(isValidCommandName)));
-};
+
+interface MemberValidationSuccess {
+  ok: true;
+  leadBotId: string;
+  memberBotIds: string[];
+}
+
+interface MemberValidationFailure {
+  ok: false;
+  error: string;
+  status: 400 | 403;
+}
+
+type MemberValidationResult = MemberValidationSuccess | MemberValidationFailure;
+
+function validateSessionMembers(
+  db: HubDatabase,
+  userId: string,
+  mode: SessionMode,
+  leadBotIdInput: unknown,
+  memberBotIdsInput: unknown
+): MemberValidationResult {
+  if (!isSafeId(leadBotIdInput)) {
+    return { ok: false, error: 'Invalid lead BOT', status: 400 };
+  }
+  const leadBot = db.getBot(leadBotIdInput);
+  if (!leadBot) {
+    return { ok: false, error: `Lead bot ${leadBotIdInput} not found`, status: 400 };
+  }
+  if (db.getNodeOwner(leadBot.nodeId) !== userId) {
+    return { ok: false, error: 'Forbidden', status: 403 };
+  }
+
+  if (!Array.isArray(memberBotIdsInput) || !memberBotIdsInput.every(isSafeId)) {
+    return { ok: false, error: 'Invalid memberBotIds', status: 400 };
+  }
+
+  const dedupedMembers = [...new Set<string>(memberBotIdsInput)];
+
+  for (const mid of dedupedMembers) {
+    const memberBot = db.getBot(mid);
+    if (!memberBot) {
+      return { ok: false, error: `Member bot ${mid} not found`, status: 400 };
+    }
+    if (db.getNodeOwner(memberBot.nodeId) !== userId) {
+      return { ok: false, error: 'Forbidden', status: 403 };
+    }
+  }
+
+  if (!dedupedMembers.includes(leadBotIdInput) || (mode === 'direct' && dedupedMembers.length !== 1)) {
+    return { ok: false, error: 'Lead BOT must be a member; direct sessions have exactly one member', status: 400 };
+  }
+
+  return { ok: true, leadBotId: leadBotIdInput, memberBotIds: dedupedMembers };
+}
 
 export function createHub(options?: HubOptions): HubInstance {
   const db = new HubDatabase({ dbPath: options?.dbPath });
   const auth = new AuthManager();
   const adminPassword = options?.adminPassword || process.env.BOTD_ADMIN_PASSWORD || 'admin';
   db.ensureBootstrapAdmin(auth.hashPassword(adminPassword));
-  const sseHub = new SseHub();
-  const connections = new NodeConnectionManager(db, auth, sseHub);
+  // SessionRecord 未暴露 ownerId，读取归属；SseHub 借此把会话事件同步派发给 owner 的全局订阅者
+  const getSessionOwnerId = (sessionId: string): string | undefined => {
+    return db.getSessionOwner(sessionId);
+  };
+  const sseHub = new SseHub({ getSessionOwnerId });
+  const artifacts = new ArtifactService(db, sseHub, { artifactsDir: options?.artifactsDir });
+  const connections = new NodeConnectionManager(db, auth, sseHub, artifacts);
   const router = new GroupRouter(db, connections, sseHub);
   connections.setRouter(router);
 
   const app = new Hono<{ Variables: { user: UserRecord } }>();
   app.onError((error, c) => c.json({ error: error.message || 'Internal server error' }, 500));
   app.notFound(c => c.json({ error: 'Not found' }, 404));
-
-  // SessionRecord 未暴露 ownerId，直接查 sessions 表读取归属
-  const getSessionOwnerId = (sessionId: string): string | undefined => {
-    const row = db.db.prepare('SELECT owner_id FROM sessions WHERE id = ?').get(sessionId) as
-      | { owner_id: string | null }
-      | undefined;
-    return row?.owner_id ?? undefined;
-  };
 
   // 1. Health check (public)
   app.get('/api/health', (c) => c.json({ ok: true }));
@@ -159,12 +215,14 @@ export function createHub(options?: HubOptions): HubInstance {
 
   // 4. User management (admin only)
   app.get('/api/users', (c) => {
-    if (c.get('user').role !== 'admin') return c.json({ error: 'Admin only' }, 403);
+    const adminErr = requireAdmin(c);
+    if (adminErr) return adminErr;
     return c.json(db.listUsers());
   });
 
   app.post('/api/users', async (c) => {
-    if (c.get('user').role !== 'admin') return c.json({ error: 'Admin only' }, 403);
+    const adminErr = requireAdmin(c);
+    if (adminErr) return adminErr;
     const body = await c.req.json<{ username?: string; password?: string; role?: string }>().catch(() => ({} as { username?: string; password?: string; role?: string }));
     const username = typeof body?.username === 'string' ? body.username : '';
     const password = typeof body?.password === 'string' ? body.password : '';
@@ -183,7 +241,8 @@ export function createHub(options?: HubOptions): HubInstance {
   });
 
   app.delete('/api/users/:id', (c) => {
-    if (c.get('user').role !== 'admin') return c.json({ error: 'Admin only' }, 403);
+    const adminErr = requireAdmin(c);
+    if (adminErr) return adminErr;
     const id = c.req.param('id');
     if (id === c.get('user').id) {
       return c.json({ error: 'Cannot delete yourself' }, 400);
@@ -194,12 +253,13 @@ export function createHub(options?: HubOptions): HubInstance {
     if (db.getAllNodesWithBots(id).length > 0) {
       return c.json({ error: 'User still owns nodes; delete their nodes first' }, 409);
     }
-    db.deleteUser(id);
+    artifacts.deleteUser(id);
     return c.json({ ok: true });
   });
 
   app.put('/api/users/:id/password', async (c) => {
-    if (c.get('user').role !== 'admin') return c.json({ error: 'Admin only' }, 403);
+    const adminErr = requireAdmin(c);
+    if (adminErr) return adminErr;
     const id = c.req.param('id');
     const body = await c.req.json<{ password?: string }>().catch(() => ({} as { password?: string }));
     if (!body || typeof body.password !== 'string' || body.password.length < 4) {
@@ -256,13 +316,8 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.delete('/api/nodes/:nodeId', async (c) => {
     const { nodeId } = c.req.param();
-    const node = db.getNode(nodeId);
-    if (!node) {
-      return c.json({ error: 'Node not found' }, 404);
-    }
-    if (db.getNodeOwner(nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
+    const nodeRes = resolveOwnedNode(c, db, nodeId);
+    if (!nodeRes.ok) return nodeRes.response;
 
     const hostedBots = db.getBotsForNode(nodeId);
     if (hostedBots.length > 0) {
@@ -287,21 +342,13 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.get('/api/nodes/:nodeId/skills/:skillId', async (c) => {
     const { nodeId, skillId } = c.req.param();
-    if (!ID_REGEX.test(skillId)) {
+    if (!isSafeId(skillId)) {
       return c.json({ error: 'Invalid skill id format' }, 400);
     }
-    if (!db.getNode(nodeId)) {
-      return c.json({ error: 'Node not found' }, 404);
-    }
-    if (db.getNodeOwner(nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    const rpc = connections.getNodeRpc(nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+    if (!nodeRpc.ok) return nodeRpc.response;
     try {
-      const content = await rpc.readFile({ kind: 'skill', id: skillId });
+      const content = await nodeRpc.rpc.readFile({ kind: 'skill', id: skillId });
       return c.json({ content });
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to read skill' }, 500);
@@ -310,23 +357,15 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.put('/api/nodes/:nodeId/skills/:skillId', async (c) => {
     const { nodeId, skillId } = c.req.param();
-    if (!ID_REGEX.test(skillId)) {
+    if (!isSafeId(skillId)) {
       return c.json({ error: 'Invalid skill id format' }, 400);
     }
-    if (!db.getNode(nodeId)) {
-      return c.json({ error: 'Node not found' }, 404);
-    }
-    if (db.getNodeOwner(nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    const rpc = connections.getNodeRpc(nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+    if (!nodeRpc.ok) return nodeRpc.response;
     const body = await c.req.json<{ content?: string }>().catch(() => null);
     if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
     try {
-      await rpc.writeFile({ kind: 'skill', id: skillId }, body.content);
+      await nodeRpc.rpc.writeFile({ kind: 'skill', id: skillId }, body.content);
       db.addNodeSkill(nodeId, skillId);
       return c.json({ ok: true });
     } catch (err: any) {
@@ -336,21 +375,13 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.delete('/api/nodes/:nodeId/skills/:skillId', async (c) => {
     const { nodeId, skillId } = c.req.param();
-    if (!ID_REGEX.test(skillId)) {
+    if (!isSafeId(skillId)) {
       return c.json({ error: 'Invalid skill id format' }, 400);
     }
-    if (!db.getNode(nodeId)) {
-      return c.json({ error: 'Node not found' }, 404);
-    }
-    if (db.getNodeOwner(nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    const rpc = connections.getNodeRpc(nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+    if (!nodeRpc.ok) return nodeRpc.response;
     try {
-      await rpc.deleteResource({ kind: 'skill', id: skillId });
+      await nodeRpc.rpc.deleteResource({ kind: 'skill', id: skillId });
       db.removeNodeSkill(nodeId, skillId);
       return c.json({ ok: true });
     } catch (err: any) {
@@ -360,21 +391,13 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.get('/api/nodes/:nodeId/extensions/:extId', async (c) => {
     const { nodeId, extId } = c.req.param();
-    if (!ID_REGEX.test(extId)) {
+    if (!isSafeId(extId)) {
       return c.json({ error: 'Invalid extension id format' }, 400);
     }
-    if (!db.getNode(nodeId)) {
-      return c.json({ error: 'Node not found' }, 404);
-    }
-    if (db.getNodeOwner(nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    const rpc = connections.getNodeRpc(nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+    if (!nodeRpc.ok) return nodeRpc.response;
     try {
-      const content = await rpc.readFile({ kind: 'extension', id: extId });
+      const content = await nodeRpc.rpc.readFile({ kind: 'extension', id: extId });
       return c.json({ content });
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to read extension' }, 500);
@@ -383,23 +406,15 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.put('/api/nodes/:nodeId/extensions/:extId', async (c) => {
     const { nodeId, extId } = c.req.param();
-    if (!ID_REGEX.test(extId)) {
+    if (!isSafeId(extId)) {
       return c.json({ error: 'Invalid extension id format' }, 400);
     }
-    if (!db.getNode(nodeId)) {
-      return c.json({ error: 'Node not found' }, 404);
-    }
-    if (db.getNodeOwner(nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    const rpc = connections.getNodeRpc(nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+    if (!nodeRpc.ok) return nodeRpc.response;
     const body = await c.req.json<{ content?: string }>().catch(() => null);
     if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
     try {
-      await rpc.writeFile({ kind: 'extension', id: extId }, body.content);
+      await nodeRpc.rpc.writeFile({ kind: 'extension', id: extId }, body.content);
       db.addNodeExtension(nodeId, extId);
       return c.json({ ok: true });
     } catch (err: any) {
@@ -409,21 +424,13 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.delete('/api/nodes/:nodeId/extensions/:extId', async (c) => {
     const { nodeId, extId } = c.req.param();
-    if (!ID_REGEX.test(extId)) {
+    if (!isSafeId(extId)) {
       return c.json({ error: 'Invalid extension id format' }, 400);
     }
-    if (!db.getNode(nodeId)) {
-      return c.json({ error: 'Node not found' }, 404);
-    }
-    if (db.getNodeOwner(nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    const rpc = connections.getNodeRpc(nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+    if (!nodeRpc.ok) return nodeRpc.response;
     try {
-      await rpc.deleteResource({ kind: 'extension', id: extId });
+      await nodeRpc.rpc.deleteResource({ kind: 'extension', id: extId });
       db.removeNodeExtension(nodeId, extId);
       return c.json({ ok: true });
     } catch (err: any) {
@@ -433,16 +440,8 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.post('/api/nodes/:nodeId/install', async (c) => {
     const { nodeId } = c.req.param();
-    if (!db.getNode(nodeId)) {
-      return c.json({ error: 'Node not found' }, 404);
-    }
-    if (db.getNodeOwner(nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    const rpc = connections.getNodeRpc(nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+    if (!nodeRpc.ok) return nodeRpc.response;
     const body = await c.req.json<{
       source?: string;
       kind?: 'auto' | 'skill' | 'extension';
@@ -454,11 +453,11 @@ export function createHub(options?: HubOptions): HubInstance {
     if (body.kind !== undefined && !['auto', 'skill', 'extension'].includes(body.kind)) {
       return c.json({ error: 'Invalid kind' }, 400);
     }
-    if (body.customId !== undefined && body.customId !== '' && !isId(body.customId)) {
+    if (body.customId !== undefined && body.customId !== '' && !isSafeId(body.customId)) {
       return c.json({ error: 'Invalid customId' }, 400);
     }
     try {
-      const installed = await rpc.installResource({
+      const installed = await nodeRpc.rpc.installResource({
         source: body.source.trim(),
         kind: body.kind,
         customId: body.customId?.trim() || undefined,
@@ -476,19 +475,10 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.post('/api/nodes/:nodeId/restart', async (c) => {
     const { nodeId } = c.req.param();
-    const node = db.getNode(nodeId);
-    if (!node) {
-      return c.json({ error: 'Node not found' }, 404);
-    }
-    if (db.getNodeOwner(nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    const rpc = connections.getNodeRpc(nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+    if (!nodeRpc.ok) return nodeRpc.response;
     try {
-      const result = await rpc.restartDaemon();
+      const result = await nodeRpc.rpc.restartDaemon();
       return c.json(result);
     } catch (err: any) {
       const message = err && typeof err === 'object' && 'message' in err && err.message
@@ -505,22 +495,12 @@ export function createHub(options?: HubOptions): HubInstance {
       return c.json({ error: 'Invalid BOT configuration' }, 400);
     }
 
-    const node = db.getNode(body.nodeId);
-    if (!node) {
-      return c.json({ error: 'Node not found' }, 404);
-    }
-    if (db.getNodeOwner(body.nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
+    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, body.nodeId);
+    if (!nodeRpc.ok) return nodeRpc.response;
 
     const existing = db.getBot(body.id);
     if (existing && existing.nodeId !== body.nodeId) {
       return c.json({ error: `Bot id "${body.id}" already owned by node "${existing.nodeId}"` }, 409);
-    }
-
-    const rpc = connections.getNodeRpc(body.nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
     }
 
     const botConfig: BotConfig = {
@@ -538,7 +518,7 @@ export function createHub(options?: HubOptions): HubInstance {
     };
 
     try {
-      await rpc.saveBot(botConfig, body.systemMd || '');
+      await nodeRpc.rpc.saveBot(botConfig, body.systemMd || '');
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to save bot on node' }, 500);
     }
@@ -549,13 +529,9 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.put('/api/bots/:botId', async (c) => {
     const botId = c.req.param('botId');
-    const existing = db.getBot(botId);
-    if (!existing) {
-      return c.json({ error: 'Bot not found' }, 404);
-    }
-    if (db.getNodeOwner(existing.nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
+    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
+    if (!botRpc.ok) return botRpc.response;
+    const { bot: existing, rpc } = botRpc;
 
     const body = await c.req.json<Partial<BotConfig> & { systemMd?: string }>().catch(() => null);
     if (!isObject(body) || !isBotConfig({ ...existing, ...body, id: botId })
@@ -565,11 +541,6 @@ export function createHub(options?: HubOptions): HubInstance {
 
     if (body.nodeId && body.nodeId !== existing.nodeId) {
       return c.json({ error: 'Cannot transfer bot to a different node' }, 409);
-    }
-
-    const rpc = connections.getNodeRpc(existing.nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
     }
 
     const { systemMd: requestedSystem, ...botPatch } = body;
@@ -598,21 +569,11 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.delete('/api/bots/:botId', async (c) => {
     const botId = c.req.param('botId');
-    const existing = db.getBot(botId);
-    if (!existing) {
-      return c.json({ error: 'Bot not found' }, 404);
-    }
-    if (db.getNodeOwner(existing.nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-
-    const rpc = connections.getNodeRpc(existing.nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
+    if (!botRpc.ok) return botRpc.response;
 
     try {
-      await rpc.deleteBot(botId);
+      await botRpc.rpc.deleteBot(botId);
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to delete bot on node' }, 500);
     }
@@ -623,21 +584,11 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.get('/api/bots/:botId/commands', async (c) => {
     const botId = c.req.param('botId');
-    const bot = db.getBot(botId);
-    if (!bot) {
-      return c.json({ error: 'Bot not found' }, 404);
-    }
-    if (db.getNodeOwner(bot.nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-
-    const rpc = connections.getNodeRpc(bot.nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
+    if (!botRpc.ok) return botRpc.response;
 
     try {
-      const commands = await rpc.getCommands(botId);
+      const commands = await botRpc.rpc.getCommands(botId);
       return c.json(commands);
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to fetch bot commands' }, 500);
@@ -646,21 +597,11 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.get('/api/bots/:botId/system', async (c) => {
     const botId = c.req.param('botId');
-    const bot = db.getBot(botId);
-    if (!bot) {
-      return c.json({ error: 'Bot not found' }, 404);
-    }
-    if (db.getNodeOwner(bot.nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-
-    const rpc = connections.getNodeRpc(bot.nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
+    if (!botRpc.ok) return botRpc.response;
 
     try {
-      const content = await rpc.readFile({ kind: 'system', botId, id: 'SYSTEM.md' });
+      const content = await botRpc.rpc.readFile({ kind: 'system', botId, id: 'SYSTEM.md' });
       return c.json({ content });
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to read system prompt' }, 500);
@@ -669,23 +610,13 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.put('/api/bots/:botId/system', async (c) => {
     const botId = c.req.param('botId');
-    const bot = db.getBot(botId);
-    if (!bot) {
-      return c.json({ error: 'Bot not found' }, 404);
-    }
-    if (db.getNodeOwner(bot.nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-
-    const rpc = connections.getNodeRpc(bot.nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
+    if (!botRpc.ok) return botRpc.response;
 
     const body = await c.req.json<{ content?: string }>().catch(() => null);
     if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
     try {
-      await rpc.writeFile({ kind: 'system', botId, id: 'SYSTEM.md' }, body.content);
+      await botRpc.rpc.writeFile({ kind: 'system', botId, id: 'SYSTEM.md' }, body.content);
       return c.json({ ok: true });
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to write system prompt' }, 500);
@@ -694,21 +625,11 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.get('/api/bots/:botId/memory', async (c) => {
     const botId = c.req.param('botId');
-    const bot = db.getBot(botId);
-    if (!bot) {
-      return c.json({ error: 'Bot not found' }, 404);
-    }
-    if (db.getNodeOwner(bot.nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-
-    const rpc = connections.getNodeRpc(bot.nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
+    if (!botRpc.ok) return botRpc.response;
 
     try {
-      const content = await rpc.readFile({ kind: 'memory', botId, id: 'MEMORY.md' });
+      const content = await botRpc.rpc.readFile({ kind: 'memory', botId, id: 'MEMORY.md' });
       return c.json({ content });
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to read memory' }, 500);
@@ -717,79 +638,49 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.put('/api/bots/:botId/memory', async (c) => {
     const botId = c.req.param('botId');
-    const bot = db.getBot(botId);
-    if (!bot) {
-      return c.json({ error: 'Bot not found' }, 404);
-    }
-    if (db.getNodeOwner(bot.nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-
-    const rpc = connections.getNodeRpc(bot.nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
+    if (!botRpc.ok) return botRpc.response;
 
     const body = await c.req.json<{ content?: string }>().catch(() => null);
     if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
     try {
-      await rpc.writeFile({ kind: 'memory', botId, id: 'MEMORY.md' }, body.content);
+      await botRpc.rpc.writeFile({ kind: 'memory', botId, id: 'MEMORY.md' }, body.content);
       return c.json({ ok: true });
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to write memory' }, 500);
     }
   });
 
-  const ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
-  const RESERVED_ENV_KEYS = new Set(['PATH', 'PWD', 'HOME', 'USER', 'SHELL']);
-  const isValidEnvKey = (key: string): boolean =>
-    ENV_KEY_REGEX.test(key) && !RESERVED_ENV_KEYS.has(key.toUpperCase()) && !key.toUpperCase().startsWith('BOTD_');
-
-  const readNodeBotEnv = async (rpc: NonNullable<ReturnType<typeof connections.getNodeRpc>>, botId: string): Promise<Record<string, string>> => {
-    if (typeof rpc.getBotEnv === 'function') {
-      try {
-        return await rpc.getBotEnv(botId);
-      } catch {
-        // Fallback to readFile
-      }
+  const readNodeBotEnv = async (
+    rpc: NodeRpc,
+    botId: string,
+  ): Promise<Record<string, string>> => {
+    try {
+      const raw = await rpc.readFile({ kind: 'env', botId, id: 'env.json' });
+      if (!raw || !raw.trim()) return {};
+      const parsed = JSON.parse(raw);
+      return isObject(parsed) ? (parsed as Record<string, string>) : {};
+    } catch {
+      return {};
     }
-    const raw = await rpc.readFile({ kind: 'env', botId, id: 'env.json' });
-    if (!raw || !raw.trim()) return {};
-    const parsed = JSON.parse(raw);
-    return isObject(parsed) ? (parsed as Record<string, string>) : {};
   };
 
   const writeNodeBotEnv = async (
-    rpc: NonNullable<ReturnType<typeof connections.getNodeRpc>>,
+    rpc: NodeRpc,
     botId: string,
     env: Record<string, string>,
   ): Promise<Record<string, string>> => {
-    if (typeof rpc.setBotEnv === 'function') {
-      try {
-        return await rpc.setBotEnv(botId, env);
-      } catch {
-        // Fallback to writeFile
-      }
-    }
     await rpc.writeFile({ kind: 'env', botId, id: 'env.json' }, JSON.stringify(env, null, 2));
     return env;
   };
 
   app.get('/api/bots/:botId/env', async (c) => {
     const botId = c.req.param('botId');
-    const bot = db.getBot(botId);
-    if (!bot) {
-      return c.json({ error: 'Bot not found' }, 404);
-    }
-    if (db.getNodeOwner(bot.nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    const rpc = connections.getNodeRpc(bot.nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
+    if (!botRpc.ok) return botRpc.response;
+
     try {
-      const env = await readNodeBotEnv(rpc, botId);
+      const env = await readNodeBotEnv(botRpc.rpc, botId);
       return c.json({ keys: Object.keys(env), env });
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to read bot env' }, 500);
@@ -798,24 +689,16 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.put('/api/bots/:botId/env', async (c) => {
     const botId = c.req.param('botId');
-    const bot = db.getBot(botId);
-    if (!bot) {
-      return c.json({ error: 'Bot not found' }, 404);
-    }
-    if (db.getNodeOwner(bot.nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    const rpc = connections.getNodeRpc(bot.nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
+    if (!botRpc.ok) return botRpc.response;
+
     const body = await c.req.json<{ env?: Record<string, unknown>; merge?: boolean }>().catch(() => null);
     if (!body || !isObject(body.env)) {
       return c.json({ error: 'env must be a key-value object' }, 400);
     }
     const sanitized: Record<string, string> = {};
     for (const [k, v] of Object.entries(body.env)) {
-      if (!isValidEnvKey(k)) {
+      if (!isValidBotEnvKey(k)) {
         return c.json({ error: `Invalid or reserved environment variable name: "${k}"` }, 400);
       }
       if (typeof v !== 'string') {
@@ -824,9 +707,9 @@ export function createHub(options?: HubOptions): HubInstance {
       sanitized[k] = v;
     }
     try {
-      const base = body.merge ? await readNodeBotEnv(rpc, botId) : {};
+      const base = body.merge ? await readNodeBotEnv(botRpc.rpc, botId) : {};
       const nextEnv = { ...base, ...sanitized };
-      const saved = await writeNodeBotEnv(rpc, botId, nextEnv);
+      const saved = await writeNodeBotEnv(botRpc.rpc, botId, nextEnv);
       return c.json({ ok: true, keys: Object.keys(saved), env: saved });
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to write bot env' }, 500);
@@ -836,21 +719,13 @@ export function createHub(options?: HubOptions): HubInstance {
   app.delete('/api/bots/:botId/env/:key', async (c) => {
     const botId = c.req.param('botId');
     const key = c.req.param('key');
-    const bot = db.getBot(botId);
-    if (!bot) {
-      return c.json({ error: 'Bot not found' }, 404);
-    }
-    if (db.getNodeOwner(bot.nodeId) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    const rpc = connections.getNodeRpc(bot.nodeId);
-    if (!rpc) {
-      return c.json({ error: 'Node is offline' }, 503);
-    }
+    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
+    if (!botRpc.ok) return botRpc.response;
+
     try {
-      const current = await readNodeBotEnv(rpc, botId);
+      const current = await readNodeBotEnv(botRpc.rpc, botId);
       delete current[key];
-      const saved = await writeNodeBotEnv(rpc, botId, current);
+      const saved = await writeNodeBotEnv(botRpc.rpc, botId, current);
       return c.json({ ok: true, keys: Object.keys(saved), env: saved });
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to delete bot env key' }, 500);
@@ -865,19 +740,15 @@ export function createHub(options?: HubOptions): HubInstance {
     }
     const sessionId = c.req.query('sessionId')?.trim() || undefined;
     if (sessionId) {
-      const session = db.getSession(sessionId);
-      if (!session) return c.json({ error: 'Session not found' }, 404);
-      if (getSessionOwnerId(sessionId) !== c.get('user').id) {
-        return c.json({ error: 'Forbidden' }, 403);
-      }
+      const sRes = resolveOwnedSession(c, db, sessionId);
+      if (!sRes.ok) return sRes.response;
     }
     const rawLimit = Number(c.req.query('limit') || '30');
     const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 100) : 30;
-    const hits = typeof (db as any).searchMessages === 'function'
-      ? (db as any).searchMessages(c.get('user').id, q, { sessionId, limit })
-      : [];
+    const hits = db.searchMessages(c.get('user').id, q, { sessionId, limit });
     return c.json(hits);
   });
+
   app.get('/api/sessions', (c) => c.json(db.getAllSessions(c.get('user').id)));
 
   app.post('/api/sessions', async (c) => {
@@ -889,37 +760,19 @@ export function createHub(options?: HubOptions): HubInstance {
     if (!VALID_MODES.has(body.mode)) {
       return c.json({ error: 'Invalid session mode' }, 400);
     }
-    const leadBot = isId(body.leadBotId) ? db.getBot(body.leadBotId) : undefined;
-    if (!leadBot) {
-      return c.json({ error: `Lead bot ${body?.leadBotId} not found` }, 400);
-    }
-    if (db.getNodeOwner(leadBot.nodeId) !== user.id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    if (!Array.isArray(body.memberBotIds)) {
-      return c.json({ error: 'Invalid memberBotIds' }, 400);
-    }
 
-    for (const memberId of body.memberBotIds) {
-      const memberBot = isId(memberId) ? db.getBot(memberId) : undefined;
-      if (!memberBot) {
-        return c.json({ error: `Member bot ${memberId} not found` }, 400);
-      }
-      if (db.getNodeOwner(memberBot.nodeId) !== user.id) {
-        return c.json({ error: 'Forbidden' }, 403);
-      }
+    const validation = validateSessionMembers(db, user.id, body.mode, body.leadBotId, body.memberBotIds);
+    if (!validation.ok) {
+      return c.json({ error: validation.error }, validation.status);
     }
+    const { leadBotId, memberBotIds } = validation;
 
-    const memberBotIds = [...new Set(body.memberBotIds)];
-    if (!memberBotIds.includes(body.leadBotId) || (body.mode === 'direct' && memberBotIds.length !== 1)) {
-      return c.json({ error: 'Lead BOT must be a member; direct sessions have exactly one member' }, 400);
-    }
     const sessionId = `sess_${randomUUID()}`;
     const session = db.createSession({
       id: sessionId,
       title: body.title.trim(),
       mode: body.mode,
-      leadBotId: body.leadBotId,
+      leadBotId,
       memberBotIds,
       ownerId: user.id,
       parallelRoundtable: Boolean(body.parallelRoundtable),
@@ -930,31 +783,37 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.patch('/api/sessions/:id', async (c) => {
     const id = c.req.param('id');
-    const session = db.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
-    if (getSessionOwnerId(id) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    const session = sRes.session;
 
-    const body = await c.req.json<{ title?: string; mode?: SessionMode; leadBotId?: string; memberBotIds?: string[]; archived?: boolean; parallelRoundtable?: boolean }>().catch(() => null);
+    const body = await c.req.json<{
+      title?: string;
+      mode?: SessionMode;
+      leadBotId?: string;
+      memberBotIds?: string[];
+      archived?: boolean;
+      pinned?: boolean;
+      parallelRoundtable?: boolean;
+    }>().catch(() => null);
     if (!isObject(body)) return c.json({ error: 'Invalid session configuration' }, 400);
     // 归档是纯 UI 分类标记，允许在运行中修改（如「开启新话题」时旧会话仍在后台执行）；
-    // 标题/模式/负责人/成员会改变调度行为，运行中仍需拒绝。
+    // 标题/模式/负责人/成员/圆桌并发会改变调度行为，运行中仍需拒绝。
     const touchesConfig =
       body.title !== undefined ||
       body.mode !== undefined ||
       body.leadBotId !== undefined ||
-      body.memberBotIds !== undefined;
+      body.memberBotIds !== undefined ||
+      body.parallelRoundtable !== undefined;
     if (session.status === 'running' && touchesConfig) {
       return c.json({ error: 'Stop the session before changing its configuration' }, 409);
     }
     if (body.archived !== undefined && typeof body.archived !== 'boolean') return c.json({ error: 'Invalid archived flag' }, 400);
+    if (body.pinned !== undefined && typeof body.pinned !== 'boolean') return c.json({ error: 'Invalid pinned flag' }, 400);
     if (body.parallelRoundtable !== undefined && typeof body.parallelRoundtable !== 'boolean') return c.json({ error: 'Invalid parallelRoundtable flag' }, 400);
     if (body.title !== undefined && !isText(body.title)) return c.json({ error: 'Invalid session title' }, 400);
-    if (body.leadBotId !== undefined && !isId(body.leadBotId)) return c.json({ error: 'Invalid lead BOT' }, 400);
-    if (body.memberBotIds !== undefined && (!Array.isArray(body.memberBotIds) || !body.memberBotIds.every(isId))) {
+    if (body.leadBotId !== undefined && !isSafeId(body.leadBotId)) return c.json({ error: 'Invalid lead BOT' }, 400);
+    if (body.memberBotIds !== undefined && (!Array.isArray(body.memberBotIds) || !body.memberBotIds.every(isSafeId))) {
       return c.json({ error: 'Invalid memberBotIds' }, 400);
     }
 
@@ -962,33 +821,41 @@ export function createHub(options?: HubOptions): HubInstance {
       return c.json({ error: 'Invalid session mode' }, 400);
     }
 
-    if (body.leadBotId && !db.getBot(body.leadBotId)) {
-      return c.json({ error: `Lead bot ${body.leadBotId} not found` }, 400);
+    const mode = body.mode ?? session.mode;
+    const targetLead = body.leadBotId ?? session.leadBotId;
+    const targetMembers = body.memberBotIds ?? session.memberBotIds;
+
+    const validation = validateSessionMembers(db, c.get('user').id, mode, targetLead, targetMembers);
+    if (!validation.ok) {
+      return c.json({ error: validation.error }, validation.status);
+    }
+    const { leadBotId, memberBotIds } = validation;
+
+    // 配置成员变更时统一失效旧队列，复用 cancelSession，防止 queued 任务绕过新配置
+    if (touchesConfig) {
+      await router.cancelSession(id);
     }
 
-    if (body.memberBotIds) {
-      if (!Array.isArray(body.memberBotIds)) {
-        return c.json({ error: 'Invalid memberBotIds' }, 400);
-      }
-      for (const mid of body.memberBotIds) {
-        if (!db.getBot(mid)) {
-          return c.json({ error: `Member bot ${mid} not found` }, 400);
+    // 成员移除时禁用相应 trigger，避免旧任务造成跨用户调用
+    const oldMemberIds = new Set([session.leadBotId, ...session.memberBotIds]);
+    const newMemberIds = new Set(memberBotIds);
+    const removedBotIds = [...oldMemberIds].filter((botId) => !newMemberIds.has(botId));
+    if (removedBotIds.length > 0) {
+      const triggers = db.listSessionTriggers(id);
+      for (const trg of triggers) {
+        if (removedBotIds.includes(trg.botId) && trg.enabled) {
+          db.updateTrigger(trg.id, { enabled: false });
         }
       }
     }
 
-    const leadBotId = body.leadBotId ?? session.leadBotId;
-    const mode = body.mode ?? session.mode;
-    const memberBotIds = [...new Set(body.memberBotIds ?? session.memberBotIds)];
-    if (!memberBotIds.includes(leadBotId) || (mode === 'direct' && memberBotIds.length !== 1)) {
-      return c.json({ error: 'Lead BOT must be a member; direct sessions have exactly one member' }, 400);
-    }
     const updated = db.updateSession(id, {
       title: body.title?.trim(),
       mode,
       leadBotId,
       memberBotIds,
       archived: body.archived,
+      pinned: body.pinned,
       parallelRoundtable: body.parallelRoundtable,
     });
     return c.json(updated);
@@ -996,25 +863,50 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.get('/api/sessions/:id/messages', (c) => {
     const id = c.req.param('id');
-    const session = db.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+
+    // 分页参数：before=<messageId>（向上翻页）、around=<messageId>（定位上下文）、limit；无参数时保持全量返回
+    const beforeId = c.req.query('before')?.trim() || undefined;
+    const aroundId = c.req.query('around')?.trim() || undefined;
+    const limitRaw = c.req.query('limit');
+    if (beforeId === undefined && aroundId === undefined && limitRaw === undefined) {
+      return c.json(db.getMessages(id));
     }
-    if (getSessionOwnerId(id) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
+
+    let limit: number | undefined;
+    if (limitRaw !== undefined) {
+      const parsed = Number(limitRaw);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        return c.json({ error: 'Invalid limit' }, 400);
+      }
+      limit = parsed;
     }
-    return c.json(db.getMessages(id));
+
+    // around 优先于 before；锚点必须存在且属于该会话
+    const anchorId = aroundId ?? beforeId;
+    let anchor: { rowid: number } | undefined;
+    if (anchorId !== undefined) {
+      const found = db.getMessageById(anchorId);
+      if (!found || found.message.sessionId !== id) {
+        return c.json({ error: 'Message not found' }, 404);
+      }
+      anchor = found;
+    }
+
+    const page = db.getMessagesPage(id, {
+      ...(anchor && beforeId !== undefined && aroundId === undefined ? { beforeRowid: anchor.rowid } : {}),
+      ...(anchor && aroundId !== undefined ? { aroundRowid: anchor.rowid } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+    });
+    return c.json(page);
   });
 
   app.post('/api/sessions/:id/messages', async (c) => {
     const id = c.req.param('id');
-    const session = db.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
-    if (getSessionOwnerId(id) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    const session = sRes.session;
 
     const body = (await c.req.json<{ content?: string; attachments?: MessageAttachment[] }>().catch(() => ({ content: '' }))) as {
       content?: string;
@@ -1062,13 +954,9 @@ export function createHub(options?: HubOptions): HubInstance {
   app.put('/api/sessions/:id/messages/:messageId', async (c) => {
     const id = c.req.param('id');
     const messageId = c.req.param('messageId');
-    const session = db.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
-    if (getSessionOwnerId(id) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    const session = sRes.session;
 
     const found = db.getMessageById(messageId);
     if (!found || found.message.sessionId !== id) {
@@ -1101,6 +989,9 @@ export function createHub(options?: HubOptions): HubInstance {
       ? [cmdResult.targetBotId]
       : (cmdResult.isCommand ? [] : extractMentions(body.content, validBots));
 
+    // 验证输入后，使用 Router 统一失效旧队列，复用 cancelSession
+    await router.cancelSession(id);
+
     const anchorRowid = found.rowid;
     const updated = db.updateMessageContent(messageId, body.content, mentions);
     if (!updated) {
@@ -1126,13 +1017,8 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.post('/api/sessions/:id/cancel', async (c) => {
     const id = c.req.param('id');
-    const session = db.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
-    if (getSessionOwnerId(id) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
 
     await router.cancelSession(id);
     return c.json({ ok: true });
@@ -1142,13 +1028,8 @@ export function createHub(options?: HubOptions): HubInstance {
   // 允许 running 中分叉：只读源会话 + 新建独立会话，不打扰执行中的回合；新会话尚无订阅者，无需 SSE 广播。
   app.post('/api/sessions/:id/fork', async (c) => {
     const id = c.req.param('id');
-    const session = db.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
-    if (getSessionOwnerId(id) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
 
     const body = await c.req.json<{ anchorMessageId?: string }>().catch(() => null);
     if (!isObject(body) || !isText(body.anchorMessageId)) {
@@ -1165,16 +1046,15 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.delete('/api/sessions/:id/messages', async (c) => {
     const id = c.req.param('id');
-    const session = db.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
-    if (getSessionOwnerId(id) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    const session = sRes.session;
     if (session.status === 'running') {
       return c.json({ error: 'Stop the session before clearing messages' }, 409);
     }
+
+    // 验证后，使用 Router 统一失效旧队列，复用 cancelSession
+    await router.cancelSession(id);
 
     db.clearSessionMessages(id);
     // 同步清空各成员节点的本地会话记忆（best-effort，失败在方法内部吞掉）
@@ -1184,33 +1064,28 @@ export function createHub(options?: HubOptions): HubInstance {
 
   app.delete('/api/sessions/:id', async (c) => {
     const id = c.req.param('id');
-    const session = db.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
-    if (getSessionOwnerId(id) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    const session = sRes.session;
     if (session.status === 'running') {
       return c.json({ error: 'Stop the session before deleting it' }, 409);
     }
 
+    // 验证后，使用 Router 统一失效旧队列，复用 cancelSession
+    await router.cancelSession(id);
+
     // resetMemberSessions 内部要查会话成员，必须在 deleteSession 之前调用
     await router.resetMemberSessions(id);
-    db.deleteSession(id);
+    artifacts.deleteSession(id);
     return c.json({ ok: true });
   });
 
   // 9. SSE Streaming
   app.get('/api/sessions/:id/events', async (c) => {
     const id = c.req.param('id');
-    const session = db.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
-    if (getSessionOwnerId(id) !== c.get('user').id) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    const session = sRes.session;
 
     return streamSSE(c, async (stream) => {
       // Send initial session status event
@@ -1255,9 +1130,52 @@ export function createHub(options?: HubOptions): HubInstance {
     });
   });
 
+  // 全局 SSE（登录用户）：该用户所有会话事件 + 其节点上下线通知
+  app.get('/api/events', (c) => {
+    const user = c.get('user');
+
+    return streamSSE(c, async (stream) => {
+      // 首个事件：握手确认，便于客户端确认订阅已建立
+      await stream.writeSSE({
+        data: JSON.stringify({ type: 'hello' }),
+      });
+
+      const unsubscribe = sseHub.subscribeUser(user.id, async (event) => {
+        try {
+          await stream.writeSSE({
+            data: JSON.stringify(event),
+          });
+        } catch {
+          // stream aborted or error
+        }
+      });
+
+      const keepalive = setInterval(async () => {
+        try {
+          await stream.writeSSE({
+            event: 'ping',
+            data: '',
+          });
+        } catch {
+          clearInterval(keepalive);
+        }
+      }, 15000);
+
+      stream.onAbort(() => {
+        clearInterval(keepalive);
+        unsubscribe();
+      });
+
+      await new Promise<void>((resolve) => {
+        stream.onAbort(resolve);
+      });
+    });
+  });
+
   registerProviderRoutes(app, db, connections);
-  registerArtifactRoutes(app, db, sseHub, getSessionOwnerId);
+  registerArtifactRoutes(app, artifacts);
   const triggerScheduler = registerTriggerRoutes(app, db, router, getSessionOwnerId);
+  registerBgJobRoutes(app, db, connections);
   registerSkillSyncAndAskRoutes(app, db, connections, router, getSessionOwnerId);
 
   // 10. Serve static web files & SPA fallback

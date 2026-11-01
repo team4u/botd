@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { api } from '../api';
 import { ProviderAuthModal } from './ProviderAuthModal';
+import { ConfirmDialog } from './ConfirmDialog';
 import type {
   ModelCatalog,
   ProviderCatalogEntry,
@@ -71,6 +72,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   // Logout / clear node credential state
   const [clearingAuth, setClearingAuth] = useState(false);
+  // ConfirmDialog state for clearing node credentials
+  const [clearAuthProviderId, setClearAuthProviderId] = useState<string | null>(null);
 
   // Online nodes list
   const onlineNodes = useMemo(() => {
@@ -206,16 +209,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleClearNodeAuth = async (providerId: string) => {
+  const handleClearNodeAuth = (providerId: string) => {
     if (!selectedNodeId) return;
-    const targetNode = nodesList.find((n) => n.id === selectedNodeId);
-    const confirmMsg = `确定要清除节点 "${targetNode?.name || selectedNodeId}" 上的 ${providerId} 专属凭据吗？\n清除后该服务商需重新授权才能继续使用。`;
-    if (!window.confirm(confirmMsg)) return;
+    setClearAuthProviderId(providerId);
+  };
 
+  const confirmClearNodeAuth = async () => {
+    if (!selectedNodeId || !clearAuthProviderId) return;
+    const providerId = clearAuthProviderId;
     setClearingAuth(true);
     setError(null);
     try {
       await api.logoutProviderAuth(selectedNodeId, providerId);
+      setClearAuthProviderId(null);
       await fetchCatalog(selectedNodeId);
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
@@ -723,6 +729,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           }}
         />
       )}
+
+      {/* Submodal: 清除节点凭据确认 */}
+      <ConfirmDialog
+        isOpen={Boolean(clearAuthProviderId)}
+        title="清除节点凭据"
+        message={
+          <>
+            确定要清除节点 “{selectedNode?.name || selectedNodeId}” 上的 {clearAuthProviderId} 专属凭据吗？
+            <br />
+            清除后该服务商需重新授权才能继续使用。
+          </>
+        }
+        confirmText="清除凭据"
+        danger
+        busy={clearingAuth}
+        onConfirm={confirmClearNodeAuth}
+        onClose={() => setClearAuthProviderId(null)}
+      />
     </>
   );
 };

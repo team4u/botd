@@ -34,9 +34,7 @@ export interface IncrementalMessageResult {
   rowid: number;
 }
 
-export const isValidCommandName = (name: unknown): name is string => {
-  return typeof name === 'string' && name.length > 0 && !name.includes('/') && !/\s/.test(name);
-};
+export { isValidCommandName } from '@botd/protocol';
 
 const PREVIEW_MAX_LENGTH = 60;
 
@@ -127,6 +125,60 @@ const mapArtifactRow = (row: ArtifactRow): ArtifactRecord => ({
 const TRIGGER_COLUMNS =
   'id, session_id, bot_id, owner_id, name, kind, token, cron_expr, run_at, prompt, enabled, last_triggered_at, created_at';
 
+type NodeRow = {
+  id: string;
+  name: string;
+  platform: string;
+  skills_json: string;
+  extensions_json: string;
+  status: string;
+  last_seen_at: string;
+  created_at: string;
+  pid: number | null;
+  started_at: string | null;
+};
+
+const mapNodeRow = (row: NodeRow): NodeRecord => ({
+  id: row.id,
+  name: row.name,
+  platform: row.platform as PlatformType,
+  skills: parseOptionalJson<string[]>(row.skills_json) ?? [],
+  extensions: parseOptionalJson<string[]>(row.extensions_json) ?? [],
+  status: row.status as 'online' | 'offline',
+  lastSeenAt: row.last_seen_at,
+  createdAt: row.created_at,
+  ...(typeof row.pid === 'number' ? { pid: row.pid } : {}),
+  ...(typeof row.started_at === 'string' && row.started_at.length > 0 ? { startedAt: row.started_at } : {}),
+});
+
+type BotRow = {
+  id: string;
+  node_id: string;
+  name: string;
+  description: string;
+  model_provider: string;
+  model_id: string;
+  thinking_level: string | null;
+  enabled_skills_json: string;
+  enabled_extensions_json: string;
+  web_command_names_json: string | null;
+  updated_at: string;
+};
+
+const mapBotRow = (row: BotRow): BotConfig => ({
+  id: row.id,
+  nodeId: row.node_id,
+  name: row.name,
+  description: row.description,
+  modelProvider: row.model_provider,
+  modelId: row.model_id,
+  thinkingLevel: (row.thinking_level as ThinkingLevel) ?? 'medium',
+  enabledSkills: parseOptionalJson<string[]>(row.enabled_skills_json) ?? [],
+  enabledExtensions: parseOptionalJson<string[]>(row.enabled_extensions_json) ?? [],
+  webCommandNames: parseOptionalJson<string[]>(row.web_command_names_json) ?? [],
+  updatedAt: row.updated_at,
+});
+
 type TriggerRow = {
   id: string;
   session_id: string;
@@ -180,14 +232,20 @@ export class HubDatabase {
     `);
   }
 
+  public inTransaction<T>(fn: () => T): T {
+    this.db.exec('BEGIN');
+    try {
+      const result = fn();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
   private initSchema(): void {
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value_json TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         username TEXT NOT NULL UNIQUE,
@@ -282,6 +340,20 @@ export class HubDatabase {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_triggers_session ON triggers(session_id);
+
+      CREATE TABLE IF NOT EXISTS session_resets_pending (
+        session_id TEXT NOT NULL,
+        bot_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (session_id, bot_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_resets_pending_session ON session_resets_pending(session_id);
+
+      CREATE TABLE IF NOT EXISTS artifact_cleanup_pending (
+        storage_path TEXT PRIMARY KEY,
+        error TEXT NOT NULL,
+        failed_at TEXT NOT NULL
+      );
     `);
 
     const migrations = [
@@ -294,6 +366,7 @@ export class HubDatabase {
       `ALTER TABLE nodes ADD COLUMN owner_id TEXT`,
       `ALTER TABLE sessions ADD COLUMN owner_id TEXT`,
       `ALTER TABLE sessions ADD COLUMN parallel_roundtable INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE messages ADD COLUMN tool_calls_json TEXT`,
       `ALTER TABLE messages ADD COLUMN usage_json TEXT`,
       `ALTER TABLE messages ADD COLUMN attachments_json TEXT`,
@@ -313,29 +386,53 @@ export class HubDatabase {
     this.db.exec(`UPDATE sessions SET owner_id = 'user_admin' WHERE owner_id IS NULL`);
   }
 
-  // --- Settings ---
-  getSetting<T = any>(key: string): T | undefined {
-    const stmt = this.db.prepare('SELECT value_json FROM settings WHERE key = ?');
-    const row = stmt.get(key) as { value_json: string } | undefined;
-    if (!row) return undefined;
-    try {
-      return JSON.parse(row.value_json) as T;
-    } catch {
-      return undefined;
-    }
+  // --- Session Resets Pending ---
+  markSessionResetPending(sessionId: string, botId: string): void {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT INTO session_resets_pending (session_id, bot_id, created_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(session_id, bot_id) DO UPDATE SET created_at = excluded.created_at
+    `);
+    stmt.run(sessionId, botId, now);
   }
 
-  setSetting(key: string, value: any): void {
+  hasPendingSessionReset(sessionId: string, botId: string): boolean {
+    const stmt = this.db.prepare('SELECT 1 FROM session_resets_pending WHERE session_id = ? AND bot_id = ? LIMIT 1');
+    return stmt.get(sessionId, botId) !== undefined;
+  }
+
+  clearSessionResetPending(sessionId: string, botId: string): void {
+    const stmt = this.db.prepare('DELETE FROM session_resets_pending WHERE session_id = ? AND bot_id = ?');
+    stmt.run(sessionId, botId);
+  }
+
+  // --- Artifact Cleanup Pending ---
+  recordArtifactCleanupPending(storagePath: string, error: string): void {
     const now = new Date().toISOString();
-    const json = JSON.stringify(value);
     const stmt = this.db.prepare(`
-      INSERT INTO settings (key, value_json, updated_at)
+      INSERT INTO artifact_cleanup_pending (storage_path, error, failed_at)
       VALUES (?, ?, ?)
-      ON CONFLICT(key) DO UPDATE SET
-        value_json = excluded.value_json,
-        updated_at = excluded.updated_at
+      ON CONFLICT(storage_path) DO UPDATE SET
+        error = excluded.error,
+        failed_at = excluded.failed_at
     `);
-    stmt.run(key, json, now);
+    stmt.run(storagePath, error, now);
+  }
+
+  listArtifactCleanupPending(): { storagePath: string; error: string; failedAt: string }[] {
+    const stmt = this.db.prepare('SELECT storage_path, error, failed_at FROM artifact_cleanup_pending ORDER BY failed_at ASC');
+    const rows = stmt.all() as { storage_path: string; error: string; failed_at: string }[];
+    return rows.map((r) => ({
+      storagePath: r.storage_path,
+      error: r.error,
+      failedAt: r.failed_at,
+    }));
+  }
+
+  removeArtifactCleanupPending(storagePath: string): void {
+    const stmt = this.db.prepare('DELETE FROM artifact_cleanup_pending WHERE storage_path = ?');
+    stmt.run(storagePath);
   }
 
   // --- Users ---
@@ -425,17 +522,20 @@ export class HubDatabase {
 
   /** 删除用户，并级联删除其全部 sessions 及这些 sessions 的 messages */
   deleteUser(id: string): void {
-    const sessionIds = (this.db.prepare('SELECT id FROM sessions WHERE owner_id = ?').all(id) as { id: string }[]).map(
-      (row) => row.id
-    );
-    if (sessionIds.length > 0) {
-      const placeholders = sessionIds.map(() => '?').join(', ');
-      this.db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...sessionIds);
-      this.db.prepare(`DELETE FROM triggers WHERE session_id IN (${placeholders})`).run(...sessionIds);
-      this.db.prepare(`DELETE FROM artifacts WHERE session_id IN (${placeholders})`).run(...sessionIds);
-    }
-    this.db.prepare('DELETE FROM sessions WHERE owner_id = ?').run(id);
-    this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    return this.inTransaction(() => {
+      const sessionIds = (this.db.prepare('SELECT id FROM sessions WHERE owner_id = ?').all(id) as { id: string }[]).map(
+        (row) => row.id
+      );
+      if (sessionIds.length > 0) {
+        const placeholders = sessionIds.map(() => '?').join(', ');
+        this.db.prepare(`DELETE FROM session_resets_pending WHERE session_id IN (${placeholders})`).run(...sessionIds);
+        this.db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...sessionIds);
+        this.db.prepare(`DELETE FROM triggers WHERE session_id IN (${placeholders})`).run(...sessionIds);
+        this.db.prepare(`DELETE FROM artifacts WHERE session_id IN (${placeholders})`).run(...sessionIds);
+      }
+      this.db.prepare('DELETE FROM sessions WHERE owner_id = ?').run(id);
+      this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    });
   }
 
   // --- Nodes ---
@@ -457,117 +557,26 @@ export class HubDatabase {
 
   getNode(id: string): NodeRecord | undefined {
     const stmt = this.db.prepare('SELECT id, name, platform, skills_json, extensions_json, status, last_seen_at, created_at, pid, started_at FROM nodes WHERE id = ?');
-    const row = stmt.get(id) as {
-      id: string;
-      name: string;
-      platform: string;
-      skills_json: string;
-      extensions_json: string;
-      status: string;
-      last_seen_at: string;
-      created_at: string;
-      pid: number | null;
-      started_at: string | null;
-    } | undefined;
+    const row = stmt.get(id) as NodeRow | undefined;
     if (!row) return undefined;
-    return {
-      id: row.id,
-      name: row.name,
-      platform: row.platform as PlatformType,
-      skills: JSON.parse(row.skills_json || '[]'),
-      extensions: JSON.parse(row.extensions_json || '[]'),
-      status: row.status as 'online' | 'offline',
-      lastSeenAt: row.last_seen_at,
-      createdAt: row.created_at,
-      ...(typeof row.pid === 'number' ? { pid: row.pid } : {}),
-      ...(typeof row.started_at === 'string' && row.started_at.length > 0 ? { startedAt: row.started_at } : {}),
-    };
+    return mapNodeRow(row);
   }
 
   getNodeWithSecret(id: string): (NodeRecord & { tokenHash: string }) | undefined {
     const stmt = this.db.prepare('SELECT id, name, platform, token_hash, skills_json, extensions_json, status, last_seen_at, created_at, pid, started_at FROM nodes WHERE id = ?');
-    const row = stmt.get(id) as {
-      id: string;
-      name: string;
-      platform: string;
-      token_hash: string;
-      skills_json: string;
-      extensions_json: string;
-      status: string;
-      last_seen_at: string;
-      created_at: string;
-      pid: number | null;
-      started_at: string | null;
-    } | undefined;
+    const row = stmt.get(id) as (NodeRow & { token_hash: string }) | undefined;
     if (!row) return undefined;
     return {
-      id: row.id,
-      name: row.name,
-      platform: row.platform as PlatformType,
+      ...mapNodeRow(row),
       tokenHash: row.token_hash,
-      skills: JSON.parse(row.skills_json || '[]'),
-      extensions: JSON.parse(row.extensions_json || '[]'),
-      status: row.status as 'online' | 'offline',
-      lastSeenAt: row.last_seen_at,
-      createdAt: row.created_at,
-      ...(typeof row.pid === 'number' ? { pid: row.pid } : {}),
-      ...(typeof row.started_at === 'string' && row.started_at.length > 0 ? { startedAt: row.started_at } : {}),
     };
-  }
-
-  getAllNodes(): NodeRecord[] {
-    const stmt = this.db.prepare('SELECT id, name, platform, skills_json, extensions_json, status, last_seen_at, created_at, pid, started_at FROM nodes ORDER BY created_at ASC');
-    const rows = stmt.all() as {
-      id: string;
-      name: string;
-      platform: string;
-      skills_json: string;
-      extensions_json: string;
-      status: string;
-      last_seen_at: string;
-      created_at: string;
-      pid: number | null;
-      started_at: string | null;
-    }[];
-    return rows.map((row) => ({
-      id: row.id,
-      name: row.name,
-      platform: row.platform as PlatformType,
-      skills: JSON.parse(row.skills_json || '[]'),
-      extensions: JSON.parse(row.extensions_json || '[]'),
-      status: row.status as 'online' | 'offline',
-      lastSeenAt: row.last_seen_at,
-      createdAt: row.created_at,
-      ...(typeof row.pid === 'number' ? { pid: row.pid } : {}),
-      ...(typeof row.started_at === 'string' && row.started_at.length > 0 ? { startedAt: row.started_at } : {}),
-    }));
   }
 
   getAllNodesWithBots(ownerId: string): NodeWithBots[] {
     const stmt = this.db.prepare('SELECT id, name, platform, skills_json, extensions_json, status, last_seen_at, created_at, pid, started_at FROM nodes WHERE owner_id = ? ORDER BY created_at ASC');
-    const rows = stmt.all(ownerId) as {
-      id: string;
-      name: string;
-      platform: string;
-      skills_json: string;
-      extensions_json: string;
-      status: string;
-      last_seen_at: string;
-      created_at: string;
-      pid: number | null;
-      started_at: string | null;
-    }[];
+    const rows = stmt.all(ownerId) as NodeRow[];
     return rows.map((row) => ({
-      id: row.id,
-      name: row.name,
-      platform: row.platform as PlatformType,
-      skills: JSON.parse(row.skills_json || '[]'),
-      extensions: JSON.parse(row.extensions_json || '[]'),
-      status: row.status as 'online' | 'offline',
-      lastSeenAt: row.last_seen_at,
-      createdAt: row.created_at,
-      ...(typeof row.pid === 'number' ? { pid: row.pid } : {}),
-      ...(typeof row.started_at === 'string' && row.started_at.length > 0 ? { startedAt: row.started_at } : {}),
+      ...mapNodeRow(row),
       bots: this.getBotsForNode(row.id),
     }));
   }
@@ -597,8 +606,10 @@ export class HubDatabase {
   }
 
   deleteNode(id: string): void {
-    const stmt = this.db.prepare('DELETE FROM nodes WHERE id = ?');
-    stmt.run(id);
+    return this.inTransaction(() => {
+      const stmt = this.db.prepare('DELETE FROM nodes WHERE id = ?');
+      stmt.run(id);
+    });
   }
 
   /** Remove every cached BOT record belonging to a node (force node removal). */
@@ -607,106 +618,56 @@ export class HubDatabase {
     stmt.run(nodeId);
   }
 
-  addNodeSkill(nodeId: string, skillId: string): void {
+  private updateNodeStringSet(
+    nodeId: string,
+    column: 'skills_json' | 'extensions_json',
+    mutate: (list: string[]) => string[]
+  ): void {
     const node = this.getNode(nodeId);
     if (!node) return;
-    if (!node.skills.includes(skillId)) {
-      node.skills.push(skillId);
-      const stmt = this.db.prepare('UPDATE nodes SET skills_json = ? WHERE id = ?');
-      stmt.run(JSON.stringify(node.skills), nodeId);
+    const current = column === 'skills_json' ? node.skills : node.extensions;
+    const next = mutate([...current]);
+    if (JSON.stringify(current) !== JSON.stringify(next)) {
+      const stmt = this.db.prepare(`UPDATE nodes SET ${column} = ? WHERE id = ?`);
+      stmt.run(JSON.stringify(next), nodeId);
     }
+  }
+
+  addNodeSkill(nodeId: string, skillId: string): void {
+    this.updateNodeStringSet(nodeId, 'skills_json', (list) =>
+      list.includes(skillId) ? list : [...list, skillId]
+    );
   }
 
   removeNodeSkill(nodeId: string, skillId: string): void {
-    const node = this.getNode(nodeId);
-    if (!node) return;
-    if (node.skills.includes(skillId)) {
-      const nextSkills = node.skills.filter((s) => s !== skillId);
-      const stmt = this.db.prepare('UPDATE nodes SET skills_json = ? WHERE id = ?');
-      stmt.run(JSON.stringify(nextSkills), nodeId);
-    }
+    this.updateNodeStringSet(nodeId, 'skills_json', (list) =>
+      list.filter((s) => s !== skillId)
+    );
   }
 
   addNodeExtension(nodeId: string, extId: string): void {
-    const node = this.getNode(nodeId);
-    if (!node) return;
-    if (!node.extensions.includes(extId)) {
-      node.extensions.push(extId);
-      const stmt = this.db.prepare('UPDATE nodes SET extensions_json = ? WHERE id = ?');
-      stmt.run(JSON.stringify(node.extensions), nodeId);
-    }
+    this.updateNodeStringSet(nodeId, 'extensions_json', (list) =>
+      list.includes(extId) ? list : [...list, extId]
+    );
   }
 
   removeNodeExtension(nodeId: string, extId: string): void {
-    const node = this.getNode(nodeId);
-    if (!node) return;
-    if (node.extensions.includes(extId)) {
-      const nextExtensions = node.extensions.filter((e) => e !== extId);
-      const stmt = this.db.prepare('UPDATE nodes SET extensions_json = ? WHERE id = ?');
-      stmt.run(JSON.stringify(nextExtensions), nodeId);
-    }
+    this.updateNodeStringSet(nodeId, 'extensions_json', (list) =>
+      list.filter((e) => e !== extId)
+    );
   }
 
   // --- Bots ---
   getBot(id: string): BotConfig | undefined {
     const stmt = this.db.prepare('SELECT id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, web_command_names_json, updated_at FROM bots WHERE id = ?');
-    const row = stmt.get(id) as {
-      id: string;
-      node_id: string;
-      name: string;
-      description: string;
-      model_provider: string;
-      model_id: string;
-      thinking_level: string | null;
-      enabled_skills_json: string;
-      enabled_extensions_json: string;
-      web_command_names_json: string | null;
-      updated_at: string;
-    } | undefined;
-    if (!row) return undefined;
-    return {
-      id: row.id,
-      nodeId: row.node_id,
-      name: row.name,
-      description: row.description,
-      modelProvider: row.model_provider,
-      modelId: row.model_id,
-      thinkingLevel: (row.thinking_level as ThinkingLevel) ?? 'medium',
-      enabledSkills: JSON.parse(row.enabled_skills_json || '[]'),
-      enabledExtensions: JSON.parse(row.enabled_extensions_json || '[]'),
-      webCommandNames: JSON.parse(row.web_command_names_json || '[]'),
-      updatedAt: row.updated_at,
-    };
+    const row = stmt.get(id) as BotRow | undefined;
+    return row ? mapBotRow(row) : undefined;
   }
 
   getBotsForNode(nodeId: string): BotConfig[] {
     const stmt = this.db.prepare('SELECT id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, web_command_names_json, updated_at FROM bots WHERE node_id = ? ORDER BY id ASC');
-    const rows = stmt.all(nodeId) as {
-      id: string;
-      node_id: string;
-      name: string;
-      description: string;
-      model_provider: string;
-      model_id: string;
-      thinking_level: string | null;
-      enabled_skills_json: string;
-      enabled_extensions_json: string;
-      web_command_names_json: string | null;
-      updated_at: string;
-    }[];
-    return rows.map((row) => ({
-      id: row.id,
-      nodeId: row.node_id,
-      name: row.name,
-      description: row.description,
-      modelProvider: row.model_provider,
-      modelId: row.model_id,
-      thinkingLevel: (row.thinking_level as ThinkingLevel) ?? 'medium',
-      enabledSkills: JSON.parse(row.enabled_skills_json || '[]'),
-      enabledExtensions: JSON.parse(row.enabled_extensions_json || '[]'),
-      webCommandNames: JSON.parse(row.web_command_names_json || '[]'),
-      updatedAt: row.updated_at,
-    }));
+    const rows = stmt.all(nodeId) as BotRow[];
+    return rows.map(mapBotRow);
   }
 
   saveBot(bot: BotConfig): void {
@@ -787,7 +748,7 @@ export class HubDatabase {
   }
 
   getSession(id: string): (SessionRecord & { cursorMap: Record<string, number> }) | undefined {
-    const stmt = this.db.prepare('SELECT id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, archived, parallel_roundtable, created_at, updated_at FROM sessions WHERE id = ?');
+    const stmt = this.db.prepare('SELECT id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, archived, pinned, parallel_roundtable, created_at, updated_at FROM sessions WHERE id = ?');
     const row = stmt.get(id) as {
       id: string;
       title: string;
@@ -798,6 +759,7 @@ export class HubDatabase {
       status: string;
       active_bot_id: string | null;
       archived: number;
+      pinned: number;
       parallel_roundtable: number;
       created_at: string;
       updated_at: string;
@@ -813,6 +775,7 @@ export class HubDatabase {
       status: row.status as SessionStatus,
       activeBotId: row.active_bot_id ?? undefined,
       archived: Boolean(row.archived),
+      pinned: Boolean(row.pinned),
       parallelRoundtable: Boolean(row.parallel_roundtable),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -821,7 +784,7 @@ export class HubDatabase {
 
   getAllSessions(ownerId: string): SessionRecord[] {
     const stmt = this.db.prepare(`
-      SELECT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.parallel_roundtable, s.created_at, s.updated_at,
+      SELECT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.pinned, s.parallel_roundtable, s.created_at, s.updated_at,
         (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
         (SELECT m.content FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_content,
         (SELECT m.created_at FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_at
@@ -838,6 +801,7 @@ export class HubDatabase {
       status: string;
       active_bot_id: string | null;
       archived: number;
+      pinned: number;
       parallel_roundtable: number;
       created_at: string;
       updated_at: string;
@@ -854,6 +818,7 @@ export class HubDatabase {
       status: row.status as SessionStatus,
       activeBotId: row.active_bot_id ?? undefined,
       archived: Boolean(row.archived),
+      pinned: Boolean(row.pinned),
       parallelRoundtable: Boolean(row.parallel_roundtable),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -863,27 +828,40 @@ export class HubDatabase {
     }));
   }
 
+  /** 返回会话归属用户 id；会话不存在返回 undefined */
+  getSessionOwner(sessionId: string): string | undefined {
+    const stmt = this.db.prepare('SELECT owner_id FROM sessions WHERE id = ?');
+    const row = stmt.get(sessionId) as { owner_id: string | null } | undefined;
+    return row?.owner_id ?? undefined;
+  }
+
   deleteSession(id: string): boolean {
-    const session = this.getSession(id);
-    if (!session) return false;
-    const deleteMessages = this.db.prepare('DELETE FROM messages WHERE session_id = ?');
-    deleteMessages.run(id);
-    const deleteTriggers = this.db.prepare('DELETE FROM triggers WHERE session_id = ?');
-    deleteTriggers.run(id);
-    const deleteArtifacts = this.db.prepare('DELETE FROM artifacts WHERE session_id = ?');
-    deleteArtifacts.run(id);
-    const deleteSessionStmt = this.db.prepare('DELETE FROM sessions WHERE id = ?');
-    deleteSessionStmt.run(id);
-    return true;
+    return this.inTransaction(() => {
+      const session = this.getSession(id);
+      if (!session) return false;
+      const deletePending = this.db.prepare('DELETE FROM session_resets_pending WHERE session_id = ?');
+      deletePending.run(id);
+      const deleteMessages = this.db.prepare('DELETE FROM messages WHERE session_id = ?');
+      deleteMessages.run(id);
+      const deleteTriggers = this.db.prepare('DELETE FROM triggers WHERE session_id = ?');
+      deleteTriggers.run(id);
+      const deleteArtifacts = this.db.prepare('DELETE FROM artifacts WHERE session_id = ?');
+      deleteArtifacts.run(id);
+      const deleteSessionStmt = this.db.prepare('DELETE FROM sessions WHERE id = ?');
+      deleteSessionStmt.run(id);
+      return true;
+    });
   }
 
   clearSessionMessages(id: string): boolean {
-    const session = this.getSession(id);
-    if (!session) return false;
-    const deleteMessages = this.db.prepare('DELETE FROM messages WHERE session_id = ?');
-    deleteMessages.run(id);
-    this.resetCursorMap(id);
-    return true;
+    return this.inTransaction(() => {
+      const session = this.getSession(id);
+      if (!session) return false;
+      const deleteMessages = this.db.prepare('DELETE FROM messages WHERE session_id = ?');
+      deleteMessages.run(id);
+      this.resetCursorMap(id);
+      return true;
+    });
   }
 
   /** 将会话的 cursor_map_json 重置为 '{}'（各 bot 的增量游标全部归零） */
@@ -921,17 +899,6 @@ export class HubDatabase {
       INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parallel_roundtable)
       VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?)
     `);
-    insertSession.run(
-      newSessionId,
-      `${source.title}（分叉）`,
-      source.mode,
-      source.leadBotId,
-      JSON.stringify(source.memberBotIds),
-      now,
-      now,
-      ownerId,
-      source.parallelRoundtable ? 1 : 0
-    );
 
     const rows = this.db.prepare(`
       SELECT role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
@@ -954,23 +921,84 @@ export class HubDatabase {
       INSERT INTO messages (id, session_id, role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    for (const row of rows) {
-      insertMessage.run(
-        `msg_${randomUUID()}`,
-        newSessionId,
-        row.role,
-        row.sender_bot_id,
-        row.model_badge,
-        row.content,
-        row.mentions_json,
-        row.tool_calls_json,
-        row.usage_json,
-        row.attachments_json,
-        row.created_at
-      );
-    }
+    const insertArtifact = this.db.prepare(`
+      INSERT INTO artifacts (id, session_id, filename, mime_type, size_bytes, sender_bot_id, storage_path, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
 
-    return this.getAllSessions(ownerId).find((s) => s.id === newSessionId);
+    const idMap = new Map<string, string>();
+
+    return this.inTransaction(() => {
+      insertSession.run(
+        newSessionId,
+        `${source.title}（分叉）`,
+        source.mode,
+        source.leadBotId,
+        JSON.stringify(source.memberBotIds),
+        now,
+        now,
+        ownerId,
+        source.parallelRoundtable ? 1 : 0
+      );
+
+      for (const row of rows) {
+        let attachmentsJson = row.attachments_json;
+        const attachments = parseOptionalJson<MessageAttachment[]>(row.attachments_json);
+        if (attachments && attachments.length > 0) {
+          const rewrittenAttachments: MessageAttachment[] = [];
+          for (const att of attachments) {
+            let newArtId = idMap.get(att.id);
+            if (!newArtId) {
+              const oldArt = this.getArtifactWithStoragePath(att.id);
+              if (oldArt) {
+                const artSessionOwner = this.getSessionOwner(oldArt.sessionId);
+                // 仅当产物所属会话 owner 与源会话 owner 一致时允许复制，防止跨用户克隆提权
+                if (artSessionOwner && artSessionOwner === ownerId) {
+                  newArtId = `art_${randomUUID()}`;
+                  idMap.set(att.id, newArtId);
+                  insertArtifact.run(
+                    newArtId,
+                    newSessionId,
+                    oldArt.filename,
+                    oldArt.mimeType,
+                    oldArt.sizeBytes,
+                    oldArt.senderBotId ?? null,
+                    oldArt.storagePath,
+                    oldArt.createdAt
+                  );
+                }
+              }
+            }
+            if (newArtId) {
+              rewrittenAttachments.push({
+                ...att,
+                id: newArtId,
+                url: `/api/artifacts/${newArtId}/content`,
+              });
+            } else {
+              rewrittenAttachments.push(att);
+            }
+          }
+          attachmentsJson = JSON.stringify(rewrittenAttachments);
+        }
+
+        insertMessage.run(
+          `msg_${randomUUID()}`,
+          newSessionId,
+          row.role,
+          row.sender_bot_id,
+          row.model_badge,
+          row.content,
+          row.mentions_json,
+          row.tool_calls_json,
+          row.usage_json,
+          attachmentsJson,
+          row.created_at
+        );
+      }
+
+      return this.getAllSessions(ownerId).find((s) => s.id === newSessionId);
+    });
   }
 
   updateSession(
@@ -983,6 +1011,7 @@ export class HubDatabase {
       status?: SessionStatus;
       activeBotId?: string;
       archived?: boolean;
+      pinned?: boolean;
       parallelRoundtable?: boolean;
     }
   ): SessionRecord | undefined {
@@ -996,11 +1025,12 @@ export class HubDatabase {
     const status = patch.status ?? session.status;
     const activeBotId = patch.activeBotId !== undefined ? patch.activeBotId : session.activeBotId;
     const archived = patch.archived ?? session.archived ?? false;
+    const pinned = patch.pinned ?? session.pinned ?? false;
     const parallelRoundtable = patch.parallelRoundtable ?? session.parallelRoundtable ?? false;
 
     const stmt = this.db.prepare(`
       UPDATE sessions
-      SET title = ?, mode = ?, lead_bot_id = ?, member_bot_ids_json = ?, status = ?, active_bot_id = ?, archived = ?, parallel_roundtable = ?, updated_at = ?
+      SET title = ?, mode = ?, lead_bot_id = ?, member_bot_ids_json = ?, status = ?, active_bot_id = ?, archived = ?, pinned = ?, parallel_roundtable = ?, updated_at = ?
       WHERE id = ?
     `);
     stmt.run(
@@ -1011,6 +1041,7 @@ export class HubDatabase {
       status,
       activeBotId ?? null,
       archived ? 1 : 0,
+      pinned ? 1 : 0,
       parallelRoundtable ? 1 : 0,
       now,
       id
@@ -1025,6 +1056,7 @@ export class HubDatabase {
       status,
       activeBotId: activeBotId ?? undefined,
       archived,
+      pinned,
       parallelRoundtable,
       createdAt: session.createdAt,
       updatedAt: now,
@@ -1116,6 +1148,65 @@ export class HubDatabase {
     return rows.map(mapMessageRow);
   }
 
+  /**
+   * 分页读取会话消息：
+   * - beforeRowid：取 rowid 严格小于该值的最新 limit 条（升序返回），hasMore 表示是否还有更早消息
+   * - aroundRowid：窗口 [rowid-15, rowid+45]（升序返回），hasMore 表示窗口外是否还有更早消息；优先于 beforeRowid
+   * - limit 默认 60，上限 200
+   */
+  getMessagesPage(
+    sessionId: string,
+    opts: { beforeRowid?: number; aroundRowid?: number; limit?: number }
+  ): { messages: MessageRecord[]; hasMore: boolean } {
+    const limit = opts.limit && Number.isFinite(opts.limit) && opts.limit > 0 ? Math.min(Math.floor(opts.limit), 200) : 60;
+    const columns = 'rowid, id, session_id, role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at';
+
+    if (opts.aroundRowid !== undefined) {
+      const around = Math.floor(opts.aroundRowid);
+      const lower = around - 15;
+      const upper = around + 45;
+      const rows = this.db.prepare(`
+        SELECT ${columns}
+        FROM messages
+        WHERE session_id = ? AND rowid >= ? AND rowid <= ?
+        ORDER BY rowid ASC
+      `).all(sessionId, lower, upper) as (MessageRow & { rowid: number | bigint })[];
+      const hasMore = this.db
+        .prepare('SELECT 1 FROM messages WHERE session_id = ? AND rowid < ? LIMIT 1')
+        .get(sessionId, lower) !== undefined;
+      return { messages: rows.map(row => mapMessageRow(row)), hasMore };
+    }
+
+    if (opts.beforeRowid !== undefined) {
+      const before = Math.floor(opts.beforeRowid);
+      const rows = this.db.prepare(`
+        SELECT ${columns}
+        FROM messages
+        WHERE session_id = ? AND rowid < ?
+        ORDER BY rowid DESC
+        LIMIT ?
+      `).all(sessionId, before, limit) as (MessageRow & { rowid: number | bigint })[];
+      const oldestRowid = rows.length > 0 ? Number(rows[rows.length - 1].rowid) : undefined;
+      const hasMore = oldestRowid !== undefined
+        ? this.db.prepare('SELECT 1 FROM messages WHERE session_id = ? AND rowid < ? LIMIT 1').get(sessionId, oldestRowid) !== undefined
+        : false;
+      return { messages: rows.reverse().map(row => mapMessageRow(row)), hasMore };
+    }
+
+    const rows = this.db.prepare(`
+      SELECT ${columns}
+      FROM messages
+      WHERE session_id = ?
+      ORDER BY rowid DESC
+      LIMIT ?
+    `).all(sessionId, limit) as (MessageRow & { rowid: number | bigint })[];
+    const oldestRowid = rows.length > 0 ? Number(rows[rows.length - 1].rowid) : undefined;
+    const hasMore = oldestRowid !== undefined
+      ? this.db.prepare('SELECT 1 FROM messages WHERE session_id = ? AND rowid < ? LIMIT 1').get(sessionId, oldestRowid) !== undefined
+      : false;
+    return { messages: rows.reverse().map(row => mapMessageRow(row)), hasMore };
+  }
+
   getIncrementalMessages(sessionId: string, afterRowid: number): IncrementalMessageResult[] {
     const stmt = this.db.prepare(`
       SELECT rowid, id, session_id, role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
@@ -1147,9 +1238,11 @@ export class HubDatabase {
 
   /** 删除会话内 rowid 大于给定值（不含等于）的消息，返回删除条数 */
   deleteMessagesAfter(sessionId: string, rowid: number): number {
-    const stmt = this.db.prepare('DELETE FROM messages WHERE session_id = ? AND rowid > ?');
-    const result = stmt.run(sessionId, rowid);
-    return Number(result.changes);
+    return this.inTransaction(() => {
+      const stmt = this.db.prepare('DELETE FROM messages WHERE session_id = ? AND rowid > ?');
+      const result = stmt.run(sessionId, rowid);
+      return Number(result.changes);
+    });
   }
 
   getMessageRowid(messageId: string): number | undefined {
@@ -1209,6 +1302,21 @@ export class HubDatabase {
   }
 
   // --- Artifacts ---
+  listArtifactStoragePaths(target: { sessionId: string } | { ownerId: string }): string[] {
+    const rows = 'sessionId' in target
+      ? this.db.prepare('SELECT DISTINCT storage_path FROM artifacts WHERE session_id = ?')
+        .all(target.sessionId)
+      : this.db.prepare(`
+          SELECT DISTINCT a.storage_path FROM artifacts a
+          JOIN sessions s ON s.id = a.session_id WHERE s.owner_id = ?
+        `).all(target.ownerId);
+    return (rows as { storage_path: string }[]).map((row) => row.storage_path);
+  }
+
+  isArtifactStoragePathReferenced(storagePath: string): boolean {
+    return this.db.prepare('SELECT 1 FROM artifacts WHERE storage_path = ? LIMIT 1').get(storagePath) !== undefined;
+  }
+
   createArtifact(input: {
     id: string;
     sessionId: string;

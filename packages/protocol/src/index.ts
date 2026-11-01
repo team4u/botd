@@ -169,6 +169,8 @@ export interface SessionRecord {
   lastMessageAt?: string;
   /** 是否已归档（如「开启新话题」后旧会话自动归档，在历史话题区展示） */
   archived?: boolean;
+  /** 是否置顶（会话列表顶部固定展示的纯 UI 标记） */
+  pinned?: boolean;
   /** 圆桌模式下是否开启独立并发盲评（所有成员并发独立作答，最后由 Lead 总结） */
   parallelRoundtable?: boolean;
 }
@@ -200,6 +202,12 @@ export type SessionSseEvent =
   | { type: 'interaction_resolved'; sessionId: string; askId: string; answer: string }
   /** 新文件产物上传通知 */
   | { type: 'artifact_created'; sessionId: string; artifact: ArtifactRecord };
+
+/** 节点上下线通知（按节点 owner 用户广播） */
+export type NodeStatusSseEvent = { type: 'node_status'; nodeId: string; status: 'online' | 'offline' };
+
+/** 全局 SSE（GET /api/events）事件：会话事件 + 节点状态事件 */
+export type GlobalSseEvent = SessionSseEvent | NodeStatusSseEvent;
 
 export interface HubRpcFunctions {
   registerNode(info: {
@@ -296,8 +304,11 @@ export interface NodeRpcFunctions {
     usage?: TurnUsage;
   }>;
   cancelTurn(sessionId: string, botId: string): Promise<void>;
-  /** 归档该 BOT 在指定会话的本地 Pi 会话文件（.jsonl 改名备份），下一回合将从 Hub 历史全量重建上下文 */
+  /** 删除该 BOT 在指定会话的本地 Pi 会话文件（.jsonl），下一回合将从 Hub 历史全量重建上下文 */
   resetSession(sessionId: string, botId: string): Promise<void>;
+  listBgJobs?(filter?: { sessionId?: string; botId?: string }): Promise<BgJobRecord[]>;
+  getBgJobLogs?(jobId: string, tailLines?: number): Promise<{ job: BgJobRecord; logs: string }>;
+  killBgJob?(jobId: string): Promise<BgJobRecord>;
 }
 
 // HTTP shapes shared by the browser and Hub. Responses contain these values directly.
@@ -342,6 +353,38 @@ export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhi
 export const THINKING_LEVELS: readonly ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 export const isThinkingLevel = (value: unknown): value is ThinkingLevel =>
   typeof value === 'string' && (THINKING_LEVELS as readonly string[]).includes(value);
+
+export const SAFE_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
+export const isSafeId = (value: unknown): value is string =>
+  typeof value === 'string' && SAFE_ID_REGEX.test(value);
+
+export const isValidCommandName = (name: unknown): name is string =>
+  typeof name === 'string' && name.length > 0 && !name.includes('/') && !/\s/.test(name);
+
+export const BOT_ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const RESERVED_BOT_ENV_KEYS = new Set(['PATH', 'PWD', 'HOME', 'USER', 'SHELL']);
+export const isValidBotEnvKey = (key: unknown): key is string =>
+  typeof key === 'string' &&
+  BOT_ENV_KEY_REGEX.test(key) &&
+  !RESERVED_BOT_ENV_KEYS.has(key.toUpperCase()) &&
+  !key.toUpperCase().startsWith('BOTD_');
+
+export const isBotConfig = (value: unknown): value is BotConfig => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    isSafeId(v.id) &&
+    isSafeId(v.nodeId) &&
+    typeof v.name === 'string' && v.name.trim().length > 0 &&
+    typeof v.description === 'string' &&
+    typeof v.modelProvider === 'string' && v.modelProvider.trim().length > 0 &&
+    typeof v.modelId === 'string' && v.modelId.trim().length > 0 &&
+    (v.thinkingLevel === undefined || isThinkingLevel(v.thinkingLevel)) &&
+    Array.isArray(v.enabledSkills) && v.enabledSkills.every(isSafeId) &&
+    (v.enabledExtensions === undefined || (Array.isArray(v.enabledExtensions) && v.enabledExtensions.every(isSafeId))) &&
+    (v.webCommandNames === undefined || (Array.isArray(v.webCommandNames) && v.webCommandNames.every(isValidCommandName)))
+  );
+};
 
 export interface ProviderLoginPrompt {
   id: string;

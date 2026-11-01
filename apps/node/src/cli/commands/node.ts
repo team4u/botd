@@ -9,7 +9,7 @@ import { CliError } from '../errors.js';
 import { writeNodeIdentity, getDaemonSocketPath } from '../../storage.js';
 import { startDaemon, type DaemonHandle } from '../../daemon.js';
 import { installResourceToNode } from '../../installer.js';
-import { getTsxLoaderUrl, resolveCliEntry } from '../../runtime.js';
+import { buildDaemonSpawnSpec } from '../../daemon-launch.js';
 
 // ---------------------------------------------------------------------------
 // Daemon control-plane helpers (Unix socket / Windows named pipe)
@@ -197,15 +197,11 @@ async function stopDaemon(dataDir: string): Promise<'stopped' | 'not-running'> {
 }
 
 /** Spawn `botd start` again as a detached background process logging to a file. */
-function spawnDetachedDaemon(logFile: string): number {
+function spawnDetachedDaemon(logFile: string, dataDir: string): number {
   const out = fs.openSync(logFile, 'a');
   try {
-    // Under a tsx checkout process.argv loses the loader flag, so rebuild the
-    // invocation from the resolved CLI entry instead of replaying argv verbatim.
-    const { cliPath, isTypeScript } = resolveCliEntry();
-    const args = process.argv.slice(2).filter((arg) => arg !== '--detach' && arg !== '-d');
-    const loaderArgs = isTypeScript && getTsxLoaderUrl() ? ['--import', getTsxLoaderUrl()!] : [];
-    const child = spawn(process.execPath, [...loaderArgs, cliPath, ...args], {
+    const { execPath, args } = buildDaemonSpawnSpec({ dataDir });
+    const child = spawn(execPath, args, {
       detached: true,
       stdio: ['ignore', out, out],
       windowsHide: true,
@@ -238,7 +234,7 @@ export function registerNodeCommands(program: Command): void {
         typeof options.logFile === 'string' && options.logFile
           ? path.resolve(options.logFile)
           : path.join(dataDir, 'daemon.log');
-      const pid = spawnDetachedDaemon(logFile);
+      const pid = spawnDetachedDaemon(logFile, dataDir);
       if (json) {
         console.log(JSON.stringify({ ok: true, pid, logFile }, null, 2));
       } else {
@@ -423,7 +419,7 @@ export function registerNodeCommands(program: Command): void {
         const botId = (options.bot as string | undefined) || process.env.BOTD_BOT_ID;
         const message = options.message as string | undefined;
         const replyToBotId = options.replyTo as string | undefined;
-        const noTurn = options.noTurn === true;
+        const noTurn = options.turn === false;
 
         let delaySeconds: number | undefined;
         if (typeof options.delay === 'string' && options.delay) {
@@ -506,7 +502,7 @@ export function registerNodeCommands(program: Command): void {
                 botId,
                 command: commandText,
                 ...(replyToBotId ? { replyToBotId } : {}),
-                noTurnOnComplete: options.noTurn === true,
+                noTurnOnComplete: options.turn === false,
               },
               15_000,
             );

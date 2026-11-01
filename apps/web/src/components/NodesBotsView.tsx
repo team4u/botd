@@ -226,7 +226,6 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
 
   const startRestartPolling = (
     nodeId: string,
-    nodeName: string,
     prevPid: number | undefined,
     prevStartedAt: string | undefined
   ) => {
@@ -318,7 +317,6 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
 
     const node = nodeToRestart;
     const nodeId = node.id;
-    const nodeName = node.name;
     const prevPid = node.pid;
     const prevStartedAt = node.startedAt;
 
@@ -341,7 +339,7 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
       return;
     }
 
-    startRestartPolling(nodeId, nodeName, prevPid, prevStartedAt);
+    startRestartPolling(nodeId, prevPid, prevStartedAt);
   };
 
   const handleSyncSkill = async (nodeId: string, skillId: string) => {
@@ -409,7 +407,6 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
     return new Date(iso).toLocaleDateString([], { month: '2-digit', day: '2-digit' });
   };
 
-  const totalBots = nodes.reduce((sum, n) => sum + (n.bots?.length || 0), 0);
   const onlineCount = nodes.filter((n) => n.status === 'online').length;
 
   return (

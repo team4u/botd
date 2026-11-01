@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Copy, Check, Terminal, Loader2, Clock, AlertCircle } from 'lucide-react';
 import { api } from '../api';
+import { copyText } from '../utils/clipboard';
 import type { PairingResult } from '@botd/protocol';
 
 interface PairingModalProps {
@@ -44,9 +45,11 @@ export const PairingModal: React.FC<PairingModalProps> = ({ isOpen, onClose }) =
 
   const handleCopy = () => {
     if (!joinCommand) return;
-    navigator.clipboard.writeText(joinCommand);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    void copyText(joinCommand).then((ok) => {
+      if (!ok) return;
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
   };
 
   return (

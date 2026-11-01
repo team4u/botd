@@ -14,7 +14,6 @@ import {
   CircleAlert,
   Loader2,
   FileText,
-  Download,
 } from 'lucide-react';
 import type {
   MessageRecord,
@@ -24,6 +23,8 @@ import type {
   MessageAttachment,
 } from '@botd/protocol';
 import { Markdown } from './Markdown';
+import { copyText } from '../utils/clipboard';
+import { AttachmentPreviewModal } from './AttachmentPreviewModal';
 
 /**
  * 辅助函数：提取模型简称，截取斜杠后的核心模型标识
@@ -72,50 +73,60 @@ export function formatFileSize(bytes?: number): string {
 
 /**
  * 辅助组件：消息附件渲染（用户与助手消息通用）
- * 图片渲染为可点击缩略图（新标签打开原文件），其余渲染为可下载文件芯片
+ * 图片渲染为可点击缩略图（点击打开大图预览弹窗），其余渲染为文件芯片
+ * 芯片上提供预览（可预览类型）与下载两个入口
  */
 const MessageAttachments: React.FC<{ attachments: MessageAttachment[] }> = ({ attachments }) => {
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+
   if (!attachments || attachments.length === 0) return null;
 
   return (
-    <div className="flex flex-wrap gap-1.5 mt-1.5">
-      {attachments.map((att) =>
-        att.mimeType?.startsWith('image/') && att.url ? (
-          <a
-            key={att.id}
-            href={att.url}
-            target="_blank"
-            rel="noreferrer"
-            title={`查看图片：${att.filename}`}
-            className="block max-w-full rounded-lg border border-zinc-200 dark:border-zinc-800 overflow-hidden hover:opacity-90 transition-opacity shadow-xs"
-          >
-            <img
-              src={att.url}
-              alt={att.filename}
-              loading="lazy"
-              className="max-h-56 rounded-lg block max-w-full"
-            />
-          </a>
-        ) : (
-          <a
-            key={att.id}
-            href={att.url}
-            download={att.filename}
-            title={`下载 ${att.filename}`}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800 rounded-lg text-[11px] text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700 transition-colors"
-          >
-            <FileText className="w-3.5 h-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
-            <span className="truncate max-w-[160px]">{att.filename}</span>
-            {typeof att.sizeBytes === 'number' && att.sizeBytes > 0 && (
-              <span className="font-mono text-zinc-400 dark:text-zinc-500 shrink-0">
-                {formatFileSize(att.sizeBytes)}
-              </span>
-            )}
-            <Download className="w-3 h-3 shrink-0 text-zinc-400 dark:text-zinc-500" />
-          </a>
-        )
+    <>
+      <div className="flex flex-wrap gap-1.5 mt-1.5">
+        {attachments.map((att, i) =>
+          att.mimeType?.startsWith('image/') && att.url ? (
+            <button
+              key={att.id}
+              type="button"
+              onClick={() => setPreviewIndex(i)}
+              title={`预览图片：${att.filename}`}
+              className="block max-w-full rounded-lg border border-zinc-200 dark:border-zinc-800 overflow-hidden hover:opacity-90 transition-opacity shadow-xs cursor-zoom-in"
+            >
+              <img
+                src={att.url}
+                alt={att.filename}
+                loading="lazy"
+                className="max-h-56 rounded-lg block max-w-full"
+              />
+            </button>
+          ) : (
+            <button
+              key={att.id}
+              type="button"
+              onClick={() => setPreviewIndex(i)}
+              title={`预览 ${att.filename}`}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800 rounded-lg text-[11px] text-zinc-600 dark:text-zinc-300 hover:border-zinc-300 dark:hover:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+            >
+              <FileText className="w-3.5 h-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+              <span className="truncate max-w-[160px]">{att.filename}</span>
+              {typeof att.sizeBytes === 'number' && att.sizeBytes > 0 && (
+                <span className="font-mono text-zinc-400 dark:text-zinc-500 shrink-0">
+                  {formatFileSize(att.sizeBytes)}
+                </span>
+              )}
+            </button>
+          )
+        )}
+      </div>
+      {previewIndex !== null && (
+        <AttachmentPreviewModal
+          attachments={attachments}
+          initialIndex={previewIndex}
+          onClose={() => setPreviewIndex(null)}
+        />
       )}
-    </div>
+    </>
   );
 };
 
@@ -206,12 +217,10 @@ const MessageCopyButton: React.FC<{ content: string; className?: string }> = ({ 
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(content);
+    const ok = await copyText(content);
+    if (ok) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // 剪贴板不可用（如非安全上下文）时静默降级
     }
   };
 
@@ -304,10 +313,32 @@ export const MessageItem: React.FC<MessageItemProps> = ({
     .filter(Boolean)
     .join(' · ');
 
+  // Token 用量徽标：置于底部操作行（复制/分叉旁），悬停展示完整用量明细
+  const usageBadge =
+    message.usage && message.usage.totalTokens > 0 ? (
+      <span
+        className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0"
+        title={[
+          `输入 ${message.usage.inputTokens.toLocaleString()} tokens`,
+          `输出 ${message.usage.outputTokens.toLocaleString()} tokens`,
+          message.usage.contextWindow
+            ? `上下文窗口 ${message.usage.contextWindow.toLocaleString()}`
+            : '',
+        ]
+          .filter(Boolean)
+          .join('\n')}
+      >
+        {message.usage.totalTokens.toLocaleString()} tokens
+        {message.usage.contextWindow && message.usage.contextWindow > 0 && (
+          <> · {Math.round((message.usage.totalTokens / message.usage.contextWindow) * 100)}% ctx</>
+        )}
+      </span>
+    ) : null;
+
   // 系统消息：紧凑单行胶囊居中
   if (isSystem) {
     return (
-      <div className="flex justify-center my-2 px-3 sm:px-6">
+      <div data-message-id={message.id} className="flex justify-center my-2 px-3 sm:px-6">
         <div className="flex items-center gap-1.5 max-w-xl py-1 px-3 bg-zinc-100/90 dark:bg-zinc-800/90 border border-zinc-200/60 dark:border-zinc-800/60 rounded-full text-[11px] text-zinc-500 dark:text-zinc-400">
           <Info className="w-3 h-3 text-zinc-400 dark:text-zinc-500 shrink-0" />
           <div className="prose-botd prose-botd--xs text-zinc-600 dark:text-zinc-400">
@@ -325,7 +356,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   // 唤醒回调事件：去中英混排，轻量卡片
   if (isCallback) {
     return (
-      <div className="flex justify-center my-2.5 px-3 sm:px-6">
+      <div data-message-id={message.id} className="flex justify-center my-2.5 px-3 sm:px-6">
         <div className="max-w-2xl w-full p-2.5 sm:p-3 bg-amber-50/70 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/60 rounded-xl text-xs text-amber-900 dark:text-amber-200 shadow-xs">
           <div className="flex items-center justify-between font-medium text-amber-800 dark:text-amber-300 mb-1">
             <div className="flex items-center gap-1.5">
@@ -347,9 +378,9 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   // 用户消息：去头像、去顶部“我+时间”，直接右对齐紧凑现代气泡
   if (isUser) {
     return (
-      <div className="flex flex-col items-end my-2 px-3 sm:px-6 group">
+      <div data-message-id={message.id} className="flex flex-col items-end my-2 px-3 sm:px-6 group">
         <div
-          className={`bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 px-4 py-2.5 rounded-2xl rounded-br-sm max-w-[85%] sm:max-w-[75%] shadow-xs user-bubble ${
+          className={`bg-zinc-100 dark:bg-zinc-800 border border-zinc-200/80 dark:border-zinc-700/60 px-4 py-2.5 rounded-2xl rounded-br-sm max-w-[85%] sm:max-w-[75%] shadow-xs user-bubble ${
             isEditing ? 'ring-2 ring-blue-500/60' : ''
           }`}
         >
@@ -385,7 +416,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
 
   // AI 助手消息（Assistant）：去独立头像列、去外框气泡，Markdown 正文平铺画布，释放移动端阅读空间
   return (
-    <div className="group px-3 sm:px-6 py-2.5 sm:py-3 hover:bg-zinc-50/50 dark:hover:bg-zinc-900/50 transition-colors">
+    <div data-message-id={message.id} className="group px-3 sm:px-6 py-2.5 sm:py-3 hover:bg-zinc-50/50 dark:hover:bg-zinc-900/50 transition-colors">
       {/* 极简单行浅灰元数据 */}
       <div className="flex items-center gap-1.5 min-w-0 text-xs flex-wrap sm:flex-nowrap">
         <div className="w-5 h-5 rounded-md bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 border border-blue-200/60 dark:border-blue-900/60 flex items-center justify-center shrink-0">
@@ -405,29 +436,6 @@ export const MessageItem: React.FC<MessageItemProps> = ({
             </span>
           </>
         )}
-        {/* Token 用量与上下文水位：极简 mono 徽标，悬停展示完整用量明细 */}
-        {message.usage && message.usage.totalTokens > 0 && (
-          <span
-            className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0"
-            title={[
-              `输入 ${message.usage.inputTokens.toLocaleString()} tokens`,
-              `输出 ${message.usage.outputTokens.toLocaleString()} tokens`,
-              message.usage.contextWindow
-                ? `上下文窗口 ${message.usage.contextWindow.toLocaleString()}`
-                : '',
-            ]
-              .filter(Boolean)
-              .join('\n')}
-          >
-            <span className="text-zinc-300 dark:text-zinc-600">·</span>{' '}
-            {message.usage.totalTokens.toLocaleString()} tokens
-            {message.usage.contextWindow && message.usage.contextWindow > 0 && (
-              <>
-                {' '}· {Math.round((message.usage.totalTokens / message.usage.contextWindow) * 100)}% ctx
-              </>
-            )}
-          </span>
-        )}
       </div>
 
       {/* 可折叠工具执行轨迹：收起时仅单行摘要，展开后逐条展示名称/摘要/状态/耗时 */}
@@ -441,7 +449,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
       {/* 附件（图片缩略图 / 文件下载芯片），助手产出的文件产物同样可预览与下载 */}
       <MessageAttachments attachments={message.attachments || []} />
 
-      {/* 操作按钮与用户消息保持一致：时间 + 复制 + 分叉置于正文下方，移动端常显、桌面端悬停显示 */}
+      {/* 操作按钮与用户消息保持一致：时间 + 复制 + 分叉 + Token 用量置于正文下方，移动端常显、桌面端悬停显示 */}
       <div className="mt-1 flex items-center gap-0.5 select-none opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
         <span className="text-[11px] text-zinc-400 dark:text-zinc-500 px-1" title={fullTime}>
           {formattedTime}
@@ -450,6 +458,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
         {onForkMessage && (
           <MessageForkButton messageId={message.id} onForkMessage={onForkMessage} />
         )}
+        {usageBadge}
       </div>
     </div>
   );

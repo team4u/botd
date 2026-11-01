@@ -12,7 +12,7 @@ import { HubDatabase } from '../apps/hub/src/db.js';
 import { serializeRpcMessage } from '../packages/protocol/src/index.js';
 import { getBuiltinModelCatalog } from '../packages/models/src/index.js';
 import type { ProviderLoginState } from '../packages/protocol/src/index.js';
-import type { BotConfig, HubRpcFunctions, MessageRecord, NodeRpcFunctions, SessionRecord } from '../packages/protocol/src/index.js';
+import type { BotConfig, HubRpcFunctions, MessageRecord, NodeRpcFunctions, SessionRecord, TriggerRecord } from '../packages/protocol/src/index.js';
 
 const PASSWORD = 'integration-password';
 const waitFor = async <T>(read: () => Promise<T> | T, predicate: (value: T) => boolean, timeout = 8_000): Promise<T> => {
@@ -1087,4 +1087,237 @@ test('archiving is allowed while a session is running, but config patches are st
   const settledItem = settled.find(s => s.id === session.id)!;
   assert.equal(settledItem.status, 'idle');
   assert.equal(settledItem.archived, true, 'archived flag must survive the background turn');
+});
+
+test('message pagination: no params stays full, before/around windows and hasMore', async t => {
+  const f = await fixture(t);
+  await f.addNode(['solo']);
+  const session = await f.session(['solo'], 'direct');
+
+  // 直插 db 造出 20 条消息，拿到 rowid 升序的 id 列表
+  for (let i = 1; i <= 20; i++) {
+    f.hub.db.createMessage({
+      id: `msg_paging_${String(i).padStart(2, '0')}`,
+      sessionId: session.id,
+      role: 'user',
+      content: `paging message ${i}`,
+    });
+  }
+  const full = await f.messages(session.id);
+  assert.equal(full.length, 20, 'no query params keeps the full history');
+  assert.deepEqual(full.map(m => m.content).at(-1), 'paging message 20', 'full list stays ascending');
+
+  // before：取 rowid 严格小于锚点的最新 5 条，升序，hasMore=true
+  const beforePage = await f.json<{ messages: MessageRecord[]; hasMore: boolean }>(
+    `/api/sessions/${session.id}/messages?before=${full[19].id}&limit=5`
+  );
+  assert.deepEqual(beforePage.messages.map(m => m.content), [
+    'paging message 15', 'paging message 16', 'paging message 17', 'paging message 18', 'paging message 19',
+  ]);
+  assert.equal(beforePage.hasMore, true);
+
+  // 再往前翻一页：到头部后 hasMore=false
+  const firstPage = await f.json<{ messages: MessageRecord[]; hasMore: boolean }>(
+    `/api/sessions/${session.id}/messages?before=${beforePage.messages[0].id}&limit=5`
+  );
+  assert.deepEqual(firstPage.messages.map(m => m.content), [
+    'paging message 10', 'paging message 11', 'paging message 12', 'paging message 13', 'paging message 14',
+  ]);
+  const topPage = await f.json<{ messages: MessageRecord[]; hasMore: boolean }>(
+    `/api/sessions/${session.id}/messages?before=${full[0].id}&limit=5`
+  );
+  assert.deepEqual(topPage.messages, []);
+  assert.equal(topPage.hasMore, false);
+
+  // around：窗口 [rowid-15, rowid+45]，锚点是第 18 条 → 从第 3 条到末尾
+  const aroundPage = await f.json<{ messages: MessageRecord[]; hasMore: boolean }>(
+    `/api/sessions/${session.id}/messages?around=${full[17].id}`
+  );
+  assert.equal(aroundPage.messages.length, 18);
+  assert.equal(aroundPage.messages[0].content, 'paging message 3');
+  assert.equal(aroundPage.messages.at(-1)!.content, 'paging message 20');
+  assert.equal(aroundPage.hasMore, true, 'messages below rowid-15 leave hasMore=true');
+
+  // 锚点靠前时窗口覆盖全部消息，hasMore=false
+  const earlyPage = await f.json<{ messages: MessageRecord[]; hasMore: boolean }>(
+    `/api/sessions/${session.id}/messages?around=${full[0].id}`
+  );
+  assert.equal(earlyPage.messages.length, 20);
+  assert.equal(earlyPage.hasMore, false);
+
+  // 锚点不存在 / 属于其他会话 / limit 非法
+  assert.equal((await f.request(`/api/sessions/${session.id}/messages?before=msg_missing`)).status, 404);
+  const other = await f.session(['solo'], 'direct');
+  const foreign = await f.json<MessageRecord>(`/api/sessions/${other.id}/messages`, 'POST', { content: 'other' });
+  assert.equal((await f.request(`/api/sessions/${session.id}/messages?around=${foreign.id}`)).status, 404);
+  assert.equal((await f.request(`/api/sessions/${session.id}/messages?limit=abc`)).status, 400);
+
+  // 仅 limit：返回最新 N 条
+  const tailPage = await f.json<{ messages: MessageRecord[]; hasMore: boolean }>(
+    `/api/sessions/${session.id}/messages?limit=3`
+  );
+  assert.deepEqual(tailPage.messages.map(m => m.content), ['paging message 18', 'paging message 19', 'paging message 20']);
+  assert.equal(tailPage.hasMore, true);
+});
+
+test('PATCH /api/sessions/:id pinned toggles, validates and migrates legacy databases', async t => {
+  const f = await fixture(t);
+  await f.addNode(['solo']);
+  const session = await f.session(['solo'], 'direct');
+
+  // 1. 置顶与取消：响应与会话列表均反映 pinned
+  const pinned = await f.json<SessionRecord>(`/api/sessions/${session.id}`, 'PATCH', { pinned: true });
+  assert.equal(pinned.pinned, true);
+  assert.equal((await f.json<SessionRecord[]>('/api/sessions')).find(s => s.id === session.id)!.pinned, true);
+  const unpinned = await f.json<SessionRecord>(`/api/sessions/${session.id}`, 'PATCH', { pinned: false });
+  assert.equal(unpinned.pinned, false);
+  assert.equal((await f.json<SessionRecord[]>('/api/sessions')).find(s => s.id === session.id)!.pinned, false);
+
+  // patch 其他字段不重置 pinned
+  await f.json(`/api/sessions/${session.id}`, 'PATCH', { pinned: true });
+  const retitled = await f.json<SessionRecord>(`/api/sessions/${session.id}`, 'PATCH', { title: 'Renamed' });
+  assert.equal(retitled.pinned, true, 'patching other fields must not reset the pinned flag');
+
+  // 2. 非布尔值拒绝
+  const bad = await f.request(`/api/sessions/${session.id}`, 'PATCH', { pinned: 'yes' });
+  assert.equal(bad.status, 400);
+  assert.deepEqual(await bad.json(), { error: 'Invalid pinned flag' });
+
+  // 3. running 中允许置顶（纯 UI 标记，与 archived 同类）
+  const finish = deferred<{ replyText: string; modelBadge: string }>();
+  await f.addNode(['busy'], async () => finish.promise);
+  const busySession = await f.session(['busy'], 'direct');
+  await f.json(`/api/sessions/${busySession.id}/messages`, 'POST', { content: 'long work' });
+  await waitFor(() => f.json<SessionRecord[]>('/api/sessions'), list => list.find(s => s.id === busySession.id)?.status === 'running');
+  const pinnedWhileRunning = await f.json<SessionRecord>(`/api/sessions/${busySession.id}`, 'PATCH', { pinned: true });
+  assert.equal(pinnedWhileRunning.pinned, true);
+  assert.equal(pinnedWhileRunning.status, 'running', 'pinning must not disturb the running status');
+  finish.resolve({ replyText: 'done', modelBadge: 'test/model' });
+  await f.idle(busySession.id);
+
+  // 4. 旧库自动补 pinned 列
+  const dir = await mkdtemp(path.join(tmpdir(), 'botd-hub-pinned-migration-'));
+  const dbPath = path.join(dir, 'legacy.sqlite');
+  const setupDb = new DatabaseSync(dbPath);
+  setupDb.exec(`
+    CREATE TABLE sessions (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'direct',
+      lead_bot_id TEXT NOT NULL,
+      member_bot_ids_json TEXT NOT NULL DEFAULT '[]',
+      cursor_map_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'idle',
+      active_bot_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at)
+    VALUES ('legacy-sess', 'Legacy Session', 'direct', 'legacy-bot', '[]', '{}', 'idle', NULL, '2025-01-01T00:00:00.000Z', '2025-01-01T00:00:00.000Z');
+  `);
+  setupDb.close();
+  const hubDb = new HubDatabase({ dbPath });
+  t.after(async () => {
+    hubDb.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  const columns = hubDb.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+  assert(columns.some(c => c.name === 'pinned'), 'sessions table must gain the pinned column');
+  assert.equal(hubDb.getSession('legacy-sess')!.pinned, false, 'migrated rows default to pinned = false');
+  assert.equal(hubDb.updateSession('legacy-sess', { pinned: true })!.pinned, true);
+});
+
+test('POST /api/triggers/:triggerId/run fires a wakeup turn into the session', async t => {
+  const f = await fixture(t);
+  const calls: Parameters<NodeRpcFunctions['runTurn']>[0][] = [];
+  await f.addNode(['solo'], async input => {
+    calls.push(input);
+    return { replyText: 'triggered reply', modelBadge: 'test/model' };
+  });
+  const session = await f.session(['solo'], 'direct');
+
+  const trigger = await f.json<TriggerRecord>(`/api/sessions/${session.id}/triggers`, 'POST', {
+    name: 'manual check',
+    botId: 'solo',
+    kind: 'webhook',
+    prompt: 'run the daily check',
+  });
+  assert.equal(trigger.kind, 'webhook');
+
+  // 手动执行：立即 200，异步唤醒回合进入会话
+  const run = await f.json<{ ok: boolean }>(`/api/triggers/${trigger.id}/run`, 'POST');
+  assert.deepEqual(run, { ok: true });
+  const history = await waitFor(() => f.messages(session.id), list => list.some(m => m.role === 'assistant' && m.content === 'triggered reply'));
+  await f.idle(session.id);
+  assert(history.some(m => m.role === 'callback' && m.content.includes('[手动触发: manual check]') && m.content.includes('run the daily check')));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].botId, 'solo');
+
+  // 归属与存在性校验
+  assert.equal((await f.request('/api/triggers/trg_missing/run', 'POST')).status, 404);
+});
+
+test('GET /api/events streams hello and forwards this user session events', async t => {
+  const f = await fixture(t);
+  await f.addNode(['solo'], async input => ({ replyText: `Reply from ${input.botId}`, modelBadge: 'test/model' }));
+  const session = await f.session(['solo'], 'direct');
+
+  // 未登录拒绝
+  assert.equal((await f.request('/api/events', 'GET', undefined, false)).status, 401);
+
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const stream = await fetch(`${f.base}/api/events`, { headers: { cookie: f.cookie() }, signal: controller.signal });
+  assert.equal(stream.status, 200);
+  assert.match(stream.headers.get('content-type')!, /text\/event-stream/);
+  const reader = stream.body!.getReader();
+  const chunks: string[] = [];
+  const consuming = (async () => {
+    try { while (true) { const next = await reader.read(); if (next.done) return; chunks.push(new TextDecoder().decode(next.value)); } } catch { /* client closed */ }
+  })();
+
+  // 先收到 hello，再收到该用户会话的 message_created
+  await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: 'ping the global stream' });
+  await f.idle(session.id);
+  await waitFor(() => chunks.join(''), text => text.includes('hello') && text.includes('message_created') && text.includes('ping the global stream'));
+  controller.abort();
+  await consuming;
+});
+
+test('global SSE delivers node online/offline events only to the node owner', async t => {
+  const f = await fixture(t);
+
+  // bob 与他的专属订阅流
+  const createUser = await f.request('/api/users', 'POST', { username: 'carol', password: 'carol-pass' });
+  assert.equal(createUser.status, 200);
+  const carolCookie = await f.loginAs('carol', 'carol-pass');
+  const carol = f.forUser(carolCookie);
+  const carolNode = await f.addNode(['carol-bot'], undefined, undefined, ['demo-ext'], undefined, carolCookie);
+
+  const adminController = new AbortController();
+  const carolController = new AbortController();
+  t.after(() => { adminController.abort(); carolController.abort(); });
+  const adminStream = await fetch(`${f.base}/api/events`, { headers: { cookie: f.cookie() }, signal: adminController.signal });
+  const carolStream = await fetch(`${f.base}/api/events`, { headers: { cookie: carolCookie }, signal: carolController.signal });
+  const readAll = async (stream: Response, bucket: string[]) => {
+    const reader = stream.body!.getReader();
+    try { while (true) { const next = await reader.read(); if (next.done) return; bucket.push(new TextDecoder().decode(next.value)); } } catch { /* client closed */ }
+  };
+  const adminChunks: string[] = [];
+  const carolChunks: string[] = [];
+  const adminRead = readAll(adminStream, adminChunks);
+  const carolRead = readAll(carolStream, carolChunks);
+
+  // bob 的节点断开下线：carol 收到 offline，admin 什么也收不到
+  carolNode.socket.close();
+  await once(carolNode.socket, 'close');
+  await waitFor(() => carolChunks.join(''), text => text.includes('node_status') && text.includes('offline'));
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const adminText = adminChunks.join('');
+  assert.equal(adminText.includes('node_status'), false, 'admin must not receive carol node events');
+  assert(carolChunks.join('').includes(`"nodeId":"${carolNode.identity.nodeId}"`));
+
+  adminController.abort();
+  carolController.abort();
+  await Promise.allSettled([adminRead, carolRead]);
 });

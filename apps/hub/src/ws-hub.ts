@@ -1,21 +1,19 @@
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { randomUUID } from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createBirpc, type BirpcReturn } from 'birpc';
 import {
-  type ArtifactRecord,
   HubRpcFunctions,
-  type MessageAttachment,
   NodeRpcFunctions,
+  isBotConfig,
+  isSafeId,
   serializeRpcMessage,
 } from '@botd/protocol';
-import { type HubDatabase, isValidCommandName } from './db.js';
+import type { HubDatabase } from './db.js';
 import type { AuthManager } from './auth.js';
 import type { SseHub } from './sse.js';
+import { ArtifactService } from './artifact-service.js';
 
 export interface GroupRouterDelegate {
   handleWakeup(
@@ -37,22 +35,6 @@ export interface GroupRouterDelegate {
   }): Promise<{ answer: string }>;
 }
 
-export interface ArtifactHandlerDelegate {
-  uploadArtifact(input: {
-    sessionId: string;
-    botId?: string;
-    filename: string;
-    mimeType?: string;
-    contentBase64: string;
-    message?: string;
-  }): Promise<ArtifactRecord>;
-  downloadArtifact(artifactId: string): Promise<{
-    artifact: ArtifactRecord;
-    contentBase64: string;
-  }>;
-  listSessionArtifacts(sessionId: string): Promise<ArtifactRecord[]>;
-}
-
 export interface NodeConnection {
   nodeId: string;
   ws: WebSocket;
@@ -66,21 +48,23 @@ export class NodeConnectionManager {
   private auth: AuthManager;
   private sseHub: SseHub;
   private router?: GroupRouterDelegate;
-  private artifactHandler?: ArtifactHandlerDelegate;
+  private artifactService: ArtifactService;
 
-  constructor(db: HubDatabase, auth: AuthManager, sseHub: SseHub) {
+  constructor(
+    db: HubDatabase,
+    auth: AuthManager,
+    sseHub: SseHub,
+    artifactService?: ArtifactService
+  ) {
     this.db = db;
     this.auth = auth;
     this.sseHub = sseHub;
+    this.artifactService = artifactService ?? new ArtifactService(db, sseHub);
     this.wss = new WebSocketServer({ noServer: true });
   }
 
   setRouter(router: GroupRouterDelegate): void {
     this.router = router;
-  }
-
-  setArtifactHandler(handler: ArtifactHandlerDelegate): void {
-    this.artifactHandler = handler;
   }
 
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -138,10 +122,8 @@ export class NodeConnectionManager {
           throw new Error(`Forbidden: authenticated as node ${nodeId}, cannot register as ${info.nodeId}`);
         }
 
-        const ID_REGEX = /^[a-zA-Z0-9_-]+$/;
-
         const extensions = info.extensions ?? [];
-        if (!Array.isArray(extensions) || !extensions.every(ext => typeof ext === 'string' && ID_REGEX.test(ext))) {
+        if (!Array.isArray(extensions) || !extensions.every(ext => isSafeId(ext))) {
           throw new Error('Invalid extensions configuration in node registration');
         }
 
@@ -150,7 +132,7 @@ export class NodeConnectionManager {
 
         // 1. Validate all skills first before any writes
         for (const skill of info.skills || []) {
-          if (typeof skill !== 'string' || !ID_REGEX.test(skill)) {
+          if (!isSafeId(skill)) {
             throw new Error(`Invalid skill id format: "${skill}"`);
           }
         }
@@ -158,22 +140,11 @@ export class NodeConnectionManager {
         // 2. Validate all bots and ensure no stealing of bot IDs from another node
         const botIds = new Set<string>();
         for (const bot of info.bots || []) {
-          if (!bot || typeof bot.id !== 'string' || !ID_REGEX.test(bot.id)
-            || typeof bot.name !== 'string' || !bot.name.trim()
-            || typeof bot.modelProvider !== 'string' || !bot.modelProvider.trim()
-            || typeof bot.modelId !== 'string' || !bot.modelId.trim()
-            || typeof bot.description !== 'string' || !Array.isArray(bot.enabledSkills)
-            || !bot.enabledSkills.every(skill => typeof skill === 'string' && ID_REGEX.test(skill))
-            || !(bot.enabledExtensions === undefined || (Array.isArray(bot.enabledExtensions) && bot.enabledExtensions.every(ext => typeof ext === 'string' && ID_REGEX.test(ext))))
-            || !(bot.webCommandNames === undefined || (Array.isArray(bot.webCommandNames) && bot.webCommandNames.every(isValidCommandName)))
-            || (bot.thinkingLevel !== undefined && !['low', 'medium', 'high'].includes(bot.thinkingLevel))) {
+          if (!isBotConfig(bot)) {
             throw new Error('Invalid BOT configuration in node registration');
           }
           if (botIds.has(bot.id)) throw new Error(`Duplicate BOT id: ${bot.id}`);
           botIds.add(bot.id);
-          if (!ID_REGEX.test(bot.id)) {
-            throw new Error(`Invalid bot id format: "${bot.id}"`);
-          }
           if (bot.nodeId !== nodeId) {
             throw new Error(`Forbidden: bot ${bot.id} nodeId does not match ${nodeId}`);
           }
@@ -202,6 +173,12 @@ export class NodeConnectionManager {
         }
 
         this.router?.onNodeOnline?.(nodeId);
+
+        // 广播节点上线通知（仅节点 owner 的全局 SSE 订阅者）
+        const onlineOwner = this.db.getNodeOwner(nodeId);
+        if (onlineOwner) {
+          this.sseHub.broadcastToUser(onlineOwner, { type: 'node_status', nodeId, status: 'online' });
+        }
 
         return;
       },
@@ -333,142 +310,15 @@ export class NodeConnectionManager {
       },
 
       uploadArtifact: async (input) => {
-        if (this.artifactHandler) {
-          return await this.artifactHandler.uploadArtifact(input);
-        }
-
-        const session = this.db.getSession(input.sessionId);
-        if (!session) {
-          throw new Error(`Session ${input.sessionId} not found`);
-        }
-
-        if (input.botId) {
-          const bot = this.db.getBot(input.botId);
-          if (!bot || bot.nodeId !== nodeId) {
-            throw new Error(`Forbidden: bot ${input.botId} does not belong to node ${nodeId}`);
-          }
-          const isMember = session.memberBotIds.includes(input.botId) || session.leadBotId === input.botId;
-          if (!isMember) {
-            throw new Error(`Forbidden: bot ${input.botId} is not a member of session ${input.sessionId}`);
-          }
-        }
-
-        const artifactId = `art_${randomUUID()}`;
-        const buffer = Buffer.from(input.contentBase64, 'base64');
-        const sizeBytes = buffer.length;
-        const mimeType = input.mimeType || 'application/octet-stream';
-        const storageDir = path.join(process.env.BOTD_HUB_DATA_DIR || path.join(os.homedir(), '.botd'), 'artifacts');
-        fs.mkdirSync(storageDir, { recursive: true });
-        const storagePath = path.join(storageDir, artifactId);
-        fs.writeFileSync(storagePath, buffer);
-
-        let artifact: ArtifactRecord;
-        if (typeof (this.db as any).createArtifact === 'function') {
-          artifact = (this.db as any).createArtifact({
-            id: artifactId,
-            sessionId: input.sessionId,
-            filename: input.filename,
-            mimeType,
-            sizeBytes,
-            senderBotId: input.botId,
-            storagePath,
-          });
-        } else {
-          artifact = {
-            id: artifactId,
-            sessionId: input.sessionId,
-            filename: input.filename,
-            mimeType,
-            sizeBytes,
-            senderBotId: input.botId,
-            createdAt: new Date().toISOString(),
-          };
-        }
-
-        this.sseHub.broadcast(input.sessionId, {
-          type: 'artifact_created',
-          sessionId: input.sessionId,
-          artifact,
-        });
-
-        if (input.message) {
-          const attachment: MessageAttachment = {
-            id: artifact.id,
-            filename: artifact.filename,
-            mimeType: artifact.mimeType,
-            sizeBytes: artifact.sizeBytes,
-            url: `/api/artifacts/${artifact.id}`,
-          };
-          const msg = (this.db as any).createMessage({
-            id: `msg_${randomUUID()}`,
-            sessionId: input.sessionId,
-            role: 'assistant',
-            senderBotId: input.botId,
-            content: input.message,
-            attachments: [attachment],
-          });
-          this.sseHub.broadcast(input.sessionId, {
-            type: 'message_created',
-            message: msg.message,
-          });
-        }
-
-        return artifact;
+        return this.artifactService.uploadArtifact({ type: 'node', nodeId }, input);
       },
 
       downloadArtifact: async (artifactId: string) => {
-        if (this.artifactHandler) {
-          return await this.artifactHandler.downloadArtifact(artifactId);
-        }
-
-        let artifact: ArtifactRecord | undefined;
-        let storagePath: string | undefined;
-
-        if (typeof (this.db as any).getArtifactWithStoragePath === 'function') {
-          const res = (this.db as any).getArtifactWithStoragePath(artifactId);
-          if (res) {
-            artifact = res;
-            storagePath = res.storagePath;
-          }
-        }
-
-        if (!storagePath) {
-          storagePath = path.join(process.env.BOTD_HUB_DATA_DIR || path.join(os.homedir(), '.botd'), 'artifacts', artifactId);
-        }
-
-        if (!fs.existsSync(storagePath)) {
-          throw new Error(`Artifact ${artifactId} not found`);
-        }
-
-        if (!artifact) {
-          const stat = fs.statSync(storagePath);
-          artifact = {
-            id: artifactId,
-            sessionId: '',
-            filename: artifactId,
-            mimeType: 'application/octet-stream',
-            sizeBytes: stat.size,
-            createdAt: stat.birthtime.toISOString(),
-          };
-        }
-
-        const contentBase64 = fs.readFileSync(storagePath).toString('base64');
-        return {
-          artifact,
-          contentBase64,
-        };
+        return this.artifactService.downloadArtifact({ type: 'node', nodeId }, artifactId);
       },
 
       listSessionArtifacts: async (sessionId: string) => {
-        if (this.artifactHandler) {
-          return await this.artifactHandler.listSessionArtifacts(sessionId);
-        }
-
-        if (typeof (this.db as any).listSessionArtifacts === 'function') {
-          return (this.db as any).listSessionArtifacts(sessionId);
-        }
-
-        return [];
+        return this.artifactService.listSessionArtifacts({ type: 'node', nodeId }, sessionId);
       },
     };
 
@@ -499,6 +349,10 @@ export class NodeConnectionManager {
       if (this.connections.get(nodeId)?.ws === ws) {
         this.connections.delete(nodeId);
         this.db.updateNodeStatus(nodeId, 'offline');
+        const offlineOwner = this.db.getNodeOwner(nodeId);
+        if (offlineOwner) {
+          this.sseHub.broadcastToUser(offlineOwner, { type: 'node_status', nodeId, status: 'offline' });
+        }
         rpc.$close();
       }
     };

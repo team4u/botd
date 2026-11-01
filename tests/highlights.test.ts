@@ -217,7 +217,7 @@ test('artifacts upload/download/list over HTTP and node RPC, attachments forward
   assert.equal(producer.content, 'Produced notes.md');
   assert.deepEqual(producer.attachments, [{
     id: rpcArtifact.id, filename: 'notes.md', mimeType: 'text/markdown',
-    sizeBytes: rpcBody.length, url: `/api/artifacts/${rpcArtifact.id}`,
+    sizeBytes: rpcBody.length, url: `/api/artifacts/${rpcArtifact.id}/content`,
   }]);
 
   // 4. List via HTTP and RPC both see the two artifacts

@@ -1,6 +1,132 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, Users, Sparkles, Loader2, Save } from 'lucide-react';
 import type { SessionRecord, SessionMode, BotConfig, CreateSessionInput } from '@botd/protocol';
+import { CheckList } from './CheckList.js';
+
+export interface GroupSettingsDraft {
+  title: string;
+  mode: SessionMode;
+  leadBotId: string;
+  memberBotIds: string[];
+  parallelRoundtable: boolean;
+  error: string | null;
+}
+
+export function initGroupSettingsDraft(
+  session: SessionRecord,
+  bots: BotConfig[] = []
+): GroupSettingsDraft {
+  const leadBotId = session.leadBotId || (bots[0]?.id ?? '');
+  return {
+    title: session.title,
+    mode: session.mode,
+    leadBotId,
+    memberBotIds: session.memberBotIds || (leadBotId ? [leadBotId] : []),
+    parallelRoundtable: session.parallelRoundtable ?? false,
+    error: null,
+  };
+}
+
+export interface ResolveGroupSettingsStepParams {
+  isOpen: boolean;
+  lastInitializedSessionId: string | null;
+  currentSession: SessionRecord;
+  currentDraft: GroupSettingsDraft;
+  bots: BotConfig[];
+}
+
+export interface ResolveGroupSettingsStepResult {
+  shouldUpdate: boolean;
+  nextInitializedSessionId: string | null;
+  nextDraft: GroupSettingsDraft;
+}
+
+export function resolveGroupSettingsStep({
+  isOpen,
+  lastInitializedSessionId,
+  currentSession,
+  currentDraft,
+  bots,
+}: ResolveGroupSettingsStepParams): ResolveGroupSettingsStepResult {
+  // 关弹窗：重置初始化记录，不更新草稿
+  if (!isOpen) {
+    return {
+      shouldUpdate: false,
+      nextInitializedSessionId: null,
+      nextDraft: currentDraft,
+    };
+  }
+
+  // 弹窗打开 或 切换了被编辑的 session.id：以编辑对象 ID 为初始化边界
+  if (lastInitializedSessionId !== currentSession.id) {
+    return {
+      shouldUpdate: true,
+      nextInitializedSessionId: currentSession.id,
+      nextDraft: initGroupSettingsDraft(currentSession, bots),
+    };
+  }
+
+  // 弹窗对同一 session 保持打开（SSE产生新 session 对象、后台轮询 bots 等）
+  // 首次异步到达 bots 且当前草稿尚未有 leadBotId 时可补填
+  let updatedDraft = currentDraft;
+  let draftModified = false;
+
+  if (!updatedDraft.leadBotId && bots.length > 0) {
+    const fallbackLead = bots[0].id;
+    updatedDraft = {
+      ...updatedDraft,
+      leadBotId: fallbackLead,
+      memberBotIds: updatedDraft.memberBotIds.includes(fallbackLead)
+        ? updatedDraft.memberBotIds
+        : [...updatedDraft.memberBotIds, fallbackLead],
+    };
+    draftModified = true;
+  }
+
+  // 数据中被删 BOT 合理处理，但不能因为后台 refresh 重设整份草稿
+  if (bots.length > 0) {
+    const validIds = new Set(bots.map((b) => b.id));
+    let leadBotId = updatedDraft.leadBotId;
+    let leadChanged = false;
+    if (leadBotId && !validIds.has(leadBotId)) {
+      leadBotId = bots[0]?.id || '';
+      leadChanged = true;
+    }
+
+    const filteredMembers = updatedDraft.memberBotIds.filter((id) => validIds.has(id));
+    const finalMembers = leadChanged && leadBotId && !filteredMembers.includes(leadBotId)
+      ? [...filteredMembers, leadBotId]
+      : filteredMembers;
+
+    const membersChanged =
+      finalMembers.length !== updatedDraft.memberBotIds.length ||
+      finalMembers.some((id, idx) => id !== updatedDraft.memberBotIds[idx]);
+
+    if (leadChanged || membersChanged) {
+      updatedDraft = {
+        ...updatedDraft,
+        leadBotId,
+        memberBotIds: finalMembers,
+      };
+      draftModified = true;
+    }
+  }
+
+  if (draftModified) {
+    return {
+      shouldUpdate: true,
+      nextInitializedSessionId: currentSession.id,
+      nextDraft: updatedDraft,
+    };
+  }
+
+  // 相同数据刷新/SSE新对象/在线状态变化：完全不覆盖草稿
+  return {
+    shouldUpdate: false,
+    nextInitializedSessionId: currentSession.id,
+    nextDraft: currentDraft,
+  };
+}
 
 interface GroupSettingsModalProps {
   isOpen: boolean;
@@ -27,31 +153,46 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const lastInitializedSessionIdRef = useRef<string | null>(null);
+  const draftRef = useRef<GroupSettingsDraft>({
+    title,
+    mode,
+    leadBotId,
+    memberBotIds,
+    parallelRoundtable,
+    error,
+  });
+  draftRef.current = {
+    title,
+    mode,
+    leadBotId,
+    memberBotIds,
+    parallelRoundtable,
+    error,
+  };
+
   useEffect(() => {
-    if (isOpen) {
-      setTitle(session.title);
-      setMode(session.mode);
-      setLeadBotId(session.leadBotId);
-      setMemberBotIds(session.memberBotIds || []);
-      setParallelRoundtable(session.parallelRoundtable ?? false);
-      setError(null);
+    const step = resolveGroupSettingsStep({
+      isOpen,
+      lastInitializedSessionId: lastInitializedSessionIdRef.current,
+      currentSession: session,
+      currentDraft: draftRef.current,
+      bots,
+    });
+
+    lastInitializedSessionIdRef.current = step.nextInitializedSessionId;
+
+    if (step.shouldUpdate) {
+      setTitle(step.nextDraft.title);
+      setMode(step.nextDraft.mode);
+      setLeadBotId(step.nextDraft.leadBotId);
+      setMemberBotIds(step.nextDraft.memberBotIds);
+      setParallelRoundtable(step.nextDraft.parallelRoundtable);
+      setError(step.nextDraft.error);
     }
-  }, [isOpen, session]);
+  }, [isOpen, session.id, session, bots]);
 
   if (!isOpen) return null;
-
-  const toggleMember = (botId: string) => {
-    setMemberBotIds((prev) => {
-      if (prev.includes(botId)) {
-        if (botId === leadBotId) {
-          return prev; // 不能反选当前主持人/总结人
-        }
-        return prev.filter((id) => id !== botId);
-      } else {
-        return [...prev, botId];
-      }
-    });
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -234,56 +375,41 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
             </p>
           </div>
 
-          <div>
-            <span className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5">
-              群成员配置（已选 {memberBotIds.length} 个）
-            </span>
-            <div className="space-y-1.5 max-h-52 overflow-y-auto border border-zinc-200 dark:border-zinc-800 rounded-xl p-2 bg-zinc-50/50 dark:bg-zinc-900/50">
-              {bots.map((bot) => {
-                const isChecked = memberBotIds.includes(bot.id);
-                const isLead = bot.id === leadBotId;
-                const node = nodeMap.get(bot.nodeId);
-
-                return (
-                  <div
-                    key={bot.id}
-                    onClick={() => toggleMember(bot.id)}
-                    className={`p-2 rounded-xl border flex items-center justify-between cursor-pointer transition-all ${
-                      isChecked
-                        ? 'bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-300 dark:border-indigo-800 text-indigo-950 dark:text-indigo-200'
-                        : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700 text-zinc-700 dark:text-zinc-300'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={() => {}}
-                        aria-label={`选择成员 ${bot.name}`}
-                        className="rounded border-zinc-300 dark:border-zinc-600 dark:bg-zinc-800 text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5 shrink-0"
-                      />
-                      <div className="min-w-0">
-                        <span className="font-semibold text-xs mr-1 truncate text-zinc-900 dark:text-zinc-100">{bot.name}</span>
-                        <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500">@{bot.id}</span>
-                        {isLead && (
-                          <span className="ml-1.5 px-1.5 py-0.2 bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 text-[11px] font-semibold rounded shrink-0">
-                            {mode === 'lead' ? '主持人' : '总结人'}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0 ml-2">
-                      {node && <span>{node.name}</span>}
-                      <span className="font-mono bg-zinc-100 dark:bg-zinc-800 px-1 py-0.2 rounded text-zinc-500 dark:text-zinc-400">
-                        {bot.modelId}
-                      </span>
+          <CheckList
+            label="群成员配置"
+            countUnit="个"
+            emptyText="暂无可选成员"
+            options={bots.map((bot) => ({ id: bot.id, data: bot }))}
+            selected={memberBotIds}
+            onChange={setMemberBotIds}
+            lockedIds={leadBotId ? [leadBotId] : []}
+            getAriaLabel={(bot: BotConfig) => `选择成员 ${bot.name}`}
+            renderItem={(bot: BotConfig) => {
+              const node = nodeMap.get(bot.nodeId);
+              const isLead = bot.id === leadBotId;
+              return (
+                <div className="flex items-center justify-between min-w-0 flex-1">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="min-w-0">
+                      <span className="font-semibold text-xs mr-1 truncate text-zinc-900 dark:text-zinc-100">{bot.name}</span>
+                      <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500">@{bot.id}</span>
+                      {isLead && (
+                        <span className="ml-1.5 px-1.5 py-0.2 bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 text-[11px] font-semibold rounded shrink-0">
+                          {mode === 'lead' ? '主持人' : '总结人'}
+                        </span>
+                      )}
                     </div>
                   </div>
-                );
-              })}
-            </div>
-          </div>
+                  <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0 ml-2">
+                    {node && <span>{node.name}</span>}
+                    <span className="font-mono bg-zinc-100 dark:bg-zinc-800 px-1 py-0.2 rounded text-zinc-500 dark:text-zinc-400">
+                      {bot.modelId}
+                    </span>
+                  </div>
+                </div>
+              );
+            }}
+          />
 
           <div className="pt-3 flex items-center justify-end gap-2 border-t border-zinc-100 dark:border-zinc-800/60 pb-[max(1rem,env(safe-area-inset-bottom,0px))]">
             <button

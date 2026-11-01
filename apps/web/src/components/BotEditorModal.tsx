@@ -15,9 +15,12 @@ import {
   Trash2,
   Eye,
   EyeOff,
+  Search,
 } from 'lucide-react';
 import { api } from '../api';
 import { SearchableSelect } from './SearchableSelect';
+import { CheckList } from './CheckList';
+import { ConfirmDialog } from './ConfirmDialog';
 import type {
   BotConfig,
   NodeWithBots,
@@ -77,6 +80,8 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
   const [enabledExtensions, setEnabledExtensions] = useState<string[]>([]);
   const [systemMd, setSystemMd] = useState(DEFAULT_SYSTEM_MD);
   const [memoryMd, setMemoryMd] = useState('');
+  // 技能搜索：实时过滤，已勾选技能始终可见
+  const [skillSearch, setSkillSearch] = useState('');
 
   // Env (secrets) editor state
   interface EnvPair {
@@ -86,6 +91,9 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
   }
   const [envPairs, setEnvPairs] = useState<EnvPair[]>([]);
   const [envLoaded, setEnvLoaded] = useState(false);
+  // env 单键删除确认
+  const [envDeleteIndex, setEnvDeleteIndex] = useState<number | null>(null);
+  const [deletingEnvKey, setDeletingEnvKey] = useState(false);
 
   // Catalog state
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
@@ -101,6 +109,16 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
   // Available skills on the owning node
   const availableSkills = node ? node.skills : [];
   const availableExtensions = node ? (node.extensions || []) : [];
+
+  // 技能搜索过滤：匹配项 + 已勾选项始终保留（防搜索时丢失勾选状态不可见）
+  const enabledSkillSet = useMemo(() => new Set(enabledSkills), [enabledSkills]);
+  const filteredSkills = useMemo(() => {
+    const q = skillSearch.trim().toLowerCase();
+    if (!q) return availableSkills;
+    return availableSkills.filter(
+      (skill) => skill.toLowerCase().includes(q) || enabledSkillSet.has(skill)
+    );
+  }, [availableSkills, skillSearch, enabledSkillSet]);
 
   // Fetch catalog when selected node changes
   useEffect(() => {
@@ -219,6 +237,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       setEnvLoaded(false);
       setLoadingFiles(false);
     }
+    setSkillSearch('');
 
     return () => {
       current = false;
@@ -283,20 +302,6 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Toggle skills checkbox
-  const toggleSkill = (skill: string) => {
-    setEnabledSkills((prev) =>
-      prev.includes(skill) ? prev.filter((s) => s !== skill) : [...prev, skill]
-    );
-  };
-
-  // Toggle extensions checkbox
-  const toggleExtension = (ext: string) => {
-    setEnabledExtensions((prev) =>
-      prev.includes(ext) ? prev.filter((e) => e !== ext) : [...prev, ext]
-    );
-  };
-
   // Env (secrets) helpers
   const addEnvPair = () => {
     setEnvPairs((prev) => [...prev, { key: '', value: '', visible: false }]);
@@ -304,6 +309,37 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
 
   const removeEnvPair = (index: number) => {
     setEnvPairs((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // 单键删除：先确认；已落盘的 bot（isEditing 且在线）调 API 删除并回写返回 env，否则纯本地移除
+  const confirmRemoveEnvPair = async () => {
+    if (envDeleteIndex === null) return;
+    const pair = envPairs[envDeleteIndex];
+    if (!pair) {
+      setEnvDeleteIndex(null);
+      return;
+    }
+    const cleanKey = pair.key.trim();
+    const canCallApi = isEditing && Boolean(bot?.id) && node?.status === 'online' && cleanKey !== '';
+
+    if (canCallApi) {
+      setDeletingEnvKey(true);
+      try {
+        const res = await api.deleteBotEnvKey(bot!.id, cleanKey);
+        setEnvPairs(
+          Object.entries(res.env || {}).map(([key, value]) => ({ key, value, visible: false }))
+        );
+        setEnvLoaded(true);
+        setEnvDeleteIndex(null);
+      } catch (err: any) {
+        setError(err?.message || '删除环境变量失败');
+      } finally {
+        setDeletingEnvKey(false);
+      }
+    } else {
+      removeEnvPair(envDeleteIndex);
+      setEnvDeleteIndex(null);
+    }
   };
 
   const updateEnvPair = (
@@ -431,6 +467,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
   };
 
   return (
+    <>
     <div
       className="fixed inset-0 z-50 bg-black/50 dark:bg-black/70 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4 overflow-hidden animate-in fade-in"
       role="dialog"
@@ -760,40 +797,43 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                     </div>
                   </div>
 
-                  {/* Enabled Skills */}
+                  {/* Enabled Skills (searchable) */}
                   <div>
-                    <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
-                      启用技能（已选 {enabledSkills.length} 项）
-                    </label>
-                    {availableSkills.length === 0 ? (
-                      <p className="text-xs text-zinc-400 dark:text-zinc-500 bg-zinc-50 dark:bg-zinc-900 p-3 rounded-xl border border-zinc-200 dark:border-zinc-800">
-                        当前节点暂无可用技能，可在节点卡片中添加。
-                      </p>
-                    ) : (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 border border-zinc-200 dark:border-zinc-800 rounded-xl p-2.5 bg-zinc-50/50 dark:bg-zinc-900/50 max-h-36 overflow-y-auto">
-                        {availableSkills.map((skill) => {
-                          const isChecked = enabledSkills.includes(skill);
-                          return (
-                            <label
-                              key={skill}
-                              className={`flex items-center gap-2 p-1.5 rounded-lg border text-[11px] cursor-pointer transition-colors ${
-                                isChecked
-                                  ? 'bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-300 dark:border-indigo-800 text-indigo-950 dark:text-indigo-200'
-                                  : 'bg-white dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800'
-                              }`}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={isChecked}
-                                onChange={() => toggleSkill(skill)}
-                                className="rounded text-indigo-600 dark:text-indigo-400 border-zinc-300 dark:border-zinc-700 focus:ring-indigo-500 dark:bg-zinc-900"
-                              />
-                              <span className="font-mono truncate">{skill}</span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    )}
+                    <div className="relative mb-1.5">
+                      <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 dark:text-zinc-500 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={skillSearch}
+                        onChange={(e) => setSkillSearch(e.target.value)}
+                        placeholder="搜索技能…"
+                        aria-label="搜索技能"
+                        className="w-full h-8 pl-8 pr-7 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
+                      />
+                      {skillSearch && (
+                        <button
+                          type="button"
+                          onClick={() => setSkillSearch('')}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 text-xs p-0.5"
+                          aria-label="清空搜索"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                    <CheckList
+                      label={skillSearch.trim() ? `启用技能（已勾选始终显示）` : '启用技能'}
+                      variant="grid"
+                      countUnit="项"
+                      emptyText={
+                        skillSearch.trim()
+                          ? '未找到匹配的技能（已勾选的技能会始终显示）'
+                          : '当前节点暂无可用技能，可在节点卡片中添加。'
+                      }
+                      options={filteredSkills.map((skill) => ({ id: skill, data: skill }))}
+                      selected={enabledSkills}
+                      onChange={setEnabledSkills}
+                      renderItem={(skill) => <span className="font-mono truncate">{skill}</span>}
+                    />
                   </div>
 
                   {/* Env (Secrets) editor */}
@@ -856,7 +896,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                             </div>
                             <button
                               type="button"
-                              onClick={() => removeEnvPair(index)}
+                              onClick={() => setEnvDeleteIndex(index)}
                               className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 rounded-lg transition-colors cursor-pointer shrink-0"
                               aria-label={`删除变量 ${index + 1}`}
                               title="删除变量"
@@ -870,43 +910,17 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                   </div>
 
                   {/* Enabled Extensions */}
-                  <div>
-                    <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
-                      启用扩展（已选 {enabledExtensions.length} 项）
-                    </label>
-                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mb-2 leading-relaxed">
-                      启用后，扩展注册的命令会自动出现在聊天的 / 菜单中。需要终端界面的命令暂不支持在网页执行。
-                    </p>
-                    {availableExtensions.length === 0 ? (
-                      <p className="text-xs text-zinc-400 dark:text-zinc-500 bg-zinc-50 dark:bg-zinc-900 p-3 rounded-xl border border-zinc-200 dark:border-zinc-800">
-                        当前节点暂无可用扩展，可在节点卡片中安装添加。
-                      </p>
-                    ) : (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 border border-zinc-200 dark:border-zinc-800 rounded-xl p-2.5 bg-zinc-50/50 dark:bg-zinc-900/50 max-h-36 overflow-y-auto">
-                        {availableExtensions.map((ext) => {
-                          const isChecked = enabledExtensions.includes(ext);
-                          return (
-                            <label
-                              key={ext}
-                              className={`flex items-center gap-2 p-1.5 rounded-lg border text-[11px] cursor-pointer transition-colors ${
-                                isChecked
-                                  ? 'bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-300 dark:border-indigo-800 text-indigo-950 dark:text-indigo-200'
-                                  : 'bg-white dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800'
-                              }`}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={isChecked}
-                                onChange={() => toggleExtension(ext)}
-                                className="rounded text-indigo-600 dark:text-indigo-400 border-zinc-300 dark:border-zinc-700 focus:ring-indigo-500 dark:bg-zinc-900"
-                              />
-                              <span className="font-mono truncate">{ext}</span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
+                  <CheckList
+                    label="启用扩展"
+                    variant="grid"
+                    countUnit="项"
+                    description="启用后，扩展注册的命令会自动出现在聊天的 / 菜单中。需要终端界面的命令暂不支持在网页执行。"
+                    emptyText="当前节点暂无可用扩展，可在节点卡片中安装添加。"
+                    options={availableExtensions.map((ext) => ({ id: ext, data: ext }))}
+                    selected={enabledExtensions}
+                    onChange={setEnabledExtensions}
+                    renderItem={(ext) => <span className="font-mono truncate">{ext}</span>}
+                  />
                 </div>
               )}
 
@@ -992,5 +1006,26 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
         </form>
       </div>
     </div>
+
+    {/* 单键删除环境变量确认 */}
+    <ConfirmDialog
+      isOpen={envDeleteIndex !== null}
+      title="删除环境变量"
+      message={
+        <>
+          删除环境变量{' '}
+          <span className="font-mono font-medium text-zinc-800 dark:text-zinc-200">
+            {envDeleteIndex !== null ? (envPairs[envDeleteIndex]?.key?.trim() || '（未命名）') : ''}
+          </span>
+          ？该 BOT 的此配置将被移除。
+        </>
+      }
+      confirmText="删除"
+      danger
+      busy={deletingEnvKey}
+      onConfirm={confirmRemoveEnvPair}
+      onClose={() => setEnvDeleteIndex(null)}
+    />
+    </>
   );
 };

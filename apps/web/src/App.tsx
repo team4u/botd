@@ -7,10 +7,12 @@ import type {
   NodeRecord,
   CreateSessionInput,
   SessionSseEvent,
+  GlobalSseEvent,
   MessageAttachment,
   PendingAskRecord,
 } from '@botd/protocol';
-import { api, AuthRequiredError, subscribeSessionEvents } from './api';
+import { api, AuthRequiredError, subscribeGlobalEvents } from './api';
+import { emitGlobalEvent } from './events';
 import type { StreamingAssistantState, ToastItem, MainViewTab, UserInfo } from './types';
 import { LoginView } from './components/LoginView';
 import { Sidebar, pickCurrentDirectSession } from './components/Sidebar';
@@ -22,15 +24,25 @@ import { SettingsModal } from './components/SettingsModal';
 import { UsersModal } from './components/UsersModal';
 import { ToastContainer } from './components/Toast';
 import { Loader2, Menu, Bot } from 'lucide-react';
+import {
+  mergeMessagesPage,
+  isSnapshotCurrent,
+  truncateMessagesAtAnchor,
+  updateStreamingMap,
+  clearStreamingMap,
+  mergePendingAsks,
+} from './utils/message-state';
 
 // 全局 hash 路由：视图/当前会话/弹窗统一编码进 URL hash（如 #?v=nodes&s=xxx&m=settings），
 // 页面重载/手机后台回收后原样恢复。不引路由库，hash 即状态单一来源。
 type ModalName = 'create' | 'group' | 'settings' | 'users';
 
+/** 会话内消息高亮定位：搜索跳转等场景通过 msg 参数携带目标消息 ID */
 interface HashRoute {
   view: MainViewTab;
   sessionId: string | null;
   modal: ModalName | null;
+  messageId: string | null;
 }
 
 const parseHash = (): HashRoute => {
@@ -41,6 +53,7 @@ const parseHash = (): HashRoute => {
     view: params.get('v') === 'nodes' ? 'nodes' : 'chat',
     sessionId: params.get('s'),
     modal: m === 'create' || m === 'group' || m === 'settings' || m === 'users' ? m : null,
+    messageId: params.get('msg'),
   };
 };
 
@@ -49,8 +62,36 @@ const buildHash = (route: HashRoute): string => {
   if (route.view !== 'chat') params.set('v', route.view);
   if (route.sessionId) params.set('s', route.sessionId);
   if (route.modal) params.set('m', route.modal);
+  if (route.messageId) params.set('msg', route.messageId);
   const qs = params.toString();
   return qs ? `#?${qs}` : '';
+};
+
+/** 非当前会话新消息提示音：150ms 880Hz→660Hz 短促 beep（Web Audio，失败静默） */
+const playNotificationBeep = () => {
+  try {
+    const AudioCtor: typeof AudioContext | undefined =
+      window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtor) return;
+    const ctx = new AudioCtor();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const now = ctx.currentTime;
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, now);
+    osc.frequency.linearRampToValueAtTime(660, now + 0.15);
+    gain.gain.setValueAtTime(0.06, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.15);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.15);
+    osc.onended = () => {
+      ctx.close().catch(() => {});
+    };
+  } catch {
+    // Web Audio 不可用时静默降级
+  }
 };
 
 export const App: React.FC = () => {
@@ -67,18 +108,25 @@ export const App: React.FC = () => {
 
   // Data state
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
+  // 全局 SSE 分流时同步读取最新列表（避免闭包拿到陈旧数据）
+  const sessionsRef = useRef<SessionRecord[]>([]);
+  sessionsRef.current = sessions;
   const activeSessionIdRef = useRef<string | null>(null);
 
   const [messages, setMessages] = useState<MessageRecord[]>([]);
+  const messagesRef = useRef<MessageRecord[]>([]);
+  messagesRef.current = messages;
+
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [nodes, setNodes] = useState<NodeWithBots[]>([]);
+  // node_status 事件分流时同步读取最新节点列表
+  const nodesRef = useRef<NodeWithBots[]>([]);
+  nodesRef.current = nodes;
   const [loadingNodes, setLoadingNodes] = useState(false);
 
-  // Streaming assistant state for active session
-  const [streamingState, setStreamingState] = useState<StreamingAssistantState | null>(null);
-  // 多 BOT 并发流式状态（并行盲评圆桌）：按 botId 隔离，互不覆盖
+  // 多 BOT 并发流式状态（按 botId 隔离索引，互不覆盖）
   const [streamingStatesMap, setStreamingStatesMap] = useState<Record<string, StreamingAssistantState>>({});
   const [cancelling, setCancelling] = useState(false);
 
@@ -88,8 +136,29 @@ export const App: React.FC = () => {
   // Toast notifications
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
+  // 非当前会话未读计数（sessionId → 条数）：进入会话清零、登出清空
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  // 聚合未读数写入 document.title（登出/无未读时恢复默认标题）
+  useEffect(() => {
+    const total = authenticated
+      ? Object.values(unreadCounts).reduce((sum, n) => sum + n, 0)
+      : 0;
+    document.title = total > 0 ? `(${total > 99 ? '99+' : total}) botd` : 'botd · 多节点个人智能体平台';
+  }, [unreadCounts, authenticated]);
+
+  // 历史消息分页：是否还有更早消息 / 加载中（ref 防重入，state 供 UI 展示）
+  const [hasEarlierMessages, setHasEarlierMessages] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const loadingEarlierRef = useRef(false);
+
   // Epoch counter for session changes to protect against race conditions
   const sessionEpochRef = useRef<number>(0);
+  // Snapshot sequence number for out-of-order & truncation invalidation protection
+  const snapshotSeqRef = useRef<number>(0);
+  // 本地发起的历史截断锚点记录（防止 HTTP 与 SSE 竞态误切新回复）
+  const clientTruncatedAnchorRef = useRef<string | null>(null);
+  // 已响应的人机协同请求记录，防止拉取慢快照时重新复活已解决 ask
+  const resolvedAskIdsRef = useRef<Set<string>>(new Set());
   const isMountedRef = useRef(true);
 
   // 单聊静默创建并发防抖：创建进行中忽略重复点击
@@ -162,6 +231,10 @@ export const App: React.FC = () => {
 
     return { botMap: bMap, allBots: botsList, nodeMap: nMap };
   }, [nodes]);
+
+  // 全局 SSE 回调里读取最新 botMap（订阅不随会话/节点重建，避免闭包拿到陈旧映射）
+  const botMapRef = useRef(botMap);
+  botMapRef.current = botMap;
 
   // Active session object
   const activeSession = useMemo(
@@ -276,8 +349,16 @@ export const App: React.FC = () => {
     };
   }, [authenticated]);
 
-  // Load messages with epoch guards and merge fetched snapshot with live incoming SSE messages
+  // Load messages with epoch/seq guards and merge fetched snapshot with live incoming SSE messages
   const loadMessagesForSession = useCallback(async (sessionId: string, epoch: number) => {
+    if (!isMountedRef.current || activeSessionIdRef.current !== sessionId || sessionEpochRef.current !== epoch) return;
+    const seq = ++snapshotSeqRef.current;
+    const meta = { sessionId, epoch, seq };
+    const isCurrentSnapshot = () => isMountedRef.current && isSnapshotCurrent(
+      activeSessionIdRef.current, sessionEpochRef.current, snapshotSeqRef.current, meta
+    );
+    const knownLiveIdsAtStart = new Set(messagesRef.current.map((m) => m.id));
+
     setLoadingMessages(true);
     setLoadError(null);
 
@@ -285,35 +366,28 @@ export const App: React.FC = () => {
     api
       .getPendingAsks(sessionId)
       .then((asks) => {
-        if (!isMountedRef.current || sessionEpochRef.current !== epoch || activeSessionIdRef.current !== sessionId) {
-          return;
-        }
-        setPendingAsks(Array.isArray(asks) ? asks.filter((a) => a.status === 'pending') : []);
+        if (!isCurrentSnapshot()) return;
+        setPendingAsks((prev) => mergePendingAsks(prev, asks, resolvedAskIdsRef.current));
       })
       .catch(() => {
-        if (isMountedRef.current && sessionEpochRef.current === epoch && activeSessionIdRef.current === sessionId) {
-          setPendingAsks([]);
-        }
+        // 静默失败，保留当前已有待响应 ask，不覆盖为空
       });
 
     try {
-      const fetched = await api.getSessionMessages(sessionId);
+      // 首载取最新一页（60 条），更早历史由 ChatView「加载更早」按游标分页拉取
+      const fetched = await api.getSessionMessagesPage(sessionId, { limit: 60 });
 
-      // Guard: only commit if still on this session and epoch
-      if (!isMountedRef.current || sessionEpochRef.current !== epoch || activeSessionIdRef.current !== sessionId) {
-        return;
-      }
+      if (!isCurrentSnapshot()) return;
 
       setMessages((currentLive) => {
-        // Merge history snapshot with newer live messages arrived via SSE
-        const fetchedIds = new Set(fetched.map((m) => m.id));
-        const newerLive = currentLive.filter((m) => !fetchedIds.has(m.id));
-        return [...fetched, ...newerLive];
+        if (!isCurrentSnapshot()) return currentLive;
+        const next = mergeMessagesPage(currentLive, fetched.messages, knownLiveIdsAtStart, fetched.hasMore);
+        messagesRef.current = next;
+        return next;
       });
+      setHasEarlierMessages(fetched.hasMore);
     } catch (err: any) {
-      if (!isMountedRef.current || sessionEpochRef.current !== epoch || activeSessionIdRef.current !== sessionId) {
-        return;
-      }
+      if (!isCurrentSnapshot()) return;
       if (err instanceof AuthRequiredError || err?.status === 401) {
         setAuthenticated(false);
         authenticatedRef.current = false;
@@ -321,39 +395,139 @@ export const App: React.FC = () => {
         setLoadError(err?.message || '读取历史消息记录失败');
       }
     } finally {
-      if (isMountedRef.current && sessionEpochRef.current === epoch && activeSessionIdRef.current === sessionId) {
-        setLoadingMessages(false);
-      }
+      if (isCurrentSnapshot()) setLoadingMessages(false);
     }
   }, []);
 
-  // Subscribe to SSE with session switch clearing, failed status handling, and per-bot isolation
+  // 加载更早历史：以当前最早一条消息为游标向前取一页并 prepend，
+  // 与 SSE 实时到达的新消息按 id 去重兼容；loadingEarlierRef 防重入
+  const handleLoadEarlier = useCallback(async () => {
+    const sessionId = activeSessionIdRef.current;
+    const oldest = messagesRef.current[0];
+    if (!sessionId || !oldest || loadingEarlierRef.current) return;
+
+    const epoch = sessionEpochRef.current;
+    const seq = snapshotSeqRef.current;
+    loadingEarlierRef.current = true;
+    setLoadingEarlier(true);
+
+    try {
+      const result = await api.getSessionMessagesPage(sessionId, { before: oldest.id, limit: 60 });
+      // Guard：会话已切换或期间发生快照刷新（截断/重连补拉）则丢弃本次结果
+      if (
+        !isMountedRef.current ||
+        sessionEpochRef.current !== epoch ||
+        activeSessionIdRef.current !== sessionId ||
+        snapshotSeqRef.current !== seq
+      ) {
+        return;
+      }
+      setHasEarlierMessages(result.hasMore);
+      setMessages((prev) => {
+        const existingIds = new Set(prev.map((m) => m.id));
+        const older = result.messages.filter((m) => !existingIds.has(m.id));
+        if (older.length === 0) return prev;
+        const next = [...older, ...prev];
+        messagesRef.current = next;
+        return next;
+      });
+    } catch (err: any) {
+      if (err instanceof AuthRequiredError || err?.status === 401) {
+        setAuthenticated(false);
+        authenticatedRef.current = false;
+      } else {
+        addToast('error', err?.message || '加载更早消息失败');
+      }
+    } finally {
+      loadingEarlierRef.current = false;
+      if (isMountedRef.current) {
+        setLoadingEarlier(false);
+      }
+    }
+  }, [addToast]);
+
+  // 统一历史截断/失效动作：立即按 anchorMessageId 截断，使旧快照请求失效，并发起新快照
+  const handleHistoryInvalidation = useCallback((anchorMessageId: string, updatedContent?: string, clientInitiated = false) => {
+    const sessionId = activeSessionIdRef.current;
+    const epoch = sessionEpochRef.current;
+    if (!sessionId) return;
+
+    if (clientInitiated) {
+      // 客户端主动发起的编辑：记录 anchor，防止后续广播/响应竞态误把新回复截断
+      clientTruncatedAnchorRef.current = anchorMessageId;
+      setMessages((prev) => {
+        const next = truncateMessagesAtAnchor(prev, anchorMessageId, updatedContent);
+        messagesRef.current = next;
+        return next;
+      });
+      snapshotSeqRef.current++;
+      return;
+    }
+
+    // 服务端广播 (messages_truncated)：
+    if (clientTruncatedAnchorRef.current === anchorMessageId) {
+      // 若当前客户端已先行动作，消费标记并放行（不重复 slice，避免把正在生成/已到达的新回复切掉）
+      clientTruncatedAnchorRef.current = null;
+      loadMessagesForSession(sessionId, epoch);
+      return;
+    }
+
+    // 其他标签页/服务端发起的截断：立即按 anchorMessageId 截断，使旧请求失效，并拉取最新快照
+    setMessages((prev) => {
+      const next = truncateMessagesAtAnchor(prev, anchorMessageId, updatedContent);
+      messagesRef.current = next;
+      return next;
+    });
+    snapshotSeqRef.current++;
+    loadMessagesForSession(sessionId, epoch);
+  }, [loadMessagesForSession]);
+
+  // 会话切换：立即清空消息/流式/待响应状态防鬼影，bump epoch 使旧快照失效，并加载新会话首屏。
+  // 注意：全局 SSE 订阅不随会话切换重建（见下方 effect），切换本身只做状态清理与历史加载。
   useEffect(() => {
     if (!authenticated || !activeSessionId) {
-      setStreamingState(null);
-      setStreamingStatesMap({});
+      setStreamingStatesMap(clearStreamingMap());
       setPendingAsks([]);
       setMessages([]);
+      setHasEarlierMessages(false);
       return;
     }
 
     const currentEpoch = ++sessionEpochRef.current;
-    const targetSessionId = activeSessionId;
-    activeSessionIdRef.current = targetSessionId;
+    snapshotSeqRef.current++;
+    clientTruncatedAnchorRef.current = null;
+    resolvedAskIdsRef.current.clear();
+    activeSessionIdRef.current = activeSessionId;
 
     // Immediately clear messages and stream on session switch to prevent ghosting
     setMessages([]);
-    setStreamingState(null);
-    setStreamingStatesMap({});
+    setStreamingStatesMap(clearStreamingMap());
     setPendingAsks([]);
+    setHasEarlierMessages(false);
+    // 进入会话即清零该会话未读
+    setUnreadCounts((prev) =>
+      prev[activeSessionId] ? { ...prev, [activeSessionId]: 0 } : prev
+    );
 
-    // 后台完成通知：页面不可见时以浏览器 Web Notification 提醒用户回合结束
+    // Load initial message history
+    loadMessagesForSession(activeSessionId, currentEpoch);
+  }, [authenticated, activeSessionId, loadMessagesForSession]);
+
+  // 全局 SSE 订阅：登录后建立一条连接（不随会话切换重建），登出时关闭。
+  // 事件先 emitGlobalEvent 喂给全局总线（供产物抽屉等组件消费），再分流：
+  // - node_status：patch 本地节点状态，未知节点触发一次节点列表刷新；
+  // - 当前会话事件：走完整处理（流式/工具状态/消息/截断/人机协同/会话状态）；
+  // - 其他会话事件：仅处理 assistant/callback 消息（未读+提醒）与 session_status。
+  useEffect(() => {
+    if (!authenticated) return;
+
+    // 后台完成通知：页面不可见时以浏览器 Web Notification 提醒用户回合结束；点击聚焦并跳回来源会话
     const notifyBackgroundCompletion = (message: MessageRecord) => {
       if (typeof Notification === 'undefined') return;
       if (document.visibilityState !== 'hidden') return;
       if (Notification.permission !== 'granted') return;
       try {
-        const botName = botMap.get(message.senderBotId || '')?.name || message.senderBotId || '智能体';
+        const botName = botMapRef.current.get(message.senderBotId || '')?.name || message.senderBotId || '智能体';
         const preview = (message.content || '').replace(/\s+/g, ' ').trim().slice(0, 80);
         const title =
           message.role === 'callback' ? `${botName} 的后台任务有回调` : `${botName} 已完成回复`;
@@ -361,6 +535,8 @@ export const App: React.FC = () => {
         const notification = new Notification(title, { body, tag: `botd-${message.sessionId}` });
         notification.onclick = () => {
           window.focus();
+          // navigate 为稳定 useCallback，闭包内可安全引用；跳回来源会话并清除高亮
+          navigate({ sessionId: message.sessionId, view: 'chat', messageId: null });
           notification.close();
         };
       } catch {
@@ -368,38 +544,16 @@ export const App: React.FC = () => {
       }
     };
 
-    // Load initial message history
-    loadMessagesForSession(targetSessionId, currentEpoch);
-
-    // 更新单个 BOT 的并发流式状态（按 botId 隔离互不覆盖），同时同步单流兼容状态
+    // 更新单个 BOT 的并发流式状态（按 botId 隔离互不覆盖）
     const updateStreamingStates = (
       botId: string,
       updater: (prev: StreamingAssistantState | undefined) => StreamingAssistantState | null
     ) => {
-      setStreamingStatesMap((prevMap) => {
-        const next = updater(prevMap[botId]);
-        const nextMap = { ...prevMap };
-        if (next) {
-          nextMap[botId] = next;
-        } else {
-          delete nextMap[botId];
-        }
-        // 单流兼容：仅有一个活跃流时同步到 streamingState，否则置空避免单流视图误展示
-        const activeList = Object.values(nextMap);
-        setStreamingState(activeList.length === 1 ? activeList[0] : null);
-        return nextMap;
-      });
+      setStreamingStatesMap((prevMap) => updateStreamingMap(prevMap, botId, updater));
     };
 
-    const handleSseEvent = (event: SessionSseEvent) => {
-      // Guard against stale session or epoch
-      if (sessionEpochRef.current !== currentEpoch || activeSessionIdRef.current !== targetSessionId) {
-        return;
-      }
-      if ('sessionId' in event && event.sessionId !== targetSessionId) {
-        return;
-      }
-
+    // 当前会话事件全量处理（分流层已保证事件属于当前活跃会话）
+    const handleCurrentSessionEvent = (event: SessionSseEvent) => {
       switch (event.type) {
         case 'text_delta': {
           updateStreamingStates(event.botId, (prev) => {
@@ -446,30 +600,30 @@ export const App: React.FC = () => {
         }
 
         case 'message_created': {
-          if (event.message.sessionId === targetSessionId) {
-            setMessages((prev) => {
-              if (prev.some((m) => m.id === event.message.id)) {
-                return prev;
-              }
-              return [...prev, event.message];
-            });
-
-            // If message was created by the streaming assistant, clear streaming state
-            if (event.message.senderBotId) {
-              updateStreamingStates(event.message.senderBotId, () => null);
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === event.message.id)) {
+              return prev;
             }
+            const next = [...prev, event.message];
+            messagesRef.current = next;
+            return next;
+          });
 
-            // 后台完成通知：助手回复或回调到达且页面不可见时发浏览器通知
-            if (event.message.role === 'assistant' || event.message.role === 'callback') {
-              notifyBackgroundCompletion(event.message);
-            }
+          // If message was created by the streaming assistant, clear streaming state
+          if (event.message.senderBotId) {
+            updateStreamingStates(event.message.senderBotId, () => null);
+          }
+
+          // 后台完成通知：助手回复或回调到达且页面不可见时发浏览器通知
+          if (event.message.role === 'assistant' || event.message.role === 'callback') {
+            notifyBackgroundCompletion(event.message);
           }
           break;
         }
 
         case 'messages_truncated': {
-          // 编辑用户消息后：锚点之后历史已截断，重新拉取该会话消息
-          loadMessagesForSession(targetSessionId, currentEpoch);
+          // 编辑用户消息后：按锚点统一截断历史，使旧请求失效并刷新
+          handleHistoryInvalidation(event.anchorMessageId);
           break;
         }
 
@@ -483,7 +637,8 @@ export const App: React.FC = () => {
         }
 
         case 'interaction_resolved': {
-          // 人机协同请求已响应：从待响应列表移除
+          // 人机协同请求已响应：从待响应列表移除并记录，防止后续被慢快照重新复活
+          resolvedAskIdsRef.current.add(event.askId);
           setPendingAsks((prev) => prev.filter((a) => a.id !== event.askId));
           break;
         }
@@ -498,39 +653,100 @@ export const App: React.FC = () => {
           );
 
           if (event.status === 'idle' || event.status === 'failed') {
-            setStreamingState(null);
-            setStreamingStatesMap({});
+            setStreamingStatesMap(clearStreamingMap());
             setCancelling(false);
-          } else if (event.status === 'running' && event.activeBotId) {
-            // 轮到新 BOT 接力：清掉非当前活跃 BOT 的残留单流状态，保留并发流（盲评场景）
-            setStreamingState((prev) => {
-              if (prev && prev.botId !== event.activeBotId) {
-                return null;
-              }
-              return prev;
-            });
           }
           break;
         }
       }
     };
 
-    const unsubscribe = subscribeSessionEvents(targetSessionId, {
-      onEvent: handleSseEvent,
-      onOpen: () => {
-        if (sessionEpochRef.current === currentEpoch && activeSessionIdRef.current === targetSessionId) {
-          loadMessagesForSession(targetSessionId, currentEpoch);
+    const unsubscribe = subscribeGlobalEvents({
+      onEvent: (event: GlobalSseEvent) => {
+        if (!isMountedRef.current || !authenticatedRef.current) return;
+
+        // 1. 每条事件先喂全局总线（供产物抽屉等组件消费）
+        emitGlobalEvent(event);
+
+        // 2. 节点上下线：patch 本地节点状态；未知节点触发一次节点列表刷新
+        if (event.type === 'node_status') {
+          const known = nodesRef.current.some((n) => n.id === event.nodeId);
+          if (known) {
+            const seenAt = new Date().toISOString();
+            setNodes((prev) =>
+              prev.map((n) =>
+                n.id === event.nodeId ? { ...n, status: event.status, lastSeenAt: seenAt } : n
+              )
+            );
+          } else {
+            api
+              .getNodes()
+              .then((fetched) => {
+                if (isMountedRef.current && authenticatedRef.current) setNodes(fetched);
+              })
+              .catch(() => {
+                // 静默失败，交给 10s 轮询兑底
+              });
+          }
+          return;
+        }
+
+        // 3. 会话事件按 sessionId 分流（message_created 的 sessionId 在 message 内）
+        const eventSessionId =
+          'sessionId' in event
+            ? event.sessionId
+            : event.type === 'message_created'
+              ? event.message.sessionId
+              : null;
+        if (!eventSessionId) return;
+
+        if (eventSessionId === activeSessionIdRef.current) {
+          handleCurrentSessionEvent(event);
+          return;
+        }
+
+        // 其他会话：仅 assistant/callback 新消息计未读+提醒；session_status 同步列表状态
+        if (event.type === 'message_created') {
+          const message = event.message;
+          if (message.role !== 'assistant' && message.role !== 'callback') return;
+          // 未读会话不在列表中（理论少见）直接忽略
+          if (!sessionsRef.current.some((s) => s.id === eventSessionId)) return;
+
+          setUnreadCounts((prev) => ({ ...prev, [eventSessionId]: (prev[eventSessionId] || 0) + 1 }));
+
+          if (document.visibilityState === 'visible') {
+            // 页面可见：按用户设置播提示音；不可见时交给 Notification，避免双重打扰
+            if (localStorage.getItem('botd-sound') === '1') playNotificationBeep();
+          } else {
+            notifyBackgroundCompletion(message);
+          }
+          return;
+        }
+
+        if (event.type === 'session_status') {
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === eventSessionId
+                ? { ...s, status: event.status, activeBotId: event.activeBotId }
+                : s
+            )
+          );
         }
       },
+      onOpen: () => {
+        // 连接（含断线重连）建立后重拉当前会话最新快照，补齐断线期间丢失的事件
+        const sid = activeSessionIdRef.current;
+        if (sid) loadMessagesForSession(sid, sessionEpochRef.current);
+      },
       onError: (err) => {
-        console.warn('[SSE] EventSource connection error:', err);
+        console.warn('[SSE] Global EventSource connection error:', err);
       },
     });
 
     return () => {
       unsubscribe();
     };
-  }, [authenticated, activeSessionId, loadMessagesForSession]);
+  }, [authenticated, loadMessagesForSession, handleHistoryInvalidation, navigate]);
 
   // Handlers
   const handleLoginSuccess = () => {
@@ -550,6 +766,9 @@ export const App: React.FC = () => {
 
   const handleLogout = async () => {
     sessionEpochRef.current++;
+    snapshotSeqRef.current++;
+    clientTruncatedAnchorRef.current = null;
+    resolvedAskIdsRef.current.clear();
     authenticatedRef.current = false;
     activeSessionIdRef.current = null;
 
@@ -561,11 +780,11 @@ export const App: React.FC = () => {
     setAuthenticated(false);
     setCurrentUser(null);
     setSessions([]);
-    navigate({ sessionId: null, modal: null, view: 'chat' });
+    setUnreadCounts({});
+    navigate({ sessionId: null, modal: null, view: 'chat', messageId: null });
     setMessages([]);
     setNodes([]);
-    setStreamingState(null);
-    setStreamingStatesMap({});
+    setStreamingStatesMap(clearStreamingMap());
     setPendingAsks([]);
     addToast('info', '已成功退出登录');
   };
@@ -604,8 +823,13 @@ export const App: React.FC = () => {
         if (prev.some((m) => m.id === userMsg.id)) {
           return prev;
         }
-        return [...prev, userMsg];
+        const next = [...prev, userMsg];
+        messagesRef.current = next;
+        return next;
       });
+
+      // 用户主动发消息即脱离搜索高亮场景，清除陈旧高亮定位
+      navigate((prev) => (prev.messageId ? { messageId: null } : {}));
     } catch (err: any) {
       if (err instanceof AuthRequiredError || err?.status === 401) {
         setAuthenticated(false);
@@ -618,23 +842,23 @@ export const App: React.FC = () => {
 
   // 编辑已发送的用户消息：服务端更新该消息、截断其后回复并自动重新派发 bot 生成新回复
   const handleEditMessage = async (sessionId: string, messageId: string, content: string) => {
+    const epoch = sessionEpochRef.current;
+    const isCurrentSession = () => isMountedRef.current &&
+      activeSessionIdRef.current === sessionId && sessionEpochRef.current === epoch;
     try {
+      if (isCurrentSession()) handleHistoryInvalidation(messageId, content, true);
       await api.editUserMessage(sessionId, messageId, content);
-      // 本地立即截断锚点之后的消息：防止 loadMessagesForSession 的快照合并逻辑
-      // 把服务端已删除的旧回复当作“较新的实时消息”重新保留（幽灵消息）
-      setMessages((prev) => {
-        if (activeSessionIdRef.current !== sessionId) return prev;
-        const idx = prev.findIndex((m) => m.id === messageId);
-        if (idx < 0) return prev;
-        return prev.slice(0, idx + 1);
-      });
-      // 成功后重拉消息（SSE messages_truncated 也会触发重拉，双重拉取天然去重，无害）
-      await loadMessagesForSession(sessionId, sessionEpochRef.current);
+      // 响应后只拉取服务端快照，不再切片；SSE 断开时也能取得最终历史。
+      if (isCurrentSession()) await loadMessagesForSession(sessionId, epoch);
     } catch (err: any) {
       if (err instanceof AuthRequiredError || err?.status === 401) {
         setAuthenticated(false);
         authenticatedRef.current = false;
         return;
+      }
+      if (isCurrentSession()) {
+        clientTruncatedAnchorRef.current = null;
+        void loadMessagesForSession(sessionId, epoch);
       }
       if (err?.status === 409) {
         addToast('error', '会话运行中，请先停止再编辑');
@@ -647,9 +871,13 @@ export const App: React.FC = () => {
 
   // 响应 BOT 的人机协同交互请求：成功后服务端广播 interaction_resolved，本地即时移除
   const handleRespondToAsk = async (sessionId: string, askId: string, answer: string) => {
+    const epoch = sessionEpochRef.current;
     try {
       await api.respondToAsk(sessionId, askId, answer);
-      setPendingAsks((prev) => prev.filter((a) => a.id !== askId));
+      if (activeSessionIdRef.current === sessionId && sessionEpochRef.current === epoch) {
+        resolvedAskIdsRef.current.add(askId);
+        setPendingAsks((prev) => prev.filter((a) => a.id !== askId));
+      }
     } catch (err: any) {
       if (err instanceof AuthRequiredError || err?.status === 401) {
         setAuthenticated(false);
@@ -845,7 +1073,10 @@ export const App: React.FC = () => {
     try {
       await api.clearSessionMessages(sessionId);
       if (sessionId === activeSessionIdRef.current) {
+        snapshotSeqRef.current++;
         setMessages([]);
+        // 消息已清空，不再有更早历史
+        setHasEarlierMessages(false);
       }
       setSessions((prev) =>
         prev.map((s) =>
@@ -866,6 +1097,38 @@ export const App: React.FC = () => {
       } else {
         addToast('error', err?.message || '清空消息失败');
       }
+    }
+  };
+
+  // 置顶/取消置顶：服务端更新后 patch 本地列表，失败如实提示
+  const handleTogglePinned = async (sessionId: string, pinned: boolean) => {
+    try {
+      const updated = await api.updateSessionPinned(sessionId, pinned);
+      setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, ...updated } : s)));
+      addToast('success', pinned ? '已置顶' : '已取消置顶');
+    } catch (err: any) {
+      if (err instanceof AuthRequiredError || err?.status === 401) {
+        setAuthenticated(false);
+        authenticatedRef.current = false;
+        return;
+      }
+      addToast('error', err?.message || '更新置顶状态失败');
+    }
+  };
+
+  // 归档/恢复：归档当前会话时不跳转（保留查看），仅切换列表分类
+  const handleSetArchived = async (sessionId: string, archived: boolean) => {
+    try {
+      const updated = await api.setSessionArchived(sessionId, archived);
+      setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, ...updated } : s)));
+      addToast('success', archived ? '已归档' : '已恢复');
+    } catch (err: any) {
+      if (err instanceof AuthRequiredError || err?.status === 401) {
+        setAuthenticated(false);
+        authenticatedRef.current = false;
+        return;
+      }
+      addToast('error', err?.message || (archived ? '归档会话失败' : '恢复会话失败'));
     }
   };
 
@@ -909,17 +1172,21 @@ export const App: React.FC = () => {
   }
 
   return (
-    <div className="flex h-screen h-[100dvh] w-screen overflow-hidden bg-zinc-50 dark:bg-zinc-900">
+    <div className="flex h-full w-full overflow-hidden bg-zinc-50 dark:bg-zinc-900">
       {/* Responsive Sidebar */}
       <Sidebar
         sessions={sessions}
         bots={allBots}
         nodeMap={nodeMap}
         activeSessionId={activeSessionId}
-        onSelectSession={(id) => {
-          navigate({ sessionId: id, view: 'chat' });
+        onSelectSession={(id, messageId) => {
+          // 进入会话即清零未读并清除陈旧高亮（搜索跳转可携带 messageId）
+          navigate({ sessionId: id, view: 'chat', messageId: messageId ?? null });
         }}
         onOpenBotChat={handleOpenBotChat}
+        unreadCounts={unreadCounts}
+        onTogglePinned={handleTogglePinned}
+        onSetArchived={handleSetArchived}
         onCreateGroup={() => navigate({ modal: 'create' })}
         onOpenNodesView={() => navigate({ view: 'nodes' })}
         onOpenSettings={() => navigate({ modal: 'settings' })}
@@ -951,7 +1218,6 @@ export const App: React.FC = () => {
             onRetryLoad={() => activeSessionId && loadMessagesForSession(activeSessionId, sessionEpochRef.current)}
             botMap={botMap}
             nodeMap={nodeMap}
-            streamingState={streamingState}
             streamingStates={Object.values(streamingStatesMap)}
             onSendMessage={handleSendMessage}
             onEditMessage={handleEditMessage}
@@ -965,6 +1231,10 @@ export const App: React.FC = () => {
             onForkMessage={handleForkMessage}
             cancelling={cancelling}
             pendingAsks={pendingAsks}
+            hasEarlierMessages={hasEarlierMessages}
+            loadingEarlier={loadingEarlier}
+            onLoadEarlier={handleLoadEarlier}
+            highlightMessageId={route.messageId}
             onRespondToAsk={handleRespondToAsk}
             onAddToast={addToast}
           />

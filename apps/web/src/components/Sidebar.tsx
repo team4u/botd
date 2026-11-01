@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   MessageSquare,
   Users,
@@ -16,11 +16,18 @@ import {
   User,
   ShieldCheck,
   Loader2,
+  MoreHorizontal,
+  Pin,
+  PinOff,
+  ArchiveRestore,
+  Bell,
+  BellRing,
 } from 'lucide-react';
 import type { SessionRecord, BotConfig, NodeRecord } from '@botd/protocol';
 import type { MessageSearchHit } from '../api';
 import type { UserInfo } from '../types';
 import { ConfirmDialog } from './ConfirmDialog';
+import ThemeToggle from './ThemeToggle';
 import { api } from '../api';
 
 interface SidebarProps {
@@ -28,13 +35,19 @@ interface SidebarProps {
   bots: BotConfig[];
   nodeMap: Map<string, NodeRecord>;
   activeSessionId: string | null;
-  onSelectSession: (id: string) => void;
+  onSelectSession: (id: string, messageId?: string) => void;
   onOpenBotChat: (bot: BotConfig) => void;
   onCreateGroup: () => void;
   onOpenNodesView: () => void;
   onOpenSettings: () => void;
   onLogout: () => void;
   onDeleteSession: (id: string) => Promise<void> | void;
+  /** sessionId -> 未读消息数（可选，缺省视为全部为 0） */
+  unreadCounts?: Record<string, number>;
+  /** 置顶/取消置顶会话 */
+  onTogglePinned?: (sessionId: string, pinned: boolean) => void;
+  /** 归档/恢复会话 */
+  onSetArchived?: (sessionId: string, archived: boolean) => void;
   isOpen: boolean;
   onClose: () => void;
   currentUser?: UserInfo;
@@ -83,6 +96,30 @@ function formatRelativeTime(iso?: string): string | null {
   return `${mm}-${dd}`;
 }
 
+/** 搜索命中片段：…前文 20 字 + 命中词 + 后文 40 字…（大小写不敏感定位，未命中取开头） */
+function buildSearchSnippet(
+  content: string,
+  query: string,
+  beforeLen = 20,
+  afterLen = 40
+): { leading: string; before: string; match: string; after: string; trailing: string } {
+  // 折叠空白为单空格，保证单行片段展示稳定
+  const text = content.replace(/\s+/g, ' ').trim();
+  const q = query.trim().toLowerCase();
+  const idx = q ? text.toLowerCase().indexOf(q) : -1;
+  const start = idx >= 0 ? idx : 0;
+  const matchLen = idx >= 0 ? q.length : 0;
+  const beforeStart = Math.max(0, start - beforeLen);
+  const afterEnd = start + matchLen + afterLen;
+  return {
+    leading: beforeStart > 0 ? '…' : '',
+    before: text.slice(beforeStart, start),
+    match: text.slice(start, start + matchLen),
+    after: text.slice(start + matchLen, afterEnd),
+    trailing: afterEnd < text.length ? '…' : '',
+  };
+}
+
 /** 可折叠分区头：文字 + 数量 + chevron */
 const SectionHeader: React.FC<{
   label: string;
@@ -106,6 +143,142 @@ const SectionHeader: React.FC<{
   </button>
 );
 
+/** 未读数徽标：99+ 封顶；是否渲染（非活跃会话）由调用方决定 */
+const UnreadBadge: React.FC<{ count: number }> = ({ count }) => {
+  if (count <= 0) return null;
+  return (
+    <span className="shrink-0 bg-red-500 text-white text-[10px] font-semibold rounded-full min-w-[16px] h-4 px-1 flex items-center justify-center">
+      {count > 99 ? '99+' : count}
+    </span>
+  );
+};
+
+/**
+ * 会话项 hover「⋯」操作菜单：
+ * 群聊区 = 置顶/取消置顶 + 归档 + 删除；历史话题区 = 恢复 + 删除。
+ * 点击外部 / Esc 关闭；菜单项点击需 stopPropagation，避免冒泡触发会话切换。
+ */
+const SessionItemMenu: React.FC<{
+  session: SessionRecord;
+  variant: 'group' | 'history';
+  onTogglePinned?: (sessionId: string, pinned: boolean) => void;
+  onSetArchived?: (sessionId: string, archived: boolean) => void;
+  onDelete: (session: SessionRecord) => void;
+}> = ({ session, variant, onTogglePinned, onSetArchived, onDelete }) => {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
+  const itemBase =
+    'w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium transition-colors cursor-pointer';
+  const menuItemClass = `${itemBase} text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/60`;
+  const menuItemDangerClass = `${itemBase} text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40`;
+
+  return (
+    <div ref={rootRef} className="relative shrink-0">
+      <button
+        type="button"
+        aria-label={`会话操作 ${session.title}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        className={`${
+          open ? 'flex' : 'hidden group-hover:flex group-focus-within:flex'
+        } items-center justify-center w-4 h-4 text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors cursor-pointer`}
+      >
+        <MoreHorizontal className="w-3.5 h-3.5" />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-5 z-50 min-w-[124px] py-1 rounded-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 shadow-md"
+        >
+          {variant === 'group' && (
+            <>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onTogglePinned?.(session.id, !session.pinned);
+                  setOpen(false);
+                }}
+                className={menuItemClass}
+              >
+                {session.pinned ? (
+                  <PinOff className="w-3.5 h-3.5 shrink-0" />
+                ) : (
+                  <Pin className="w-3.5 h-3.5 shrink-0" />
+                )}
+                <span>{session.pinned ? '取消置顶' : '置顶'}</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSetArchived?.(session.id, true);
+                  setOpen(false);
+                }}
+                className={menuItemClass}
+              >
+                <Archive className="w-3.5 h-3.5 shrink-0" />
+                <span>归档</span>
+              </button>
+            </>
+          )}
+          {variant === 'history' && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={(e) => {
+                e.stopPropagation();
+                onSetArchived?.(session.id, false);
+                setOpen(false);
+              }}
+              className={menuItemClass}
+            >
+              <ArchiveRestore className="w-3.5 h-3.5 shrink-0" />
+              <span>恢复</span>
+            </button>
+          )}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(session);
+              setOpen(false);
+            }}
+            className={menuItemDangerClass}
+          >
+            <Trash2 className="w-3.5 h-3.5 shrink-0" />
+            <span>删除</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const Sidebar: React.FC<SidebarProps> = ({
   sessions,
   bots,
@@ -118,6 +291,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenSettings,
   onLogout,
   onDeleteSession,
+  unreadCounts = {},
+  onTogglePinned,
+  onSetArchived,
   isOpen,
   onClose,
   currentUser,
@@ -129,6 +305,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<SessionRecord | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  // 新消息提示音开关（localStorage 持久化，默认关闭）
+  const [soundOn, setSoundOn] = useState(() => {
+    try {
+      return localStorage.getItem('botd-sound') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const toggleSound = () => {
+    const next = !soundOn;
+    setSoundOn(next);
+    try {
+      localStorage.setItem('botd-sound', next ? '1' : '0');
+    } catch {
+      // localStorage 不可用时静默忽略
+    }
+  };
 
   // Global message search state (debounced)
   const [searchHits, setSearchHits] = useState<MessageSearchHit[]>([]);
@@ -208,9 +402,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
     );
   });
 
-  // 分区 2：群聊（非单聊且未归档）
+  // 分区 2：群聊（非单聊且未归档），置顶会话排前（sort 稳定，组内保持既有活跃时间序）
   const groupSessions = useMemo(
-    () => sessions.filter((s) => s.mode !== 'direct' && !s.archived && sessionMatchesQuery(s)),
+    () =>
+      sessions
+        .filter((s) => s.mode !== 'direct' && !s.archived && sessionMatchesQuery(s))
+        .sort((a, b) => Number(b.pinned === true) - Number(a.pinned === true)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [sessions, query]
   );
@@ -334,7 +531,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     key={hit.message.id}
                     type="button"
                     onClick={() => {
-                      onSelectSession(hit.message.sessionId);
+                      onSelectSession(hit.message.sessionId, hit.message.id);
                       onClose();
                     }}
                     className="w-full text-left p-2 rounded-lg text-xs transition-colors hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 border border-transparent hover:border-zinc-200/70 dark:hover:border-zinc-700/70 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500"
@@ -349,12 +546,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         </span>
                       )}
                     </div>
-                    <p className="text-[11px] text-zinc-600 dark:text-zinc-400 line-clamp-2 leading-relaxed break-words whitespace-pre-wrap">
-                      <span className="font-mono text-zinc-400 dark:text-zinc-500 shrink-0">
-                        {hit.message.senderBotId ? `@${hit.message.senderBotId}` : 'User'}:
-                      </span>{' '}
-                      {hit.message.content}
-                    </p>
+                    {(() => {
+                      const snippet = buildSearchSnippet(hit.message.content, filter);
+                      return (
+                        <p className="truncate text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+                          <span className="font-mono shrink-0">{hit.message.senderBotId ? `@${hit.message.senderBotId}` : 'User'}:</span>{' '}
+                          {snippet.leading}
+                          {snippet.before}
+                          <span className="font-semibold text-zinc-900 dark:text-zinc-100">{snippet.match}</span>
+                          {snippet.after}
+                          {snippet.trailing}
+                        </p>
+                      );
+                    })()}
                     <div className="text-[10px] text-zinc-400 dark:text-zinc-500 mt-0.5">
                       {new Date(hit.message.createdAt).toLocaleString()}
                     </div>
@@ -514,7 +718,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         }`}
                       >
                         <div className="flex items-center justify-between gap-1 w-full">
-                          <div className="flex items-center gap-1.5 truncate">                            {session.mode === 'direct' ? (
+                          {/* 名称行：置顶 Pin 标记 + 标题 + 未读徽标 */}
+                          <div className="flex items-center gap-1.5 truncate">
+                            {session.mode === 'direct' ? (
                               <Bot
                                 className={`w-3.5 h-3.5 shrink-0 ${
                                   isActive ? 'text-zinc-600 dark:text-zinc-300' : 'text-zinc-500 dark:text-zinc-400'
@@ -533,14 +739,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 }`}
                               />
                             )}
+                            {session.pinned && (
+                              <span title="已置顶" className="shrink-0 flex items-center">
+                                <Pin className="w-3 h-3 text-[11px] text-zinc-400 dark:text-zinc-500" />
+                              </span>
+                            )}
                             <span
                               className="truncate font-medium text-zinc-900 dark:text-zinc-100"
                             >
                               {session.title}
                             </span>
+                            {!isActive && <UnreadBadge count={unreadCounts[session.id] || 0} />}
                           </div>
 
-                          {/* 状态圆点：hover 时让位给删除按钮 */}
+                          {/* 状态圆点：hover 时让位给「⋯」菜单 */}
                           <div className="w-4 h-4 flex items-center justify-center shrink-0">
                             {isRunning ? (
                               <span
@@ -553,17 +765,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 title="执行异常"
                               />
                             ) : null}
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setDeleteTarget(session);
-                              }}
-                              className="hidden group-hover:flex group-focus-within:flex items-center justify-center w-4 h-4 text-zinc-400 dark:text-zinc-400 hover:text-rose-500 dark:hover:text-rose-400 transition-colors cursor-pointer"
-                              aria-label={`删除会话 ${session.title}`}
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            <SessionItemMenu
+                              session={session}
+                              variant="group"
+                              onTogglePinned={onTogglePinned}
+                              onSetArchived={onSetArchived}
+                              onDelete={setDeleteTarget}
+                            />
                           </div>
                         </div>
 
@@ -637,6 +845,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         >
                           {session.title}
                         </span>
+                        {!isActive && <UnreadBadge count={unreadCounts[session.id] || 0} />}
                         {relativeTime && (
                           <span
                             className={`ml-auto shrink-0 text-[11px] ${
@@ -646,19 +855,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             {relativeTime}
                           </span>
                         )}
-                        <div className="w-4 h-4 flex items-center justify-center shrink-0">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setDeleteTarget(session);
-                            }}
-                            className="hidden group-hover:flex group-focus-within:flex items-center justify-center w-4 h-4 text-zinc-400 dark:text-zinc-400 hover:text-rose-500 dark:hover:text-rose-400 transition-colors cursor-pointer"
-                            aria-label={`删除历史话题 ${session.title}`}
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
+                        <SessionItemMenu
+                          session={session}
+                          variant="history"
+                          onSetArchived={onSetArchived}
+                          onDelete={setDeleteTarget}
+                        />
                       </div>
                     );
                   })}
@@ -703,6 +905,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   </span>
                 </div>
               </div>
+              {/* 主题切换 + 新消息提示音开关：与底部按钮同阶的小图标按钮 */}
+              <ThemeToggle />
+              <button
+                type="button"
+                onClick={toggleSound}
+                title="新消息提示音"
+                aria-pressed={soundOn}
+                className={`h-8 w-8 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-center transition-colors cursor-pointer ${
+                  soundOn ? 'text-zinc-900 dark:text-zinc-100' : 'text-zinc-500'
+                }`}
+              >
+                {soundOn ? <BellRing className="h-4 w-4" /> : <Bell className="h-4 w-4" />}
+              </button>
             </div>
           )}
 

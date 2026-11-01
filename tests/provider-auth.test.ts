@@ -79,12 +79,12 @@ test('native Pi API-key login preserves SDK extra fields without exposing the ke
   assert.equal(stored['auth-test'].env.TEST_ACCOUNT, 'account-123');
   if (process.platform !== 'win32') assert.equal((await stat(path.join(f.dir, '.agent/auth.json'))).mode & 0o777, 0o600);
   const runtime = await f.createRuntime();
-  await configureProviderAuth(runtime, f.dir, 'auth-test');
+  await configureProviderAuth(runtime, 'auth-test');
   assert.equal((await runtime.getAuth('auth-test'))!.auth.apiKey, 'private-local-test-key');
   await f.manager.logout('auth-test');
   const loggedOut = await f.createRuntime();
   assert.equal((await loggedOut.listCredentials()).some(item => item.providerId === 'auth-test'), false);
-  await assert.rejects(configureProviderAuth(loggedOut, f.dir, 'auth-test'), /not configured/);
+  await assert.rejects(configureProviderAuth(loggedOut, 'auth-test'), /not configured/);
 });
 
 test('native SDK OAuth persists credentials and reuses its token refresh', async t => {
@@ -97,7 +97,7 @@ test('native SDK OAuth persists credentials and reuses its token refresh', async
   const success = await waitFor(() => f.manager.get(login.id), state => state.status === 'success');
   assert.equal(JSON.stringify(success).includes('private-authorization-code'), false);
   const runtime = await f.createRuntime();
-  await configureProviderAuth(runtime, f.dir, 'auth-test');
+  await configureProviderAuth(runtime, 'auth-test');
   assert.equal((await runtime.getAuth('auth-test'))!.auth.apiKey, 'local-access');
   const storePath = path.join(f.dir, '.agent/auth.json');
   const stored = JSON.parse(await readFile(storePath, 'utf8'));

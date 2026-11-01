@@ -37,7 +37,10 @@ export interface BotWithNode extends BotConfig {
 export type {
   ArtifactRecord,
   MessageAttachment,
+  MessageRecord,
   PendingAskRecord,
+  SessionRecord,
+  SessionStatus,
   TriggerKind,
   TriggerRecord,
   CreateTriggerInput,

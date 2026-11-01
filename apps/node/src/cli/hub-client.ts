@@ -20,7 +20,7 @@ export interface HubClientOptions {
 
 const DEFAULT_USERNAME = 'admin';
 
-const normalizeUrl = (url: string): string => url.replace(/\/+$/, '');
+const normalizeUrl = (url: string): string => url.trim().replace(/\/+$/, '');
 
 /**
  * The single HTTP layer for every Hub command.
@@ -45,26 +45,33 @@ export class HubClient {
   /** Resolve hub URL + credentials from config/flags, logging in when needed. */
   static async connect(options: HubClientOptions): Promise<HubClient> {
     const config = await readCliConfig(options.dataDir);
-    const hubUrl = normalizeUrl(options.hubUrl || config.hubUrl || '');
+    const explicitHub = options.hubUrl ? normalizeUrl(options.hubUrl) : undefined;
+    const configHub = config.hubUrl ? normalizeUrl(config.hubUrl) : undefined;
+    const hubUrl = explicitHub || configHub || '';
 
-    // 无 token 且无密码（或连 hubUrl 都没配）时，尝试用 node.json 节点凭据免登录直通
-    const username = options.username || config.username || DEFAULT_USERNAME;
-    const password = options.password || config.password;
-    const hasToken = Boolean(config.hubUrl && normalizeUrl(config.hubUrl) === hubUrl && config.token);
-    if (!hasToken && !password) {
+    // Only reuse stored credentials if the target hub matches the stored hub.
+    const isConfigHubMatch = Boolean(configHub && hubUrl && configHub === hubUrl);
+    const token = isConfigHubMatch ? config.token : undefined;
+    const username = options.username || (isConfigHubMatch ? config.username : undefined) || DEFAULT_USERNAME;
+    const password = options.password || (isConfigHubMatch ? config.password : undefined);
+
+    if (!token && !password) {
       const nodeIdty = await readNodeIdentity(options.dataDir);
-      if (nodeIdty && (!options.hubUrl || !hubUrl || normalizeUrl(nodeIdty.hubUrl) === hubUrl)) {
-        const client = new HubClient(normalizeUrl(nodeIdty.hubUrl), undefined, username, undefined, options);
-        client.nodeAuth = { nodeId: nodeIdty.nodeId, token: nodeIdty.token };
-        return client;
+      if (nodeIdty && nodeIdty.hubUrl) {
+        const nodeHub = normalizeUrl(nodeIdty.hubUrl);
+        // node.json fallback only allowed if it matches the target hub (or if no hub was configured)
+        if (!hubUrl || nodeHub === hubUrl) {
+          const finalHub = hubUrl || nodeHub;
+          const client = new HubClient(finalHub, undefined, username, undefined, options);
+          client.nodeAuth = { nodeId: nodeIdty.nodeId, token: nodeIdty.token };
+          return client;
+        }
       }
     }
 
     if (!hubUrl) {
       throw new CliError('No Hub configured. Run: botd login <hubUrl> --password <password>');
     }
-    // Never send a token that was issued by a different hub.
-    const token = config.hubUrl && normalizeUrl(config.hubUrl) === hubUrl ? config.token : undefined;
 
     const client = new HubClient(hubUrl, token, username, password, options);
     if (!client.token) {

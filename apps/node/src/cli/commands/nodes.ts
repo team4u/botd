@@ -11,7 +11,7 @@ export function registerNodesCommands(program: Command): void {
     .command('list')
     .description('List connected nodes and their hosted bots')
     .action(
-      cliAction(async (options, command) => {
+      cliAction(async (_options, command) => {
         const globals = readGlobals(command);
         const client = await HubClient.connect(globals);
         const result = await client.get<NodeWithBots[]>('/api/nodes');
@@ -23,7 +23,7 @@ export function registerNodesCommands(program: Command): void {
     .command('pair')
     .description('Generate a pairing code to join a new node')
     .action(
-      cliAction(async (options, command) => {
+      cliAction(async (_options, command) => {
         const globals = readGlobals(command);
         const client = await HubClient.connect(globals);
         const result = await client.post<PairingResult>('/api/nodes/pairing', {});

@@ -38,15 +38,26 @@ export async function writeCliConfig(dataDir: string, config: CliConfig): Promis
   await writeSecureFile(cliConfigPath(dataDir), `${JSON.stringify(config, null, 2)}\n`);
 }
 
-/** Read-modify-write merge. `undefined` patch values are removed from the stored config. */
+/** Read-modify-write merge. Explicit `undefined` patch values are removed from the stored config; omitted properties are preserved. */
 export async function updateCliConfig(dataDir: string, patch: Partial<CliConfig>): Promise<CliConfig> {
   const current = await readCliConfig(dataDir);
-  const next: CliConfig = {
-    hubUrl: patch.hubUrl !== undefined ? patch.hubUrl : current.hubUrl,
-    token: patch.token !== undefined ? patch.token : current.token,
-    username: patch.username !== undefined ? patch.username : current.username,
-    password: patch.password !== undefined ? patch.password : current.password,
-  };
+  const next: CliConfig = {};
+
+  const keys: (keyof CliConfig)[] = ['hubUrl', 'token', 'username', 'password'];
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(patch, key)) {
+      const val = patch[key];
+      if (val !== undefined) {
+        next[key] = val;
+      }
+    } else {
+      const val = current[key];
+      if (val !== undefined) {
+        next[key] = val;
+      }
+    }
+  }
+
   await writeCliConfig(dataDir, next);
   return next;
 }

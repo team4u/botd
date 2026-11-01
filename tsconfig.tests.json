@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.base.json",
-  "compilerOptions": { "noEmit": true, "declaration": false },
+  "compilerOptions": { "noEmit": true, "declaration": false, "jsx": "react-jsx" },
   "include": ["tests/**/*.ts"]
 }

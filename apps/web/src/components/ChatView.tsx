@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Menu,
   Users,
@@ -19,6 +19,9 @@ import {
   X,
   Clock,
   Hourglass,
+  Package,
+  SquareTerminal,
+  ChevronUp,
 } from 'lucide-react';
 import type {
   SessionRecord,
@@ -35,6 +38,11 @@ import { ChatInput } from './ChatInput';
 import { ConfirmDialog } from './ConfirmDialog';
 import { AskCard } from './AskCard';
 import { TriggersModal } from './TriggersModal';
+import { ArtifactsDrawer } from './ArtifactsDrawer';
+import { BgJobsDrawer } from './BgJobsDrawer';
+import { api } from '../api';
+import { onGlobalEvent } from '../events';
+import { useKeyboardInset } from '../utils/viewport';
 import type { ToastItem } from '../types';
 
 interface ChatViewProps {
@@ -45,10 +53,8 @@ interface ChatViewProps {
   onRetryLoad: () => void;
   botMap: Map<string, BotConfig>;
   nodeMap: Map<string, NodeRecord>;
-  /** 单 BOT 流式状态（兼容保留）：并发流式时请改用 streamingStates */
-  streamingState: StreamingAssistantState | null;
-  /** 多 BOT 并发流式状态（并行盲评圆桌）：各成员互不覆盖，>1 时以网格并排展示 */
-  streamingStates?: StreamingAssistantState[];
+  /** 各 BOT 的流式状态；多个成员同时运行时并排展示。 */
+  streamingStates: StreamingAssistantState[];
   onSendMessage: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
   onEditMessage: (sessionId: string, messageId: string, content: string) => Promise<void>;
   onCancelSession: () => Promise<void>;
@@ -67,6 +73,14 @@ interface ChatViewProps {
   onRespondToAsk?: (sessionId: string, askId: string, answer: string) => Promise<void>;
   /** 全局 toast 通知（供弹窗内部使用） */
   onAddToast?: (type: ToastItem['type'], message: string) => void;
+  /** 是否还有更早的历史消息可加载（App 负责分页） */
+  hasEarlierMessages?: boolean;
+  /** 正在加载更早消息 */
+  loadingEarlier?: boolean;
+  /** 加载更早消息（App 负责 prepend） */
+  onLoadEarlier?: () => void;
+  /** 搜索跳转定位高亮的消息 id */
+  highlightMessageId?: string | null;
 }
 
 export const ChatView: React.FC<ChatViewProps> = ({
@@ -77,7 +91,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onRetryLoad,
   botMap,
   nodeMap,
-  streamingState,
   streamingStates,
   onSendMessage,
   onEditMessage,
@@ -93,9 +106,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
   pendingAsks = [],
   onRespondToAsk,
   onAddToast,
+  hasEarlierMessages = false,
+  loadingEarlier = false,
+  onLoadEarlier,
+  highlightMessageId = null,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
+  const keyboardInset = useKeyboardInset();
+
+  // 本会话参会成员（提前声明：蓝点探测/SSE/群设置等多处使用）
+  const memberBots: BotConfig[] = (session.memberBotIds || [])
+    .map((id) => botMap.get(id))
+    .filter((b): b is BotConfig => Boolean(b));
 
   // 头部更多操作菜单 / 行内重命名 / 清空与删除确认
   const [menuOpen, setMenuOpen] = useState(false);
@@ -112,10 +135,164 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // 回到底部按钮触发的程序化平滑滚动标记，避免滚动动画的中间位置误触发 userScrolledUp
   const programmaticScrollRef = useRef(false);
 
-  // 本会话参会成员
-  const memberBots: BotConfig[] = (session.memberBotIds || [])
-    .map((id) => botMap.get(id))
-    .filter((b): b is BotConfig => Boolean(b));
+  // ===== 历史消息向上分页：prepend 滚动锚定 =====
+  // 点击「加载更早消息」前记录 scrollHeight 与首条消息 id；messages 变长后在
+  // useLayoutEffect 里判定是否为顶部 prepend（首条消息 id 变化），是刚补偿 scrollHeight
+  // 差值保证视口不跳，并置抑制标记让同一次 commit 的自动滚底 effect 跳过。
+  const prevScrollHeightRef = useRef<number | null>(null);
+  const prevFirstMessageIdRef = useRef<string | null>(null);
+  const prevMessageCountRef = useRef(messages.length);
+  const pendingPrependRef = useRef(false);
+
+  const handleLoadEarlier = () => {
+    if (loadingEarlier || !onLoadEarlier) return;
+    const el = scrollContainerRef.current;
+    if (el) prevScrollHeightRef.current = el.scrollHeight;
+    prevFirstMessageIdRef.current = messages.length > 0 ? messages[0].id : null;
+    pendingPrependRef.current = true;
+    onLoadEarlier();
+  };
+
+  // IntersectionObserver 哨兵：列表顶部进入视口时自动触发加载（按钮仍是主入口）
+  const earlierSentinelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const sentinel = earlierSentinelRef.current;
+    if (!hasEarlierMessages || loadingEarlier || !onLoadEarlier || !sentinel) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((en) => en.isIntersecting)) handleLoadEarlier();
+      },
+      { root: scrollContainerRef.current, rootMargin: '80px' }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasEarlierMessages, loadingEarlier, onLoadEarlier, messages.length]);
+
+  useLayoutEffect(() => {
+    const el = scrollContainerRef.current;
+    const grew = messages.length > prevMessageCountRef.current;
+    prevMessageCountRef.current = messages.length;
+    if (!pendingPrependRef.current || !el || !grew) return;
+    // 仅当首条消息 id 变化才判定为 prepend（追加消息不改首条 id）
+    const firstId = messages.length > 0 ? messages[0].id : null;
+    const isPrepend = firstId !== prevFirstMessageIdRef.current;
+    prevFirstMessageIdRef.current = firstId;
+    if (!isPrepend) return;
+    const prevHeight = prevScrollHeightRef.current;
+    prevScrollHeightRef.current = null;
+    if (prevHeight == null) return;
+    // 补偿高度差：视口停在原消息位置；prepend 后必不在底部，确保回到底部按钮可见
+    const delta = el.scrollHeight - prevHeight;
+    if (delta > 0) {
+      el.scrollTop += delta;
+      setUserScrolledUp(true);
+    }
+  }, [messages.length]);
+
+  // ===== 搜索跳转定位高亮 =====
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!highlightMessageId) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const target = container.querySelector<HTMLElement>(`[data-message-id="${highlightMessageId}"]`);
+    if (!target) return;
+    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    // 平滑滚动中间位置不触发 userScrolledUp 误判，结束后若不在底部再交回监听
+    programmaticScrollRef.current = true;
+    window.setTimeout(() => {
+      programmaticScrollRef.current = false;
+    }, 800);
+    setHighlightedId(highlightMessageId);
+    const timer = window.setTimeout(() => setHighlightedId(null), 2000);
+    return () => window.clearTimeout(timer);
+  }, [highlightMessageId]);
+
+  // ===== 会话产物 / 后台任务抽屉 =====
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
+  const [bgJobsOpen, setBgJobsOpen] = useState(false);
+  const [artifactsUnseen, setArtifactsUnseen] = useState(false);
+  const [hasRunningBgJobs, setHasRunningBgJobs] = useState(false);
+
+  // 切换会话时重置抽屉红点/蓝点标记
+  useEffect(() => {
+    setArtifactsUnseen(false);
+    setHasRunningBgJobs(false);
+  }, [session.id]);
+
+  // 全局 SSE：本会话 artifact_created 且抽屉未开时置红点；新回调消息（后台任务完成）到达时
+  // 重新探测 running 蓝点（callback 角色消息意味着任务状态可能已翻转）
+  useEffect(() => {
+    const unsubscribe = onGlobalEvent((e) => {
+      if (e.type === 'artifact_created' && e.sessionId === session.id) {
+        if (!artifactsOpenRef.current) setArtifactsUnseen(true);
+      } else if (
+        e.type === 'message_created' &&
+        e.message.sessionId === session.id &&
+        e.message.role === 'callback'
+      ) {
+        if (!bgJobsOpenRef.current) void probeRunningBgJobs();
+      }
+    });
+    return unsubscribe;
+  }, [session.id]);
+
+  // 用 ref 避免订阅 effect 依赖抽屉开关导致反复重订阅
+  const artifactsOpenRef = useRef(false);
+  const bgJobsOpenRef = useRef(false);
+  artifactsOpenRef.current = artifactsOpen;
+  bgJobsOpenRef.current = bgJobsOpen;
+
+  // 探测本会话是否存在 running 后台任务（用于顶栏蓝点）
+  const memberNodeIds = useMemo(
+    () =>
+      [...new Set(memberBots.map((b) => b.nodeId).filter(Boolean))],
+    [memberBots]
+  );
+  const probeRunningBgJobs = async () => {
+    if (memberNodeIds.length === 0) return;
+    const results = await Promise.allSettled(
+      memberNodeIds.map((id) => api.listBgJobs(id, { sessionId: session.id }))
+    );
+    const running = results.some(
+      (r) => r.status === 'fulfilled' && r.value.some((j) => j.status === 'running')
+    );
+    setHasRunningBgJobs(running);
+  };
+
+  // 会话打开/成员变化时探一次 running（轻量，仅顶栏蓝点用途）
+  useEffect(() => {
+    void probeRunningBgJobs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.id, memberNodeIds.join(',')]);
+
+  // ===== 消息日期分隔线 =====
+  // 相邻消息 createdAt 跨自然日时插入分隔条：今天/昨天/M月D日（同年省略年份，跨年带年份）
+  const dayLabel = (iso: string): string => {
+    const d = new Date(iso);
+    const now = new Date();
+    const sameCalendarDay = (a: Date, b: Date) =>
+      a.getFullYear() === b.getFullYear() &&
+      a.getMonth() === b.getMonth() &&
+      a.getDate() === b.getDate();
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    if (sameCalendarDay(d, now)) return '今天';
+    if (sameCalendarDay(d, yesterday)) return '昨天';
+    const sameYear = d.getFullYear() === now.getFullYear();
+    return sameYear
+      ? `${d.getMonth() + 1}月${d.getDate()}日`
+      : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+  };
+  const sameDay = (a: string, b: string): boolean => {
+    const da = new Date(a);
+    const db = new Date(b);
+    return (
+      da.getFullYear() === db.getFullYear() &&
+      da.getMonth() === db.getMonth() &&
+      da.getDate() === db.getDate()
+    );
+  };
 
   // 自动滚动到底部
   const scrollToBottom = (smooth = true) => {
@@ -132,18 +309,29 @@ export const ChatView: React.FC<ChatViewProps> = ({
     scrollToBottom(false);
   }, [session.id]);
 
-  useEffect(() => {
-    scrollToBottom(true);
-  }, [messages.length, streamingState?.delta, streamingState?.tools.length, streamingStates]);
-
-  // 多 BOT 并发流式状态：优先使用 streamingStates；未提供时退回单 BOT streamingState 保持兼容
-  const effectiveStreamingStates: StreamingAssistantState[] =
-    streamingStates && streamingStates.length > 0
-      ? streamingStates
-      : streamingState
-      ? [streamingState]
-      : [];
+  const effectiveStreamingStates = streamingStates;
   const isParallelStreaming = effectiveStreamingStates.length > 1;
+
+  useEffect(() => {
+    // prepend 加载更早消息时不触发自动滚底（视口锚定由 useLayoutEffect 补偿）。
+    // 注意：layout effect 先于本 effect 运行，此处消费标记（而非依赖它被清除前判断）
+    if (pendingPrependRef.current) {
+      pendingPrependRef.current = false;
+      return;
+    }
+    scrollToBottom(true);
+  }, [
+    messages.length,
+    effectiveStreamingStates.length,
+    effectiveStreamingStates.map((s) => `${s.botId}:${s.delta.length}:${s.tools.length}`).join(','),
+  ]);
+
+  // 移动端软键盘联动：键盘弹起垫片高度变化时，若用户在底部则保持贴底可见
+  useEffect(() => {
+    if (!userScrolledUp) {
+      scrollToBottom(false);
+    }
+  }, [keyboardInset, userScrolledUp]);
 
   const handleScroll = () => {
     const el = scrollContainerRef.current;
@@ -458,7 +646,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           )}
         </div>
 
-        {/* 右侧操作：开启新话题 + 更多操作下拉菜单（重命名 / 群设置 / 清空消息 / 删除会话） */}
+        {/* 右侧操作：开启新话题 + 产物/后台任务抽屉入口 + 更多操作下拉菜单 */}
         <div className="flex items-center gap-1 shrink-0">
           <button
             onClick={() => void onNewTopic(session.id)}
@@ -468,6 +656,48 @@ export const ChatView: React.FC<ChatViewProps> = ({
           >
             <MessageSquarePlus className="w-4 h-4" />
           </button>
+
+          {/* 会话产物抽屉入口：新产物未查看时右上角红点 */}
+          <div className="relative">
+            <button
+              onClick={() => {
+                setArtifactsOpen(true);
+                setArtifactsUnseen(false);
+              }}
+              className="h-8 w-8 rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-center transition-colors cursor-pointer"
+              title="会话产物"
+              aria-label="会话产物"
+            >
+              <Package className="w-4 h-4" />
+            </button>
+            {artifactsUnseen && (
+              <span
+                className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-red-500 pointer-events-none"
+                aria-hidden="true"
+              />
+            )}
+          </div>
+
+          {/* 后台任务抽屉入口：本会话存在 running 任务时蓝点 */}
+          <div className="relative">
+            <button
+              onClick={() => {
+                setBgJobsOpen(true);
+                setHasRunningBgJobs(false);
+              }}
+              className="h-8 w-8 rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-center transition-colors cursor-pointer"
+              title="后台任务"
+              aria-label="后台任务"
+            >
+              <SquareTerminal className="w-4 h-4" />
+            </button>
+            {hasRunningBgJobs && !bgJobsOpen && (
+              <span
+                className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-blue-500 pointer-events-none"
+                aria-hidden="true"
+              />
+            )}
+          </div>
 
           <div className="relative" ref={menuRef}>
             <button
@@ -640,17 +870,56 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         ) : (
           <>
-            {messages.map((msg) => (
-              <MessageItem
-                key={msg.id}
-                message={msg}
-                botMap={botMap}
-                nodeMap={nodeMap}
-                canEdit={canEdit}
-                isEditing={editingMessage?.id === msg.id}
-                onStartEdit={startEdit}
-                onForkMessage={(mid) => onForkMessage(session.id, mid)}
-              />
+            {/* 加载更早消息：IntersectionObserver 哨兵（自动触发）+ 居中按钮（可靠主入口） */}
+            {hasEarlierMessages && (
+              <div ref={earlierSentinelRef} className="flex justify-center py-1.5">
+                <button
+                  type="button"
+                  onClick={handleLoadEarlier}
+                  disabled={loadingEarlier || !onLoadEarlier}
+                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  {loadingEarlier ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin-fast" />
+                      <span>正在加载...</span>
+                    </>
+                  ) : (
+                    <>
+                      <ChevronUp className="w-3.5 h-3.5" />
+                      <span>加载更早消息</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
+
+            {messages.map((msg, idx) => (
+              <React.Fragment key={msg.id}>
+                {/* 日期分隔线：相邻消息跨自然日时插入（只做视觉分组，不动数据） */}
+                {(idx === 0 || !sameDay(messages[idx - 1].createdAt, msg.createdAt)) && (
+                  <div className="sticky top-0 z-[5] mx-auto my-2 w-fit px-2.5 py-0.5 rounded-full bg-zinc-100/90 dark:bg-zinc-800/90 text-[11px] text-zinc-500 backdrop-blur-sm">
+                    {dayLabel(msg.createdAt)}
+                  </div>
+                )}
+                <div
+                  className={
+                    highlightedId === msg.id
+                      ? 'rounded-2xl ring-2 ring-blue-400/60 bg-blue-50/50 dark:bg-blue-500/5 transition-colors duration-500'
+                      : 'transition-colors duration-500'
+                  }
+                >
+                  <MessageItem
+                    message={msg}
+                    botMap={botMap}
+                    nodeMap={nodeMap}
+                    canEdit={canEdit}
+                    isEditing={editingMessage?.id === msg.id}
+                    onStartEdit={startEdit}
+                    onForkMessage={(mid) => onForkMessage(session.id, mid)}
+                  />
+                </div>
+              </React.Fragment>
             ))}
 
             {/* 多 BOT 并发流式（并行盲评）：网格并排展示，互不覆盖；单 BOT 保持平铺风格 */}
@@ -717,6 +986,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onCancelEditing={() => setEditingMessage(null)}
       />
 
+      {/* 移动端软键盘动态避让垫片：iOS Safari 键盘弹起时垫起输入框，消除悬空与空白 */}
+      {keyboardInset > 0 && (
+        <div
+          style={{ height: `${keyboardInset}px` }}
+          className="w-full shrink-0"
+          aria-hidden="true"
+        />
+      )}
+
       {/* 清空消息 / 删除会话二次确认 */}
       <ConfirmDialog
         isOpen={!!confirmAction}
@@ -747,6 +1025,25 @@ export const ChatView: React.FC<ChatViewProps> = ({
         memberBots={memberBots}
         onClose={() => setTriggersOpen(false)}
         onAddToast={(type, message) => onAddToast?.(type, message)}
+      />
+
+      {/* 会话产物抽屉 */}
+      <ArtifactsDrawer
+        isOpen={artifactsOpen}
+        sessionId={session.id}
+        botMap={botMap}
+        onClose={() => setArtifactsOpen(false)}
+      />
+
+      {/* 后台任务抽屉 */}
+      <BgJobsDrawer
+        isOpen={bgJobsOpen}
+        sessionId={session.id}
+        memberBotIds={session.memberBotIds || []}
+        botMap={botMap}
+        nodeMap={nodeMap}
+        onClose={() => setBgJobsOpen(false)}
+        onToast={(type, message) => onAddToast?.(type, message)}
       />
     </div>
   );

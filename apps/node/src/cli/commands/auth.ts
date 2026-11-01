@@ -41,7 +41,7 @@ export function registerAuthCommands(program: Command): void {
     .command('logout')
     .description('Log out from the current Hub and clear stored credentials')
     .action(
-      cliAction(async (options, command) => {
+      cliAction(async (_options, command) => {
         const globals = readGlobals(command);
         const { dataDir, timeoutMs, json } = globals;
         const { hubUrl } = await readCliConfig(dataDir);
@@ -57,7 +57,7 @@ export function registerAuthCommands(program: Command): void {
     .command('health')
     .description('Check Hub health and reachability')
     .action(
-      cliAction(async (options, command) => {
+      cliAction(async (_options, command) => {
         const globals = readGlobals(command);
         const hubUrl = globals.hubUrl ?? (await readCliConfig(globals.dataDir)).hubUrl;
         if (!hubUrl) {

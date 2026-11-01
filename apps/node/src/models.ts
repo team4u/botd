@@ -87,7 +87,7 @@ export function resolveProviderApiKey(providerId: string): string | undefined {
   return override?.trim() ? override.trim() : undefined;
 }
 
-export async function configureProviderAuth(runtime: ModelRuntime, dataDir: string, providerId: string): Promise<void> {
+export async function configureProviderAuth(runtime: ModelRuntime, providerId: string): Promise<void> {
   const key = resolveProviderApiKey(providerId);
   if (key) {
     const provider = runtime.getProvider(providerId);

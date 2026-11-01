@@ -6,6 +6,8 @@
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
     "noEmit": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "lib": ["DOM", "DOM.Iterable", "ESNext"],
     "paths": {
       "@botd/protocol": ["../../packages/protocol/src/index.ts"]

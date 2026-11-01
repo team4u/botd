@@ -117,7 +117,7 @@ export function registerBotsCommands(program: Command): void {
     .command('delete <botId>')
     .description('Delete a BOT configuration')
     .action((botId: string, options: Record<string, unknown>, command: Command) =>
-      cliAction(async (options, command) => {
+      cliAction(async (_options, command) => {
         const g = readGlobals(command);
         const client = await HubClient.connect(g);
         const result = await client.delete<{ ok: true }>(`/api/bots/${encodeURIComponent(botId)}`);
@@ -131,7 +131,7 @@ export function registerBotsCommands(program: Command): void {
     .command('get <botId>')
     .description("Read a BOT's SYSTEM.md")
     .action((botId: string, options: Record<string, unknown>, command: Command) =>
-      cliAction(async (options, command) => {
+      cliAction(async (_options, command) => {
         const g = readGlobals(command);
         const client = await HubClient.connect(g);
         const result = await client.get<{ content: string }>(`/api/bots/${encodeURIComponent(botId)}/system`);
@@ -161,7 +161,7 @@ export function registerBotsCommands(program: Command): void {
     .command('get <botId>')
     .description("Read a BOT's MEMORY.md")
     .action((botId: string, options: Record<string, unknown>, command: Command) =>
-      cliAction(async (options, command) => {
+      cliAction(async (_options, command) => {
         const g = readGlobals(command);
         const client = await HubClient.connect(g);
         const result = await client.get<{ content: string }>(`/api/bots/${encodeURIComponent(botId)}/memory`);
@@ -191,7 +191,7 @@ export function registerBotsCommands(program: Command): void {
     .command('list <botId>')
     .description("List a BOT's environment variables")
     .action((botId: string, options: Record<string, unknown>, command: Command) =>
-      cliAction(async (options, command) => {
+      cliAction(async (_options, command) => {
         const g = readGlobals(command);
         const client = await HubClient.connect(g);
         const result = await client.get<{ keys: string[]; env: Record<string, string> }>(
@@ -231,7 +231,7 @@ export function registerBotsCommands(program: Command): void {
     .command('unset <botId> <keys...>')
     .description("Remove environment variables by key")
     .action((botId: string, keys: string[], options: Record<string, unknown>, command: Command) =>
-      cliAction(async (options, command) => {
+      cliAction(async (_options, command) => {
         const g = readGlobals(command);
         const client = await HubClient.connect(g);
         let lastResult: unknown;
