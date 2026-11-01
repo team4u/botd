@@ -115,7 +115,8 @@ export class NodeConnectionManager {
           || !['linux', 'darwin', 'win32'].includes(info.platform)
           || !Array.isArray(info.bots) || !Array.isArray(info.skills)
           || (info.pid !== undefined && info.pid !== null && (typeof info.pid !== 'number' || !Number.isFinite(info.pid)))
-          || (info.startedAt !== undefined && info.startedAt !== null && typeof info.startedAt !== 'string')) {
+          || (info.startedAt !== undefined && info.startedAt !== null && typeof info.startedAt !== 'string')
+          || (info.version !== undefined && info.version !== null && (typeof info.version !== 'string' || !info.version.trim()))) {
           throw new Error('Invalid node registration');
         }
         if (info.nodeId !== nodeId) {
@@ -157,7 +158,7 @@ export class NodeConnectionManager {
         // Reconcile the cache with the node's authoritative local inventory.
         this.db.db.exec('BEGIN');
         try {
-          this.db.updateNodeMetadata(nodeId, info.name, info.platform, info.skills, extensions, pid, startedAt);
+          this.db.updateNodeMetadata(nodeId, info.name, info.platform, info.skills, extensions, pid, startedAt, info.version);
           for (const cached of this.db.getBotsForNode(nodeId)) {
             if (!botIds.has(cached.id)) this.db.deleteBot(cached.id);
           }
