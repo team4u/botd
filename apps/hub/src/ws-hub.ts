@@ -1,9 +1,15 @@
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createBirpc, type BirpcReturn } from 'birpc';
 import {
+  type ArtifactRecord,
   HubRpcFunctions,
+  type MessageAttachment,
   NodeRpcFunctions,
   serializeRpcMessage,
 } from '@botd/protocol';
@@ -12,8 +18,39 @@ import type { AuthManager } from './auth.js';
 import type { SseHub } from './sse.js';
 
 export interface GroupRouterDelegate {
-  handleWakeup(sessionId: string, botId: string, wakeupMessage: string): Promise<void>;
+  handleWakeup(
+    sessionId: string,
+    botId: string,
+    wakeupMessage: string,
+    replyToBotId?: string,
+    options?: { noTurn?: boolean }
+  ): Promise<void>;
   getActiveBotId(sessionId: string): string | undefined;
+  isBotActiveInSession?(sessionId: string, botId: string): boolean;
+  onNodeOnline?(nodeId: string): void;
+  requestHumanInput?(input: {
+    sessionId: string;
+    botId: string;
+    prompt: string;
+    options?: string[];
+    timeoutSeconds?: number;
+  }): Promise<{ answer: string }>;
+}
+
+export interface ArtifactHandlerDelegate {
+  uploadArtifact(input: {
+    sessionId: string;
+    botId?: string;
+    filename: string;
+    mimeType?: string;
+    contentBase64: string;
+    message?: string;
+  }): Promise<ArtifactRecord>;
+  downloadArtifact(artifactId: string): Promise<{
+    artifact: ArtifactRecord;
+    contentBase64: string;
+  }>;
+  listSessionArtifacts(sessionId: string): Promise<ArtifactRecord[]>;
 }
 
 export interface NodeConnection {
@@ -29,6 +66,7 @@ export class NodeConnectionManager {
   private auth: AuthManager;
   private sseHub: SseHub;
   private router?: GroupRouterDelegate;
+  private artifactHandler?: ArtifactHandlerDelegate;
 
   constructor(db: HubDatabase, auth: AuthManager, sseHub: SseHub) {
     this.db = db;
@@ -39,6 +77,10 @@ export class NodeConnectionManager {
 
   setRouter(router: GroupRouterDelegate): void {
     this.router = router;
+  }
+
+  setArtifactHandler(handler: ArtifactHandlerDelegate): void {
+    this.artifactHandler = handler;
   }
 
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -159,6 +201,8 @@ export class NodeConnectionManager {
           throw error;
         }
 
+        this.router?.onNodeOnline?.(nodeId);
+
         return;
       },
 
@@ -187,9 +231,11 @@ export class NodeConnectionManager {
           return;
         }
 
-        // Enforce that this session is currently running and this bot is the active bot
-        const currentActiveBot = this.router?.getActiveBotId(event.sessionId);
-        if (currentActiveBot !== event.botId) {
+        // Enforce that this session is currently running and this bot is an active bot
+        const isActive = this.router?.isBotActiveInSession
+          ? this.router.isBotActiveInSession(event.sessionId, event.botId)
+          : this.router?.getActiveBotId(event.sessionId) === event.botId;
+        if (!isActive) {
           // Suppress stray or cancelled streams
           return;
         }
@@ -232,8 +278,197 @@ export class NodeConnectionManager {
         }
 
         if (this.router) {
-          await this.router.handleWakeup(input.sessionId, input.botId, input.wakeupMessage);
+          // 延时唤醒：在 Hub 上创建 once 触发器，到点再触发推理回合
+          if (typeof input.delaySeconds === 'number' && Number.isFinite(input.delaySeconds) && input.delaySeconds > 0) {
+            const ownerRow = this.db.db.prepare('SELECT owner_id FROM sessions WHERE id = ?').get(input.sessionId) as
+              | { owner_id: string | null }
+              | undefined;
+            const ownerId = ownerRow?.owner_id ?? 'user_admin';
+            const runAt = new Date(Date.now() + Math.floor(input.delaySeconds) * 1000).toISOString();
+            const prompt =
+              input.replyToBotId && !input.wakeupMessage.includes(`@${input.replyToBotId}`)
+                ? `${input.wakeupMessage} (cc @${input.replyToBotId})`
+                : input.wakeupMessage;
+            const trigger = this.db.createTrigger({
+              id: `trg_${randomUUID()}`,
+              sessionId: input.sessionId,
+              botId: input.botId,
+              ownerId,
+              name: `延时唤醒 (${input.botId})`,
+              kind: 'once',
+              runAt,
+              prompt,
+              enabled: true,
+            });
+            return { ok: true as const, scheduledTriggerId: trigger.id };
+          }
+          await this.router.handleWakeup(input.sessionId, input.botId, input.wakeupMessage, input.replyToBotId, {
+            noTurn: input.noTurn,
+          });
+          return { ok: true as const };
         }
+      },
+
+      requestHumanInput: async (input) => {
+        const bot = this.db.getBot(input.botId);
+        if (!bot || bot.nodeId !== nodeId) {
+          throw new Error(`Forbidden: bot ${input.botId} does not belong to node ${nodeId}`);
+        }
+
+        const session = this.db.getSession(input.sessionId);
+        if (!session) {
+          throw new Error(`Session ${input.sessionId} not found`);
+        }
+
+        const isMember = session.memberBotIds.includes(input.botId) || session.leadBotId === input.botId;
+        if (!isMember) {
+          throw new Error(`Forbidden: bot ${input.botId} is not a member of session ${input.sessionId}`);
+        }
+
+        if (!this.router?.requestHumanInput) {
+          throw new Error('Interactive human input is not supported by router');
+        }
+
+        return await this.router.requestHumanInput(input);
+      },
+
+      uploadArtifact: async (input) => {
+        if (this.artifactHandler) {
+          return await this.artifactHandler.uploadArtifact(input);
+        }
+
+        const session = this.db.getSession(input.sessionId);
+        if (!session) {
+          throw new Error(`Session ${input.sessionId} not found`);
+        }
+
+        if (input.botId) {
+          const bot = this.db.getBot(input.botId);
+          if (!bot || bot.nodeId !== nodeId) {
+            throw new Error(`Forbidden: bot ${input.botId} does not belong to node ${nodeId}`);
+          }
+          const isMember = session.memberBotIds.includes(input.botId) || session.leadBotId === input.botId;
+          if (!isMember) {
+            throw new Error(`Forbidden: bot ${input.botId} is not a member of session ${input.sessionId}`);
+          }
+        }
+
+        const artifactId = `art_${randomUUID()}`;
+        const buffer = Buffer.from(input.contentBase64, 'base64');
+        const sizeBytes = buffer.length;
+        const mimeType = input.mimeType || 'application/octet-stream';
+        const storageDir = path.join(process.env.BOTD_HUB_DATA_DIR || path.join(os.homedir(), '.botd'), 'artifacts');
+        fs.mkdirSync(storageDir, { recursive: true });
+        const storagePath = path.join(storageDir, artifactId);
+        fs.writeFileSync(storagePath, buffer);
+
+        let artifact: ArtifactRecord;
+        if (typeof (this.db as any).createArtifact === 'function') {
+          artifact = (this.db as any).createArtifact({
+            id: artifactId,
+            sessionId: input.sessionId,
+            filename: input.filename,
+            mimeType,
+            sizeBytes,
+            senderBotId: input.botId,
+            storagePath,
+          });
+        } else {
+          artifact = {
+            id: artifactId,
+            sessionId: input.sessionId,
+            filename: input.filename,
+            mimeType,
+            sizeBytes,
+            senderBotId: input.botId,
+            createdAt: new Date().toISOString(),
+          };
+        }
+
+        this.sseHub.broadcast(input.sessionId, {
+          type: 'artifact_created',
+          sessionId: input.sessionId,
+          artifact,
+        });
+
+        if (input.message) {
+          const attachment: MessageAttachment = {
+            id: artifact.id,
+            filename: artifact.filename,
+            mimeType: artifact.mimeType,
+            sizeBytes: artifact.sizeBytes,
+            url: `/api/artifacts/${artifact.id}`,
+          };
+          const msg = (this.db as any).createMessage({
+            id: `msg_${randomUUID()}`,
+            sessionId: input.sessionId,
+            role: 'assistant',
+            senderBotId: input.botId,
+            content: input.message,
+            attachments: [attachment],
+          });
+          this.sseHub.broadcast(input.sessionId, {
+            type: 'message_created',
+            message: msg.message,
+          });
+        }
+
+        return artifact;
+      },
+
+      downloadArtifact: async (artifactId: string) => {
+        if (this.artifactHandler) {
+          return await this.artifactHandler.downloadArtifact(artifactId);
+        }
+
+        let artifact: ArtifactRecord | undefined;
+        let storagePath: string | undefined;
+
+        if (typeof (this.db as any).getArtifactWithStoragePath === 'function') {
+          const res = (this.db as any).getArtifactWithStoragePath(artifactId);
+          if (res) {
+            artifact = res;
+            storagePath = res.storagePath;
+          }
+        }
+
+        if (!storagePath) {
+          storagePath = path.join(process.env.BOTD_HUB_DATA_DIR || path.join(os.homedir(), '.botd'), 'artifacts', artifactId);
+        }
+
+        if (!fs.existsSync(storagePath)) {
+          throw new Error(`Artifact ${artifactId} not found`);
+        }
+
+        if (!artifact) {
+          const stat = fs.statSync(storagePath);
+          artifact = {
+            id: artifactId,
+            sessionId: '',
+            filename: artifactId,
+            mimeType: 'application/octet-stream',
+            sizeBytes: stat.size,
+            createdAt: stat.birthtime.toISOString(),
+          };
+        }
+
+        const contentBase64 = fs.readFileSync(storagePath).toString('base64');
+        return {
+          artifact,
+          contentBase64,
+        };
+      },
+
+      listSessionArtifacts: async (sessionId: string) => {
+        if (this.artifactHandler) {
+          return await this.artifactHandler.listSessionArtifacts(sessionId);
+        }
+
+        if (typeof (this.db as any).listSessionArtifacts === 'function') {
+          return (this.db as any).listSessionArtifacts(sessionId);
+        }
+
+        return [];
       },
     };
 

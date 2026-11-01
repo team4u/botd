@@ -33,3 +33,13 @@ export interface BotWithNode extends BotConfig {
   nodeName?: string;
   nodeStatus?: NodeRecord['status'];
 }
+
+export type {
+  ArtifactRecord,
+  MessageAttachment,
+  PendingAskRecord,
+  TriggerKind,
+  TriggerRecord,
+  CreateTriggerInput,
+} from '@botd/protocol';
+

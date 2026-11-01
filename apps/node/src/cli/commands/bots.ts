@@ -1,5 +1,5 @@
 import { Command, Option } from 'commander';
-import type { BotConfig, SaveBotInput } from '@botd/protocol';
+import type { BotConfig, SaveBotInput, ThinkingLevel } from '@botd/protocol';
 import { cliAction, readGlobals } from '../context.js';
 import { CliError } from '../errors.js';
 import { HubClient } from '../hub-client.js';
@@ -29,7 +29,7 @@ export function registerBotsCommands(program: Command): void {
     .option('--desc <description>', 'BOT description')
     .addOption(
       new Option('--thinking <level>', 'Thinking budget level')
-        .choices(['low', 'medium', 'high'])
+        .choices(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
         .default('medium'),
     )
     .option('--skill <ids...>', 'Skill ID(s) to enable')
@@ -53,7 +53,7 @@ export function registerBotsCommands(program: Command): void {
           description: (options.desc as string | undefined) ?? '',
           modelProvider,
           modelId,
-          thinkingLevel: options.thinking as 'low' | 'medium' | 'high',
+          thinkingLevel: options.thinking as ThinkingLevel,
           enabledSkills: (options.skill as string[] | undefined) ?? [],
           enabledExtensions: (options.extension as string[] | undefined) ?? [],
           systemMd,
@@ -72,7 +72,7 @@ export function registerBotsCommands(program: Command): void {
     .option('--model <provider/modelId>', 'Model in <provider>/<modelId> format')
     .addOption(
       new Option('--thinking <level>', 'Thinking budget level')
-        .choices(['low', 'medium', 'high']),
+        .choices(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
     )
     .option('--skill <ids...>', 'Skill ID(s) to enable')
     .option('--extension <ids...>', 'Extension ID(s) to enable')
@@ -96,7 +96,7 @@ export function registerBotsCommands(program: Command): void {
           body.modelId = modelId;
         }
         if (options.thinking !== undefined) {
-          body.thinkingLevel = options.thinking as 'low' | 'medium' | 'high';
+          body.thinkingLevel = options.thinking as ThinkingLevel;
         }
         if (options.skill !== undefined) {
           body.enabledSkills = options.skill as string[];
@@ -184,6 +184,65 @@ export function registerBotsCommands(program: Command): void {
     );
 
   bots.addCommand(memory);
+
+  const env = new Command('env').description("Manage a BOT's environment variables (secrets)");
+
+  env
+    .command('list <botId>')
+    .description("List a BOT's environment variables")
+    .action((botId: string, options: Record<string, unknown>, command: Command) =>
+      cliAction(async (options, command) => {
+        const g = readGlobals(command);
+        const client = await HubClient.connect(g);
+        const result = await client.get<{ keys: string[]; env: Record<string, string> }>(
+          `/api/bots/${encodeURIComponent(botId)}/env`,
+        );
+        printResult(result, g.json);
+      })(options, command),
+    );
+
+  env
+    .command('set <botId> <pairs...>')
+    .description("Set one or more KEY=VALUE environment variables (e.g. GITHUB_TOKEN=xxx)")
+    .option('--replace', 'Replace all existing variables instead of merging')
+    .action((botId: string, pairs: string[], options: Record<string, unknown>, command: Command) =>
+      cliAction(async (options, command) => {
+        const g = readGlobals(command);
+        const client = await HubClient.connect(g);
+        const parsedEnv: Record<string, string> = {};
+        for (const pair of pairs) {
+          const eq = pair.indexOf('=');
+          const key = eq > 0 ? pair.slice(0, eq) : '';
+          const value = eq >= 0 ? pair.slice(eq + 1) : '';
+          if (eq < 0 || !key) {
+            throw new CliError(`Invalid KEY=VALUE pair: "${pair}"`);
+          }
+          parsedEnv[key] = value;
+        }
+        const result = await client.put(`/api/bots/${encodeURIComponent(botId)}/env`, {
+          env: parsedEnv,
+          merge: !options.replace,
+        });
+        printResult(result, g.json);
+      })(options, command),
+    );
+
+  env
+    .command('unset <botId> <keys...>')
+    .description("Remove environment variables by key")
+    .action((botId: string, keys: string[], options: Record<string, unknown>, command: Command) =>
+      cliAction(async (options, command) => {
+        const g = readGlobals(command);
+        const client = await HubClient.connect(g);
+        let lastResult: unknown;
+        for (const key of keys) {
+          lastResult = await client.delete(`/api/bots/${encodeURIComponent(botId)}/env/${encodeURIComponent(key)}`);
+        }
+        printResult(lastResult, g.json);
+      })(options, command),
+    );
+
+  bots.addCommand(env);
 
   program.addCommand(bots);
 }

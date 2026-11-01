@@ -503,6 +503,47 @@ test('node removal disconnects the agent and revokes its credentials', async t =
   assert.equal((await f.request('/api/nodes/ghost', 'DELETE')).status, 404);
 });
 
+test('force removal discards an offline node together with its cached bots', async t => {
+  const f = await fixture(t);
+  const node = await f.addNode(['bot-x', 'bot-y']);
+
+  // Simulate the machine vanishing: the socket drops and the node goes offline
+  node.socket.terminate();
+  await waitFor(() => f.json('/api/nodes'), list => list[0]?.status === 'offline');
+
+  // Regular removal is still blocked (its bots cannot be deleted without the agent)
+  const blocked = await f.request(`/api/nodes/${node.identity.nodeId}`, 'DELETE');
+  assert.equal(blocked.status, 409, 'offline node hosting bots cannot be removed regularly');
+
+  // Deleting a bot on the offline node is a 503 — the historical deadlock
+  assert.equal((await f.request('/api/bots/bot-x', 'DELETE')).status, 503);
+
+  // Force removal unlocks it: cache dropped, node gone, bot records purged
+  await f.json(`/api/nodes/${node.identity.nodeId}?force=1`, 'DELETE');
+  assert.equal((await f.json('/api/nodes')).length, 0, 'forced node disappears from the registry');
+  assert.equal((await f.request('/api/bots/bot-x/system', 'GET')).status, 404, 'cached bots of the forced node are purged');
+
+  // Old credentials no longer authenticate a reconnect
+  const stale = new WebSocket(`${f.base.replace('http:', 'ws:')}/ws/node?nodeId=${node.identity.nodeId}&token=${node.identity.token}`);
+  stale.on('error', () => {});
+  const [, response] = (await once(stale, 'unexpected-response')) as [any, any];
+  assert.equal(response.statusCode, 401, 'stale node token must be rejected after force removal');
+  stale.terminate();
+});
+
+test('force removal of an online node best-effort deletes its local bots', async t => {
+  const f = await fixture(t);
+  const node = await f.addNode(['bot-z']);
+
+  const [closed] = await Promise.all([
+    once(node.socket, 'close'),
+    f.json(`/api/nodes/${node.identity.nodeId}?force=1`, 'DELETE'),
+  ]);
+  assert(closed, 'live node connection must be closed on force removal');
+  assert.deepEqual(node.bots.map(bot => bot.id), [], 'online node is asked to delete its local bots');
+  assert.equal((await f.json('/api/nodes')).length, 0);
+});
+
 test('SQLite schema migration adds extensions columns to legacy tables without losing rows', async t => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-hub-migration-'));
   const dbPath = path.join(dir, 'legacy.sqlite');

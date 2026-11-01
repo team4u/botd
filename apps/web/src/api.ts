@@ -11,8 +11,16 @@ import type {
   ProviderAuthType,
   ProviderLoginState,
   ChatCommand,
+  ArtifactRecord,
+  MessageAttachment,
+  PendingAskRecord,
+  TriggerRecord,
+  CreateTriggerInput,
+  MessageSearchHit,
 } from '@botd/protocol';
 import type { UserInfo } from './types';
+
+export type { MessageSearchHit };
 
 export class ApiError extends Error {
   status: number;
@@ -202,8 +210,9 @@ export const api = {
     });
   },
 
-  async deleteNode(nodeId: string): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>(`/api/nodes/${encodeURIComponent(nodeId)}`, {
+  async deleteNode(nodeId: string, force = false): Promise<{ ok: boolean }> {
+    const query = force ? '?force=1' : '';
+    return request<{ ok: boolean }>(`/api/nodes/${encodeURIComponent(nodeId)}${query}`, {
       method: 'DELETE',
     });
   },
@@ -236,6 +245,20 @@ export const api = {
     return request<{ ok: boolean }>(
       `/api/nodes/${encodeURIComponent(nodeId)}/skills/${encodeURIComponent(skillId)}`,
       { method: 'DELETE' }
+    );
+  },
+
+  async syncSkillAcrossNodes(
+    sourceNodeId: string,
+    skillId: string,
+    targetNodeIds: string[]
+  ): Promise<{ ok: boolean; syncedNodeIds: string[]; failedNodeIds: string[] }> {
+    return request<{ ok: boolean; syncedNodeIds: string[]; failedNodeIds: string[] }>(
+      `/api/nodes/${encodeURIComponent(sourceNodeId)}/skills/${encodeURIComponent(skillId)}/sync`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ targetNodeIds }),
+      }
     );
   },
 
@@ -323,6 +346,29 @@ export const api = {
     return request<ChatCommand[]>(`/api/bots/${encodeURIComponent(botId)}/commands`);
   },
 
+  // Bot environment variables (secrets)
+  async getBotEnv(
+    botId: string
+  ): Promise<{ keys: string[]; env: Record<string, string> }> {
+    return request<{ keys: string[]; env: Record<string, string> }>(
+      `/api/bots/${encodeURIComponent(botId)}/env`
+    );
+  },
+
+  async putBotEnv(
+    botId: string,
+    env: Record<string, string>,
+    merge = false
+  ): Promise<{ ok: true; keys: string[]; env: Record<string, string> }> {
+    return request<{ ok: true; keys: string[]; env: Record<string, string> }>(
+      `/api/bots/${encodeURIComponent(botId)}/env`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ env, merge }),
+      }
+    );
+  },
+
   // Sessions
   async getSessions(): Promise<SessionRecord[]> {
     return request<SessionRecord[]>('/api/sessions');
@@ -355,10 +401,17 @@ export const api = {
     });
   },
 
-  async sendMessage(sessionId: string, content: string): Promise<MessageRecord> {
+  async sendMessage(
+    sessionId: string,
+    content: string,
+    attachments?: MessageAttachment[]
+  ): Promise<MessageRecord> {
     return request<MessageRecord>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({
+        content,
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
+      }),
     });
   },
 
@@ -397,6 +450,105 @@ export const api = {
     return request<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: 'DELETE',
     });
+  },
+
+  // Artifacts
+  async uploadArtifact(
+    sessionId: string,
+    input: { filename: string; mimeType?: string; contentBase64: string }
+  ): Promise<ArtifactRecord & { url: string }> {
+    return request<ArtifactRecord & { url: string }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/artifacts`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }
+    );
+  },
+
+  async listSessionArtifacts(sessionId: string): Promise<ArtifactRecord[]> {
+    return request<ArtifactRecord[]>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/artifacts`
+    );
+  },
+
+  // Asks (Human-in-the-Loop)
+  async getPendingAsks(sessionId: string): Promise<PendingAskRecord[]> {
+    return request<PendingAskRecord[]>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/asks`
+    );
+  },
+
+  async respondToAsk(
+    sessionId: string,
+    askId: string,
+    answer: string
+  ): Promise<{ ok: boolean; ask: PendingAskRecord }> {
+    return request<{ ok: boolean; ask: PendingAskRecord }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/asks/${encodeURIComponent(askId)}/respond`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ answer }),
+      }
+    );
+  },
+
+  // Triggers
+  async listSessionTriggers(sessionId: string): Promise<TriggerRecord[]> {
+    return request<TriggerRecord[]>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/triggers`
+    );
+  },
+
+  async createSessionTrigger(
+    sessionId: string,
+    input: CreateTriggerInput
+  ): Promise<TriggerRecord> {
+    return request<TriggerRecord>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/triggers`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }
+    );
+  },
+
+  async updateTrigger(
+    triggerId: string,
+    patch: {
+      enabled?: boolean;
+      name?: string;
+      prompt?: string;
+      cronExpr?: string;
+    }
+  ): Promise<TriggerRecord> {
+    return request<TriggerRecord>(
+      `/api/triggers/${encodeURIComponent(triggerId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }
+    );
+  },
+
+  async deleteTrigger(triggerId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(
+      `/api/triggers/${encodeURIComponent(triggerId)}`,
+      {
+        method: 'DELETE',
+      }
+    );
+  },
+
+  // Global message search
+  async searchMessages(
+    query: string,
+    options?: { sessionId?: string; limit?: number }
+  ): Promise<MessageSearchHit[]> {
+    const params = new URLSearchParams({ q: query });
+    if (options?.sessionId) params.set('sessionId', options.sessionId);
+    if (options?.limit !== undefined) params.set('limit', String(options.limit));
+    return request<MessageSearchHit[]>(`/api/messages/search?${params.toString()}`);
   },
 };
 

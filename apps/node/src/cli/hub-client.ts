@@ -1,6 +1,7 @@
 import type { SessionSseEvent } from '@botd/protocol';
 import { readCliConfig, updateCliConfig } from './config.js';
 import { CliError } from './errors.js';
+import { readNodeIdentity } from '../storage.js';
 
 const TOKEN_COOKIE = 'botd_token=';
 
@@ -26,6 +27,9 @@ const normalizeUrl = (url: string): string => url.replace(/\/+$/, '');
  * Owns the auth lifecycle: lazy login, 401 auto-relogin (once), token persistence.
  */
 export class HubClient {
+  /** 节点凭据直通（node.json）：无 token/密码时用节点身份访问 Hub API */
+  private nodeAuth?: { nodeId: string; token: string };
+
   private constructor(
     private readonly baseUrl: string,
     private token: string | undefined,
@@ -42,11 +46,23 @@ export class HubClient {
   static async connect(options: HubClientOptions): Promise<HubClient> {
     const config = await readCliConfig(options.dataDir);
     const hubUrl = normalizeUrl(options.hubUrl || config.hubUrl || '');
+
+    // 无 token 且无密码（或连 hubUrl 都没配）时，尝试用 node.json 节点凭据免登录直通
+    const username = options.username || config.username || DEFAULT_USERNAME;
+    const password = options.password || config.password;
+    const hasToken = Boolean(config.hubUrl && normalizeUrl(config.hubUrl) === hubUrl && config.token);
+    if (!hasToken && !password) {
+      const nodeIdty = await readNodeIdentity(options.dataDir);
+      if (nodeIdty && (!options.hubUrl || !hubUrl || normalizeUrl(nodeIdty.hubUrl) === hubUrl)) {
+        const client = new HubClient(normalizeUrl(nodeIdty.hubUrl), undefined, username, undefined, options);
+        client.nodeAuth = { nodeId: nodeIdty.nodeId, token: nodeIdty.token };
+        return client;
+      }
+    }
+
     if (!hubUrl) {
       throw new CliError('No Hub configured. Run: botd login <hubUrl> --password <password>');
     }
-    const username = options.username || config.username || DEFAULT_USERNAME;
-    const password = options.password || config.password;
     // Never send a token that was issued by a different hub.
     const token = config.hubUrl && normalizeUrl(config.hubUrl) === hubUrl ? config.token : undefined;
 
@@ -120,7 +136,12 @@ export class HubClient {
   private headers(body?: unknown): Record<string, string> {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers['content-type'] = 'application/json';
-    if (this.token) headers.cookie = `${TOKEN_COOKIE}${this.token}`;
+    if (this.token) {
+      headers.cookie = `${TOKEN_COOKIE}${this.token}`;
+    } else if (this.nodeAuth) {
+      headers['x-botd-node-id'] = this.nodeAuth.nodeId;
+      headers['x-botd-node-token'] = this.nodeAuth.token;
+    }
     return headers;
   }
 
@@ -184,7 +205,11 @@ export class HubClient {
     const response = await fetch(`${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/events`, {
       headers: {
         accept: 'text/event-stream',
-        ...(this.token ? { cookie: `${TOKEN_COOKIE}${this.token}` } : {}),
+        ...(this.token
+          ? { cookie: `${TOKEN_COOKIE}${this.token}` }
+          : this.nodeAuth
+            ? { 'x-botd-node-id': this.nodeAuth.nodeId, 'x-botd-node-token': this.nodeAuth.token }
+            : {}),
       },
       signal: listeners.signal,
     }).catch((err: Error) => {

@@ -24,6 +24,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
   const [groupMode, setGroupMode] = useState<SessionMode>('lead');
   const [groupLeadBotId, setGroupLeadBotId] = useState<string>('');
   const [groupMemberBotIds, setGroupMemberBotIds] = useState<string[]>([]);
+  const [parallelRoundtable, setParallelRoundtable] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -31,6 +32,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       setError(null);
+      setParallelRoundtable(false);
       if (bots.length > 0) {
         const firstBot = bots[0];
         setGroupLeadBotId(firstBot.id);
@@ -82,6 +84,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
         mode: groupMode,
         leadBotId: groupLeadBotId || finalMembers[0],
         memberBotIds: finalMembers,
+        ...(groupMode === 'roundtable' ? { parallelRoundtable } : {}),
       });
       onClose();
     } catch (err: any) {
@@ -104,7 +107,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
 
         {/* 头部标题与关闭按钮 */}
         <div className="px-5 py-3.5 sm:px-6 sm:py-4 border-b border-zinc-100 dark:border-zinc-800/60 flex items-center justify-between shrink-0">
-          <h2 id="create-session-title" className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+          <h2 id="create-session-title" className="text-sm sm:text-base font-semibold text-zinc-900 dark:text-zinc-100">
             新建群聊
           </h2>
           <button
@@ -141,7 +144,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
                   value={groupTitle}
                   onChange={(e) => setGroupTitle(e.target.value)}
                   placeholder="例如：产品与架构研讨群"
-                  className="w-full px-3 py-2 text-base sm:text-sm bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-xl text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   required
                 />
               </div>
@@ -164,7 +167,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
                       <Sparkles className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
                       <span>主持模式</span>
                     </div>
-                    <p className="text-[10px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
                       由指定主持人优先响应，正文中可通过 @ 指定其他成员接力协作。
                     </p>
                   </button>
@@ -182,12 +185,33 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
                       <Users className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
                       <span>圆桌模式</span>
                     </div>
-                    <p className="text-[10px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
                       群成员按序依次发言，最后由总结人统一归纳陈词。
                     </p>
                   </button>
                 </div>
               </div>
+
+              {groupMode === 'roundtable' && (
+                <div className="p-3 bg-purple-50/50 dark:bg-purple-950/20 border border-purple-200/70 dark:border-purple-900/50 rounded-xl">
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={parallelRoundtable}
+                      onChange={(e) => setParallelRoundtable(e.target.checked)}
+                      className="mt-0.5 rounded border-zinc-300 dark:border-zinc-600 dark:bg-zinc-800 text-purple-600 focus:ring-purple-500 w-3.5 h-3.5 shrink-0"
+                    />
+                    <div>
+                      <span className="block text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                        独立盲评并发模式（Parallel Blind Review）
+                      </span>
+                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                        开启后所有成员将并发独立作答（互不可见本轮草稿），最后由主持人汇总裁决
+                      </p>
+                    </div>
+                  </label>
+                </div>
+              )}
 
               {/* 主持人 / 总结人选择 */}
               <div>
@@ -209,7 +233,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
                       setGroupMemberBotIds((prev) => [...prev, newLead]);
                     }
                   }}
-                  className="w-full px-3 py-2 text-base sm:text-sm bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-xl text-zinc-800 dark:text-zinc-100 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
                 >
                   {bots.map((bot) => (
                     <option key={bot.id} value={bot.id}>
@@ -217,7 +241,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
                     </option>
                   ))}
                 </select>
-                <p className="text-[10px] text-zinc-400 dark:text-zinc-500 mt-1">
+                <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1">
                   {groupMode === 'lead'
                     ? '默认由该成员先行响应并统筹分工'
                     : '所有成员按顺序依次发言后，由该成员最后总结陈词'}
@@ -255,16 +279,16 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
                           />
                           <div className="min-w-0">
                             <span className="font-semibold text-xs mr-1 truncate text-zinc-900 dark:text-zinc-100">{bot.name}</span>
-                            <span className="font-mono text-[10px] text-zinc-400 dark:text-zinc-500">@{bot.id}</span>
+                            <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500">@{bot.id}</span>
                             {isLead && (
-                              <span className="ml-1.5 px-1.5 py-0.2 bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 text-[9px] font-semibold rounded shrink-0">
+                              <span className="ml-1.5 px-1.5 py-0.2 bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 text-[11px] font-semibold rounded shrink-0">
                                 {groupMode === 'lead' ? '主持人' : '总结人'}
                               </span>
                             )}
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0 ml-2">
+                        <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0 ml-2">
                           {node && <span>{node.name}</span>}
                           <span className="font-mono bg-zinc-100 dark:bg-zinc-800 px-1 py-0.2 rounded text-zinc-500 dark:text-zinc-400">
                             {bot.modelId}

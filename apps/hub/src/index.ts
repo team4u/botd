@@ -5,9 +5,11 @@ import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { serve } from '@hono/node-server';
+import { isThinkingLevel } from '@botd/protocol';
 import type {
   BotConfig,
   CreateSessionInput,
+  MessageAttachment,
   PlatformType,
   SaveBotInput,
   SessionMode,
@@ -21,6 +23,9 @@ import { NodeConnectionManager } from './ws-hub.js';
 import { GroupRouter, extractMentions, parseSlashCommand } from './group-router.js';
 import { createStaticMiddleware } from './static.js';
 import { registerProviderRoutes } from './providers.js';
+import { registerArtifactRoutes } from './artifacts.js';
+import { registerTriggerRoutes } from './triggers.js';
+import { registerSkillSyncAndAskRoutes } from './skill-sync.js';
 
 export interface HubOptions {
   dbPath?: string;
@@ -56,7 +61,7 @@ const isBotConfig = (value: unknown): value is BotConfig => {
   if (!isObject(value)) return false;
   return isId(value.id) && isId(value.nodeId) && isText(value.name) && typeof value.description === 'string'
     && isText(value.modelProvider) && isText(value.modelId)
-    && (value.thinkingLevel === undefined || ['low', 'medium', 'high'].includes(String(value.thinkingLevel)))
+    && (value.thinkingLevel === undefined || isThinkingLevel(value.thinkingLevel))
     && Array.isArray(value.enabledSkills) && value.enabledSkills.every(isId)
     && (value.enabledExtensions === undefined || (Array.isArray(value.enabledExtensions) && value.enabledExtensions.every(isId)))
     && (value.webCommandNames === undefined || (Array.isArray(value.webCommandNames) && value.webCommandNames.every(isValidCommandName)));
@@ -95,14 +100,28 @@ export function createHub(options?: HubOptions): HubInstance {
     if (
       reqPath === '/api/health' ||
       (reqPath === '/api/auth/login' && method === 'POST') ||
-      (reqPath === '/api/nodes/pairing/exchange' && method === 'POST')
+      (reqPath === '/api/nodes/pairing/exchange' && method === 'POST') ||
+      (reqPath.startsWith('/api/webhooks/') && method === 'POST')
     ) {
       return next();
     }
 
     const cookie = c.req.header('cookie');
     const verified = auth.verifyCookie(cookie);
-    const user = verified ? db.getUser(verified.userId) : undefined;
+    let user = verified ? db.getUser(verified.userId) : undefined;
+    if (!user) {
+      const headerNodeId = c.req.header('x-botd-node-id');
+      const headerNodeToken = c.req.header('x-botd-node-token');
+      if (headerNodeId && headerNodeToken) {
+        const nodeWithSecret = db.getNodeWithSecret(headerNodeId);
+        if (nodeWithSecret && auth.verifyNodeToken(headerNodeToken, nodeWithSecret.tokenHash)) {
+          const ownerId = db.getNodeOwner(headerNodeId);
+          if (ownerId) {
+            user = db.getUser(ownerId);
+          }
+        }
+      }
+    }
     if (!user) {
       return c.json({ error: 'Unauthorized' }, 401);
     }
@@ -235,7 +254,7 @@ export function createHub(options?: HubOptions): HubInstance {
   // 6. Node, Skill, and Extension management
   app.get('/api/nodes', (c) => c.json(db.getAllNodesWithBots(c.get('user').id)));
 
-  app.delete('/api/nodes/:nodeId', (c) => {
+  app.delete('/api/nodes/:nodeId', async (c) => {
     const { nodeId } = c.req.param();
     const node = db.getNode(nodeId);
     if (!node) {
@@ -245,9 +264,20 @@ export function createHub(options?: HubOptions): HubInstance {
       return c.json({ error: 'Forbidden' }, 403);
     }
 
-    const bots = db.getBotsForNode(nodeId);
-    if (bots.length > 0) {
-      return c.json({ error: `Node still hosts ${bots.length} bot(s); delete them first` }, 409);
+    const hostedBots = db.getBotsForNode(nodeId);
+    if (hostedBots.length > 0) {
+      // Regular removal requires an empty node: the node is authoritative for its
+      // BOT directories, so deleting them needs the agent to be online.
+      if (c.req.query('force') !== '1') {
+        return c.json({ error: `Node still hosts ${hostedBots.length} bot(s); delete them first or force=1` }, 409);
+      }
+      // Force removal (node may be gone for good): drop the Hub cache and
+      // best-effort clean the node itself when it happens to be online.
+      const rpc = connections.getNodeRpc(nodeId);
+      if (rpc) {
+        await Promise.allSettled(hostedBots.map((bot) => rpc.deleteBot(bot.id)));
+      }
+      db.deleteBotsForNode(nodeId);
     }
 
     connections.disconnectNode(nodeId);
@@ -710,7 +740,144 @@ export function createHub(options?: HubOptions): HubInstance {
     }
   });
 
+  const ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  const RESERVED_ENV_KEYS = new Set(['PATH', 'PWD', 'HOME', 'USER', 'SHELL']);
+  const isValidEnvKey = (key: string): boolean =>
+    ENV_KEY_REGEX.test(key) && !RESERVED_ENV_KEYS.has(key.toUpperCase()) && !key.toUpperCase().startsWith('BOTD_');
+
+  const readNodeBotEnv = async (rpc: NonNullable<ReturnType<typeof connections.getNodeRpc>>, botId: string): Promise<Record<string, string>> => {
+    if (typeof rpc.getBotEnv === 'function') {
+      try {
+        return await rpc.getBotEnv(botId);
+      } catch {
+        // Fallback to readFile
+      }
+    }
+    const raw = await rpc.readFile({ kind: 'env', botId, id: 'env.json' });
+    if (!raw || !raw.trim()) return {};
+    const parsed = JSON.parse(raw);
+    return isObject(parsed) ? (parsed as Record<string, string>) : {};
+  };
+
+  const writeNodeBotEnv = async (
+    rpc: NonNullable<ReturnType<typeof connections.getNodeRpc>>,
+    botId: string,
+    env: Record<string, string>,
+  ): Promise<Record<string, string>> => {
+    if (typeof rpc.setBotEnv === 'function') {
+      try {
+        return await rpc.setBotEnv(botId, env);
+      } catch {
+        // Fallback to writeFile
+      }
+    }
+    await rpc.writeFile({ kind: 'env', botId, id: 'env.json' }, JSON.stringify(env, null, 2));
+    return env;
+  };
+
+  app.get('/api/bots/:botId/env', async (c) => {
+    const botId = c.req.param('botId');
+    const bot = db.getBot(botId);
+    if (!bot) {
+      return c.json({ error: 'Bot not found' }, 404);
+    }
+    if (db.getNodeOwner(bot.nodeId) !== c.get('user').id) {
+      return c.json({ error: 'Forbidden' }, 403);
+    }
+    const rpc = connections.getNodeRpc(bot.nodeId);
+    if (!rpc) {
+      return c.json({ error: 'Node is offline' }, 503);
+    }
+    try {
+      const env = await readNodeBotEnv(rpc, botId);
+      return c.json({ keys: Object.keys(env), env });
+    } catch (err: any) {
+      return c.json({ error: err?.message || 'Failed to read bot env' }, 500);
+    }
+  });
+
+  app.put('/api/bots/:botId/env', async (c) => {
+    const botId = c.req.param('botId');
+    const bot = db.getBot(botId);
+    if (!bot) {
+      return c.json({ error: 'Bot not found' }, 404);
+    }
+    if (db.getNodeOwner(bot.nodeId) !== c.get('user').id) {
+      return c.json({ error: 'Forbidden' }, 403);
+    }
+    const rpc = connections.getNodeRpc(bot.nodeId);
+    if (!rpc) {
+      return c.json({ error: 'Node is offline' }, 503);
+    }
+    const body = await c.req.json<{ env?: Record<string, unknown>; merge?: boolean }>().catch(() => null);
+    if (!body || !isObject(body.env)) {
+      return c.json({ error: 'env must be a key-value object' }, 400);
+    }
+    const sanitized: Record<string, string> = {};
+    for (const [k, v] of Object.entries(body.env)) {
+      if (!isValidEnvKey(k)) {
+        return c.json({ error: `Invalid or reserved environment variable name: "${k}"` }, 400);
+      }
+      if (typeof v !== 'string') {
+        return c.json({ error: `Environment variable "${k}" must be a string` }, 400);
+      }
+      sanitized[k] = v;
+    }
+    try {
+      const base = body.merge ? await readNodeBotEnv(rpc, botId) : {};
+      const nextEnv = { ...base, ...sanitized };
+      const saved = await writeNodeBotEnv(rpc, botId, nextEnv);
+      return c.json({ ok: true, keys: Object.keys(saved), env: saved });
+    } catch (err: any) {
+      return c.json({ error: err?.message || 'Failed to write bot env' }, 500);
+    }
+  });
+
+  app.delete('/api/bots/:botId/env/:key', async (c) => {
+    const botId = c.req.param('botId');
+    const key = c.req.param('key');
+    const bot = db.getBot(botId);
+    if (!bot) {
+      return c.json({ error: 'Bot not found' }, 404);
+    }
+    if (db.getNodeOwner(bot.nodeId) !== c.get('user').id) {
+      return c.json({ error: 'Forbidden' }, 403);
+    }
+    const rpc = connections.getNodeRpc(bot.nodeId);
+    if (!rpc) {
+      return c.json({ error: 'Node is offline' }, 503);
+    }
+    try {
+      const current = await readNodeBotEnv(rpc, botId);
+      delete current[key];
+      const saved = await writeNodeBotEnv(rpc, botId, current);
+      return c.json({ ok: true, keys: Object.keys(saved), env: saved });
+    } catch (err: any) {
+      return c.json({ error: err?.message || 'Failed to delete bot env key' }, 500);
+    }
+  });
+
   // 8. Session management
+  app.get('/api/messages/search', (c) => {
+    const q = (c.req.query('q') ?? '').trim();
+    if (!q) {
+      return c.json({ error: 'Missing search query parameter "q"' }, 400);
+    }
+    const sessionId = c.req.query('sessionId')?.trim() || undefined;
+    if (sessionId) {
+      const session = db.getSession(sessionId);
+      if (!session) return c.json({ error: 'Session not found' }, 404);
+      if (getSessionOwnerId(sessionId) !== c.get('user').id) {
+        return c.json({ error: 'Forbidden' }, 403);
+      }
+    }
+    const rawLimit = Number(c.req.query('limit') || '30');
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 100) : 30;
+    const hits = typeof (db as any).searchMessages === 'function'
+      ? (db as any).searchMessages(c.get('user').id, q, { sessionId, limit })
+      : [];
+    return c.json(hits);
+  });
   app.get('/api/sessions', (c) => c.json(db.getAllSessions(c.get('user').id)));
 
   app.post('/api/sessions', async (c) => {
@@ -755,6 +922,7 @@ export function createHub(options?: HubOptions): HubInstance {
       leadBotId: body.leadBotId,
       memberBotIds,
       ownerId: user.id,
+      parallelRoundtable: Boolean(body.parallelRoundtable),
     });
 
     return c.json(session);
@@ -770,7 +938,7 @@ export function createHub(options?: HubOptions): HubInstance {
       return c.json({ error: 'Forbidden' }, 403);
     }
 
-    const body = await c.req.json<{ title?: string; mode?: SessionMode; leadBotId?: string; memberBotIds?: string[]; archived?: boolean }>().catch(() => null);
+    const body = await c.req.json<{ title?: string; mode?: SessionMode; leadBotId?: string; memberBotIds?: string[]; archived?: boolean; parallelRoundtable?: boolean }>().catch(() => null);
     if (!isObject(body)) return c.json({ error: 'Invalid session configuration' }, 400);
     // 归档是纯 UI 分类标记，允许在运行中修改（如「开启新话题」时旧会话仍在后台执行）；
     // 标题/模式/负责人/成员会改变调度行为，运行中仍需拒绝。
@@ -783,6 +951,7 @@ export function createHub(options?: HubOptions): HubInstance {
       return c.json({ error: 'Stop the session before changing its configuration' }, 409);
     }
     if (body.archived !== undefined && typeof body.archived !== 'boolean') return c.json({ error: 'Invalid archived flag' }, 400);
+    if (body.parallelRoundtable !== undefined && typeof body.parallelRoundtable !== 'boolean') return c.json({ error: 'Invalid parallelRoundtable flag' }, 400);
     if (body.title !== undefined && !isText(body.title)) return c.json({ error: 'Invalid session title' }, 400);
     if (body.leadBotId !== undefined && !isId(body.leadBotId)) return c.json({ error: 'Invalid lead BOT' }, 400);
     if (body.memberBotIds !== undefined && (!Array.isArray(body.memberBotIds) || !body.memberBotIds.every(isId))) {
@@ -814,7 +983,14 @@ export function createHub(options?: HubOptions): HubInstance {
     if (!memberBotIds.includes(leadBotId) || (mode === 'direct' && memberBotIds.length !== 1)) {
       return c.json({ error: 'Lead BOT must be a member; direct sessions have exactly one member' }, 400);
     }
-    const updated = db.updateSession(id, { title: body.title?.trim(), mode, leadBotId, memberBotIds, archived: body.archived });
+    const updated = db.updateSession(id, {
+      title: body.title?.trim(),
+      mode,
+      leadBotId,
+      memberBotIds,
+      archived: body.archived,
+      parallelRoundtable: body.parallelRoundtable,
+    });
     return c.json(updated);
   });
 
@@ -840,29 +1016,33 @@ export function createHub(options?: HubOptions): HubInstance {
       return c.json({ error: 'Forbidden' }, 403);
     }
 
-    const body = (await c.req.json<{ content?: string }>().catch(() => ({ content: '' }))) as {
+    const body = (await c.req.json<{ content?: string; attachments?: MessageAttachment[] }>().catch(() => ({ content: '' }))) as {
       content?: string;
+      attachments?: MessageAttachment[];
     };
-    if (!body || typeof body.content !== 'string' || !body.content.trim()) {
+    const attachments = Array.isArray(body.attachments) ? body.attachments : [];
+    if ((typeof body.content !== 'string' || !body.content.trim()) && attachments.length === 0) {
       return c.json({ error: 'Missing content' }, 400);
     }
+    const content = typeof body.content === 'string' ? body.content : '';
 
     const validBots = new Set([session.leadBotId, ...session.memberBotIds]);
-    const cmdResult = parseSlashCommand(body.content, validBots);
+    const cmdResult = parseSlashCommand(content, validBots);
     if (cmdResult.error) {
       return c.json({ error: cmdResult.error }, 400);
     }
 
     const mentions = cmdResult.targetBotId
       ? [cmdResult.targetBotId]
-      : (cmdResult.isCommand ? [] : extractMentions(body.content, validBots));
+      : (cmdResult.isCommand ? [] : extractMentions(content, validBots));
 
     const msgResult = db.createMessage({
       id: `msg_${randomUUID()}`,
       sessionId: id,
       role: 'user',
-      content: body.content,
+      content,
       mentions,
+      attachments,
     });
 
     sseHub.broadcast(id, {
@@ -870,7 +1050,7 @@ export function createHub(options?: HubOptions): HubInstance {
       message: msgResult.message,
     });
 
-    router.handleUserMessage(id, msgResult.message.id, body.content, cmdResult.isCommand ? {
+    router.handleUserMessage(id, msgResult.message.id, content, cmdResult.isCommand ? {
       commandText: cmdResult.commandText!,
       targetBotId: cmdResult.targetBotId,
     } : undefined);
@@ -1076,6 +1256,9 @@ export function createHub(options?: HubOptions): HubInstance {
   });
 
   registerProviderRoutes(app, db, connections);
+  registerArtifactRoutes(app, db, sseHub, getSessionOwnerId);
+  const triggerScheduler = registerTriggerRoutes(app, db, router, getSessionOwnerId);
+  registerSkillSyncAndAskRoutes(app, db, connections, router, getSessionOwnerId);
 
   // 10. Serve static web files & SPA fallback
   app.use('*', createStaticMiddleware(options?.webDir));
@@ -1084,6 +1267,7 @@ export function createHub(options?: HubOptions): HubInstance {
   const close = async (): Promise<void> => {
     if (isClosed) return;
     isClosed = true;
+    triggerScheduler.stop();
     router.close();
     connections.close();
     sseHub.close();

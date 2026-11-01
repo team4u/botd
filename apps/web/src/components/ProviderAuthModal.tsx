@@ -368,7 +368,7 @@ export const ProviderAuthModal: React.FC<ProviderAuthModalProps> = ({
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">设备验证码</span>
               {event.expiresInSeconds && (
-                <span className="text-[10px] text-zinc-500 dark:text-zinc-400 font-mono">
+                <span className="text-[11px] text-zinc-500 dark:text-zinc-400 font-mono">
                   有效期: {event.expiresInSeconds}s
                 </span>
               )}
@@ -453,7 +453,7 @@ export const ProviderAuthModal: React.FC<ProviderAuthModalProps> = ({
             onChange={(e) => setPromptValue(e.target.value)}
             placeholder={prompt.placeholder || '请输入...'}
             disabled={submittingPrompt}
-            className="w-full px-3 py-2 text-base sm:text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+            className="w-full h-8 px-2.5 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
             autoFocus
           />
         )}
@@ -467,7 +467,7 @@ export const ProviderAuthModal: React.FC<ProviderAuthModalProps> = ({
               onChange={(e) => setPromptValue(e.target.value)}
               placeholder={prompt.placeholder || '请输入敏感信息/密钥...'}
               disabled={submittingPrompt}
-              className="w-full pl-3 pr-10 py-2 text-base sm:text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+              className="w-full pl-2.5 pr-8 py-1.5 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
               autoFocus
             />
             <button
@@ -490,7 +490,7 @@ export const ProviderAuthModal: React.FC<ProviderAuthModalProps> = ({
               placeholder={prompt.placeholder || '请在此粘贴授权回调页面 URL 或授权 Code...'}
               disabled={submittingPrompt}
               rows={3}
-              className="w-full p-2.5 text-base sm:text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono leading-relaxed resize-none text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+              className="w-full p-2 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono leading-relaxed resize-none text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
               autoFocus
             />
             <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
@@ -533,7 +533,7 @@ export const ProviderAuthModal: React.FC<ProviderAuthModalProps> = ({
                 value={promptValue}
                 onChange={(e) => setPromptValue(e.target.value)}
                 placeholder="请输入选项..."
-                className="w-full px-3 py-2 text-base sm:text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                className="w-full h-8 px-2.5 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
               />
             )}
           </div>

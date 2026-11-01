@@ -133,7 +133,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
             setOpen(false);
           }
         }}
-        className="w-full px-2.5 py-1.5 text-base sm:text-xs text-left bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500 disabled:opacity-60 flex items-center justify-between gap-2 cursor-pointer transition-colors hover:border-zinc-300 dark:hover:border-zinc-700"
+        className="w-full h-8 px-2.5 text-xs text-left bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500 disabled:opacity-60 flex items-center justify-between gap-2 cursor-pointer transition-colors hover:border-zinc-300 dark:hover:border-zinc-700"
       >
         <span className="truncate">
           {selected ? (
@@ -179,7 +179,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
                 <button
                   type="button"
                   onClick={() => commit(trimmedQuery)}
-                  className="w-full px-3 py-2 text-left text-xs flex items-center gap-2 hover:bg-zinc-100 dark:hover:bg-zinc-800/80 text-zinc-700 dark:text-zinc-300 cursor-pointer transition-colors"
+                  className="w-full px-2.5 py-1.5 text-left text-xs flex items-center gap-2 hover:bg-zinc-100 dark:hover:bg-zinc-800/80 text-zinc-700 dark:text-zinc-300 cursor-pointer transition-colors"
                 >
                   <Plus className="w-3 h-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
                   <span>
@@ -197,7 +197,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
                     onClick={() => commit(o.id)}
                     role="option"
                     aria-selected={isActive}
-                    className={`w-full px-3 py-2 text-left text-xs flex items-center justify-between gap-2 cursor-pointer transition-colors ${
+                    className={`w-full px-2.5 py-1.5 text-left text-xs flex items-center justify-between gap-2 cursor-pointer transition-colors ${
                       isActive
                         ? 'bg-zinc-100 dark:bg-zinc-800/80 font-medium'
                         : 'hover:bg-zinc-50 dark:hover:bg-zinc-800/50'
@@ -205,7 +205,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
                   >
                     <span className="truncate text-zinc-800 dark:text-zinc-200">{o.label}</span>
                     <span className="flex items-center gap-1.5 shrink-0">
-                      {o.hint && <span className="font-mono text-[10px] text-zinc-400 dark:text-zinc-500 truncate max-w-[160px]">{o.hint}</span>}
+                      {o.hint && <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate max-w-[160px]">{o.hint}</span>}
                       {isActive && <Check className="w-3 h-3 text-zinc-900 dark:text-zinc-100" />}
                     </span>
                   </button>
@@ -213,14 +213,14 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
               })}
 
               {filtered.length === 0 && !(allowCustom && trimmedQuery) && (
-                <p className="px-3 py-4 text-xs text-zinc-400 dark:text-zinc-500 text-center">{emptyText}</p>
+                <p className="px-3 py-3 text-xs text-zinc-400 dark:text-zinc-500 text-center">{emptyText}</p>
               )}
 
               {customTrigger && (
                 <button
                   type="button"
                   onClick={() => commit(customTrigger.id)}
-                  className="w-full px-3 py-2 text-left text-xs flex items-center gap-1.5 border-t border-zinc-100 dark:border-zinc-800/80 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 text-zinc-600 dark:text-zinc-400 cursor-pointer transition-colors"
+                  className="w-full px-2.5 py-1.5 text-left text-xs flex items-center gap-1.5 border-t border-zinc-100 dark:border-zinc-800/80 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 text-zinc-600 dark:text-zinc-400 cursor-pointer transition-colors"
                 >
                   <Plus className="w-3 h-3" />
                   <span>{customTrigger.label}</span>

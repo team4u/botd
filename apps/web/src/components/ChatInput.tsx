@@ -12,12 +12,15 @@ import {
   X,
   Check,
   Pencil,
+  Paperclip,
+  FileText,
 } from 'lucide-react';
-import type { BotConfig, NodeRecord, ChatCommand, MessageRecord } from '@botd/protocol';
+import type { BotConfig, NodeRecord, ChatCommand, MessageRecord, MessageAttachment } from '@botd/protocol';
 import { api } from '../api';
+import { formatFileSize } from './MessageItem';
 
 interface ChatInputProps {
-  onSendMessage: (content: string) => Promise<void>;
+  onSendMessage: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
   memberBots: BotConfig[];
   nodeMap: Map<string, NodeRecord>;
   sessionId?: string;
@@ -86,6 +89,11 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const [content, setContent] = useState('');
   const [sending, setSending] = useState(false);
   const [validationNotice, setValidationNotice] = useState<string | null>(null);
+
+  // 待发送附件（图片/文件）：上传完成后暂存，随消息一并发送
+  const [pendingAttachments, setPendingAttachments] = useState<MessageAttachment[]>([]);
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Mention 下拉菜单状态
   const [showMentions, setShowMentions] = useState(false);
@@ -189,8 +197,13 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     setShowSlashMenu(false);
     setShowMentions(false);
     setValidationNotice(null);
+    setPendingAttachments([]);
+    setUploadingFile(false);
     dismissedSlashRef.current = null;
     draftBeforeEditRef.current = null;
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
@@ -528,9 +541,89 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     checkTriggers();
   };
 
+  // 上传单个文件为会话产物并加入待发送附件列表；上传失败以输入框 notice 提示
+  const uploadFiles = useCallback(
+    async (files: FileList | File[]) => {
+      const sessionIdForUpload = currentSessionIdRef.current;
+      if (!sessionIdForUpload) {
+        setValidationNotice('当前无有效会话，无法上传附件');
+        return;
+      }
+      const list = Array.from(files);
+      if (list.length === 0) return;
+
+      setUploadingFile(true);
+      try {
+        for (const file of list) {
+          const contentBase64 = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const result = reader.result;
+              if (typeof result !== 'string') {
+                reject(new Error('读取文件失败'));
+                return;
+              }
+              // dataURL 去掉 "data:*;base64," 前缀，仅保留 Base64 载荷
+              const idx = result.indexOf(',');
+              resolve(idx >= 0 ? result.slice(idx + 1) : result);
+            };
+            reader.onerror = () => reject(new Error('读取文件失败'));
+            reader.readAsDataURL(file);
+          });
+
+          const uploaded = await api.uploadArtifact(sessionIdForUpload, {
+            filename: file.name,
+            mimeType: file.type || undefined,
+            contentBase64,
+          });
+
+          // 防竞态：上传期间切换会话则丢弃结果
+          if (currentSessionIdRef.current !== sessionIdForUpload) return;
+
+          setPendingAttachments((prev) => [
+            ...prev,
+            {
+              id: uploaded.id,
+              filename: uploaded.filename,
+              mimeType: uploaded.mimeType || file.type || 'application/octet-stream',
+              sizeBytes: uploaded.sizeBytes ?? file.size,
+              url: uploaded.url,
+            },
+          ]);
+        }
+      } catch (err: any) {
+        if (currentSessionIdRef.current === sessionIdForUpload) {
+          setValidationNotice(err?.message || '附件上传失败，请重试');
+        }
+      } finally {
+        if (currentSessionIdRef.current === sessionIdForUpload) {
+          setUploadingFile(false);
+        }
+      }
+    },
+    []
+  );
+
+  // 文件选择器选中文件后立即上传
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || e.target.files.length === 0) return;
+    void uploadFiles(e.target.files);
+    // 允许连续选择同一文件：每次清空 value
+    e.target.value = '';
+  };
+
+  // 粘贴板含文件（如截图）时自动上传为附件，不干扰正常文本粘贴
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = e.clipboardData?.files;
+    if (files && files.length > 0) {
+      e.preventDefault();
+      void uploadFiles(files);
+    }
+  };
+
   const handleSubmit = async () => {
     const trimmed = content.trim();
-    if (!trimmed || sending || disabled) return;
+    if ((!trimmed && pendingAttachments.length === 0) || sending || disabled) return;
 
     // 编辑态优先：提交编辑，成功后由服务端截断后续回复并重新生成
     if (editingMessage) {
@@ -577,11 +670,19 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     setShowSlashMenu(false);
     setValidationNotice(null);
 
+    // 纯附件发送时自动补充占位正文，保证消息流可读
+    const outgoingContent = trimmed || `[已发送附件: ${pendingAttachments.map((a) => a.filename).join(', ')}]`;
+    const outgoingAttachments = pendingAttachments;
+
     try {
-      await onSendMessage(trimmed);
-      // 仅在当前会话未变更时清空输入框，防止切会话后把新会话草稿清掉
+      await onSendMessage(outgoingContent, outgoingAttachments);
+      // 仅在当前会话未变更时清空输入框与附件，防止切会话后把新会话草稿清掉
       if (currentSessionIdRef.current === targetSessionId) {
         setContent('');
+        setPendingAttachments([]);
+        if (fileInputRef.current) {
+          fileInputRef.current.value = '';
+        }
         if (textareaRef.current) {
           textareaRef.current.style.height = 'auto';
         }
@@ -605,7 +706,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   };
 
   // 发送与停止按钮二合一逻辑：正在运行中且输入框没有排队的新内容时显示停止按钮
-  const showStopButton = Boolean(isRunning && !content.trim());
+  const showStopButton = Boolean(isRunning && !content.trim() && pendingAttachments.length === 0 && !uploadingFile);
 
   // 当前命令目标 BOT 名称
   const targetBotName = slashTargetBot?.name || (slashTargetBot as any)?.id || leadBotId || '主导智能体';
@@ -614,19 +715,19 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     switch (source) {
       case 'skill':
         return (
-          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-50 dark:bg-purple-950/40 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-800/50">
+          <span className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-purple-50 dark:bg-purple-950/40 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-800/50">
             技能
           </span>
         );
       case 'prompt':
         return (
-          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-800/50">
+          <span className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-800/50">
             提示词
           </span>
         );
       case 'extension':
         return (
-          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200/50 dark:border-amber-800/50">
+          <span className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200/50 dark:border-amber-800/50">
             扩展
           </span>
         );
@@ -702,7 +803,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                     {targetBotName}
                   </span>
                   {slashTargetBot && 'id' in slashTargetBot && (
-                    <span className="font-mono text-zinc-400 dark:text-zinc-500 text-[10px]">
+                    <span className="font-mono text-zinc-400 dark:text-zinc-500 text-[11px]">
                       @{slashTargetBot.id}
                     </span>
                   )}
@@ -711,7 +812,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             </div>
 
             {!isMultiTarget && !loadingCommands && !commandsError && (
-              <span className="text-[10px] text-zinc-400 dark:text-zinc-500 font-mono shrink-0 ml-2">
+              <span className="text-[11px] text-zinc-400 dark:text-zinc-500 font-mono shrink-0 ml-2">
                 共 {filteredCommands.length} 个
               </span>
             )}
@@ -867,7 +968,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                   </div>
 
                   {node && (
-                    <span className="text-[10px] text-zinc-400 dark:text-zinc-500 font-mono truncate max-w-[100px] shrink-0">
+                    <span className="text-[11px] text-zinc-400 dark:text-zinc-500 font-mono truncate max-w-[100px] shrink-0">
                       {node.name}
                     </span>
                   )}
@@ -880,7 +981,85 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
       {/* 现代悬浮胶囊输入框 */}
       <div className="max-w-4xl mx-auto">
+        {/* 待发送附件芯片：图片显示缩略图，文件显示文件名与体积，可逐个移除 */}
+        {(pendingAttachments.length > 0 || uploadingFile) && (
+          <div className="flex flex-wrap gap-1.5 mb-1.5 px-1">
+            {pendingAttachments.map((att) => (
+              <div
+                key={att.id}
+                className="group/att relative flex items-center gap-1.5 px-2 py-1.5 bg-white dark:bg-zinc-900 border border-zinc-200/90 dark:border-zinc-700/80 rounded-lg shadow-xs"
+              >
+                {att.mimeType.startsWith('image/') && att.url ? (
+                  <img
+                    src={att.url}
+                    alt={att.filename}
+                    className="w-8 h-8 rounded-md object-cover shrink-0 border border-zinc-100 dark:border-zinc-800"
+                  />
+                ) : (
+                  <FileText className="w-4 h-4 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                )}
+                <div className="flex flex-col min-w-0 max-w-[140px]">
+                  <span className="text-[11px] text-zinc-700 dark:text-zinc-200 truncate leading-tight">
+                    {att.filename}
+                  </span>
+                  {att.sizeBytes > 0 && (
+                    <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 leading-tight">
+                      {formatFileSize(att.sizeBytes)}
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPendingAttachments((prev) => prev.filter((a) => a.id !== att.id))
+                  }
+                  className="w-4 h-4 rounded-full flex items-center justify-center bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300 hover:bg-rose-500 hover:text-white transition-colors cursor-pointer shrink-0"
+                  aria-label={`移除附件 ${att.filename}`}
+                  title="移除附件"
+                >
+                  <X className="w-2.5 h-2.5" />
+                </button>
+              </div>
+            ))}
+            {uploadingFile && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1.5 border border-dashed border-zinc-300 dark:border-zinc-700 rounded-lg text-[11px] text-zinc-500 dark:text-zinc-400">
+                <Loader2 className="w-3.5 h-3.5 animate-spin-fast text-blue-600 dark:text-blue-400" />
+                <span>正在上传附件...</span>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="relative flex items-end gap-2 bg-zinc-50 dark:bg-zinc-900 border border-zinc-300/80 dark:border-zinc-700/80 rounded-2xl p-1.5 sm:p-2 focus-within:bg-white dark:focus-within:bg-zinc-900 focus-within:border-zinc-400 dark:focus-within:border-zinc-600 focus-within:ring-2 focus-within:ring-zinc-100 dark:focus-within:ring-zinc-800 transition-all shadow-xs">
+          {/* 附件上传：编辑态不提供（编辑仅重写文本），选择后立即上传为会话产物 */}
+          {!editingMessage && (
+            <>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                onChange={handleFileInputChange}
+                className="hidden"
+                aria-hidden="true"
+                tabIndex={-1}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={disabled || uploadingFile}
+                aria-label="上传附件"
+                title="上传附件（支持图片与文件，也可直接粘贴截图）"
+                className="h-8 w-8 rounded-lg flex items-center justify-center text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0 cursor-pointer self-end mb-[3px]"
+              >
+                {uploadingFile ? (
+                  <Loader2 className="w-4 h-4 animate-spin-fast text-blue-600 dark:text-blue-400" />
+                ) : (
+                  <Paperclip className="w-4 h-4" />
+                )}
+              </button>
+            </>
+          )}
+
           <textarea
             ref={textareaRef}
             value={content}
@@ -894,6 +1073,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             onKeyUp={handleKeyUp}
             onClick={checkTriggers}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             onCompositionStart={() => {
               isComposingRef.current = true;
             }}
@@ -926,7 +1106,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                 ? `mention-bot-${filteredBots[mentionIndex].id}`
                 : undefined
             }
-            className="w-full resize-none bg-transparent px-2.5 py-1.5 text-base sm:text-sm text-zinc-800 dark:text-zinc-100 placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none min-h-[38px] max-h-[180px] leading-relaxed"
+            className="w-full resize-none bg-transparent h-8 px-2.5 text-xs text-zinc-800 dark:text-zinc-100 placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none min-h-[38px] max-h-[180px] leading-relaxed"
             aria-label="消息输入框"
           />
 
@@ -965,7 +1145,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             <button
               type="button"
               onClick={handleSubmit}
-              disabled={!content.trim() || sending || disabled}
+              disabled={(!content.trim() && pendingAttachments.length === 0) || sending || disabled || uploadingFile}
               aria-label="发送消息"
               title="发送消息"
               className="p-2 sm:p-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-200 dark:disabled:bg-zinc-800 disabled:text-zinc-400 dark:disabled:text-zinc-600 text-white shadow-xs transition-colors shrink-0 flex items-center justify-center cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500"

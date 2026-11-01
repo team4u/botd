@@ -219,7 +219,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, currentUser, onC
                             {user.username}
                           </span>
                           {isSelf && (
-                            <span className="text-[9px] px-1.5 py-0.5 bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 rounded font-medium">
+                            <span className="text-[11px] px-1.5 py-0.5 bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 rounded font-medium">
                               当前用户
                             </span>
                           )}
@@ -284,7 +284,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, currentUser, onC
                 value={newUsername}
                 onChange={(e) => setNewUsername(e.target.value)}
                 placeholder="用户名（2-32 位字母/数字/_/-）"
-                className="w-full px-3 py-2 text-base sm:text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
+                className="w-full h-8 px-2.5 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
                 autoComplete="off"
                 disabled={creating}
                 required
@@ -294,7 +294,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, currentUser, onC
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 placeholder="密码（至少 4 位）"
-                className="w-full px-3 py-2 text-base sm:text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
+                className="w-full h-8 px-2.5 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
                 autoComplete="new-password"
                 disabled={creating}
                 required
@@ -306,7 +306,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, currentUser, onC
               <select
                 value={newRole}
                 onChange={(e) => setNewRole(e.target.value as 'admin' | 'member')}
-                className="px-2.5 py-1.5 text-base sm:text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-medium text-zinc-800 dark:text-zinc-200"
+                className="h-8 px-2.5 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-medium text-zinc-800 dark:text-zinc-200"
                 aria-label="新用户角色"
                 disabled={creating}
               >

@@ -1,4 +1,4 @@
-import { PI_AI_VERSION, type Provider } from '@earendil-works/pi-ai';
+import { PI_AI_VERSION, type Provider, getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import type { ModelCatalog, ProviderCatalogEntry } from '@botd/protocol';
 
@@ -28,6 +28,7 @@ export function buildModelCatalog(providers: readonly Provider[]): ModelCatalog 
         id: model.id,
         name: model.name,
         reasoning: Boolean(model.reasoning),
+        thinkingLevels: getSupportedThinkingLevels(model),
         input: [...model.input],
         contextWindow: model.contextWindow,
         maxTokens: model.maxTokens,

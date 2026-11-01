@@ -11,6 +11,8 @@
 - **零业务 Adapter**：不编写任何 `ad-adapter` 或 `herdr-actions` 等中介包装代码。BOT 直接阅读 `SKILL.md` 学习命令行用法，并通过内置 `bash` 工具直接调用本机 CLI 命令。
 - **公屏共享结论，私域隔离草稿**：群聊中各 BOT 仅共享公屏最终结论；各 BOT 运行 bash、读写文件的完整日志保留在各自节点的私有 `.jsonl` 文件中，互不干扰。
 - **非阻塞执行与 `botd wake` 回调**：耗时任务在后台执行，外部脚本或事件钩子可通过 `botd wake` 命令向会话注入唤醒消息，触发 BOT 在群内自动汇报。
+- **跨节点文件管道与产物交换**：原生支持多模态附件与产物在 Web 界面和各计算节点间透明流转，自动落盘隔离工作区，免除外部依赖。
+- **人机协同确认最小阻力**：一行 `botd ask` 即可在 Web 端实时弹出交互确认卡片挂起等待人类决策，结果直接返回标准输出。
 
 ***
 
@@ -56,7 +58,7 @@ pnpm test
 | `pnpm dev:hub` | 仅以开发监听模式启动 Hub 服务 |
 | `pnpm dev:web` | 仅启动 Web 前端开发服务器 |
 | `pnpm start` | 启动生产环境 Cloud Hub（兼具 API 与 Web 静态托管） |
-| `pnpm node <cmd>` | 调用 Node Agent CLI（即 `botd` 命令），支持 `join`、`start`、`wake` |
+| `pnpm node <cmd>` | 调用 Node Agent CLI（即 `botd` 命令），支持 `join`、`start`、`wake`、`ask`、`artifact` 等 |
 
 ***
 
@@ -85,6 +87,12 @@ pnpm test
 - **开启新话题**：三种入口——聊天头部按钮、「更多」菜单项、输入框发送 `/new`。底层会克隆配置新建 Session 并归档旧会话，既保留完整的多会话上下文隔离，又拥有「一个 BOT 一个窗口」的顺滑体验。
 - **编辑重发**：任意已发送的用户消息可编辑（铅笔按钮，编辑复用底部输入框，支持斜杠命令与 @ 提及补全）。保存后：该消息之后的所有回复被移除，全体成员 BOT 的本地会话记忆（`.jsonl`）同步删除，并自动从编辑后的消息重新生成回复。
 - **分叉**：任意消息（含 BOT 回复）可一键分叉断会话（⑂ 按钮）：从该消息（含）复制历史到新会话，原会话不受任何影响；新会话首回合自动从复制的全量历史重建 BOT 上下文。适合对照实验与多方案并行探索。
+- **工具执行轨迹（Tool Trace）**：Assistant 消息持久化展示可折叠的工具调用步骤（名称、状态、命令/文件摘要及毫秒级耗时），执行细节与长输出收敛折叠，不冲乱公屏。
+- **Token 与上下文水位线**：每条回复底部精确展示输入/输出 Token 消耗及当前会话占模型最大上下文窗口的百分比（例如 `2,140 tokens · 1% ctx`），水位直观可见。
+- **多模态附件与预览**：输入框支持粘贴图片（截图直发）与上传文件附件，发送后由 Node Agent 自动下载并落盘至目标 BOT 的 `workspace/inbox/` 目录；公屏消息流原生支持图片缩略预览（点击放大）与产物文件点击下载。
+- **人机交互确认卡片**：配合 `botd ask`，公屏实时弹出包含选项按钮的交互卡片，人类点击决策或输入文本后即时解挂终端命令。
+- **「对话即沉淀」与 Skill Creator（技能创建器）**：内置「创建技能」元技能，BOT 在对话中即可将刚跑通的流程沉淀为标准 `SKILL.md`（写入 `~/.botd/skills/<id>/`），执行 `botd reload` 立即上线，Web 端勾选启用；节点管理页支持将技能一键同步分发至其他在线计算节点。
+- **主动触发器与后台系统通知**：支持为会话配置自动化触发器（Webhook + 标准 Cron 表达式定时任务）；当浏览器标签页处于后台时，BOT 回复完成自动通过 Web Notification 弹出系统桌面通知。
 - **消息操作**：整条消息悬停复制、代码块复制、跨天时间显示；会话运行中可随时停止（发送/停止二合一按钮）。
 - **记忆一致性**：删除会话、清空消息、编辑重发均会同步重置成员 BOT 的本地会话记忆，保证 BOT 不会「记得」已被删除的内容。
 
@@ -128,17 +136,17 @@ sequenceDiagram
 
 ***
 
-## 6. 异步任务唤醒机制（`botd wake`）
+## 6. 异步任务唤醒与人机协同机制（`botd wake` / `botd ask`）
 
 在长耗时任务（如通过 `herdr` 执行后台编译、外部脚本轮询）完成后，外部程序可通过执行 `botd wake` 命令主动唤醒指定会话。
 
 ### 6.1 命令格式
 
 ```bash
-botd wake --session <sessionId> --bot <botId> --message "构建成功，所有单元测试均已通过！"
+botd wake --session <sessionId> --bot <botId> --message "构建成功，所有单元测试均已通过！" [--reply-to <botId>]
 ```
 
-本地源码运行时，可用 `pnpm node wake ...` 执行相同命令。BOT 的 Bash 环境会自动加入独立的 `bin/botd`；容器内也可直接调用 `botd`。
+本地源码运行时，可用 `pnpm node wake ...` 执行相同命令。BOT 的 Bash 环境会自动加入独立的 `bin/botd`；容器内也可直接调用 `botd`。新增 `--reply-to <botId>` 参数支持在异步唤醒完成后自动将发言权交接给指定 BOT，实现跨节点自动化接力。
 
 ### 6.2 环境变量自动回退
 
@@ -156,7 +164,21 @@ botd wake --message "后台任务执行完成"
 1. `botd wake` 向本地 Unix Domain Socket `~/.botd/agent.sock` 发送 `POST /wake` 请求。
 2. Node Agent 通过当前长连接向 Cloud Hub 调用 `hubRpc.requestWakeupTurn`。
 3. Hub 在公屏消息流中插入一条系统回调消息（`role: "callback"`, `content: "[Wake-up] ..."`）。
-4. Hub 将该唤醒任务推入会话的串行队列，触发对应的 BOT 接续发言汇报进度。
+4. Hub 将该唤醒任务推入会话的串行队列，触发对应的 BOT 接续发言汇报进度（若指定 `--reply-to` 则接续交由该 BOT 发言）。
+
+### 6.4 一行命令的人机协同交互卡片（`botd ask`）
+
+当 BOT 在节点上运行自动化脚本需要人类确认（如生产环境部署确认、敏感命令授权、参数选择）时，可直接在 Bash 中调用 `botd ask`：
+
+```bash
+choice=$(botd ask "是否确认执行数据库迁移？" --options "确认,取消" --timeout 300)
+if [ "$choice" = "确认" ]; then
+  pnpm migrate
+fi
+```
+
+- **交互卡片实时弹出**：`botd ask` 向本地 Unix Domain Socket `~/.botd/agent.sock` 发送请求，Cloud Hub 在 Web 聊天界面向该会话公屏实时推送交互按钮卡片并挂起等待用户操作（支持 `--options "选项1,选项2"` 渲染选项按钮，未指定时渲染单行输入框）。
+- **纯净 stdout 管道输出**：用户在 Web 端点击选项或输入后，答案即时传回节点并直接输出到 stdout（支持 `--json` 输出 `{ ok: true, answer: "..." }`），供脚本无缝捕获；若超时未作答则以非零状态码退出并报错。
 
 ***
 
@@ -179,6 +201,7 @@ Node Agent 默认将所有数据保存在 `~/.botd/` 目录下（支持通过 `-
     │   ├── SYSTEM.md                # 角色人设与基础系统提示词
     │   ├── MEMORY.md                # 长期记忆（BOT 可自主读写更新）
     │   ├── workspace/               # BOT 执行 bash 命令的专属工作区（隔离 cwd）
+    │   │   └── inbox/               # Web 上传多模态附件自动落盘目录
     │   ├── prompts/                 # Pi 原生提示词模板，文件名对应 /命令名
     │   │   └── review.md
     │   └── sessions/                # 私域对话与完整工具执行日志
@@ -217,7 +240,7 @@ botd 支持统一的 Session 模型，提供三种会话模式：
 | :--- | :--- |
 | `direct`（单聊） | 用户与指定的单一 BOT 进行一对一对话。人类发言默认触发该 BOT。 |
 | `lead`（负责人群聊） | 设立一个 `Lead BOT`（群负责人）。若人类发言未包含 `@`，默认由 `Lead BOT` 响应；`Lead BOT` 可在输出正文中通过 `@member-bot` 将子任务委派给其他成员，形成传麦接力。 |
-| `roundtable`（圆桌讨论） | 适用于多模型同题评审。人类发言后，除 `Lead BOT` 外的所有成员 BOT 按序依次发言，最后由 `Lead BOT` 发言进行全场总结。 |
+| `roundtable`（圆桌讨论） | 适用于多模型同题评审。普通圆桌中，除 `Lead BOT` 外的所有成员 BOT 按序依次发言，最后由 `Lead BOT` 发言进行全场总结；开启「独立盲评并发模式」时，成员 BOT 互不锚定、并发思考。 |
 
 ### 8.2 精准 `@` 传麦
 
@@ -246,9 +269,111 @@ argument-hint: "[关注点]"
 
 新增接口 `GET /api/bots/:botId/commands` 返回当前 BOT 的可用命令列表，需要登录（仅 BOT 归属用户）且节点在线。命令发现与执行继续保持 BOT 的资源隔离，不扫描宿主机 Pi 配置。
 
+### 8.4 圆桌独立盲评并发模式（Parallel Blind Roundtable）
+
+- **互不锚定，独立推理**：普通圆桌模式下各 BOT 依次串行发言，后发言者容易受到前序模型观点的“认知锚定”影响。在圆桌群聊设置中开启「独立盲评并发模式」（`parallelRoundtable: true`）后，人类提问将同时并发派发给所有成员 BOT，各 BOT 基于同一份上下文独立并行思考与调用工具。
+- **同屏流式并发输出**：各模型在 Web 公屏上同屏实时流式呈现，各自展现无偏见的独立分析与决策建议。
+- **Lead 汇总裁决**：待全体成员 BOT 独立完成盲评输出后，调度器自动唤起 `Lead BOT`，对全场不同观点进行对比、权衡并输出最终综合裁决。
+
+### 8.5 离线节点队列挂起与上线自愈（Queued State & Auto-Resume）
+
+- **队列挂起（Queued）**：当会话任务轮到某个 BOT 执行，而该 BOT 所在的计算节点处于离线（offline）状态时，调度器不会粗暴报错中断，而是将会话状态自动置为 `queued`（挂起排队），并将任务安全保存在调度队列中。
+- **上线自动恢复**：一旦目标节点重新建立 WebSocket 长连接上线（`onNodeOnline`），Cloud Hub 自动探测并激活被挂起的会话队列，自愈式恢复执行后续任务流程，保障跨节点协作的高可用。
+
 ***
 
-## 9. 安全边界、取消与异常处理
+## 9. 跨节点文件管道与多模态附件（Artifact Pipeline）
+
+botd 原生打通了 Web 控制台与分布在各处的 Node Agent 计算节点之间的文件流转通道，无需配置任何第三方对象存储或共享 NFS：
+
+### 9.1 Web 多模态交互与自动落盘
+
+- **剪贴板粘贴与附件上传**：Web 聊天输入框支持直接粘贴截图（Ctrl+V / Cmd+V）或点击附件按钮上传任意文件。
+- **自动落盘到目标工作区**：当会话将任务分发给目标 BOT 时，Node Agent 自动从 Hub 下载文件并落盘至该 BOT 专属工作区的 `workspace/inbox/<filename>` 目录下。
+- **上下文感知与工具调用**：Node Agent 自动在提示词中注入附件通知（包含路径、MIME 类型和字节大小），BOT 可直接通过 `bash` 工具读取、解析或处理该文件。
+- **公屏预览与下载**：公屏消息流原生支持图片缩略预览（点击放大查看）以及普通附件的一键下载链接。
+
+### 9.2 CLI 跨节点文件流转（`botd artifact`）
+
+BOT 或用户可在计算节点上通过 `botd artifact` 系列命令跨节点传递文件与构建成果：
+
+- **上传产物**：
+  ```bash
+  botd artifact put ./build/report.pdf --message "测试报告生成完毕，请查收"
+  ```
+  *将本地文件推送到当前会话共享产物管道，并在公屏广播通知。*
+- **拉取产物**：
+  ```bash
+  botd artifact pull <artifactId> -o ./dist/report.pdf
+  ```
+  *从会话产物管道中拉取指定产物到本地文件系统（默认保存为 `./<filename>`）。*
+- **查看列表**：
+  ```bash
+  botd artifact list
+  ```
+  *列出当前会话的所有产物清单（产物 ID、文件名、大小及创建时间）。*
+
+典型跨节点协作：节点 A 上的 Coder BOT 编译打包产出文件后调用 `botd artifact put`，节点 B 上的 Reviewer BOT 或部署脚本通过 `botd artifact pull` 直接拉取验证，实现完全去中心化的节点协同。
+
+***
+
+## 10. 「对话即沉淀」Skill Creator 与跨节点同步
+
+botd 践行“对话即沉淀”理念，让 BOT 的优秀经验与自动化流程快速转化为持久资产。提炼能力不再是 Web 界面按钮，而是框架内置的元技能——由 BOT 自己写文件完成：
+
+### 10.1 Skill Creator（技能创建器）
+
+- **内置元技能**：框架自带的 `botd-cli` 内置技能包含「Skill creator」章节，每个 BOT 天然掌握技能沉淀方法。当用户说「沉淀为技能」「记住这个流程」，或 BOT 刚在本机跑通一个可复用流程时，即可自行提炼。
+- **BOT 亲手写文件**：BOT 直接写入 `~/.botd/skills/<skill-id>/SKILL.md`（短小写 id：a-z0-9-），包含 YAML frontmatter（`name`、`description`）与 **When to use** / **Steps**（可直接复制的真实命令）/ **Gotchas** 三段正文，全文控制在约 80 行内——只沉淀新会话真正需要的内容，拒绝占位符与臆造参数。
+- **立即上线**：写入后执行 `botd reload`，daemon 重新向 Hub 注册资源，新技能即时出现在 Web 端；随后在 Web BOT 编辑器（或 `botd bots update --help`）中为对应 BOT 勾选启用即可。
+
+### 10.2 跨节点一键同步
+
+- **单机沉淀，全网复用**：在 Web「节点管理」页面中，每个节点的公共技能列表均配备一键「同步」功能。
+- **按需分发**：勾选其他在线目标节点后，Hub 自动通过节点 RPC 读取源节点文件并批量分发写入目标节点，同时刷新各节点的技能注册表，无需手动复制或 SSH 登录各设备。
+
+***
+
+## 11. 主动触发器与自动化任务（Triggers & Webhooks）
+
+botd 支持在会话中配置多种主动触发器，让 BOT 从“被动问答”升级为“主动监控与执行”：
+
+### 11.1 触发器类型
+
+| 触发器类型 | 标识（`kind`） | 说明 |
+| :--- | :--- | :--- |
+| **Incoming Webhook** | `webhook` | 会话生成唯一的安全 URL（`POST /api/webhooks/:token`，无需 Cookie）。外部 CI/CD、监控系统（如 Prometheus、Sentry）或飞书/企业微信机器人推送时，Hub 自动提取 JSON Payload 或文本，组装提示词唤醒指定 BOT。 |
+| **定时任务（Cron）** | `cron` | 按标准 5 字段 Cron 表达式（服务器本地时间，支持 `*/n` 步进、区间、列表与周几；Web 端内置常用预设一键填充，如 `*/15 * * * *` 每 15 分钟、`30 9 * * *` 每天 09:30、`0 9 * * 1-5` 工作日 09:00）自动唤醒指定 BOT 执行巡检、轮询或每日报表任务。 |
+
+### 11.2 CLI 触发器管理
+
+```bash
+# 查看会话的所有触发器
+botd triggers list <sessionId>
+
+# 创建 Webhook 触发器
+botd triggers create <sessionId> --name "CI 构建告警" --bot ci-bot --prompt "分析构建日志并汇报" --kind webhook
+
+# 创建周期轮询触发器（每 15 分钟）
+botd triggers create <sessionId> --name "磁盘巡检" --bot ops-bot --prompt "检查各磁盘水位并告警" --kind cron --cron "*/15 * * * *"
+
+# 创建每日定时触发器（每天 09:30）
+botd triggers create <sessionId> --name "晨会报表" --bot pm-bot --prompt "生成昨日指标简报" --kind cron --cron "30 9 * * *"
+
+# 工作日每天 09:00
+botd triggers create <sessionId> --name "工作日站会" --bot pm-bot --prompt "汇总站会要点" --kind cron --cron "0 9 * * 1-5"
+
+# 删除指定触发器
+botd triggers delete <triggerId>
+```
+
+### 11.3 浏览器后台系统通知（Web Notification）
+
+当用户切换至其他标签页或浏览器处于后台时，会话中任意 BOT 执行完成或触发器响应完毕后，botd 会调用浏览器原生 Web Notification 发出桌面系统通知。点击通知卡片可直接聚焦浏览器并切换至对应会话，兼顾免打扰与即时触达。
+
+***
+
+## 12. 安全边界、取消与异常处理
 
 1. **接力上限熔断（Relay Limit）**：
    - 为杜绝多 BOT 间相互 `@` 陷入死循环，系统对单次人类发言触发的接力链条设置最大轮次上限 `MAX_RELAY_TURNS = 5`。达到上限后自动停止接力。
@@ -259,7 +384,7 @@ argument-hint: "[关注点]"
 
 ***
 
-## 10. CLI 工具与零 Adapter 原则
+## 13. CLI 工具与零 Adapter 原则
 
 botd 拒绝在后端堆叠硬编码的 SDK 适配器：
 - 节点安装真实的 ActionDock（`ad`）与 Herdr（`herdr`）命令行工具。
@@ -267,7 +392,7 @@ botd 拒绝在后端堆叠硬编码的 SDK 适配器：
 - BOT 在推理时自主查阅 `SKILL.md`，使用原生 `bash` 工具直接在独立 `workspace` 中执行命令。
 - **内置 `botd-cli` skill**：daemon 启动时自愈式保证 `~/.botd/skills/botd-cli/SKILL.md` 存在且为当前版本（同版本内用户可改，版本升级时覆盖），每个 BOT 的轮次无条件注入该 skill（不受 `enabledSkills` 限制），使所有 BOT 天然掌握框架 CLI 的用法纪律：`--json` 输出、`--help` 发现、`botd wake` 异步回报、以及“勿在自身轮次中 restart daemon”等安全约束。
 
-### 10.1 `botd` 命令行（Commander 重构后）
+### 13.1 `botd` 命令行（Commander 重构后）
 
 同一个 `botd` 二进制承载两种角色，命令面与 Web 端功能一一对应，供 AI 代理/脚本驱动全部管理能力：
 
@@ -282,7 +407,12 @@ botd 拒绝在后端堆叠硬编码的 SDK 适配器：
 | `botd status` | daemon 运行状态（pid/uptime/Hub 连接；未运行时退出码 1） |
 | `botd stop` | 优雅停止（socket `/shutdown` → pid 文件 SIGTERM 兑底） |
 | `botd restart [-d]` | 停 + 起一条命令完成重启 |
-| `botd wake --session <id> --bot <id> --message <msg>` | 异步唤醒会话（支持 `BOTD_SESSION_ID`/`BOTD_BOT_ID` 环境变量） |
+| `botd reload` | 重新向 Hub 注册本机 skills/extensions/bots（拾取 Web 外写入的文件，如 BOT 新沉淀的技能） |
+| `botd wake --session <id> --bot <id> --message <msg> [--reply-to <botId>]` | 异步唤醒会话（支持环境变量，`--reply-to` 唤醒后自动传麦） |
+| `botd ask <prompt> [--options "选项1,选项2"] [--timeout 300]` | 人机交互确认，Web 弹卡片，输出结果至 stdout |
+| `botd artifact put <file> [--message "..."]` | 上传本地文件至会话共享产物管道 |
+| `botd artifact pull <artifactId> [-o <path>]` | 下载会话共享产物至本地工作区 |
+| `botd artifact list` | 查看当前会话产物列表 |
 | `botd install <source> [--kind auto\|skill\|extension] [--id <id>]` | 本机安装资源并热重载 |
 
 daemon 在本地 `agent.sock` 上暴露控制端点（`/wake`、`/reload`、`/status`、`/shutdown`），并维护 `<dataDir>/daemon.pid`；`botd stop/restart/status` 都基于这套控制面实现，改完代码后 `botd restart -d` 即生效。
@@ -296,6 +426,8 @@ daemon 在本地 `agent.sock` 上暴露控制端点（`/wake`、`/reload`、`/st
 | BOT | `bots create\|update\|delete`、`bots system get\|put`、`bots memory get\|put` | `/api/bots*` |
 | 会话 | `sessions list\|create\|update\|messages\|cancel\|delete\|clear\|edit\|fork` | `/api/sessions*`（含 `DELETE`、`PUT messages/:id`、`POST fork`） |
 | 聊天 | `chat send <sess> <msg...> [--wait [s]]` / `chat watch <sess> [--duration s]` | 消息接口 + SSE 事件流 |
+| 产物 | `artifact put\|pull\|list` | `/api/sessions/:id/artifacts*`、`/api/artifacts/:id/content` |
+| 触发器 | `triggers list <sess>` / `triggers create <sess> --name <n> --bot <b> --prompt <p> [--kind webhook\|cron] [--cron <expr>]` / `triggers delete <id>` | `/api/sessions/:id/triggers*`、`/api/triggers/:id`、`/api/webhooks/:token` |
 | 资源 | `skills get\|put\|delete`、`extensions get\|put\|delete`（需节点在线） | `/api/nodes/:id/skills\|extensions` |
 | Provider | `providers login\|status\|respond\|cancel\|logout` | Provider 登录流接口 |
 | 模型 | `models catalog [--node <id>]` | `/api/models/catalog` |
@@ -315,11 +447,11 @@ botd chat send <sessionId> "帮我检查磁盘空间" --wait 120   # 问答一�
 
 ***
 
-## 11. Docker 与容器化部署
+## 14. Docker 与容器化部署
 
 本项目提供多阶段构建 `deploy/Dockerfile` 与 `deploy/docker-compose.yml` 配置。
 
-### 11.1 架构与端口说明
+### 14.1 架构与端口说明
 
 - **单一对外端口**：生产镜像将 Hono 后端 API、WebSocket Upgrade 以及编译后的 Web SPA 静态资源整合，统一通过 **HTTP 3000** 端口提供服务。
 - **环境定义已确认**：
@@ -329,7 +461,7 @@ botd chat send <sessionId> "帮我检查磁盘空间" --wait 120   # 问答一�
 - **容器内 PATH**：Docker 镜像全局内置 `/usr/local/bin/botd` 执行脚本，确保容器内任意位置可直接执行 `botd wake`。
 - **宿主机环境严格隔离**：构建流程已通过 `.dockerignore` 彻底屏蔽宿主机 `~/.pi` 与 `.pi` 目录。
 
-### 11.2 使用 Docker Compose 快速启动 Hub
+### 14.2 使用 Docker Compose 快速启动 Hub
 
 ```bash
 # 1. 复制环境变量配置文件并按需修改
@@ -344,7 +476,7 @@ docker compose -f deploy/docker-compose.yml ps
 
 访问 `http://localhost:3000` 即可进入 Web 管理界面，使用自举管理员账号 `admin` 登录（密码由 `BOTD_ADMIN_PASSWORD` 初始化，默认 `admin`）。
 
-### 11.3 配对与启动云端附随节点（Cloud Node Profile）
+### 14.3 配对与启动云端附随节点（Cloud Node Profile）
 
 若希望在云服务器上与 Hub 同机运行一个常驻 Node Agent，可以使用 Compose 提供的 `cloud-node` Profile：
 
@@ -358,7 +490,7 @@ docker compose -f deploy/docker-compose.yml run --rm cloud-node join http://hub:
 docker compose -f deploy/docker-compose.yml --profile cloud-node up -d
 ```
 
-### 11.4 容器内执行唤醒测试
+### 14.4 容器内执行唤醒测试
 
 在 Cloud Node 启动后，可直接通过 `docker compose exec` 验证异步唤醒机制：
 
@@ -366,14 +498,14 @@ docker compose -f deploy/docker-compose.yml --profile cloud-node up -d
 docker compose -f deploy/docker-compose.yml exec cloud-node botd wake --session <sessionId> --bot <botId> --message "来自云端容器的异步通知"
 ```
 
-### 11.5 数据卷持久化说明
+### 14.5 数据卷持久化说明
 
 - `hub-data` 命名卷：挂载至 `/data`，持久化保存 `hub.sqlite` 数据库文件。
 - `node-data` 命名卷：挂载至 `/data/node`，持久化保存云端节点的 `node.json`、`.agent/` 凭据目录、Skill 库以及各 BOT 的记忆与工作区。
 
 ***
 
-## 12. 环境变量一览表
+## 15. 环境变量一览表
 
 | 环境变量 | 默认值 | 作用对象 | 详细说明 |
 | :--- | :--- | :--- | :--- |
@@ -391,7 +523,7 @@ docker compose -f deploy/docker-compose.yml exec cloud-node botd wake --session 
 | `BOTD_API_KEY_GOOGLE` | 无 | Node Agent | Google Gemini API 密钥覆盖 |
 | `BOTD_API_KEY_OPENROUTER`| 无 | Node Agent | OpenRouter API 密钥覆盖 |
 
-## 13. 验证范围与运行边界
+## 16. 验证范围与运行边界
 
 `pnpm test` 使用临时数据库和数据目录。测试覆盖真实 HTTP/WebSocket RPC、跨节点接力、圆桌调度、接力上限、取消竞态、增量消息、节点重连，以及真实 CLI 配对与唤醒。Pi SDK 测试连接本机受控模型端点，实际执行 Bash，验证系统提示词、Skill 过滤、并发环境变量和私有 JSONL 日志。
 

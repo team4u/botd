@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   MessageSquare,
   Users,
@@ -15,10 +15,13 @@ import {
   UserCog,
   User,
   ShieldCheck,
+  Loader2,
 } from 'lucide-react';
 import type { SessionRecord, BotConfig, NodeRecord } from '@botd/protocol';
+import type { MessageSearchHit } from '../api';
 import type { UserInfo } from '../types';
 import { ConfirmDialog } from './ConfirmDialog';
+import { api } from '../api';
 
 interface SidebarProps {
   sessions: SessionRecord[];
@@ -127,7 +130,46 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [deleteTarget, setDeleteTarget] = useState<SessionRecord | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  // Global message search state (debounced)
+  const [searchHits, setSearchHits] = useState<MessageSearchHit[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchDone, setSearchDone] = useState(false);
+
   const query = filter.trim().toLowerCase();
+
+  // Debounced global message search: fire when query is non-empty
+  useEffect(() => {
+    const trimmed = filter.trim();
+    if (!trimmed) {
+      setSearchHits([]);
+      setSearching(false);
+      setSearchDone(false);
+      return;
+    }
+    let active = true;
+    setSearching(true);
+    const timer = setTimeout(() => {
+      api
+        .searchMessages(trimmed, { limit: 20 })
+        .then((hits) => {
+          if (!active) return;
+          setSearchHits(hits);
+          setSearchDone(true);
+        })
+        .catch(() => {
+          if (!active) return;
+          setSearchHits([]);
+          setSearchDone(true);
+        })
+        .finally(() => {
+          if (active) setSearching(false);
+        });
+    }, 250);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [filter]);
 
   // 搜索时强制展开各分区，保证结果可见
   const effectiveBotsOpen = botsOpen || !!query;
@@ -256,11 +298,72 @@ export const Sidebar: React.FC<SidebarProps> = ({
               type="text"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              placeholder="搜索智能体与会话..."
-              className="w-full pl-8 pr-3 py-1.5 text-base sm:text-xs bg-white dark:bg-zinc-950 border border-zinc-200/80 dark:border-zinc-800 rounded-lg text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-600 focus:border-zinc-400 dark:focus:border-zinc-600 transition-all"
+              placeholder="搜索历史消息..."
+              className="w-full h-8 pl-8 pr-7 text-xs bg-white dark:bg-zinc-950 border border-zinc-200/80 dark:border-zinc-800 rounded-lg text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-600 focus:border-zinc-400 dark:focus:border-zinc-600 transition-all"
             />
+            {filter && (
+              <button
+                type="button"
+                onClick={() => setFilter('')}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 rounded transition-colors cursor-pointer"
+                aria-label="清除搜索"
+              >
+                {searching ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <X className="w-3.5 h-3.5" />}
+              </button>
+            )}
           </div>
         </div>
+
+        {/* Global message search results */}
+        {filter.trim() && (
+          <div className="px-2 shrink-0">
+            <div className="text-[11px] font-semibold tracking-wide text-zinc-400 dark:text-zinc-500 px-2 py-1.5 flex items-center gap-1">
+              <span>消息搜索</span>
+              {searching ? (
+                <Loader2 className="w-3 h-3 animate-spin text-zinc-400" />
+              ) : (
+                <span className="font-normal">· {searchHits.length}</span>
+              )}
+            </div>
+            {searchDone && !searching && searchHits.length === 0 ? (
+              <p className="px-2 py-2 text-[11px] text-zinc-400 dark:text-zinc-500">未找到匹配的历史消息</p>
+            ) : (
+              <div className="space-y-0.5 max-h-56 overflow-y-auto">
+                {searchHits.map((hit) => (
+                  <button
+                    key={hit.message.id}
+                    type="button"
+                    onClick={() => {
+                      onSelectSession(hit.message.sessionId);
+                      onClose();
+                    }}
+                    className="w-full text-left p-2 rounded-lg text-xs transition-colors hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 border border-transparent hover:border-zinc-200/70 dark:hover:border-zinc-700/70 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500"
+                  >
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <span className="truncate font-medium text-zinc-900 dark:text-zinc-100">
+                        {hit.sessionTitle}
+                      </span>
+                      {hit.sessionArchived && (
+                        <span className="shrink-0 px-1 py-0.5 rounded text-[10px] font-medium bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700">
+                          已归档
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-zinc-600 dark:text-zinc-400 line-clamp-2 leading-relaxed break-words whitespace-pre-wrap">
+                      <span className="font-mono text-zinc-400 dark:text-zinc-500 shrink-0">
+                        {hit.message.senderBotId ? `@${hit.message.senderBotId}` : 'User'}:
+                      </span>{' '}
+                      {hit.message.content}
+                    </p>
+                    <div className="text-[10px] text-zinc-400 dark:text-zinc-500 mt-0.5">
+                      {new Date(hit.message.createdAt).toLocaleString()}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* 三分区列表：智能体 / 群聊 / 历史话题 */}
         <div className="flex-1 overflow-y-auto px-2 py-2 space-y-2">
@@ -300,7 +403,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       }}
                       className={`group w-full text-left p-2 rounded-xl text-xs transition-all flex items-center gap-2 border cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
                         isActive
-                          ? 'bg-zinc-900 border-zinc-900 shadow-xs dark:bg-zinc-100 dark:border-zinc-100'
+                          ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs'
                           : 'hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 border-transparent'
                       }`}
                     >
@@ -308,7 +411,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       <div
                         className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 border transition-colors ${
                           isActive
-                            ? 'bg-zinc-800 border-zinc-700 text-zinc-100 dark:bg-zinc-200 dark:border-zinc-300 dark:text-zinc-800'
+                            ? 'bg-zinc-200/80 dark:bg-zinc-700 border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200'
                             : 'bg-zinc-100 dark:bg-zinc-800 border-zinc-200/80 dark:border-zinc-800/80 text-zinc-600 dark:text-zinc-300'
                         }`}
                       >
@@ -319,15 +422,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-1.5">
                           <span
-                            className={`truncate font-semibold ${
-                              isActive ? 'text-white dark:text-zinc-900' : 'text-zinc-900 dark:text-zinc-100'
-                            }`}
+                            className={`truncate font-semibold text-zinc-900 dark:text-zinc-100`}
                           >
                             {bot.name}
                           </span>
                           <span
-                            className={`truncate font-mono text-[10px] ${
-                              isActive ? 'text-zinc-400 dark:text-zinc-600' : 'text-zinc-400 dark:text-zinc-500'
+                            className={`truncate font-mono text-[11px] ${
+                              isActive ? 'text-zinc-500 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500'
                             }`}
                           >
                             @{bot.id}
@@ -335,7 +436,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         </div>
                         <div
                           className={`truncate text-[11px] ${
-                            isActive ? 'text-zinc-400 dark:text-zinc-600' : 'text-zinc-400 dark:text-zinc-500'
+                            isActive ? 'text-zinc-500 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500'
                           }`}
                         >
                           {node?.name || bot.nodeId}
@@ -408,35 +509,32 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         }}
                         className={`group w-full text-left p-2.5 rounded-xl text-xs transition-all flex flex-col gap-1 border cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
                           isActive
-                            ? 'bg-zinc-900 text-white border-zinc-900 shadow-xs dark:bg-zinc-100 dark:text-zinc-900 dark:border-zinc-100'
+                            ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs text-zinc-900 dark:text-zinc-100'
                             : 'hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 border-transparent text-zinc-700 dark:text-zinc-300'
                         }`}
                       >
                         <div className="flex items-center justify-between gap-1 w-full">
-                          <div className="flex items-center gap-1.5 truncate">
-                            {session.mode === 'direct' ? (
+                          <div className="flex items-center gap-1.5 truncate">                            {session.mode === 'direct' ? (
                               <Bot
                                 className={`w-3.5 h-3.5 shrink-0 ${
-                                  isActive ? 'text-zinc-300 dark:text-zinc-600' : 'text-zinc-500 dark:text-zinc-400'
+                                  isActive ? 'text-zinc-600 dark:text-zinc-300' : 'text-zinc-500 dark:text-zinc-400'
                                 }`}
                               />
                             ) : session.mode === 'lead' ? (
                               <Users
                                 className={`w-3.5 h-3.5 shrink-0 ${
-                                  isActive ? 'text-zinc-300 dark:text-zinc-600' : 'text-zinc-500 dark:text-zinc-400'
+                                  isActive ? 'text-zinc-600 dark:text-zinc-300' : 'text-zinc-500 dark:text-zinc-400'
                                 }`}
                               />
                             ) : (
                               <Radio
                                 className={`w-3.5 h-3.5 shrink-0 ${
-                                  isActive ? 'text-zinc-300 dark:text-zinc-600' : 'text-zinc-500 dark:text-zinc-400'
+                                  isActive ? 'text-zinc-600 dark:text-zinc-300' : 'text-zinc-500 dark:text-zinc-400'
                                 }`}
                               />
                             )}
                             <span
-                              className={`truncate font-medium ${
-                                isActive ? 'text-white dark:text-zinc-900' : 'text-zinc-900 dark:text-zinc-100'
-                              }`}
+                              className="truncate font-medium text-zinc-900 dark:text-zinc-100"
                             >
                               {session.title}
                             </span>
@@ -471,14 +569,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
                         <div
                           className={`flex items-center justify-between gap-2 text-[11px] ${
-                            isActive ? 'text-zinc-400 dark:text-zinc-600' : 'text-zinc-400 dark:text-zinc-500'
+                            isActive ? 'text-zinc-500 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500'
                           }`}
                         >
                           <span className="truncate">
                             {session.lastMessagePreview || `${modeText} · @${session.leadBotId}`}
                           </span>
                           {relativeTime && (
-                            <span className="shrink-0 text-[10px] opacity-75">{relativeTime}</span>
+                            <span className="shrink-0 text-[11px] opacity-75">{relativeTime}</span>
                           )}
                         </div>
                       </div>
@@ -523,26 +621,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         }}
                         className={`group opacity-75 hover:opacity-100 w-full text-left p-2 rounded-xl text-xs transition-all flex items-center gap-2 border cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
                           isActive
-                            ? 'bg-zinc-900 border-zinc-900 shadow-xs dark:bg-zinc-100 dark:border-zinc-100'
+                            ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs'
                             : 'hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 border-transparent'
                         }`}
                       >
                         <Archive
                           className={`w-3.5 h-3.5 shrink-0 ${
-                            isActive ? 'text-zinc-300 dark:text-zinc-600' : 'text-zinc-500 dark:text-zinc-400'
+                            isActive ? 'text-zinc-600 dark:text-zinc-300' : 'text-zinc-500 dark:text-zinc-400'
                           }`}
                         />
                         <span
                           className={`truncate ${
-                            isActive ? 'text-white dark:text-zinc-900' : 'text-zinc-700 dark:text-zinc-300'
+                            isActive ? 'text-zinc-900 dark:text-zinc-100' : 'text-zinc-700 dark:text-zinc-300'
                           }`}
                         >
                           {session.title}
                         </span>
                         {relativeTime && (
                           <span
-                            className={`ml-auto shrink-0 text-[10px] ${
-                              isActive ? 'text-zinc-400 dark:text-zinc-600' : 'text-zinc-400 dark:text-zinc-500'
+                            className={`ml-auto shrink-0 text-[11px] ${
+                              isActive ? 'text-zinc-500 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500'
                             }`}
                           >
                             {relativeTime}
@@ -594,7 +692,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     {currentUser.username}
                   </span>
                   <span
-                    className={`inline-flex items-center gap-0.5 shrink-0 text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${
+                    className={`inline-flex items-center gap-0.5 shrink-0 text-[11px] font-semibold px-1.5 py-0.5 rounded-full ${
                       currentUser.role === 'admin'
                         ? 'bg-zinc-200/80 dark:bg-zinc-800/80 text-zinc-800 dark:text-zinc-200'
                         : 'bg-zinc-100 dark:bg-zinc-800/60 text-zinc-500 dark:text-zinc-400'

@@ -17,13 +17,25 @@ import {
   ArrowDown,
   Check,
   X,
+  Clock,
+  Hourglass,
 } from 'lucide-react';
-import type { SessionRecord, MessageRecord, BotConfig, NodeRecord } from '@botd/protocol';
+import type {
+  SessionRecord,
+  MessageRecord,
+  BotConfig,
+  NodeRecord,
+  MessageAttachment,
+  PendingAskRecord,
+} from '@botd/protocol';
 import type { StreamingAssistantState } from '../types';
 import { MessageItem, formatShortModel } from './MessageItem';
 import { Markdown } from './Markdown';
 import { ChatInput } from './ChatInput';
 import { ConfirmDialog } from './ConfirmDialog';
+import { AskCard } from './AskCard';
+import { TriggersModal } from './TriggersModal';
+import type { ToastItem } from '../types';
 
 interface ChatViewProps {
   session: SessionRecord;
@@ -33,8 +45,11 @@ interface ChatViewProps {
   onRetryLoad: () => void;
   botMap: Map<string, BotConfig>;
   nodeMap: Map<string, NodeRecord>;
+  /** 单 BOT 流式状态（兼容保留）：并发流式时请改用 streamingStates */
   streamingState: StreamingAssistantState | null;
-  onSendMessage: (content: string) => Promise<void>;
+  /** 多 BOT 并发流式状态（并行盲评圆桌）：各成员互不覆盖，>1 时以网格并排展示 */
+  streamingStates?: StreamingAssistantState[];
+  onSendMessage: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
   onEditMessage: (sessionId: string, messageId: string, content: string) => Promise<void>;
   onCancelSession: () => Promise<void>;
   onOpenGroupSettings: () => void;
@@ -46,6 +61,12 @@ interface ChatViewProps {
   /** 从指定消息（含）分叉出新会话并自动切换 */
   onForkMessage: (sessionId: string, messageId: string) => Promise<void>;
   cancelling: boolean;
+  /** 当前会话待处理的人机协同交互请求（botd ask） */
+  pendingAsks?: PendingAskRecord[];
+  /** 响应人机协同交互请求 */
+  onRespondToAsk?: (sessionId: string, askId: string, answer: string) => Promise<void>;
+  /** 全局 toast 通知（供弹窗内部使用） */
+  onAddToast?: (type: ToastItem['type'], message: string) => void;
 }
 
 export const ChatView: React.FC<ChatViewProps> = ({
@@ -57,6 +78,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   botMap,
   nodeMap,
   streamingState,
+  streamingStates,
   onSendMessage,
   onEditMessage,
   onCancelSession,
@@ -68,6 +90,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onNewTopic,
   onForkMessage,
   cancelling,
+  pendingAsks = [],
+  onRespondToAsk,
+  onAddToast,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
@@ -80,6 +105,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [renameBusy, setRenameBusy] = useState(false);
   const [confirmAction, setConfirmAction] = useState<'clear' | 'delete' | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+
+  // 定时与触发器弹窗开关
+  const [triggersOpen, setTriggersOpen] = useState(false);
 
   // 回到底部按钮触发的程序化平滑滚动标记，避免滚动动画的中间位置误触发 userScrolledUp
   const programmaticScrollRef = useRef(false);
@@ -106,7 +134,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   useEffect(() => {
     scrollToBottom(true);
-  }, [messages.length, streamingState?.delta, streamingState?.tools.length]);
+  }, [messages.length, streamingState?.delta, streamingState?.tools.length, streamingStates]);
+
+  // 多 BOT 并发流式状态：优先使用 streamingStates；未提供时退回单 BOT streamingState 保持兼容
+  const effectiveStreamingStates: StreamingAssistantState[] =
+    streamingStates && streamingStates.length > 0
+      ? streamingStates
+      : streamingState
+      ? [streamingState]
+      : [];
+  const isParallelStreaming = effectiveStreamingStates.length > 1;
 
   const handleScroll = () => {
     const el = scrollContainerRef.current;
@@ -139,6 +176,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setRenaming(false);
     setConfirmAction(null);
     setEditingMessage(null);
+    setTriggersOpen(false);
   }, [session.id]);
 
   // 菜单展开时：点击外部或 ESC 关闭
@@ -233,10 +271,96 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setEditingMessage(null);
   };
 
-  // 流式输出助手的元数据
-  const streamingBot = streamingState ? botMap.get(streamingState.botId) : undefined;
-  const streamingNode = streamingBot ? nodeMap.get(streamingBot.nodeId) : undefined;
-  const shortStreamingModel = formatShortModel(streamingBot?.modelId);
+  // 单个流式 BOT 输出块（并发盲评网格内复用，风格与 MessageItem Assistant 一致）
+  const renderStreamingBlock = (state: StreamingAssistantState) => {
+    const bot = botMap.get(state.botId);
+    const node = bot ? nodeMap.get(bot.nodeId) : undefined;
+    const shortModel = formatShortModel(bot?.modelId);
+    return (
+      <div
+        key={state.botId}
+        className={
+          isParallelStreaming
+            ? 'p-3 bg-zinc-50/70 dark:bg-zinc-900/60 border border-zinc-200/80 dark:border-zinc-800/80 rounded-xl min-w-0'
+            : 'px-3 sm:px-6 py-2.5 sm:py-3 animate-in fade-in'
+        }
+      >
+        {/* 极简单行浅灰元数据 */}
+        <div className="flex items-center gap-1.5 min-w-0 text-xs flex-wrap">
+          <div className="w-5 h-5 rounded-md bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 border border-blue-200/60 dark:border-blue-900/60 flex items-center justify-center shrink-0">
+            <Bot className="w-3.5 h-3.5 animate-pulse" />
+          </div>
+          <span className="font-semibold text-zinc-900 dark:text-zinc-100 truncate">
+            {bot?.name || state.botId}
+          </span>
+          <span className="font-mono text-zinc-400 dark:text-zinc-500 text-[11px] shrink-0">
+            @{state.botId}
+          </span>
+          {node && (
+            <>
+              <span className="text-zinc-300 dark:text-zinc-600">·</span>
+              <span className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate max-w-[120px] font-normal">
+                {node.name}
+              </span>
+            </>
+          )}
+          {shortModel && (
+            <>
+              <span className="text-zinc-300 dark:text-zinc-600">·</span>
+              <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate max-w-[140px] font-normal">
+                {shortModel}
+              </span>
+            </>
+          )}
+          <span className="text-zinc-300 dark:text-zinc-600">·</span>
+          <span className="inline-flex items-center gap-1 text-[11px] text-blue-600 dark:text-blue-400 font-medium shrink-0">
+            <Activity className="w-3 h-3 animate-spin-fast" />
+            <span>正在输出...</span>
+          </span>
+        </div>
+
+        {/* 类似 Claude / Cursor 的紧凑工具状态列表 */}
+        {state.tools.length > 0 && (
+          <div className="my-2.5 p-2.5 bg-white dark:bg-zinc-950 border border-zinc-200/80 dark:border-zinc-800 rounded-xl text-xs space-y-1.5">
+            <div className="text-[11px] font-medium text-zinc-400 dark:text-zinc-500 px-1">工具执行状态</div>
+            {state.tools.map((tool, idx) => (
+              <div
+                key={`${tool.toolName}-${idx}`}
+                className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-zinc-50 dark:bg-zinc-900 border border-zinc-200/70 dark:border-zinc-800/70 text-zinc-700 dark:text-zinc-300"
+              >
+                {tool.status === 'running' ? (
+                  <Loader2 className="w-3.5 h-3.5 text-amber-500 animate-spin-fast shrink-0" />
+                ) : (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                )}
+                <span className="font-mono font-medium text-zinc-900 dark:text-zinc-100">{tool.toolName}</span>
+                <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                  {tool.status === 'running' ? '执行中...' : '已完成'}
+                </span>
+                {tool.summary && (
+                  <span className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate min-w-0 font-mono">
+                    ({tool.summary})
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* 流式正文平铺输出，不套外层大白框 */}
+        <div className="mt-1 text-zinc-800 dark:text-zinc-200 leading-relaxed break-words prose-botd">
+          {state.delta ? (
+            <Markdown>{state.delta}</Markdown>
+          ) : (
+            <div className="flex items-center gap-2 text-zinc-400 dark:text-zinc-500 text-xs py-1">
+              <span className="w-2 h-2 rounded-full bg-blue-500 animate-ping" />
+              <span>等待首字回复与工具调用...</span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="flex-1 flex flex-col h-full bg-white dark:bg-zinc-950 overflow-hidden">
@@ -377,7 +501,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <MessageSquarePlus className="w-3.5 h-3.5 shrink-0" />
                   <span className="flex flex-col items-start gap-0.5 min-w-0">
                     <span>开启新话题</span>
-                    <span className="text-[10px] font-normal text-zinc-400 dark:text-zinc-500 text-left leading-tight">
+                    <span className="text-[11px] font-normal text-zinc-400 dark:text-zinc-500 text-left leading-tight">
                       归档当前话题并开始新会话
                     </span>
                   </span>
@@ -412,6 +536,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   role="menuitem"
                   onClick={() => {
                     setMenuOpen(false);
+                    setTriggersOpen(true);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                >
+                  <Clock className="w-3.5 h-3.5" />
+                  <span>定时与触发器</span>
+                </button>
+
+                <div className="my-1 border-t border-zinc-100 dark:border-zinc-800/80" />
+
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
                     setConfirmAction('clear');
                   }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors cursor-pointer"
@@ -436,6 +574,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         </div>
       </header>
+
+      {/* 排队挂起横幅：目标计算节点离线，任务已入队等待节点恢复 */}
+      {session.status === 'queued' && (
+        <div className="mx-3 sm:mx-4 mt-2.5 px-3 py-2 bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/60 rounded-lg flex items-center gap-2 text-xs text-amber-800 dark:text-amber-300 shrink-0">
+          <Hourglass className="w-3.5 h-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+          <span>目标计算节点当前离线，任务已挂起排队，节点恢复上线后将自动继续执行。</span>
+        </div>
+      )}
 
       {/* 消息滚动主区域（外层包裹用于定位回到底部悬浮按钮） */}
       <div className="relative flex-1 min-h-0">
@@ -464,7 +610,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <span>重新加载</span>
             </button>
           </div>
-        ) : messages.length === 0 && !streamingState ? (
+        ) : messages.length === 0 && effectiveStreamingStates.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-6 max-w-md mx-auto">
             <div className="w-12 h-12 rounded-2xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-200/80 dark:border-zinc-800/80 flex items-center justify-center text-zinc-700 dark:text-zinc-300 mb-3 shadow-xs">
               {session.mode === 'direct' ? (
@@ -473,7 +619,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <Users className="w-6 h-6" />
               )}
             </div>
-            <h3 className="text-base font-semibold text-zinc-800 dark:text-zinc-200 mb-1">
+            <h3 className="text-sm sm:text-base font-semibold text-zinc-800 dark:text-zinc-200 mb-1">
               {session.mode === 'direct' ? `开启与 ${session.title} 的对话` : session.title}
             </h3>
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4 leading-relaxed">
@@ -507,83 +653,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
               />
             ))}
 
-            {/* 流式 Assistant 消息：去外框气泡，与 MessageItem Assistant 风格一致 */}
-            {streamingState && (
-              <div className="px-3 sm:px-6 py-2.5 sm:py-3 animate-in fade-in">
-                {/* 极简单行浅灰元数据 */}
-                <div className="flex items-center gap-1.5 min-w-0 text-xs flex-wrap sm:flex-nowrap">
-                  <div className="w-5 h-5 rounded-md bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 border border-blue-200/60 dark:border-blue-900/60 flex items-center justify-center shrink-0">
-                    <Bot className="w-3.5 h-3.5 animate-pulse" />
-                  </div>
-                  <span className="font-semibold text-zinc-900 dark:text-zinc-100 truncate">
-                    {streamingBot?.name || streamingState.botId}
-                  </span>
-                  <span className="font-mono text-zinc-400 dark:text-zinc-500 text-[11px] shrink-0">
-                    @{streamingState.botId}
-                  </span>
-                  {streamingNode && (
-                    <>
-                      <span className="text-zinc-300 dark:text-zinc-600">·</span>
-                      <span className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate max-w-[120px] font-normal">
-                        {streamingNode.name}
-                      </span>
-                    </>
-                  )}
-                  {shortStreamingModel && (
-                    <>
-                      <span className="text-zinc-300 dark:text-zinc-600">·</span>
-                      <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate max-w-[140px] font-normal">
-                        {shortStreamingModel}
-                      </span>
-                    </>
-                  )}
-                  <span className="text-zinc-300 dark:text-zinc-600">·</span>
-                  <span className="inline-flex items-center gap-1 text-[11px] text-blue-600 dark:text-blue-400 font-medium shrink-0">
-                    <Activity className="w-3 h-3 animate-spin-fast" />
-                    <span>正在输出...</span>
+            {/* 多 BOT 并发流式（并行盲评）：网格并排展示，互不覆盖；单 BOT 保持平铺风格 */}
+            {isParallelStreaming ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 px-3 sm:px-6 my-2">
+                <div className="col-span-full flex items-center justify-center gap-1.5 py-1.5 px-3 bg-purple-50/80 dark:bg-purple-950/40 border border-purple-200/70 dark:border-purple-900/60 rounded-full w-fit mx-auto">
+                  <Hourglass className="w-3.5 h-3.5 text-purple-500 dark:text-purple-400 shrink-0" />
+                  <span className="text-[11px] font-medium text-purple-700 dark:text-purple-300">
+                    圆桌并发盲评进行中 ({effectiveStreamingStates.length} 位智能体同步思考中...)
                   </span>
                 </div>
-
-                {/* 类似 Claude / Cursor 的紧凑工具状态列表 */}
-                {streamingState.tools.length > 0 && (
-                  <div className="my-2.5 p-2.5 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800 rounded-xl text-xs space-y-1.5 max-w-xl">
-                    <div className="text-[11px] font-medium text-zinc-400 dark:text-zinc-500 px-1">工具执行状态</div>
-                    {streamingState.tools.map((tool, idx) => (
-                      <div
-                        key={`${tool.toolName}-${idx}`}
-                        className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white dark:bg-zinc-950 border border-zinc-200/70 dark:border-zinc-800/70 text-zinc-700 dark:text-zinc-300 shadow-2xs"
-                      >
-                        {tool.status === 'running' ? (
-                          <Loader2 className="w-3.5 h-3.5 text-amber-500 animate-spin-fast shrink-0" />
-                        ) : (
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                        )}
-                        <span className="font-mono font-medium text-zinc-900 dark:text-zinc-100">{tool.toolName}</span>
-                        <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
-                          {tool.status === 'running' ? '执行中...' : '已完成'}
-                        </span>
-                        {tool.summary && (
-                          <span className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate max-w-xs font-mono">
-                            ({tool.summary})
-                          </span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* 流式正文平铺输出，不套外层大白框 */}
-                <div className="mt-1 text-zinc-800 dark:text-zinc-200 text-[14px] sm:text-[15px] leading-relaxed break-words prose-botd">
-                  {streamingState.delta ? (
-                    <Markdown>{streamingState.delta}</Markdown>
-                  ) : (
-                    <div className="flex items-center gap-2 text-zinc-400 dark:text-zinc-500 text-xs py-1">
-                      <span className="w-2 h-2 rounded-full bg-blue-500 animate-ping" />
-                      <span>等待首字回复与工具调用...</span>
-                    </div>
-                  )}
-                </div>
+                {effectiveStreamingStates.map((state) => renderStreamingBlock(state))}
               </div>
+            ) : (
+              effectiveStreamingStates.map((state) => renderStreamingBlock(state))
             )}
           </>
         )}
@@ -601,6 +683,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </button>
         )}
       </div>
+
+      {/* 人机协同交互卡片：BOT 通过 botd ask 发起的待响应请求，置于输入框上方 */}
+      {pendingAsks.length > 0 && (
+        <div className="px-3 sm:px-4 pt-2.5 space-y-2 shrink-0 max-w-4xl w-full mx-auto">
+          {pendingAsks.map((ask) => (
+            <AskCard
+              key={ask.id}
+              ask={ask}
+              bot={ask.botId ? botMap.get(ask.botId) : undefined}
+              onRespond={async (askId, answer) => {
+                await onRespondToAsk?.(session.id, askId, answer);
+              }}
+            />
+          ))}
+        </div>
+      )}
 
       {/* 底部输入框：将 isRunning, cancelling, onCancelSession 传给 ChatInput 实现发送/停止二合一；
           编辑态复用输入框（享受斜杠/提及补全、自动增高与 IME 处理） */}
@@ -632,8 +730,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             <>
               将永久删除会话「{session.title}」及其全部历史消息，删除后不可恢复。
             </>
-          )
-        }
+          )}
         confirmText={confirmAction === 'clear' ? '清空消息' : '删除会话'}
         danger
         busy={actionBusy}
@@ -641,6 +738,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onClose={() => {
           if (!actionBusy) setConfirmAction(null);
         }}
+      />
+
+      {/* 定时与触发器管理弹窗 */}
+      <TriggersModal
+        isOpen={triggersOpen}
+        session={session}
+        memberBots={memberBots}
+        onClose={() => setTriggersOpen(false)}
+        onAddToast={(type, message) => onAddToast?.(type, message)}
       />
     </div>
   );

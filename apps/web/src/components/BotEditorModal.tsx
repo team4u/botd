@@ -9,6 +9,12 @@ import {
   Cpu,
   AlertCircle,
   Info,
+  Server,
+  KeyRound,
+  Plus,
+  Trash2,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { api } from '../api';
 import { SearchableSelect } from './SearchableSelect';
@@ -19,11 +25,13 @@ import type {
   ModelCatalog,
   ProviderCatalogEntry,
   ModelCatalogEntry,
+  ThinkingLevel,
 } from '@botd/protocol';
 
 interface BotEditorModalProps {
   isOpen: boolean;
-  nodes: NodeWithBots[];
+  /** Owning node, fixed by the entry point — bots are created/edited in node context. */
+  node: NodeWithBots | null;
   bot?: BotConfig | null;
   onClose: () => void;
   onSaved: () => void;
@@ -45,7 +53,7 @@ const DEFAULT_MEMORY_MD = `## 核心背景与偏好记忆
 
 export const BotEditorModal: React.FC<BotEditorModalProps> = ({
   isOpen,
-  nodes,
+  node,
   bot,
   onClose,
   onSaved,
@@ -55,8 +63,8 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
   // Tabs
   const [activeTab, setActiveTab] = useState<'basic' | 'system' | 'memory'>('basic');
 
-  // Form fields
-  const [nodeId, setNodeId] = useState('');
+  // Form fields (nodeId is fixed by the node-context entry, never edited here)
+  const nodeId = node?.id ?? '';
   const [id, setId] = useState('');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -64,11 +72,20 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
   const [customProviderInput, setCustomProviderInput] = useState('');
   const [isCustomProvider, setIsCustomProvider] = useState(false);
   const [modelId, setModelId] = useState('');
-  const [thinkingLevel, setThinkingLevel] = useState<'low' | 'medium' | 'high' | ''>('medium');
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | ''>('medium');
   const [enabledSkills, setEnabledSkills] = useState<string[]>([]);
   const [enabledExtensions, setEnabledExtensions] = useState<string[]>([]);
   const [systemMd, setSystemMd] = useState(DEFAULT_SYSTEM_MD);
   const [memoryMd, setMemoryMd] = useState('');
+
+  // Env (secrets) editor state
+  interface EnvPair {
+    key: string;
+    value: string;
+    visible?: boolean;
+  }
+  const [envPairs, setEnvPairs] = useState<EnvPair[]>([]);
+  const [envLoaded, setEnvLoaded] = useState(false);
 
   // Catalog state
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
@@ -81,10 +98,9 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
   const [loadFailed, setLoadFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Available skills on currently selected node
-  const selectedNode = nodes.find((n) => n.id === nodeId);
-  const availableSkills = selectedNode ? selectedNode.skills : [];
-  const availableExtensions = selectedNode ? (selectedNode.extensions || []) : [];
+  // Available skills on the owning node
+  const availableSkills = node ? node.skills : [];
+  const availableExtensions = node ? (node.extensions || []) : [];
 
   // Fetch catalog when selected node changes
   useEffect(() => {
@@ -135,7 +151,6 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
     setActiveTab('basic');
 
     if (bot) {
-      setNodeId(bot.nodeId);
       setId(bot.id);
       setName(bot.name);
       setDescription(bot.description || '');
@@ -151,7 +166,29 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       setLoadingFiles(true);
       setSystemMd('');
       setMemoryMd('');
-      Promise.all([api.getBotSystem(bot.id), api.getBotMemory(bot.id)])
+      // Load env vars (secrets) when node is online; env panel edits are best-effort
+      setEnvPairs([]);
+      setEnvLoaded(false);
+      const envPromise =
+        node && node.status === 'online'
+          ? api
+              .getBotEnv(bot.id)
+              .then((res) => {
+                if (!current) return;
+                setEnvPairs(
+                  Object.entries(res.env || {}).map(([key, value]) => ({
+                    key,
+                    value,
+                    visible: false,
+                  }))
+                );
+                setEnvLoaded(true);
+              })
+              .catch(() => {
+                // env endpoint unavailable (node offline / older node): keep empty list
+              })
+          : Promise.resolve();
+      Promise.all([api.getBotSystem(bot.id), api.getBotMemory(bot.id), envPromise])
         .then(([sys, mem]) => {
           if (!current) return;
           setSystemMd(sys.content);
@@ -166,8 +203,6 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
           if (current) setLoadingFiles(false);
         });
     } else {
-      const defaultNode = nodes.find((node) => node.status === 'online')?.id || nodes[0]?.id || '';
-      setNodeId(defaultNode);
       setId('');
       setName('');
       setDescription('');
@@ -180,6 +215,8 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       setCustomProviderInput('');
       setSystemMd(DEFAULT_SYSTEM_MD);
       setMemoryMd('');
+      setEnvPairs([]);
+      setEnvLoaded(false);
       setLoadingFiles(false);
     }
 
@@ -208,6 +245,42 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
     return availableModels.find((m) => m.id === modelId) || null;
   }, [availableModels, modelId]);
 
+  // Thinking levels for the selected model: catalog metadata first, generic fallback otherwise
+  const THINKING_LEVEL_LABELS: Record<Exclude<ThinkingLevel, ''>, string> = {
+    off: '关闭思考',
+    minimal: '极简思考',
+    low: '轻度思考',
+    medium: '标准思考',
+    high: '深度思考',
+    xhigh: '超深度思考',
+    max: '最大思考',
+  };
+  const modelThinkingLevels = useMemo<Exclude<ThinkingLevel, ''>[]>(() => {
+    const levels = currentModelMeta?.thinkingLevels?.filter(Boolean);
+    if (levels && levels.length > 0) return levels as Exclude<ThinkingLevel, ''>[];
+    // Fallback for models without catalog metadata (custom ids, empty catalogs)
+    return ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  }, [currentModelMeta]);
+
+  // Clamp selected level when the model changes and no longer supports it
+  useEffect(() => {
+    if (thinkingLevel && modelThinkingLevels.length > 0 && !modelThinkingLevels.includes(thinkingLevel)) {
+      // Pick the nearest supported level (prefer deeper, fall back shallower)
+      const ORDER: Exclude<ThinkingLevel, ''>[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+      const idx = ORDER.indexOf(thinkingLevel);
+      let next: Exclude<ThinkingLevel, ''> | '' = '';
+      for (let i = idx; i < ORDER.length; i++) {
+        if (modelThinkingLevels.includes(ORDER[i])) { next = ORDER[i]; break; }
+      }
+      if (!next) {
+        for (let i = idx - 1; i >= 0; i--) {
+          if (modelThinkingLevels.includes(ORDER[i])) { next = ORDER[i]; break; }
+        }
+      }
+      setThinkingLevel(next || modelThinkingLevels[0]);
+    }
+  }, [modelThinkingLevels]);
+
   if (!isOpen) return null;
 
   // Toggle skills checkbox
@@ -223,6 +296,31 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       prev.includes(ext) ? prev.filter((e) => e !== ext) : [...prev, ext]
     );
   };
+
+  // Env (secrets) helpers
+  const addEnvPair = () => {
+    setEnvPairs((prev) => [...prev, { key: '', value: '', visible: false }]);
+  };
+
+  const removeEnvPair = (index: number) => {
+    setEnvPairs((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const updateEnvPair = (
+    index: number,
+    patch: Partial<{ key: string; value: string; visible: boolean }>
+  ) => {
+    setEnvPairs((prev) =>
+      prev.map((pair, i) => (i === index ? { ...pair, ...patch } : pair))
+    );
+  };
+
+  // Sanitize env key to legal characters: uppercase letters, digits, underscore
+  const sanitizeEnvKey = (raw: string) =>
+    raw
+      .toUpperCase()
+      .replace(/[^A-Z0-9_]/g, '_')
+      .replace(/^_+/, '_');
 
   // Intentional provider change
   const handleProviderSelect = (val: string) => {
@@ -266,8 +364,8 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       setActiveTab('basic');
       return;
     }
-    if (!nodeId) {
-      setError('请选择所属节点');
+    if (!node || !nodeId) {
+      setError('缺少所属节点上下文');
       setActiveTab('basic');
       return;
     }
@@ -312,6 +410,17 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
         await api.createBot(botInput);
       }
       await api.saveBotMemory(botInput.id, memoryMd);
+
+      // Persist env vars (secrets): overwrite mode when there is content or env was loaded before
+      if (envPairs.length > 0 || (isEditing && envLoaded)) {
+        const envRecord: Record<string, string> = {};
+        for (const pair of envPairs) {
+          const cleanKey = pair.key.trim();
+          if (cleanKey) envRecord[cleanKey] = pair.value;
+        }
+        await api.putBotEnv(botInput.id, envRecord, false);
+      }
+
       onSaved();
       onClose();
     } catch (err: any) {
@@ -344,8 +453,8 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
               <h2 id="bot-editor-title" className="text-sm sm:text-base font-semibold text-zinc-900 dark:text-zinc-100">
                 {isEditing ? `编辑智能体: ${bot?.name} (@${bot?.id})` : '新建智能体'}
               </h2>
-              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 font-mono">
-                ~/.botd/bots/{id || '<唯一标识>'}/
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 font-mono truncate">
+                {node ? `${node.name} · ` : ''}~/.botd/bots/{id || '<唯一标识>'}/
               </p>
             </div>
           </div>
@@ -424,26 +533,33 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
               {/* Tab 1: Basic Config */}
               {activeTab === 'basic' && (
                 <div className="space-y-4">
-                  {/* Node & Bot ID */}
+                  {/* Owning node (fixed context) & Bot ID */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
                         所属节点
                       </label>
-                      <select
-                        value={nodeId}
-                        aria-label="所属计算节点"
-                        onChange={(e) => setNodeId(e.target.value)}
-                        disabled={isEditing}
-                        className="w-full px-3 py-2 text-base sm:text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 disabled:opacity-60 text-zinc-800 dark:text-zinc-200"
-                        required
-                      >
-                        {nodes.map((n) => (
-                          <option key={n.id} value={n.id} className="dark:bg-zinc-900 dark:text-zinc-100">
-                            {n.name} ({n.platform}) - {n.status === 'online' ? '🟢 在线' : '⚪ 离线'}
-                          </option>
-                        ))}
-                      </select>
+                      <div className="w-full h-8 px-2.5 text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-lg flex items-center gap-2 text-zinc-800 dark:text-zinc-200">
+                        <Server
+                          className={`w-3.5 h-3.5 shrink-0 ${
+                            node?.status === 'online'
+                              ? 'text-emerald-500'
+                              : 'text-zinc-400 dark:text-zinc-500'
+                          }`}
+                        />
+                        <span className="truncate">{node ? node.name : '—'}</span>
+                        {node && (
+                          <span
+                            className={`text-[11px] shrink-0 ml-auto ${
+                              node.status === 'online'
+                                ? 'text-emerald-600 dark:text-emerald-400'
+                                : 'text-zinc-400 dark:text-zinc-500'
+                            }`}
+                          >
+                            {node.status === 'online' ? '在线' : '离线'}
+                          </span>
+                        )}
+                      </div>
                     </div>
 
                     <div>
@@ -457,7 +573,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                         onChange={(e) => setId(e.target.value)}
                         placeholder="例如：pm-claude"
                         disabled={isEditing}
-                        className="w-full px-3 py-2 text-base sm:text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono disabled:opacity-60 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                        className="w-full h-8 px-2.5 text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono disabled:opacity-60 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
                         required
                       />
                     </div>
@@ -475,7 +591,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                         aria-label="显示名称"
                         onChange={(e) => setName(e.target.value)}
                         placeholder="例如：产品经理 Claude"
-                        className="w-full px-3 py-2 text-base sm:text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                        className="w-full h-8 px-2.5 text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
                         required
                       />
                     </div>
@@ -490,7 +606,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                         aria-label="角色描述"
                         onChange={(e) => setDescription(e.target.value)}
                         placeholder="例如：负责需求澄清与任务分发"
-                        className="w-full px-3 py-2 text-base sm:text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                        className="w-full h-8 px-2.5 text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
                       />
                     </div>
                   </div>
@@ -540,14 +656,21 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                         <select
                           value={thinkingLevel}
                           aria-label="思考深度"
-                          onChange={(e) => setThinkingLevel(e.target.value as any)}
-                          className="w-full px-2.5 py-1.5 text-base sm:text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200"
+                          onChange={(e) => setThinkingLevel(e.target.value as ThinkingLevel | '')}
+                          className="w-full h-8 px-2.5 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200"
                         >
                           <option value="" className="dark:bg-zinc-900 dark:text-zinc-100">默认（自动）</option>
-                          <option value="low" className="dark:bg-zinc-900 dark:text-zinc-100">轻度思考</option>
-                          <option value="medium" className="dark:bg-zinc-900 dark:text-zinc-100">标准思考</option>
-                          <option value="high" className="dark:bg-zinc-900 dark:text-zinc-100">深度思考</option>
+                          {modelThinkingLevels.map((level) => (
+                            <option key={level} value={level} className="dark:bg-zinc-900 dark:text-zinc-100">
+                              {THINKING_LEVEL_LABELS[level] || level}
+                            </option>
+                          ))}
                         </select>
+                        {currentModelMeta?.thinkingLevels && (
+                          <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                            按模型 {currentModelMeta.name || currentModelMeta.id} 实际支持的等级展示
+                          </p>
+                        )}
                       </div>
                     </div>
 
@@ -566,7 +689,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                           onChange={(e) => setCustomProviderInput(e.target.value)}
                           required
                           placeholder="例如：mistral、bedrock 或节点已注册的标识"
-                          className="w-full px-2.5 py-1.5 text-base sm:text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg font-mono focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                          className="w-full h-8 px-2.5 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg font-mono focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
                         />
                       </div>
                     )}
@@ -605,7 +728,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                           aria-label="模型标识"
                           onChange={(e) => setModelId(e.target.value)}
                           placeholder="输入模型型号，例如：gpt-4o、claude-3-7-sonnet"
-                          className="w-full px-2.5 py-1.5 text-base sm:text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                          className="w-full h-8 px-2.5 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
                           required
                         />
                       )}
@@ -653,9 +776,9 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                           return (
                             <label
                               key={skill}
-                              className={`flex items-center gap-2 p-2 rounded-lg border text-xs cursor-pointer transition-colors ${
+                              className={`flex items-center gap-2 p-1.5 rounded-lg border text-[11px] cursor-pointer transition-colors ${
                                 isChecked
-                                  ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 border-zinc-900 dark:border-zinc-100 font-medium'
+                                  ? 'bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-300 dark:border-indigo-800 text-indigo-950 dark:text-indigo-200'
                                   : 'bg-white dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800'
                               }`}
                             >
@@ -663,12 +786,85 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                                 type="checkbox"
                                 checked={isChecked}
                                 onChange={() => toggleSkill(skill)}
-                                className="rounded text-zinc-900 dark:text-zinc-100 border-zinc-300 dark:border-zinc-700 focus:ring-zinc-800 dark:focus:ring-zinc-400 dark:bg-zinc-900"
+                                className="rounded text-indigo-600 dark:text-indigo-400 border-zinc-300 dark:border-zinc-700 focus:ring-indigo-500 dark:bg-zinc-900"
                               />
                               <span className="font-mono truncate">{skill}</span>
                             </label>
                           );
                         })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Env (Secrets) editor */}
+                  <div className="p-3.5 sm:p-4 bg-zinc-50/70 dark:bg-zinc-900/70 border border-zinc-200/90 dark:border-zinc-800/90 rounded-2xl space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+                        <KeyRound className="w-3.5 h-3.5 text-zinc-700 dark:text-zinc-300" />
+                        <span>环境变量 (Secrets)</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={addEnvPair}
+                        className="h-7 px-2.5 text-xs font-medium rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center gap-1 transition-colors cursor-pointer"
+                      >
+                        <Plus className="w-3 h-3" />
+                        <span>添加变量</span>
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                      注入至 bash 子进程环境（0600 隔离存储），模型仅知晓变量名 $VAR，不会暴露明文到上下文
+                    </p>
+
+                    {envPairs.length === 0 ? (
+                      <p className="text-[11px] text-zinc-400 dark:text-zinc-500 bg-white/60 dark:bg-zinc-900/60 p-2 rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800">
+                        {isEditing && node?.status !== 'online'
+                          ? '节点离线时无法读取或保存环境变量，待节点上线后重试。'
+                          : '尚未配置环境变量，点击右上角「添加变量」新建。'}
+                      </p>
+                    ) : (
+                      <div className="space-y-1.5">
+                        {envPairs.map((pair, index) => (
+                          <div key={index} className="flex items-center gap-1.5">
+                            <input
+                              type="text"
+                              value={pair.key}
+                              aria-label={`环境变量名 ${index + 1}`}
+                              onChange={(e) => updateEnvPair(index, { key: sanitizeEnvKey(e.target.value) })}
+                              placeholder="GITHUB_TOKEN"
+                              className="w-2/5 h-8 px-2.5 text-xs font-mono bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                            />
+                            <div className="relative flex-1">
+                              <input
+                                type={pair.visible ? 'text' : 'password'}
+                                value={pair.value}
+                                aria-label={`环境变量值 ${index + 1}`}
+                                onChange={(e) => updateEnvPair(index, { value: e.target.value })}
+                                placeholder="••••••••"
+                                autoComplete="off"
+                                className="w-full h-8 pl-2.5 pr-8 text-xs font-mono bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => updateEnvPair(index, { visible: !pair.visible })}
+                                className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 rounded transition-colors cursor-pointer"
+                                aria-label={pair.visible ? '隐藏明文' : '显示明文'}
+                                title={pair.visible ? '隐藏明文' : '显示明文'}
+                              >
+                                {pair.visible ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                              </button>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => removeEnvPair(index)}
+                              className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 rounded-lg transition-colors cursor-pointer shrink-0"
+                              aria-label={`删除变量 ${index + 1}`}
+                              title="删除变量"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>
@@ -692,9 +888,9 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                           return (
                             <label
                               key={ext}
-                              className={`flex items-center gap-2 p-2 rounded-lg border text-xs cursor-pointer transition-colors ${
+                              className={`flex items-center gap-2 p-1.5 rounded-lg border text-[11px] cursor-pointer transition-colors ${
                                 isChecked
-                                  ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 border-zinc-900 dark:border-zinc-100 font-medium'
+                                  ? 'bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-300 dark:border-indigo-800 text-indigo-950 dark:text-indigo-200'
                                   : 'bg-white dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800'
                               }`}
                             >
@@ -702,7 +898,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                                 type="checkbox"
                                 checked={isChecked}
                                 onChange={() => toggleExtension(ext)}
-                                className="rounded text-zinc-900 dark:text-zinc-100 border-zinc-300 dark:border-zinc-700 focus:ring-zinc-800 dark:focus:ring-zinc-400 dark:bg-zinc-900"
+                                className="rounded text-indigo-600 dark:text-indigo-400 border-zinc-300 dark:border-zinc-700 focus:ring-indigo-500 dark:bg-zinc-900"
                               />
                               <span className="font-mono truncate">{ext}</span>
                             </label>
@@ -734,7 +930,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                     aria-label="SYSTEM.md 人设提示词"
                     onChange={(e) => setSystemMd(e.target.value)}
                     placeholder="输入智能体的角色定位、协作规范与提示词..."
-                    className="w-full flex-1 min-h-[300px] p-3 text-base sm:text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono leading-relaxed text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                    className="w-full flex-1 min-h-[300px] p-2.5 text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono leading-relaxed text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
                     required
                   />
                 </div>
@@ -763,7 +959,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                     aria-label="MEMORY.md 长期记忆"
                     onChange={(e) => setMemoryMd(e.target.value)}
                     placeholder="输入智能体的跨会话长期记忆内容..."
-                    className="w-full flex-1 min-h-[280px] p-3 text-base sm:text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono leading-relaxed text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                    className="w-full flex-1 min-h-[280px] p-2.5 text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono leading-relaxed text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
                   />
                 </div>
               )}

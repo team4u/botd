@@ -1,7 +1,110 @@
+export * from './cron.js';
+
 export type PlatformType = 'darwin' | 'linux' | 'win32';
 export type SessionMode = 'direct' | 'lead' | 'roundtable';
-export type SessionStatus = 'idle' | 'running' | 'failed';
+export type SessionStatus = 'idle' | 'running' | 'queued' | 'failed';
 export type MessageRole = 'user' | 'assistant' | 'callback' | 'system';
+
+export interface ToolCallRecord {
+  name: string;
+  summary?: string;
+  status: 'running' | 'done' | 'error';
+  durationMs?: number;
+}
+
+export interface TurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  contextWindow?: number;
+}
+
+export interface ArtifactRecord {
+  id: string;
+  sessionId: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  senderBotId?: string;
+  createdAt: string;
+}
+
+export interface MessageAttachment {
+  id: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  url: string;
+}
+
+export interface PendingAskRecord {
+  id: string;
+  sessionId: string;
+  botId: string;
+  prompt: string;
+  options: string[];
+  status: 'pending' | 'answered' | 'expired';
+  answer?: string;
+  createdAt: string;
+  expiresAt?: string;
+}
+
+export type TriggerKind = 'webhook' | 'cron' | 'once';
+
+export interface TriggerRecord {
+  id: string;
+  sessionId: string;
+  botId: string;
+  name: string;
+  kind: TriggerKind;
+  /** For webhook triggers: secret token used in POST /api/webhooks/:token */
+  token?: string;
+  /** Standard 5-field cron expression (server local time), required for kind='cron' */
+  cronExpr?: string;
+  /** ISO timestamp when a one-shot trigger (kind='once') should fire */
+  runAt?: string;
+  prompt: string;
+  enabled: boolean;
+  lastTriggeredAt?: string;
+  createdAt: string;
+}
+
+export interface CreateTriggerInput {
+  name: string;
+  botId: string;
+  kind: TriggerKind;
+  cronExpr?: string;
+  /** ISO timestamp or delaySeconds for kind='once' */
+  runAt?: string;
+  delaySeconds?: number;
+  prompt: string;
+  enabled?: boolean;
+}
+
+export type BgJobStatus = 'running' | 'done' | 'failed' | 'killed';
+
+export interface BgJobRecord {
+  id: string;
+  sessionId: string;
+  botId: string;
+  command: string;
+  cwd: string;
+  pid?: number;
+  status: BgJobStatus;
+  exitCode?: number | null;
+  replyToBotId?: string;
+  noTurnOnComplete?: boolean;
+  logPath: string;
+  startedAt: string;
+  finishedAt?: string;
+}
+
+export interface MessageSearchHit {
+  message: MessageRecord;
+  sessionTitle: string;
+  sessionMode: SessionMode;
+  sessionArchived: boolean;
+}
 
 export type UserRole = 'admin' | 'member';
 
@@ -32,7 +135,7 @@ export interface BotConfig {
   description: string;
   modelProvider: string;
   modelId: string;
-  thinkingLevel?: 'low' | 'medium' | 'high';
+  thinkingLevel?: ThinkingLevel;
   enabledSkills: string[];
   enabledExtensions?: string[];
   /** @deprecated Legacy metadata, ignored by command discovery and execution. */
@@ -66,6 +169,8 @@ export interface SessionRecord {
   lastMessageAt?: string;
   /** 是否已归档（如「开启新话题」后旧会话自动归档，在历史话题区展示） */
   archived?: boolean;
+  /** 圆桌模式下是否开启独立并发盲评（所有成员并发独立作答，最后由 Lead 总结） */
+  parallelRoundtable?: boolean;
 }
 
 export interface MessageRecord {
@@ -76,6 +181,9 @@ export interface MessageRecord {
   modelBadge?: string;
   content: string;
   mentions: string[];
+  toolCalls?: ToolCallRecord[];
+  usage?: TurnUsage;
+  attachments?: MessageAttachment[];
   createdAt: string;
 }
 
@@ -85,7 +193,13 @@ export type SessionSseEvent =
   | { type: 'tool_status'; sessionId: string; botId: string; toolName: string; status: 'running' | 'done'; summary?: string }
   | { type: 'message_created'; message: MessageRecord }
   /** 编辑用户消息后：锚点之后的历史已被截断、锚点内容已更新，客户端应重新拉取消息列表 */
-  | { type: 'messages_truncated'; sessionId: string; anchorMessageId: string };
+  | { type: 'messages_truncated'; sessionId: string; anchorMessageId: string }
+  /** BOT 通过 botd ask 发起的人机协同交互请求 */
+  | { type: 'interaction_request'; sessionId: string; ask: PendingAskRecord }
+  /** 人机协同交互已完成响应 */
+  | { type: 'interaction_resolved'; sessionId: string; askId: string; answer: string }
+  /** 新文件产物上传通知 */
+  | { type: 'artifact_created'; sessionId: string; artifact: ArtifactRecord };
 
 export interface HubRpcFunctions {
   registerNode(info: {
@@ -111,7 +225,32 @@ export interface HubRpcFunctions {
     sessionId: string;
     botId: string;
     wakeupMessage: string;
-  }): Promise<void>;
+    replyToBotId?: string;
+    /** 若为 true，仅向公屏插入消息并广播 SSE，不触发大模型推理回合 */
+    noTurn?: boolean;
+    /** 若指定正整数秒数，则在 Hub 上创建一个 once 延时触发器，到点再唤醒 */
+    delaySeconds?: number;
+  }): Promise<{ ok: true; scheduledTriggerId?: string } | void>;
+  requestHumanInput(input: {
+    sessionId: string;
+    botId: string;
+    prompt: string;
+    options?: string[];
+    timeoutSeconds?: number;
+  }): Promise<{ answer: string }>;
+  uploadArtifact(input: {
+    sessionId: string;
+    botId?: string;
+    filename: string;
+    mimeType?: string;
+    contentBase64: string;
+    message?: string;
+  }): Promise<ArtifactRecord>;
+  downloadArtifact(artifactId: string): Promise<{
+    artifact: ArtifactRecord;
+    contentBase64: string;
+  }>;
+  listSessionArtifacts(sessionId: string): Promise<ArtifactRecord[]>;
 }
 
 export interface NodeRpcFunctions {
@@ -125,8 +264,10 @@ export interface NodeRpcFunctions {
   logoutProvider(providerId: string): Promise<void>;
   saveBot(bot: BotConfig, systemMd: string): Promise<void>;
   deleteBot(botId: string): Promise<void>;
-  readFile(target: { kind: 'system' | 'memory' | 'skill' | 'extension'; botId?: string; id: string }): Promise<string>;
-  writeFile(target: { kind: 'system' | 'memory' | 'skill' | 'extension'; botId?: string; id: string }, content: string): Promise<void>;
+  readFile(target: { kind: 'system' | 'memory' | 'env' | 'skill' | 'extension'; botId?: string; id: string }): Promise<string>;
+  writeFile(target: { kind: 'system' | 'memory' | 'env' | 'skill' | 'extension'; botId?: string; id: string }, content: string): Promise<void>;
+  getBotEnv?(botId: string): Promise<Record<string, string>>;
+  setBotEnv?(botId: string, env: Record<string, string>): Promise<Record<string, string>>;
   installResource(input: {
     source: string;
     kind?: 'auto' | 'skill' | 'extension';
@@ -146,7 +287,14 @@ export interface NodeRpcFunctions {
     incrementalMessages: string;
     /** Current user command without sender/mention prefixes; history remains separate. */
     commandText?: string;
-  }): Promise<{ replyText: string; modelBadge: string }>;
+    /** Attachments sent in incremental user messages for this turn */
+    attachments?: MessageAttachment[];
+  }): Promise<{
+    replyText: string;
+    modelBadge: string;
+    toolCalls?: ToolCallRecord[];
+    usage?: TurnUsage;
+  }>;
   cancelTurn(sessionId: string, botId: string): Promise<void>;
   /** 归档该 BOT 在指定会话的本地 Pi 会话文件（.jsonl 改名备份），下一回合将从 Hub 历史全量重建上下文 */
   resetSession(sessionId: string, botId: string): Promise<void>;
@@ -160,6 +308,7 @@ export interface CreateSessionInput {
   mode: SessionMode;
   leadBotId: string;
   memberBotIds: string[];
+  parallelRoundtable?: boolean;
 }
 export interface NodeIdentity { nodeId: string; name: string; hubUrl: string; token: string }
 export interface PairingResult { code: string; expiresAt: string }
@@ -170,6 +319,8 @@ export interface ModelCatalogEntry {
   id: string;
   name: string;
   reasoning: boolean;
+  /** Thinking levels this model supports, derived from the SDK model schema. */
+  thinkingLevels?: ThinkingLevel[];
   input: string[];
   contextWindow: number;
   maxTokens: number;
@@ -187,6 +338,11 @@ export interface ModelCatalog {
   sdkVersion: string;
   providers: ProviderCatalogEntry[];
 }
+export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export const THINKING_LEVELS: readonly ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export const isThinkingLevel = (value: unknown): value is ThinkingLevel =>
+  typeof value === 'string' && (THINKING_LEVELS as readonly string[]).includes(value);
+
 export interface ProviderLoginPrompt {
   id: string;
   type: 'text' | 'secret' | 'select' | 'manual_code';

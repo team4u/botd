@@ -5,8 +5,30 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ensureDir } from './storage.js';
+import { isWindows, windowsShellPathPrefix } from './windows-shell.js';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * npm is npm.cmd on Windows and cannot be exec'd directly by Node ≥ 20.
+ * The optional prepend lets callers route git through the managed MinGit.
+ */
+async function runCommand(command: string, args: string[], options: { cwd: string; prependPath?: string[] }): Promise<{ stdout: string; stderr: string }> {
+  const resolved = isWindows && (command === 'npm' || command === 'npx') ? `${command}.cmd` : command;
+  const pathKey = isWindows
+    ? (Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ?? 'PATH')
+    : 'PATH';
+  const currentPath = process.env[pathKey] ?? '';
+  const nextPath = [
+    ...(options.prependPath ?? []),
+    ...currentPath.split(path.delimiter).filter(Boolean),
+  ].join(path.delimiter);
+  return execFileAsync(resolved, args, {
+    cwd: options.cwd,
+    windowsHide: true,
+    env: { ...process.env, [pathKey]: nextPath, PATH: nextPath },
+  });
+}
 
 export interface InstallInput {
   source: string;
@@ -101,7 +123,7 @@ export async function installResourceToNode(
       'utf8'
     );
 
-    await execFileAsync('npm', ['install', pkgSpec, '--omit=dev'], { cwd: targetDir });
+    await runCommand('npm', ['install', pkgSpec, '--omit=dev'], { cwd: targetDir });
 
     await fs.writeFile(
       path.join(targetDir, 'index.ts'),
@@ -155,7 +177,9 @@ export async function installResourceToNode(
       cloneArgs.push('--branch', branch);
     }
     cloneArgs.push(repoUrl, tempDir);
-    await execFileAsync('git', cloneArgs);
+    // Route git through the managed MinGit on Windows when nothing else exists.
+    const prependPath = isWindows ? windowsShellPathPrefix(dataDir) : [];
+    await runCommand('git', cloneArgs, { cwd: os.tmpdir(), prependPath });
 
     const extractedRoot = subPath ? path.join(tempDir, subPath) : tempDir;
     if (!(await fileExists(extractedRoot))) {
@@ -177,7 +201,7 @@ export async function installResourceToNode(
     });
 
     if (resolvedKind === 'extension' && (await fileExists(path.join(destDir, 'package.json')))) {
-      await execFileAsync('npm', ['install', '--omit=dev'], { cwd: destDir });
+      await runCommand('npm', ['install', '--omit=dev'], { cwd: destDir, prependPath });
     }
 
     return { kind: resolvedKind, id };

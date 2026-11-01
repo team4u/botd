@@ -4,15 +4,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type {
+  ArtifactRecord,
   BotConfig,
+  MessageAttachment,
   MessageRecord,
   MessageRole,
+  MessageSearchHit,
   NodeRecord,
   NodeWithBots,
   PlatformType,
   SessionMode,
   SessionRecord,
   SessionStatus,
+  ThinkingLevel,
+  ToolCallRecord,
+  TriggerKind,
+  TriggerRecord,
+  TurnUsage,
   UserRecord,
   UserRole,
 } from '@botd/protocol';
@@ -51,6 +59,105 @@ const buildPreview = (content: string): string | undefined => {
   return text.length > PREVIEW_MAX_LENGTH ? `${text.slice(0, PREVIEW_MAX_LENGTH)}...` : text;
 };
 
+/** 解析可空 JSON 列：NULL / 空串 / 非法 JSON 一律返回 undefined */
+const parseOptionalJson = <T>(raw: string | null | undefined): T | undefined => {
+  if (raw === null || raw === undefined || raw.length === 0) return undefined;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return undefined;
+  }
+};
+
+type MessageRow = {
+  id: string;
+  session_id: string;
+  role: string;
+  sender_bot_id: string | null;
+  model_badge: string | null;
+  content: string;
+  mentions_json: string;
+  tool_calls_json: string | null;
+  usage_json: string | null;
+  attachments_json: string | null;
+  created_at: string;
+};
+
+const mapMessageRow = (row: MessageRow): MessageRecord => {
+  const toolCalls = parseOptionalJson<ToolCallRecord[]>(row.tool_calls_json);
+  const usage = parseOptionalJson<TurnUsage>(row.usage_json);
+  const attachments = parseOptionalJson<MessageAttachment[]>(row.attachments_json);
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    role: row.role as MessageRole,
+    senderBotId: row.sender_bot_id ?? undefined,
+    modelBadge: row.model_badge ?? undefined,
+    content: row.content,
+    mentions: parseOptionalJson<string[]>(row.mentions_json) ?? [],
+    ...(toolCalls ? { toolCalls } : {}),
+    ...(usage ? { usage } : {}),
+    ...(attachments ? { attachments } : {}),
+    createdAt: row.created_at,
+  };
+};
+
+const ARTIFACT_COLUMNS = 'id, session_id, filename, mime_type, size_bytes, sender_bot_id, created_at';
+
+type ArtifactRow = {
+  id: string;
+  session_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number | bigint;
+  sender_bot_id: string | null;
+  created_at: string;
+};
+
+const mapArtifactRow = (row: ArtifactRow): ArtifactRecord => ({
+  id: row.id,
+  sessionId: row.session_id,
+  filename: row.filename,
+  mimeType: row.mime_type,
+  sizeBytes: Number(row.size_bytes),
+  ...(row.sender_bot_id ? { senderBotId: row.sender_bot_id } : {}),
+  createdAt: row.created_at,
+});
+
+const TRIGGER_COLUMNS =
+  'id, session_id, bot_id, owner_id, name, kind, token, cron_expr, run_at, prompt, enabled, last_triggered_at, created_at';
+
+type TriggerRow = {
+  id: string;
+  session_id: string;
+  bot_id: string;
+  owner_id: string;
+  name: string;
+  kind: string;
+  token: string | null;
+  cron_expr: string | null;
+  run_at: string | null;
+  prompt: string;
+  enabled: number;
+  last_triggered_at: string | null;
+  created_at: string;
+};
+
+const mapTriggerRow = (row: TriggerRow): TriggerRecord => ({
+  id: row.id,
+  sessionId: row.session_id,
+  botId: row.bot_id,
+  name: row.name,
+  kind: row.kind as TriggerKind,
+  ...(row.token ? { token: row.token } : {}),
+  ...(row.cron_expr ? { cronExpr: row.cron_expr } : {}),
+  ...(row.run_at ? { runAt: row.run_at } : {}),
+  prompt: row.prompt,
+  enabled: Boolean(row.enabled),
+  ...(row.last_triggered_at ? { lastTriggeredAt: row.last_triggered_at } : {}),
+  createdAt: row.created_at,
+});
+
 export class HubDatabase {
   public db: DatabaseSync;
 
@@ -69,7 +176,7 @@ export class HubDatabase {
   public resetStaleMetadata(): void {
     this.db.exec(`
       UPDATE nodes SET status = 'offline' WHERE status = 'online';
-      UPDATE sessions SET status = 'idle', active_bot_id = NULL WHERE status = 'running';
+      UPDATE sessions SET status = 'idle', active_bot_id = NULL WHERE status IN ('running', 'queued');
     `);
   }
 
@@ -127,6 +234,7 @@ export class HubDatabase {
         status TEXT NOT NULL DEFAULT 'idle',
         active_bot_id TEXT,
         archived INTEGER NOT NULL DEFAULT 0,
+        parallel_roundtable INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -139,9 +247,41 @@ export class HubDatabase {
         model_badge TEXT,
         content TEXT NOT NULL,
         mentions_json TEXT NOT NULL DEFAULT '[]',
+        tool_calls_json TEXT,
+        usage_json TEXT,
+        attachments_json TEXT,
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS artifacts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        sender_bot_id TEXT,
+        storage_path TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS triggers (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        bot_id TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        token TEXT UNIQUE,
+        cron_expr TEXT,
+        run_at TEXT,
+        prompt TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        last_triggered_at TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_triggers_session ON triggers(session_id);
     `);
 
     const migrations = [
@@ -153,6 +293,11 @@ export class HubDatabase {
       `ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE nodes ADD COLUMN owner_id TEXT`,
       `ALTER TABLE sessions ADD COLUMN owner_id TEXT`,
+      `ALTER TABLE sessions ADD COLUMN parallel_roundtable INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE messages ADD COLUMN tool_calls_json TEXT`,
+      `ALTER TABLE messages ADD COLUMN usage_json TEXT`,
+      `ALTER TABLE messages ADD COLUMN attachments_json TEXT`,
+      `ALTER TABLE triggers ADD COLUMN run_at TEXT`,
     ];
 
     for (const sql of migrations) {
@@ -286,6 +431,8 @@ export class HubDatabase {
     if (sessionIds.length > 0) {
       const placeholders = sessionIds.map(() => '?').join(', ');
       this.db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...sessionIds);
+      this.db.prepare(`DELETE FROM triggers WHERE session_id IN (${placeholders})`).run(...sessionIds);
+      this.db.prepare(`DELETE FROM artifacts WHERE session_id IN (${placeholders})`).run(...sessionIds);
     }
     this.db.prepare('DELETE FROM sessions WHERE owner_id = ?').run(id);
     this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
@@ -454,6 +601,12 @@ export class HubDatabase {
     stmt.run(id);
   }
 
+  /** Remove every cached BOT record belonging to a node (force node removal). */
+  deleteBotsForNode(nodeId: string): void {
+    const stmt = this.db.prepare('DELETE FROM bots WHERE node_id = ?');
+    stmt.run(nodeId);
+  }
+
   addNodeSkill(nodeId: string, skillId: string): void {
     const node = this.getNode(nodeId);
     if (!node) return;
@@ -518,7 +671,7 @@ export class HubDatabase {
       description: row.description,
       modelProvider: row.model_provider,
       modelId: row.model_id,
-      thinkingLevel: (row.thinking_level as 'low' | 'medium' | 'high') ?? 'medium',
+      thinkingLevel: (row.thinking_level as ThinkingLevel) ?? 'medium',
       enabledSkills: JSON.parse(row.enabled_skills_json || '[]'),
       enabledExtensions: JSON.parse(row.enabled_extensions_json || '[]'),
       webCommandNames: JSON.parse(row.web_command_names_json || '[]'),
@@ -548,7 +701,7 @@ export class HubDatabase {
       description: row.description,
       modelProvider: row.model_provider,
       modelId: row.model_id,
-      thinkingLevel: (row.thinking_level as 'low' | 'medium' | 'high') ?? 'medium',
+      thinkingLevel: (row.thinking_level as ThinkingLevel) ?? 'medium',
       enabledSkills: JSON.parse(row.enabled_skills_json || '[]'),
       enabledExtensions: JSON.parse(row.enabled_extensions_json || '[]'),
       webCommandNames: JSON.parse(row.web_command_names_json || '[]'),
@@ -600,12 +753,14 @@ export class HubDatabase {
     leadBotId: string;
     memberBotIds: string[];
     ownerId: string;
+    parallelRoundtable?: boolean;
   }): SessionRecord {
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
-      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id)
-      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?)
+      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parallel_roundtable)
+      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?)
     `);
+    const parallelRoundtable = input.parallelRoundtable ?? false;
     stmt.run(
       input.id,
       input.title,
@@ -614,7 +769,8 @@ export class HubDatabase {
       JSON.stringify(input.memberBotIds),
       now,
       now,
-      input.ownerId
+      input.ownerId,
+      parallelRoundtable ? 1 : 0
     );
     return {
       id: input.id,
@@ -626,11 +782,12 @@ export class HubDatabase {
       activeBotId: undefined,
       createdAt: now,
       updatedAt: now,
+      ...(parallelRoundtable ? { parallelRoundtable } : {}),
     };
   }
 
   getSession(id: string): (SessionRecord & { cursorMap: Record<string, number> }) | undefined {
-    const stmt = this.db.prepare('SELECT id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, archived, created_at, updated_at FROM sessions WHERE id = ?');
+    const stmt = this.db.prepare('SELECT id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, archived, parallel_roundtable, created_at, updated_at FROM sessions WHERE id = ?');
     const row = stmt.get(id) as {
       id: string;
       title: string;
@@ -641,6 +798,7 @@ export class HubDatabase {
       status: string;
       active_bot_id: string | null;
       archived: number;
+      parallel_roundtable: number;
       created_at: string;
       updated_at: string;
     } | undefined;
@@ -655,6 +813,7 @@ export class HubDatabase {
       status: row.status as SessionStatus,
       activeBotId: row.active_bot_id ?? undefined,
       archived: Boolean(row.archived),
+      parallelRoundtable: Boolean(row.parallel_roundtable),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -662,7 +821,7 @@ export class HubDatabase {
 
   getAllSessions(ownerId: string): SessionRecord[] {
     const stmt = this.db.prepare(`
-      SELECT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.created_at, s.updated_at,
+      SELECT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.parallel_roundtable, s.created_at, s.updated_at,
         (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
         (SELECT m.content FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_content,
         (SELECT m.created_at FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_at
@@ -679,6 +838,7 @@ export class HubDatabase {
       status: string;
       active_bot_id: string | null;
       archived: number;
+      parallel_roundtable: number;
       created_at: string;
       updated_at: string;
       message_count: number | bigint;
@@ -694,6 +854,7 @@ export class HubDatabase {
       status: row.status as SessionStatus,
       activeBotId: row.active_bot_id ?? undefined,
       archived: Boolean(row.archived),
+      parallelRoundtable: Boolean(row.parallel_roundtable),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       messageCount: Number(row.message_count),
@@ -707,6 +868,10 @@ export class HubDatabase {
     if (!session) return false;
     const deleteMessages = this.db.prepare('DELETE FROM messages WHERE session_id = ?');
     deleteMessages.run(id);
+    const deleteTriggers = this.db.prepare('DELETE FROM triggers WHERE session_id = ?');
+    deleteTriggers.run(id);
+    const deleteArtifacts = this.db.prepare('DELETE FROM artifacts WHERE session_id = ?');
+    deleteArtifacts.run(id);
     const deleteSessionStmt = this.db.prepare('DELETE FROM sessions WHERE id = ?');
     deleteSessionStmt.run(id);
     return true;
@@ -753,8 +918,8 @@ export class HubDatabase {
     const now = new Date().toISOString();
     const newSessionId = `sess_${randomUUID()}`;
     const insertSession = this.db.prepare(`
-      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id)
-      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?)
+      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parallel_roundtable)
+      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?)
     `);
     insertSession.run(
       newSessionId,
@@ -764,11 +929,12 @@ export class HubDatabase {
       JSON.stringify(source.memberBotIds),
       now,
       now,
-      ownerId
+      ownerId,
+      source.parallelRoundtable ? 1 : 0
     );
 
     const rows = this.db.prepare(`
-      SELECT role, sender_bot_id, model_badge, content, mentions_json, created_at
+      SELECT role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
       FROM messages
       WHERE session_id = ? AND rowid <= ?
       ORDER BY rowid ASC
@@ -778,12 +944,15 @@ export class HubDatabase {
       model_badge: string | null;
       content: string;
       mentions_json: string;
+      tool_calls_json: string | null;
+      usage_json: string | null;
+      attachments_json: string | null;
       created_at: string;
     }[];
     // 逐行 INSERT（新 msg id、新 session_id），created_at 保留原值以保真时间线
     const insertMessage = this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, sender_bot_id, model_badge, content, mentions_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, session_id, role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const row of rows) {
       insertMessage.run(
@@ -794,6 +963,9 @@ export class HubDatabase {
         row.model_badge,
         row.content,
         row.mentions_json,
+        row.tool_calls_json,
+        row.usage_json,
+        row.attachments_json,
         row.created_at
       );
     }
@@ -811,6 +983,7 @@ export class HubDatabase {
       status?: SessionStatus;
       activeBotId?: string;
       archived?: boolean;
+      parallelRoundtable?: boolean;
     }
   ): SessionRecord | undefined {
     const session = this.getSession(id);
@@ -823,10 +996,11 @@ export class HubDatabase {
     const status = patch.status ?? session.status;
     const activeBotId = patch.activeBotId !== undefined ? patch.activeBotId : session.activeBotId;
     const archived = patch.archived ?? session.archived ?? false;
+    const parallelRoundtable = patch.parallelRoundtable ?? session.parallelRoundtable ?? false;
 
     const stmt = this.db.prepare(`
       UPDATE sessions
-      SET title = ?, mode = ?, lead_bot_id = ?, member_bot_ids_json = ?, status = ?, active_bot_id = ?, archived = ?, updated_at = ?
+      SET title = ?, mode = ?, lead_bot_id = ?, member_bot_ids_json = ?, status = ?, active_bot_id = ?, archived = ?, parallel_roundtable = ?, updated_at = ?
       WHERE id = ?
     `);
     stmt.run(
@@ -837,6 +1011,7 @@ export class HubDatabase {
       status,
       activeBotId ?? null,
       archived ? 1 : 0,
+      parallelRoundtable ? 1 : 0,
       now,
       id
     );
@@ -850,6 +1025,7 @@ export class HubDatabase {
       status,
       activeBotId: activeBotId ?? undefined,
       archived,
+      parallelRoundtable,
       createdAt: session.createdAt,
       updatedAt: now,
     };
@@ -882,12 +1058,18 @@ export class HubDatabase {
     modelBadge?: string;
     content: string;
     mentions?: string[];
+    toolCalls?: ToolCallRecord[];
+    usage?: TurnUsage;
+    attachments?: MessageAttachment[];
     createdAt?: string;
   }): IncrementalMessageResult {
     const now = msg.createdAt ?? new Date().toISOString();
+    const toolCallsJson = msg.toolCalls ? JSON.stringify(msg.toolCalls) : null;
+    const usageJson = msg.usage ? JSON.stringify(msg.usage) : null;
+    const attachmentsJson = msg.attachments ? JSON.stringify(msg.attachments) : null;
     const stmt = this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, sender_bot_id, model_badge, content, mentions_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, session_id, role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       msg.id,
@@ -897,6 +1079,9 @@ export class HubDatabase {
       msg.modelBadge ?? null,
       msg.content,
       JSON.stringify(msg.mentions || []),
+      toolCallsJson,
+      usageJson,
+      attachmentsJson,
       now
     );
     const rowid = Number(result.lastInsertRowid);
@@ -912,6 +1097,9 @@ export class HubDatabase {
         modelBadge: msg.modelBadge ?? undefined,
         content: msg.content,
         mentions: msg.mentions || [],
+        ...(msg.toolCalls ? { toolCalls: msg.toolCalls } : {}),
+        ...(msg.usage ? { usage: msg.usage } : {}),
+        ...(msg.attachments ? { attachments: msg.attachments } : {}),
         createdAt: now,
       },
     };
@@ -919,63 +1107,26 @@ export class HubDatabase {
 
   getMessages(sessionId: string): MessageRecord[] {
     const stmt = this.db.prepare(`
-      SELECT id, session_id, role, sender_bot_id, model_badge, content, mentions_json, created_at
+      SELECT id, session_id, role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
       FROM messages
       WHERE session_id = ?
       ORDER BY rowid ASC
     `);
-    const rows = stmt.all(sessionId) as {
-      id: string;
-      session_id: string;
-      role: string;
-      sender_bot_id: string | null;
-      model_badge: string | null;
-      content: string;
-      mentions_json: string;
-      created_at: string;
-    }[];
-    return rows.map((row) => ({
-      id: row.id,
-      sessionId: row.session_id,
-      role: row.role as MessageRole,
-      senderBotId: row.sender_bot_id ?? undefined,
-      modelBadge: row.model_badge ?? undefined,
-      content: row.content,
-      mentions: JSON.parse(row.mentions_json || '[]'),
-      createdAt: row.created_at,
-    }));
+    const rows = stmt.all(sessionId) as MessageRow[];
+    return rows.map(mapMessageRow);
   }
 
   getIncrementalMessages(sessionId: string, afterRowid: number): IncrementalMessageResult[] {
     const stmt = this.db.prepare(`
-      SELECT rowid, id, session_id, role, sender_bot_id, model_badge, content, mentions_json, created_at
+      SELECT rowid, id, session_id, role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
       FROM messages
       WHERE session_id = ? AND rowid > ?
       ORDER BY rowid ASC
     `);
-    const rows = stmt.all(sessionId, afterRowid) as {
-      rowid: number | bigint;
-      id: string;
-      session_id: string;
-      role: string;
-      sender_bot_id: string | null;
-      model_badge: string | null;
-      content: string;
-      mentions_json: string;
-      created_at: string;
-    }[];
+    const rows = stmt.all(sessionId, afterRowid) as (MessageRow & { rowid: number | bigint })[];
     return rows.map((row) => ({
       rowid: Number(row.rowid),
-      message: {
-        id: row.id,
-        sessionId: row.session_id,
-        role: row.role as MessageRole,
-        senderBotId: row.sender_bot_id ?? undefined,
-        modelBadge: row.model_badge ?? undefined,
-        content: row.content,
-        mentions: JSON.parse(row.mentions_json || '[]'),
-        createdAt: row.created_at,
-      },
+      message: mapMessageRow(row),
     }));
   }
 
@@ -987,33 +1138,11 @@ export class HubDatabase {
 
   /** 更新消息内容与 mentions；消息不存在时返回 undefined */
   updateMessageContent(messageId: string, content: string, mentions: string[]): MessageRecord | undefined {
-    const stmt = this.db.prepare(`
-      SELECT id, session_id, role, sender_bot_id, model_badge, mentions_json, created_at
-      FROM messages
-      WHERE id = ?
-    `);
-    const row = stmt.get(messageId) as {
-      id: string;
-      session_id: string;
-      role: string;
-      sender_bot_id: string | null;
-      model_badge: string | null;
-      mentions_json: string;
-      created_at: string;
-    } | undefined;
+    const row = this.getMessageById(messageId);
     if (!row) return undefined;
     const update = this.db.prepare('UPDATE messages SET content = ?, mentions_json = ? WHERE id = ?');
     update.run(content, JSON.stringify(mentions), messageId);
-    return {
-      id: row.id,
-      sessionId: row.session_id,
-      role: row.role as MessageRole,
-      senderBotId: row.sender_bot_id ?? undefined,
-      modelBadge: row.model_badge ?? undefined,
-      content,
-      mentions,
-      createdAt: row.created_at,
-    };
+    return { ...row.message, content, mentions };
   }
 
   /** 删除会话内 rowid 大于给定值（不含等于）的消息，返回删除条数 */
@@ -1031,35 +1160,259 @@ export class HubDatabase {
 
   getMessageById(messageId: string): { rowid: number; message: MessageRecord } | undefined {
     const stmt = this.db.prepare(`
-      SELECT rowid, id, session_id, role, sender_bot_id, model_badge, content, mentions_json, created_at
+      SELECT rowid, id, session_id, role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
       FROM messages
       WHERE id = ?
     `);
-    const row = stmt.get(messageId) as {
-      rowid: number | bigint;
-      id: string;
-      session_id: string;
-      role: string;
-      sender_bot_id: string | null;
-      model_badge: string | null;
-      content: string;
-      mentions_json: string;
-      created_at: string;
-    } | undefined;
+    const row = stmt.get(messageId) as (MessageRow & { rowid: number | bigint }) | undefined;
     if (!row) return undefined;
     return {
       rowid: Number(row.rowid),
-      message: {
-        id: row.id,
-        sessionId: row.session_id,
-        role: row.role as MessageRole,
-        senderBotId: row.sender_bot_id ?? undefined,
-        modelBadge: row.model_badge ?? undefined,
-        content: row.content,
-        mentions: JSON.parse(row.mentions_json || '[]'),
-        createdAt: row.created_at,
-      },
+      message: mapMessageRow(row),
     };
+  }
+
+  /** 跨会话消息全文检索（大小写不敏感的 LIKE 匹配，按 rowid 倒序返回最新优先） */
+  searchMessages(
+    ownerId: string,
+    query: string,
+    options?: { sessionId?: string; limit?: number }
+  ): MessageSearchHit[] {
+    if (!query || !query.trim()) return [];
+    const limit = options?.limit && options.limit > 0 ? Math.min(Math.floor(options.limit), 100) : 30;
+    const escaped = query.trim().replace(/[\\%_]/g, (ch) => `\\${ch}`);
+    const pattern = `%${escaped}%`;
+    const params: (string | number)[] = [ownerId];
+    let sql = `
+      SELECT m.id, m.session_id, m.role, m.sender_bot_id, m.model_badge, m.content, m.mentions_json, m.tool_calls_json, m.usage_json, m.attachments_json, m.created_at,
+        s.title AS session_title, s.mode AS session_mode, s.archived AS session_archived
+      FROM messages m JOIN sessions s ON m.session_id = s.id
+      WHERE s.owner_id = ?
+    `;
+    if (options?.sessionId) {
+      sql += ' AND m.session_id = ?';
+      params.push(options.sessionId);
+    }
+    sql += ` AND LOWER(m.content) LIKE LOWER(?) ESCAPE '\\' ORDER BY m.rowid DESC LIMIT ?`;
+    params.push(pattern, limit);
+    const rows = this.db.prepare(sql).all(...params) as (MessageRow & {
+      session_title: string;
+      session_mode: string;
+      session_archived: number;
+    })[];
+    return rows.map((row) => ({
+      message: mapMessageRow(row),
+      sessionTitle: row.session_title,
+      sessionMode: row.session_mode as SessionMode,
+      sessionArchived: Boolean(row.session_archived),
+    }));
+  }
+
+  // --- Artifacts ---
+  createArtifact(input: {
+    id: string;
+    sessionId: string;
+    filename: string;
+    mimeType: string;
+    sizeBytes: number;
+    senderBotId?: string;
+    storagePath: string;
+  }): ArtifactRecord {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT INTO artifacts (id, session_id, filename, mime_type, size_bytes, sender_bot_id, storage_path, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      input.id,
+      input.sessionId,
+      input.filename,
+      input.mimeType,
+      input.sizeBytes,
+      input.senderBotId ?? null,
+      input.storagePath,
+      now
+    );
+    const record: ArtifactRecord = {
+      id: input.id,
+      sessionId: input.sessionId,
+      filename: input.filename,
+      mimeType: input.mimeType,
+      sizeBytes: input.sizeBytes,
+      ...(input.senderBotId ? { senderBotId: input.senderBotId } : {}),
+      createdAt: now,
+    };
+    return record;
+  }
+
+  getArtifactWithStoragePath(id: string): (ArtifactRecord & { storagePath: string }) | undefined {
+    const stmt = this.db.prepare(`
+      SELECT ${ARTIFACT_COLUMNS}, storage_path
+      FROM artifacts
+      WHERE id = ?
+    `);
+    const row = stmt.get(id) as (ArtifactRow & { storage_path: string }) | undefined;
+    if (!row) return undefined;
+    return { ...mapArtifactRow(row), storagePath: row.storage_path };
+  }
+
+  getArtifact(id: string): ArtifactRecord | undefined {
+    const stmt = this.db.prepare(`
+      SELECT ${ARTIFACT_COLUMNS}
+      FROM artifacts
+      WHERE id = ?
+    `);
+    const row = stmt.get(id) as ArtifactRow | undefined;
+    return row ? mapArtifactRow(row) : undefined;
+  }
+
+  listSessionArtifacts(sessionId: string): ArtifactRecord[] {
+    const stmt = this.db.prepare(`
+      SELECT ${ARTIFACT_COLUMNS}
+      FROM artifacts
+      WHERE session_id = ?
+      ORDER BY created_at ASC, rowid ASC
+    `);
+    const rows = stmt.all(sessionId) as ArtifactRow[];
+    return rows.map(mapArtifactRow);
+  }
+
+  // --- Triggers ---
+  createTrigger(input: {
+    id: string;
+    sessionId: string;
+    botId: string;
+    ownerId: string;
+    name: string;
+    kind: TriggerKind;
+    token?: string;
+    cronExpr?: string;
+    runAt?: string;
+    prompt: string;
+    enabled?: boolean;
+  }): TriggerRecord {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT INTO triggers (id, session_id, bot_id, owner_id, name, kind, token, cron_expr, run_at, prompt, enabled, last_triggered_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+    `);
+    const enabled = input.enabled ?? true;
+    stmt.run(
+      input.id,
+      input.sessionId,
+      input.botId,
+      input.ownerId,
+      input.name,
+      input.kind,
+      input.token ?? null,
+      input.cronExpr ?? null,
+      input.runAt ?? null,
+      input.prompt,
+      enabled ? 1 : 0,
+      now
+    );
+    return {
+      id: input.id,
+      sessionId: input.sessionId,
+      botId: input.botId,
+      name: input.name,
+      kind: input.kind,
+      ...(input.token ? { token: input.token } : {}),
+      ...(input.cronExpr !== undefined ? { cronExpr: input.cronExpr } : {}),
+      ...(input.runAt !== undefined ? { runAt: input.runAt } : {}),
+      prompt: input.prompt,
+      enabled,
+      createdAt: now,
+    };
+  }
+
+  getTrigger(id: string): (TriggerRecord & { ownerId: string }) | undefined {
+    const stmt = this.db.prepare(`
+      SELECT ${TRIGGER_COLUMNS}
+      FROM triggers
+      WHERE id = ?
+    `);
+    const row = stmt.get(id) as TriggerRow | undefined;
+    return row ? { ...mapTriggerRow(row), ownerId: row.owner_id } : undefined;
+  }
+
+  getTriggerByToken(token: string): (TriggerRecord & { ownerId: string }) | undefined {
+    const stmt = this.db.prepare(`
+      SELECT ${TRIGGER_COLUMNS}
+      FROM triggers
+      WHERE token = ?
+    `);
+    const row = stmt.get(token) as TriggerRow | undefined;
+    return row ? { ...mapTriggerRow(row), ownerId: row.owner_id } : undefined;
+  }
+
+  listSessionTriggers(sessionId: string): TriggerRecord[] {
+    const stmt = this.db.prepare(`
+      SELECT ${TRIGGER_COLUMNS}
+      FROM triggers
+      WHERE session_id = ?
+      ORDER BY created_at ASC, rowid ASC
+    `);
+    const rows = stmt.all(sessionId) as TriggerRow[];
+    return rows.map(mapTriggerRow);
+  }
+
+  listAllEnabledScheduledTriggers(): (TriggerRecord & { ownerId: string })[] {
+    const stmt = this.db.prepare(`
+      SELECT ${TRIGGER_COLUMNS}
+      FROM triggers
+      WHERE enabled = 1 AND kind IN ('cron', 'once')
+    `);
+    const rows = stmt.all() as TriggerRow[];
+    return rows.map((row) => ({ ...mapTriggerRow(row), ownerId: row.owner_id }));
+  }
+
+  updateTrigger(
+    id: string,
+    patch: {
+      enabled?: boolean;
+      name?: string;
+      prompt?: string;
+      cronExpr?: string;
+      runAt?: string;
+    }
+  ): TriggerRecord | undefined {
+    const existing = this.getTrigger(id);
+    if (!existing) return undefined;
+    const next: TriggerRecord & { ownerId: string } = {
+      ...existing,
+      ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+      ...(patch.name !== undefined ? { name: patch.name } : {}),
+      ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
+      ...(patch.cronExpr !== undefined ? { cronExpr: patch.cronExpr } : {}),
+      ...(patch.runAt !== undefined ? { runAt: patch.runAt } : {}),
+    };
+    const stmt = this.db.prepare(`
+      UPDATE triggers
+      SET enabled = ?, name = ?, prompt = ?, cron_expr = ?, run_at = ?
+      WHERE id = ?
+    `);
+    stmt.run(
+      next.enabled ? 1 : 0,
+      next.name,
+      next.prompt,
+      next.cronExpr ?? null,
+      next.runAt ?? null,
+      id
+    );
+    return next;
+  }
+
+  markTriggerFired(id: string, firedAt?: string): void {
+    const fired = firedAt ?? new Date().toISOString();
+    const stmt = this.db.prepare('UPDATE triggers SET last_triggered_at = ? WHERE id = ?');
+    stmt.run(fired, id);
+  }
+
+  deleteTrigger(id: string): boolean {
+    const stmt = this.db.prepare('DELETE FROM triggers WHERE id = ?');
+    const result = stmt.run(id);
+    return Number(result.changes) > 0;
   }
 
   close(): void {

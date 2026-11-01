@@ -291,10 +291,10 @@ export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
                     onChange={(e) => setExtId(e.target.value)}
                     placeholder="例如：bash-guard 或 custom-tools"
                     disabled={isEditing}
-                    className="w-full px-3 py-2 text-base sm:text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono disabled:opacity-60 transition-colors"
+                    className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono disabled:opacity-60 transition-colors"
                     required
                   />
-                  <p className="text-[10px] text-zinc-400 dark:text-zinc-500 mt-1">
+                  <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1">
                     对应节点路径：<code>~/.botd/extensions/{extId || '<扩展标识>'}/index.ts</code>
                   </p>
                 </div>
@@ -305,7 +305,7 @@ export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
                       <FileCode className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" />
                       <span>TypeScript 扩展代码 (index.ts)</span>
                     </label>
-                    <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
+                    <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
                       导出 default function(pi: ExtensionAPI)
                     </span>
                   </div>
@@ -313,7 +313,7 @@ export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
                     value={content}
                     onChange={(e) => setContent(e.target.value)}
                     placeholder="在此编写 Pi 扩展 TypeScript 代码..."
-                    className="flex-1 w-full p-3 text-base sm:text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono leading-relaxed transition-colors"
+                    className="flex-1 w-full p-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono leading-relaxed transition-colors"
                     rows={13}
                     required
                   />
@@ -391,10 +391,10 @@ export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
                 value={source}
                 onChange={(e) => setSource(e.target.value)}
                 placeholder="例如: https://github.com/owner/repo 或 npm:@scope/pi-extension"
-                className="w-full px-3 py-2 text-base sm:text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono transition-colors"
+                className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono transition-colors"
                 required
               />
-              <p className="text-[10px] text-zinc-500 dark:text-zinc-400 mt-1 leading-relaxed">
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-1 leading-relaxed">
                 支持 Git 仓库根目录、GitHub 单目录 URL (如 <code>https://github.com/owner/repo/tree/main/skills/herdr</code>) 或 <code>npm:&lt;包名&gt;</code>
               </p>
             </div>
@@ -407,13 +407,13 @@ export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
                 <select
                   value={kind}
                   onChange={(e) => setKind(e.target.value as 'auto' | 'skill' | 'extension')}
-                  className="w-full px-3 py-2 text-base sm:text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-sans transition-colors"
+                  className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-sans transition-colors"
                 >
                   <option value="auto" className="bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100">自动识别</option>
                   <option value="extension" className="bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100">扩展插件</option>
                   <option value="skill" className="bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100">技能文档</option>
                 </select>
-                <p className="text-[10px] text-zinc-400 dark:text-zinc-500 mt-1">
+                <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1">
                   选择「自动识别」将根据仓库内容自动检测
                 </p>
               </div>
@@ -427,9 +427,9 @@ export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
                   value={customId}
                   onChange={(e) => setCustomId(e.target.value)}
                   placeholder="留空则自动从 URL 或包名提取"
-                  className="w-full px-3 py-2 text-base sm:text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono transition-colors"
+                  className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono transition-colors"
                 />
-                <p className="text-[10px] text-zinc-400 dark:text-zinc-500 mt-1">
+                <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1">
                   安装后的本地文件夹名称
                 </p>
               </div>

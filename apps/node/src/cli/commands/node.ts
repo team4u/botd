@@ -3,15 +3,16 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { Command, Option } from 'commander';
+import { parseDelayDuration, type BgJobRecord } from '@botd/protocol';
 import { cliAction, readGlobals } from '../context.js';
 import { CliError } from '../errors.js';
-import { writeNodeIdentity } from '../../storage.js';
+import { writeNodeIdentity, getDaemonSocketPath } from '../../storage.js';
 import { startDaemon, type DaemonHandle } from '../../daemon.js';
 import { installResourceToNode } from '../../installer.js';
 import { getTsxLoaderUrl, resolveCliEntry } from '../../runtime.js';
 
 // ---------------------------------------------------------------------------
-// Unix-socket helpers (talk to the local daemon's control server)
+// Daemon control-plane helpers (Unix socket / Windows named pipe)
 // ---------------------------------------------------------------------------
 
 interface SocketResponse {
@@ -19,7 +20,8 @@ interface SocketResponse {
   body: string;
 }
 
-function requestOverSocket(
+/** GET/POST a bodyless request over the local daemon socket (raw response). */
+export function requestOverSocket(
   socketPath: string,
   method: 'GET' | 'POST',
   url: string,
@@ -41,16 +43,20 @@ function requestOverSocket(
   });
 }
 
-async function sendWakeRequest(
+/** POST a JSON payload to the local daemon socket and parse the JSON response.
+ *  Shared by the wake/ask commands here and the artifact commands. */
+export async function postJsonOverSocket<T>(
   socketPath: string,
-  payload: { sessionId: string; botId: string; message: string },
-): Promise<void> {
+  url: string,
+  payload: unknown,
+  timeoutMs: number,
+): Promise<T> {
   const data = JSON.stringify(payload);
-  await new Promise<void>((resolve, reject) => {
+  return new Promise<T>((resolve, reject) => {
     const req = http.request(
       {
         socketPath,
-        path: '/wake',
+        path: url,
         method: 'POST',
         headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) },
       },
@@ -59,16 +65,53 @@ async function sendWakeRequest(
         let responseBody = '';
         res.on('data', (chunk) => { responseBody += chunk; });
         res.on('end', () => {
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) resolve();
-          else reject(new Error(`Wake server returned status ${res.statusCode}: ${responseBody}`));
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            if (!responseBody) {
+              resolve(undefined as T);
+              return;
+            }
+            try {
+              resolve(JSON.parse(responseBody) as T);
+            } catch {
+              reject(new Error(`Daemon returned invalid JSON: ${responseBody.slice(0, 200)}`));
+            }
+            return;
+          }
+          let detail = responseBody;
+          try {
+            const parsed = JSON.parse(responseBody) as { error?: string };
+            if (parsed && typeof parsed.error === 'string') detail = parsed.error;
+          } catch {
+            // keep raw text
+          }
+          reject(new Error(`Daemon returned status ${res.statusCode}: ${detail}`));
         });
       },
     );
-    req.setTimeout(15_000, () => req.destroy(new Error('Wake request timed out')));
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('Daemon request timed out')));
     req.on('error', (err) => reject(err));
     req.write(data);
     req.end();
   });
+}
+
+interface WakeResponse {
+  ok?: boolean;
+  scheduledTriggerId?: string;
+}
+
+async function sendWakeRequest(
+  socketPath: string,
+  payload: {
+    sessionId: string;
+    botId: string;
+    message: string;
+    replyToBotId?: string;
+    noTurn?: boolean;
+    delaySeconds?: number;
+  },
+): Promise<WakeResponse | undefined> {
+  return await postJsonOverSocket<WakeResponse>(socketPath, '/wake', payload, 15_000);
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +162,7 @@ function isPidAlive(pid: number): boolean {
 
 /** Graceful stop: socket /shutdown first, SIGTERM via pid file as fallback. */
 async function stopDaemon(dataDir: string): Promise<'stopped' | 'not-running'> {
-  const socketPath = path.join(dataDir, 'agent.sock');
+  const socketPath = getDaemonSocketPath(dataDir);
   const pidFile = path.join(dataDir, 'daemon.pid');
   const status = await getDaemonStatus(socketPath);
 
@@ -165,6 +208,7 @@ function spawnDetachedDaemon(logFile: string): number {
     const child = spawn(process.execPath, [...loaderArgs, cliPath, ...args], {
       detached: true,
       stdio: ['ignore', out, out],
+      windowsHide: true,
       env: { ...process.env, BOTD_DAEMON_DETACHED: '1', BOTD_DAEMON_LOG: logFile },
     });
     child.unref();
@@ -252,6 +296,23 @@ export function registerNodeCommands(program: Command): void {
     );
 
   program
+    .command('reload')
+    .description('Re-register this node\'s skills/extensions/bots with the Hub (picks up files written outside the Web UI)')
+    .action(
+      cliAction(async (_options, command) => {
+        const { dataDir, json } = readGlobals(command);
+        const socketPath = getDaemonSocketPath(dataDir);
+        try {
+          await requestOverSocket(socketPath, 'POST', '/reload', 15_000);
+        } catch (err: unknown) {
+          throw new CliError('botd daemon is not running');
+        }
+        if (json) console.log(JSON.stringify({ ok: true }));
+        else console.log('Resources re-registered with Hub.');
+      }),
+    );
+
+  program
     .command('stop')
     .description('Stop the Node Agent daemon gracefully')
     .action(
@@ -269,7 +330,7 @@ export function registerNodeCommands(program: Command): void {
     .action(
       cliAction(async (_options, command) => {
         const { dataDir, json } = readGlobals(command);
-        const status = await getDaemonStatus(path.join(dataDir, 'agent.sock'));
+        const status = await getDaemonStatus(getDaemonSocketPath(dataDir));
         if (status) {
           if (json) {
             console.log(JSON.stringify({ running: true, ...status }, null, 2));
@@ -351,6 +412,9 @@ export function registerNodeCommands(program: Command): void {
     .option('--session <id>', 'Session ID (or env BOTD_SESSION_ID)')
     .option('--bot <id>', 'Bot ID (or env BOTD_BOT_ID)')
     .option('--message <msg>', 'Wake message to deliver')
+    .option('--reply-to <botId>', 'Bot ID to hand off / mention after wakeup')
+    .option('--no-turn', 'Deliver message to session without triggering an LLM turn')
+    .option('--delay <duration>', 'Schedule delayed wake-up (e.g. 30s, 15m, 2h, 1d)')
     .action(
       cliAction(async (options, command) => {
         const { dataDir, json } = readGlobals(command);
@@ -358,24 +422,281 @@ export function registerNodeCommands(program: Command): void {
         const sessionId = (options.session as string | undefined) || process.env.BOTD_SESSION_ID;
         const botId = (options.bot as string | undefined) || process.env.BOTD_BOT_ID;
         const message = options.message as string | undefined;
+        const replyToBotId = options.replyTo as string | undefined;
+        const noTurn = options.noTurn === true;
+
+        let delaySeconds: number | undefined;
+        if (typeof options.delay === 'string' && options.delay) {
+          const parsedDelay = parseDelayDuration(options.delay);
+          if (parsedDelay === null) {
+            throw new CliError('Invalid --delay format. Examples: 30s, 15m, 2h, 1d');
+          }
+          delaySeconds = parsedDelay;
+        }
 
         if (!sessionId || !botId || !message) {
           throw new CliError('Missing --session, --bot or --message (or env BOTD_SESSION_ID / BOTD_BOT_ID)');
         }
 
-        const socketPath = path.join(dataDir, 'agent.sock');
+        const socketPath = getDaemonSocketPath(dataDir);
+        let result: WakeResponse | undefined;
         try {
-          await sendWakeRequest(socketPath, { sessionId, botId, message });
+          result = await sendWakeRequest(socketPath, {
+            sessionId,
+            botId,
+            message,
+            ...(replyToBotId ? { replyToBotId } : {}),
+            ...(noTurn ? { noTurn: true } : {}),
+            ...(delaySeconds !== undefined ? { delaySeconds } : {}),
+          });
         } catch (err: unknown) {
           throw new CliError(`Wake failed: ${err instanceof Error ? err.message : String(err)}`);
         }
 
         if (json) {
-          console.log(JSON.stringify({ ok: true, sessionId, botId }, null, 2));
+          console.log(JSON.stringify({
+            ok: true,
+            sessionId,
+            botId,
+            ...(noTurn ? { noTurn: true } : {}),
+            ...(delaySeconds !== undefined ? { delaySeconds } : {}),
+            ...(result?.scheduledTriggerId ? { scheduledTriggerId: result.scheduledTriggerId } : {}),
+          }, null, 2));
         } else {
-          console.log(`Wake message delivered to session ${sessionId}`);
+          const scheduledNote = result?.scheduledTriggerId
+            ? ` (scheduled, triggerId: ${result.scheduledTriggerId})`
+            : '';
+          console.log(`Wake message delivered to session ${sessionId}${scheduledNote}`);
         }
       }),
+    );
+
+  const bg = program
+    .command('bg')
+    .description('Manage background jobs with automatic wake-up callbacks');
+
+  bg.command('run <command...>')
+    .description('Run a shell command as a managed background job in the bot workspace (auto wake-up on exit)')
+    .option('--session <id>', 'Session ID (or env BOTD_SESSION_ID)')
+    .option('--bot <id>', 'Bot ID (or env BOTD_BOT_ID)')
+    .option('--reply-to <botId>', 'Bot ID to hand off / mention when the job completes')
+    .option('--no-turn', 'On completion, deliver the log summary without triggering an LLM turn')
+    .action(
+      (commandParts: string[], options: Record<string, unknown>, command: Command) =>
+        cliAction(async () => {
+          const { dataDir, json } = readGlobals(command);
+
+          const sessionId = (options.session as string | undefined) || process.env.BOTD_SESSION_ID;
+          const botId = (options.bot as string | undefined) || process.env.BOTD_BOT_ID;
+          const replyToBotId = options.replyTo as string | undefined;
+          const commandText = commandParts.join(' ');
+
+          if (!sessionId || !botId || !commandText.trim()) {
+            throw new CliError('Missing --session, --bot or <command> (or env BOTD_SESSION_ID / BOTD_BOT_ID)');
+          }
+
+          const socketPath = getDaemonSocketPath(dataDir);
+          let job: BgJobRecord | undefined;
+          try {
+            const result = await postJsonOverSocket<{ ok: true; job: BgJobRecord }>(
+              socketPath,
+              '/bg/run',
+              {
+                sessionId,
+                botId,
+                command: commandText,
+                ...(replyToBotId ? { replyToBotId } : {}),
+                noTurnOnComplete: options.noTurn === true,
+              },
+              15_000,
+            );
+            job = result?.job;
+          } catch (err: unknown) {
+            throw new CliError(`Background job failed to start: ${err instanceof Error ? err.message : String(err)}`);
+          }
+
+          if (json) {
+            console.log(JSON.stringify({ ok: true, job }, null, 2));
+          } else {
+            console.log(`Started background job ${job?.id} (pid ${job?.pid ?? 'n/a'})`);
+            console.log(`  command: ${job?.command}`);
+            console.log(`  log:     ${job?.logPath}`);
+          }
+        })(options, command),
+    );
+
+  bg.command('list')
+    .description('List background jobs on this node')
+    .option('--session <id>', 'Filter by Session ID')
+    .option('--bot <id>', 'Filter by Bot ID')
+    .option('--json', 'Output as JSON')
+    .action(
+      cliAction(async (options: Record<string, unknown>, command: Command) => {
+        const { dataDir, json } = readGlobals(command);
+
+        const query = new URLSearchParams();
+        if (typeof options.session === 'string' && options.session) query.set('sessionId', options.session);
+        if (typeof options.bot === 'string' && options.bot) query.set('botId', options.bot);
+
+        const socketPath = getDaemonSocketPath(dataDir);
+        let jobs: BgJobRecord[] = [];
+        try {
+          const { status, body } = await requestOverSocket(
+            socketPath,
+            'GET',
+            `/bg/list${query.size ? `?${query.toString()}` : ''}`,
+            10_000,
+          );
+          if (status !== 200) {
+            const parsed = JSON.parse(body) as { error?: string };
+            throw new CliError(parsed?.error || `Daemon returned status ${status}`);
+          }
+          jobs = (JSON.parse(body) as { jobs?: BgJobRecord[] }).jobs ?? [];
+        } catch (err: unknown) {
+          if (err instanceof CliError) throw err;
+          throw new CliError(`Failed to list background jobs: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        if (json) {
+          console.log(JSON.stringify({ ok: true, jobs }, null, 2));
+          return;
+        }
+        if (jobs.length === 0) {
+          console.log('No background jobs.');
+          return;
+        }
+        for (const job of jobs) {
+          const finished = job.finishedAt ? `, finished ${job.finishedAt}` : '';
+          const exit = job.exitCode !== undefined && job.exitCode !== null ? `, exit ${job.exitCode}` : '';
+          console.log(`${job.id}  [${job.status}]  ${job.command}  (started ${job.startedAt}${exit}${finished})`);
+        }
+      }),
+    );
+
+  bg.command('logs <jobId>')
+    .description('Show the tail of a background job log')
+    .option('--lines <n>', 'Number of trailing lines to show (default 100)', '100')
+    .option('--json', 'Output as JSON')
+    .action(
+      (jobId: string, options: Record<string, unknown>, command: Command) =>
+        cliAction(async () => {
+          const { dataDir, json } = readGlobals(command);
+
+          const lines = Math.max(1, Number(options.lines) || 100);
+          const query = new URLSearchParams({ jobId, lines: String(lines) });
+
+          const socketPath = getDaemonSocketPath(dataDir);
+          let logs = '';
+          try {
+            const { status, body } = await requestOverSocket(
+              socketPath,
+              'GET',
+              `/bg/logs?${query.toString()}`,
+              10_000,
+            );
+            if (status !== 200) {
+              const parsed = JSON.parse(body) as { error?: string };
+              throw new CliError(parsed?.error || `Daemon returned status ${status}`);
+            }
+            logs = (JSON.parse(body) as { logs?: string }).logs ?? '';
+          } catch (err: unknown) {
+            if (err instanceof CliError) throw err;
+            throw new CliError(`Failed to read background job logs: ${err instanceof Error ? err.message : String(err)}`);
+          }
+
+          if (json) {
+            console.log(JSON.stringify({ ok: true, jobId, logs }));
+          } else {
+            if (logs) console.log(logs);
+          }
+        })(options, command),
+    );
+
+  bg.command('kill <jobId>')
+    .description('Terminate a running background job')
+    .option('--json', 'Output as JSON')
+    .action(
+      (jobId: string, options: Record<string, unknown>, command: Command) =>
+        cliAction(async () => {
+          const { dataDir, json } = readGlobals(command);
+
+          const socketPath = getDaemonSocketPath(dataDir);
+          let job: BgJobRecord | undefined;
+          try {
+            const result = await postJsonOverSocket<{ ok: true; job: BgJobRecord }>(
+              socketPath,
+              '/bg/kill',
+              { jobId },
+              10_000,
+            );
+            job = result?.job;
+          } catch (err: unknown) {
+            throw new CliError(`Failed to kill background job: ${err instanceof Error ? err.message : String(err)}`);
+          }
+
+          if (json) {
+            console.log(JSON.stringify({ ok: true, job }, null, 2));
+          } else {
+            console.log(`Background job ${job?.id} is now ${job?.status ?? 'killed'}.`);
+          }
+        })(options, command),
+    );
+
+  program
+    .command('ask <prompt>')
+    .description('Ask the user an interactive question in the active session and wait for their response')
+    .option('--options <items>', 'Comma-separated choices (e.g. "确认,取消")')
+    .option('--timeout <seconds>', 'Timeout in seconds (default 300)', '300')
+    .option('--session <id>', 'Session ID (or env BOTD_SESSION_ID)')
+    .option('--bot <id>', 'Bot ID (or env BOTD_BOT_ID)')
+    .action(
+      (prompt: string, options: Record<string, unknown>, command: Command) =>
+        cliAction(async () => {
+          const { dataDir, json, timeoutMs } = readGlobals(command);
+
+          const sessionId = (options.session as string | undefined) || process.env.BOTD_SESSION_ID;
+          const botId = (options.bot as string | undefined) || process.env.BOTD_BOT_ID;
+          const rawOptions = options.options as string | undefined;
+          const timeoutSeconds = Number(options.timeout);
+
+          if (!sessionId || !botId) {
+            throw new CliError('Missing --session or --bot (or env BOTD_SESSION_ID / BOTD_BOT_ID)');
+          }
+
+          const effectiveTimeoutSeconds =
+            Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds : 300;
+          const timeoutMsForAsk = Math.max(timeoutMs, effectiveTimeoutSeconds * 1000);
+
+          const socketPath = getDaemonSocketPath(dataDir);
+          let answer: string;
+          try {
+            const result = await postJsonOverSocket<{ ok?: boolean; answer?: string }>(
+              socketPath,
+              '/ask',
+              {
+                sessionId,
+                botId,
+                prompt,
+                options: rawOptions
+                  ? rawOptions.split(',').map((item) => item.trim()).filter(Boolean)
+                  : undefined,
+                timeoutSeconds: effectiveTimeoutSeconds,
+              },
+              timeoutMsForAsk,
+            );
+            answer = typeof result?.answer === 'string' ? result.answer : '';
+          } catch (err: unknown) {
+            throw new CliError(`Ask failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+
+          if (json) {
+            console.log(JSON.stringify({ ok: true, answer }));
+          } else {
+            // Print the raw answer so shell scripts can capture it:
+            //   choice=$(botd ask "..." --options "yes,no")
+            console.log(answer);
+          }
+        })(options, command),
     );
 
   program
@@ -402,8 +723,12 @@ export function registerNodeCommands(program: Command): void {
             throw new CliError(`Install failed: ${err instanceof Error ? err.message : String(err)}`);
           }
 
-          const socketPath = path.join(dataDir, 'agent.sock');
-          if (fs.existsSync(socketPath)) {
+          const socketPath = getDaemonSocketPath(dataDir);
+          // Named pipes never exist on disk; probe liveness instead.
+          const socketAlive = process.platform === 'win32'
+            ? await getDaemonStatus(socketPath).then((s) => Boolean(s)).catch(() => false)
+            : fs.existsSync(socketPath);
+          if (socketAlive) {
             await requestOverSocket(socketPath, 'POST', '/reload', 10_000).catch(() => {});
           }
 

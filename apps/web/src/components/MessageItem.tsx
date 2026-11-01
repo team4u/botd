@@ -1,6 +1,28 @@
 import React, { useState } from 'react';
-import { Bot, BellRing, Info, Copy, Check, Pencil, GitFork } from 'lucide-react';
-import type { MessageRecord, BotConfig, NodeRecord } from '@botd/protocol';
+import {
+  Bot,
+  BellRing,
+  Info,
+  Copy,
+  Check,
+  Pencil,
+  GitFork,
+  Terminal,
+  ChevronDown,
+  ChevronRight,
+  CircleCheck,
+  CircleAlert,
+  Loader2,
+  FileText,
+  Download,
+} from 'lucide-react';
+import type {
+  MessageRecord,
+  BotConfig,
+  NodeRecord,
+  ToolCallRecord,
+  MessageAttachment,
+} from '@botd/protocol';
 import { Markdown } from './Markdown';
 
 /**
@@ -32,6 +54,151 @@ function formatMessageTime(createdAt: string): string {
 }
 
 /**
+ * 辅助函数：格式化工具调用耗时，<1s 以毫秒展示，否则保留一位小数秒
+ */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/**
+ * 辅助函数：格式化附件体积（KB/MB），供消息附件与输入框附件芯片共用
+ */
+export function formatFileSize(bytes?: number): string {
+  if (!bytes || bytes <= 0 || !Number.isFinite(bytes)) return '';
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+/**
+ * 辅助组件：消息附件渲染（用户与助手消息通用）
+ * 图片渲染为可点击缩略图（新标签打开原文件），其余渲染为可下载文件芯片
+ */
+const MessageAttachments: React.FC<{ attachments: MessageAttachment[] }> = ({ attachments }) => {
+  if (!attachments || attachments.length === 0) return null;
+
+  return (
+    <div className="flex flex-wrap gap-1.5 mt-1.5">
+      {attachments.map((att) =>
+        att.mimeType?.startsWith('image/') && att.url ? (
+          <a
+            key={att.id}
+            href={att.url}
+            target="_blank"
+            rel="noreferrer"
+            title={`查看图片：${att.filename}`}
+            className="block max-w-full rounded-lg border border-zinc-200 dark:border-zinc-800 overflow-hidden hover:opacity-90 transition-opacity shadow-xs"
+          >
+            <img
+              src={att.url}
+              alt={att.filename}
+              loading="lazy"
+              className="max-h-56 rounded-lg block max-w-full"
+            />
+          </a>
+        ) : (
+          <a
+            key={att.id}
+            href={att.url}
+            download={att.filename}
+            title={`下载 ${att.filename}`}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800 rounded-lg text-[11px] text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700 transition-colors"
+          >
+            <FileText className="w-3.5 h-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+            <span className="truncate max-w-[160px]">{att.filename}</span>
+            {typeof att.sizeBytes === 'number' && att.sizeBytes > 0 && (
+              <span className="font-mono text-zinc-400 dark:text-zinc-500 shrink-0">
+                {formatFileSize(att.sizeBytes)}
+              </span>
+            )}
+            <Download className="w-3 h-3 shrink-0 text-zinc-400 dark:text-zinc-500" />
+          </a>
+        )
+      )}
+    </div>
+  );
+};
+
+/**
+ * 可折叠工具执行轨迹：收起时为轻量内联文字行（无框无底色，与元数据行自然留白），
+ * 展开后为分栏对齐的终端风明细面板（名称/摘要/耗时各归其位）
+ */
+const ToolCallsTrace: React.FC<{ toolCalls: ToolCallRecord[] }> = ({ toolCalls }) => {
+  const [expanded, setExpanded] = useState(false);
+  if (!toolCalls || toolCalls.length === 0) return null;
+
+  const hasDuration = toolCalls.some((t) => typeof t.durationMs === 'number');
+  const totalMs = toolCalls.reduce((sum, t) => sum + (t.durationMs || 0), 0);
+  const errorCount = toolCalls.filter((t) => t.status === 'error').length;
+
+  return (
+    <div className="mt-2 mb-1 max-w-xl">
+      {/* 收起态：极简内联文字按钮，去边框去底色，悬停仅加深文字 */}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="inline-flex items-center gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors cursor-pointer"
+      >
+        <Terminal className="w-3.5 h-3.5 shrink-0" />
+        <span className="font-medium">
+          {toolCalls.length} 次工具调用
+          {errorCount > 0 && (
+            <span className="text-rose-500 dark:text-rose-400">（{errorCount} 失败）</span>
+          )}
+        </span>
+        {hasDuration && (
+          <span className="font-mono tabular-nums">· {formatDuration(totalMs)}</span>
+        )}
+        {expanded ? (
+          <ChevronDown className="w-3 h-3 shrink-0" />
+        ) : (
+          <ChevronRight className="w-3 h-3 shrink-0" />
+        )}
+      </button>
+
+      {/* 展开态：细分隔线的终端风面板，单行内名称固定、摘要截断悬停看全文、耗时右对齐 */}
+      {expanded && (
+        <div className="mt-1.5 rounded-lg border border-zinc-200/70 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/60 overflow-hidden">
+          {toolCalls.map((tool, idx) => (
+            <div
+              key={`${tool.name}-${idx}`}
+              className="flex items-center gap-2 px-2.5 py-1.5 text-[11px] leading-relaxed border-zinc-100 dark:border-zinc-800/60 first:border-t-0 border-t"
+            >
+              {tool.status === 'running' ? (
+                <Loader2 className="w-3 h-3 shrink-0 text-amber-500 animate-spin-fast" />
+              ) : tool.status === 'error' ? (
+                <CircleAlert className="w-3 h-3 shrink-0 text-rose-500 dark:text-rose-400" />
+              ) : (
+                <CircleCheck className="w-3 h-3 shrink-0 text-emerald-500" />
+              )}
+              <span className="font-mono font-semibold text-zinc-700 dark:text-zinc-300 shrink-0">
+                {tool.name}
+              </span>
+              {tool.summary ? (
+                <span
+                  className="min-w-0 flex-1 truncate font-mono text-zinc-500 dark:text-zinc-400"
+                  title={tool.summary}
+                >
+                  {tool.summary}
+                </span>
+              ) : (
+                <span className="flex-1" />
+              )}
+              {typeof tool.durationMs === 'number' && (
+                <span className="shrink-0 font-mono tabular-nums text-zinc-400 dark:text-zinc-500">
+                  {formatDuration(tool.durationMs)}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
  * 整条消息复制按钮：复制原文（message.content），成功后短暂显示"已复制"状态
  * 可通过 className 追加可见性控制（如 hover 才显示）与布局类
  */
@@ -59,7 +226,7 @@ const MessageCopyButton: React.FC<{ content: string; className?: string }> = ({ 
       {copied ? (
         <>
           <Check className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />
-          <span className="text-[10px] text-emerald-600 dark:text-emerald-400">已复制</span>
+          <span className="text-[11px] text-emerald-600 dark:text-emerald-400">已复制</span>
         </>
       ) : (
         <Copy className="w-3.5 h-3.5" />
@@ -127,6 +294,15 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   const formattedTime = formatMessageTime(message.createdAt);
   // 完整本地日期时间，供时间元素 title 悬停展示
   const fullTime = new Date(message.createdAt).toLocaleString();
+  // Bot 头部悬停提示：收拢完整身份信息（昵称、@id、节点、完整模型名），头部只展示精简版
+  const botHeaderTitle = [
+    bot?.name || message.senderBotId,
+    message.senderBotId ? `@${message.senderBotId}` : '',
+    node?.name,
+    rawModel,
+  ]
+    .filter(Boolean)
+    .join(' · ');
 
   // 系统消息：紧凑单行胶囊居中
   if (isSystem) {
@@ -134,11 +310,11 @@ export const MessageItem: React.FC<MessageItemProps> = ({
       <div className="flex justify-center my-2 px-3 sm:px-6">
         <div className="flex items-center gap-1.5 max-w-xl py-1 px-3 bg-zinc-100/90 dark:bg-zinc-800/90 border border-zinc-200/60 dark:border-zinc-800/60 rounded-full text-[11px] text-zinc-500 dark:text-zinc-400">
           <Info className="w-3 h-3 text-zinc-400 dark:text-zinc-500 shrink-0" />
-          <div className="prose-botd text-[11px] text-zinc-600 dark:text-zinc-400">
+          <div className="prose-botd prose-botd--xs text-zinc-600 dark:text-zinc-400">
             <Markdown>{message.content}</Markdown>
           </div>
           <span className="text-zinc-300 dark:text-zinc-600">·</span>
-          <span className="text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0" title={fullTime}>
+          <span className="text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0" title={fullTime}>
             {formattedTime}
           </span>
         </div>
@@ -156,11 +332,11 @@ export const MessageItem: React.FC<MessageItemProps> = ({
               <BellRing className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
               <span>后台任务唤醒回调</span>
             </div>
-            <span className="text-[10px] text-amber-600/80 dark:text-amber-400/80 font-normal" title={fullTime}>
+            <span className="text-[11px] text-amber-600/80 dark:text-amber-400/80 font-normal" title={fullTime}>
               {formattedTime}
             </span>
           </div>
-          <div className="prose-botd text-xs text-amber-950 dark:text-amber-200 mt-1">
+          <div className="prose-botd prose-botd--xs text-amber-950 dark:text-amber-200 mt-1">
             <Markdown>{message.content}</Markdown>
           </div>
         </div>
@@ -177,12 +353,14 @@ export const MessageItem: React.FC<MessageItemProps> = ({
             isEditing ? 'ring-2 ring-blue-500/60' : ''
           }`}
         >
-          <div className="prose-botd text-[14px] sm:text-[15px] leading-relaxed break-words">
+          <div className="prose-botd leading-relaxed break-words">
             <Markdown>{message.content}</Markdown>
           </div>
         </div>
+        {/* 附件（图片缩略图 / 文件下载芯片），与气泡同宽右对齐展示 */}
+        <MessageAttachments attachments={message.attachments || []} />
         <div className="flex items-center gap-0.5 mt-0.5 mr-1 select-none opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-          <span className="text-[10px] text-zinc-400 dark:text-zinc-500" title={fullTime}>
+          <span className="text-[11px] text-zinc-400 dark:text-zinc-500" title={fullTime}>
             {formattedTime}
           </span>
           {!isEditing && <MessageCopyButton content={message.content} />}
@@ -213,22 +391,12 @@ export const MessageItem: React.FC<MessageItemProps> = ({
         <div className="w-5 h-5 rounded-md bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 border border-blue-200/60 dark:border-blue-900/60 flex items-center justify-center shrink-0">
           <Bot className="w-3.5 h-3.5" />
         </div>
-        <span className="font-semibold text-zinc-900 dark:text-zinc-100 truncate">
+        <span
+          className="font-semibold text-zinc-900 dark:text-zinc-100 truncate max-w-[160px]"
+          title={botHeaderTitle}
+        >
           {bot?.name || message.senderBotId}
         </span>
-        {message.senderBotId && (
-          <span className="font-mono text-zinc-400 dark:text-zinc-500 text-[11px] shrink-0">
-            @{message.senderBotId}
-          </span>
-        )}
-        {node && (
-          <>
-            <span className="text-zinc-300 dark:text-zinc-600">·</span>
-            <span className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate max-w-[120px] font-normal">
-              {node.name}
-            </span>
-          </>
-        )}
         {shortModel && (
           <>
             <span className="text-zinc-300 dark:text-zinc-600">·</span>
@@ -237,26 +405,51 @@ export const MessageItem: React.FC<MessageItemProps> = ({
             </span>
           </>
         )}
-        <span className="text-zinc-300 dark:text-zinc-600">·</span>
-        <span className="text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0 font-normal" title={fullTime}>
-          {formattedTime}
-        </span>
-        <MessageCopyButton
-          content={message.content}
-          className="ml-auto opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100"
-        />
-        {onForkMessage && (
-          <MessageForkButton
-            messageId={message.id}
-            onForkMessage={onForkMessage}
-            className="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100"
-          />
+        {/* Token 用量与上下文水位：极简 mono 徽标，悬停展示完整用量明细 */}
+        {message.usage && message.usage.totalTokens > 0 && (
+          <span
+            className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0"
+            title={[
+              `输入 ${message.usage.inputTokens.toLocaleString()} tokens`,
+              `输出 ${message.usage.outputTokens.toLocaleString()} tokens`,
+              message.usage.contextWindow
+                ? `上下文窗口 ${message.usage.contextWindow.toLocaleString()}`
+                : '',
+            ]
+              .filter(Boolean)
+              .join('\n')}
+          >
+            <span className="text-zinc-300 dark:text-zinc-600">·</span>{' '}
+            {message.usage.totalTokens.toLocaleString()} tokens
+            {message.usage.contextWindow && message.usage.contextWindow > 0 && (
+              <>
+                {' '}· {Math.round((message.usage.totalTokens / message.usage.contextWindow) * 100)}% ctx
+              </>
+            )}
+          </span>
         )}
       </div>
 
+      {/* 可折叠工具执行轨迹：收起时仅单行摘要，展开后逐条展示名称/摘要/状态/耗时 */}
+      <ToolCallsTrace toolCalls={isAssistant ? message.toolCalls || [] : []} />
+
       {/* Markdown 正文直接平铺在干净画布上，不套外部白框气泡 */}
-      <div className="mt-1 text-zinc-800 dark:text-zinc-200 text-[14px] sm:text-[15px] leading-relaxed break-words prose-botd">
+      <div className="mt-1 text-zinc-800 dark:text-zinc-200 leading-relaxed break-words prose-botd">
         <Markdown>{message.content}</Markdown>
+      </div>
+
+      {/* 附件（图片缩略图 / 文件下载芯片），助手产出的文件产物同样可预览与下载 */}
+      <MessageAttachments attachments={message.attachments || []} />
+
+      {/* 操作按钮与用户消息保持一致：时间 + 复制 + 分叉置于正文下方，移动端常显、桌面端悬停显示 */}
+      <div className="mt-1 flex items-center gap-0.5 select-none opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+        <span className="text-[11px] text-zinc-400 dark:text-zinc-500 px-1" title={fullTime}>
+          {formattedTime}
+        </span>
+        <MessageCopyButton content={message.content} />
+        {onForkMessage && (
+          <MessageForkButton messageId={message.id} onForkMessage={onForkMessage} />
+        )}
       </div>
     </div>
   );

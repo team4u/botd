@@ -32,13 +32,23 @@
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
     <script>
-      if ('serviceWorker' in navigator && window.location.protocol.startsWith('http')) {
-        window.addEventListener('load', () => {
-          navigator.serviceWorker.register('/sw.js').catch((err) => {
-            console.warn('[SW] Register failed:', err);
+      // 过渡性清理（2024-11 加入）：历史版本注册过 sw.js（cache-first 导致前端更新不生效）。
+      // 只满除本源注册的 SW 与 botd-* 缓存；若干个版本后可删除此即本。
+      (function () {
+        if (!('serviceWorker' in navigator)) return;
+        navigator.serviceWorker.getRegistrations().then(function (registrations) {
+          registrations.forEach(function (r) {
+            if (r.scope && r.scope.startsWith(location.origin + '/')) r.unregister();
           });
         });
-      }
+        if ('caches' in window) {
+          caches.keys().then(function (names) {
+            names.forEach(function (n) {
+              if (n.indexOf('botd-') === 0) caches.delete(n);
+            });
+          });
+        }
+      })();
     </script>
   </body>
 </html>

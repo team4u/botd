@@ -1,4 +1,4 @@
-import type { MessageRecord, SessionMode, SessionRecord } from '@botd/protocol';
+import type { MessageRecord, MessageSearchHit, SessionMode, SessionRecord } from '@botd/protocol';
 import { Command, Option } from 'commander';
 import { cliAction, readGlobals } from '../context.js';
 import { HubClient } from '../hub-client.js';
@@ -119,6 +119,32 @@ export function registerSessionsCommands(program: Command): void {
           `/api/sessions/${encodeURIComponent(sessionId)}/messages`,
         );
         printResult(messages, g.json);
+      })(options, command),
+    );
+
+  sessions
+    .command('search <query...>')
+    .description('Search messages across all sessions (or within --session)')
+    .option('--session <sessionId>', 'Filter by session ID')
+    .option('--limit <n>', 'Max results (default 30)', '30')
+    .action((query: string[], options: Record<string, unknown>, command: Command) =>
+      cliAction(async (_opts, cmd) => {
+        const g = readGlobals(cmd);
+        const q = query.join(' ').trim();
+        if (!q) {
+          throw new Error('Provide the search query as trailing arguments');
+        }
+        const client = await HubClient.connect(g);
+        const params = new URLSearchParams({ q });
+        if (typeof options.session === 'string' && options.session.trim()) {
+          params.set('sessionId', options.session.trim());
+        }
+        const rawLimit = Number(options.limit);
+        if (Number.isFinite(rawLimit) && rawLimit > 0) {
+          params.set('limit', String(Math.floor(rawLimit)));
+        }
+        const hits = await client.get<MessageSearchHit[]>(`/api/messages/search?${params.toString()}`);
+        printResult(hits, g.json);
       })(options, command),
     );
 

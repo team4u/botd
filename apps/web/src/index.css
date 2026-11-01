@@ -95,6 +95,11 @@ body {
   color: #27272a;
   word-break: break-word;
 }
+/* 小尺寸场景（系统消息胶囊等），覆盖 .prose-botd 的正文字号 */
+.prose-botd.prose-botd--xs {
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
 .prose-botd p {
   margin-bottom: 0.5em;
 }

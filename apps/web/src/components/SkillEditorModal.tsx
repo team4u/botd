@@ -191,10 +191,10 @@ export const SkillEditorModal: React.FC<SkillEditorModalProps> = ({
                   onChange={(e) => setSkillId(e.target.value)}
                   placeholder="例如：custom-cli 或 git-flow"
                   disabled={isEditing}
-                  className="w-full px-3 py-2 text-base sm:text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono disabled:opacity-60 transition-colors"
+                  className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono disabled:opacity-60 transition-colors"
                   required
                 />
-                <p className="text-[10px] text-zinc-400 dark:text-zinc-500 mt-1">
+                <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1">
                   对应节点路径：<code>~/.botd/skills/{skillId || '<技能标识>'}/SKILL.md</code>
                 </p>
               </div>
@@ -205,7 +205,7 @@ export const SkillEditorModal: React.FC<SkillEditorModalProps> = ({
                     <FileCode className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" />
                     <span>技能说明文档 (SKILL.md)</span>
                   </label>
-                  <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
+                  <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
                     智能体将阅读此文档执行相关任务
                   </span>
                 </div>
@@ -213,7 +213,7 @@ export const SkillEditorModal: React.FC<SkillEditorModalProps> = ({
                   value={content}
                   onChange={(e) => setContent(e.target.value)}
                   placeholder="在此编写技能的 Markdown 说明文档..."
-                  className="flex-1 w-full p-3 text-base sm:text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono leading-relaxed transition-colors"
+                  className="flex-1 w-full p-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono leading-relaxed transition-colors"
                   rows={13}
                   required
                 />

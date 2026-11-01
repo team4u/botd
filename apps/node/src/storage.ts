@@ -2,10 +2,55 @@ import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { BotConfig, NodeIdentity } from '@botd/protocol';
 
 const SAFE_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
+
+const BOT_ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const RESERVED_BOT_ENV_KEYS = new Set(['path', 'pwd', 'home', 'user', 'shell']);
+
+export function isValidBotEnvKey(key: string): boolean {
+  if (!BOT_ENV_KEY_REGEX.test(key)) return false;
+  if (RESERVED_BOT_ENV_KEYS.has(key.toLowerCase())) return false;
+  return !key.toUpperCase().startsWith('BOTD_');
+}
+
+export async function readBotEnv(dataDir: string, botId: string): Promise<Record<string, string>> {
+  assertSafeId(botId, 'Bot ID');
+  const envPath = path.join(getBotDir(dataDir, botId), 'env.json');
+  try {
+    const raw = await fs.readFile(envPath, 'utf-8');
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === 'string' && isValidBotEnvKey(key)) {
+        env[key] = value;
+      }
+    }
+    return env;
+  } catch {
+    return {};
+  }
+}
+
+export async function writeBotEnv(
+  dataDir: string,
+  botId: string,
+  env: Record<string, string>
+): Promise<Record<string, string>> {
+  assertSafeId(botId, 'Bot ID');
+  const sanitized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!isValidBotEnvKey(key)) {
+      throw new Error(`Invalid or reserved environment variable key: "${key}"`);
+    }
+    sanitized[key] = value;
+  }
+  await writeSecureFile(path.join(getBotDir(dataDir, botId), 'env.json'), JSON.stringify(sanitized, null, 2));
+  return sanitized;
+}
 
 export function assertSafeId(id: string, label = 'Identifier'): string {
   if (!id || typeof id !== 'string' || !SAFE_ID_REGEX.test(id)) {
@@ -17,6 +62,19 @@ export function assertSafeId(id: string, label = 'Identifier'): string {
 export function getDataDir(override?: string): string {
   const dir = override || process.env.BOTD_DATA_DIR || path.join(os.homedir(), '.botd');
   return path.resolve(dir);
+}
+
+/**
+ * Local daemon control-plane address: Unix domain socket on POSIX, named
+ * pipe on Windows. Both work with http request({ socketPath }) / listen().
+ * The pipe name hashes the dataDir so multiple instances never collide.
+ */
+export function getDaemonSocketPath(dataDir: string): string {
+  if (process.platform === 'win32') {
+    const hash = createHash('sha256').update(path.resolve(dataDir).toLowerCase()).digest('hex').slice(0, 16);
+    return `\\\\.\\pipe\\botd-agent-${hash}`;
+  }
+  return path.join(dataDir, 'agent.sock');
 }
 
 export async function ensureDir(dirPath: string, mode?: number): Promise<void> {
@@ -228,8 +286,14 @@ export async function deleteResource(
 
 export async function readFileTarget(
   dataDir: string,
-  target: { kind: 'system' | 'memory' | 'skill' | 'extension'; botId?: string; id: string }
+  target: { kind: 'system' | 'memory' | 'env' | 'skill' | 'extension'; botId?: string; id: string }
 ): Promise<string> {
+  if (target.kind === 'env') {
+    const botId = target.botId || target.id;
+    if (!botId) throw new Error('Bot ID required');
+    const env = await readBotEnv(dataDir, botId);
+    return JSON.stringify(env, null, 2);
+  }
   if (target.kind === 'skill') {
     const skillId = target.id || target.botId;
     if (!skillId) throw new Error('Skill ID required');
@@ -258,9 +322,16 @@ export async function readFileTarget(
 
 export async function writeFileTarget(
   dataDir: string,
-  target: { kind: 'system' | 'memory' | 'skill' | 'extension'; botId?: string; id: string },
+  target: { kind: 'system' | 'memory' | 'env' | 'skill' | 'extension'; botId?: string; id: string },
   content: string
 ): Promise<void> {
+  if (target.kind === 'env') {
+    const botId = target.botId || target.id;
+    if (!botId) throw new Error('Bot ID required');
+    const parsed = content.trim() ? (JSON.parse(content) as Record<string, string>) : {};
+    await writeBotEnv(dataDir, botId, parsed);
+    return;
+  }
   if (target.kind === 'skill') {
     const skillId = target.id || target.botId;
     if (!skillId) throw new Error('Skill ID required');

@@ -80,7 +80,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 placeholder="请输入用户名（默认 admin）"
-                className="w-full pl-9 pr-3 py-2.5 text-base sm:text-sm bg-zinc-50/60 dark:bg-zinc-950/60 border border-zinc-200/90 dark:border-zinc-800 rounded-xl text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 dark:focus:ring-zinc-400/20 focus:border-zinc-900 dark:focus:border-zinc-100 transition-colors"
+                className="w-full pl-9 pr-3 py-2.5 text-xs bg-zinc-50/60 dark:bg-zinc-950/60 border border-zinc-200/90 dark:border-zinc-800 rounded-xl text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 dark:focus:ring-zinc-400/20 focus:border-zinc-900 dark:focus:border-zinc-100 transition-colors"
                 autoComplete="username"
                 autoFocus
                 required
@@ -106,7 +106,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="请输入密码"
-                className="w-full pl-9 pr-10 py-2.5 text-base sm:text-sm bg-zinc-50/60 dark:bg-zinc-950/60 border border-zinc-200/90 dark:border-zinc-800 rounded-xl text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 dark:focus:ring-zinc-400/20 focus:border-zinc-900 dark:focus:border-zinc-100 transition-colors"
+                className="w-full pl-9 pr-10 py-2.5 text-xs bg-zinc-50/60 dark:bg-zinc-950/60 border border-zinc-200/90 dark:border-zinc-800 rounded-xl text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 dark:focus:ring-zinc-400/20 focus:border-zinc-900 dark:focus:border-zinc-100 transition-colors"
                 autoComplete="current-password"
                 required
                 disabled={loading}
