@@ -165,6 +165,20 @@ const mapNodeRow = (row: NodeRow): NodeRecord => ({
   ...(row.version != null ? { version: row.version } : {}),
 });
 
+type NodeRowWithOwner = NodeRow & { owner_id: string | null; owner_name: string | null };
+
+const NODE_WITH_OWNER_COLUMNS =
+  'n.id, n.name, n.platform, n.skills_json, n.extensions_json, n.status, n.visibility, n.last_seen_at, n.created_at, n.pid, n.started_at, n.version, n.owner_id, u.username AS owner_name';
+
+function mapNodeRowWithOwner(row: NodeRowWithOwner, currentUserId?: string): NodeRecord {
+  return {
+    ...mapNodeRow(row),
+    ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+    ...(row.owner_name ? { ownerName: row.owner_name } : {}),
+    ...(currentUserId !== undefined && row.owner_id !== currentUserId ? { isTeamShared: true } : {}),
+  };
+}
+
 type BotRow = {
   id: string;
   node_id: string;
@@ -192,6 +206,20 @@ const mapBotRow = (row: BotRow): BotConfig => ({
   visibility: (row.visibility === 'team' ? 'team' : 'private') as ResourceVisibility,
   updatedAt: row.updated_at,
 });
+
+type BotRowWithOwner = BotRow & { owner_id: string | null; owner_name: string | null };
+
+const BOT_WITH_OWNER_COLUMNS =
+  'b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id, b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json, b.visibility, b.updated_at, n.owner_id, u.username AS owner_name';
+
+function mapBotRowWithOwner(row: BotRowWithOwner, currentUserId?: string): BotConfig {
+  return {
+    ...mapBotRow(row),
+    ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+    ...(row.owner_name ? { ownerName: row.owner_name } : {}),
+    ...(currentUserId !== undefined ? { isTeamShared: row.owner_id !== currentUserId } : {}),
+  };
+}
 
 type TriggerRow = {
   id: string;
@@ -846,50 +874,41 @@ export class HubDatabase {
 
   getNode(id: string): NodeRecord | undefined {
     const stmt = this.db.prepare(`
-      SELECT n.id, n.name, n.platform, n.skills_json, n.extensions_json, n.status, n.visibility, n.last_seen_at, n.created_at, n.pid, n.started_at, n.version,
-             n.owner_id, u.username AS owner_name
+      SELECT ${NODE_WITH_OWNER_COLUMNS}
       FROM nodes n
       LEFT JOIN users u ON u.id = n.owner_id
       WHERE n.id = ?
     `);
-    const row = stmt.get(id) as (NodeRow & { owner_id: string | null; owner_name: string | null }) | undefined;
+    const row = stmt.get(id) as NodeRowWithOwner | undefined;
     if (!row) return undefined;
-    return {
-      ...mapNodeRow(row),
-      ...(row.owner_id ? { ownerId: row.owner_id } : {}),
-      ...(row.owner_name ? { ownerName: row.owner_name } : {}),
-    };
+    return mapNodeRowWithOwner(row);
   }
 
   getNodeWithSecret(id: string): (NodeRecord & { tokenHash: string }) | undefined {
     const stmt = this.db.prepare(`
-      SELECT n.id, n.name, n.platform, n.token_hash, n.skills_json, n.extensions_json, n.status, n.visibility, n.last_seen_at, n.created_at, n.pid, n.started_at, n.version,
-             n.owner_id, u.username AS owner_name
+      SELECT n.token_hash, ${NODE_WITH_OWNER_COLUMNS}
       FROM nodes n
       LEFT JOIN users u ON u.id = n.owner_id
       WHERE n.id = ?
     `);
-    const row = stmt.get(id) as (NodeRow & { token_hash: string; owner_id: string | null; owner_name: string | null }) | undefined;
+    const row = stmt.get(id) as (NodeRowWithOwner & { token_hash: string }) | undefined;
     if (!row) return undefined;
     return {
-      ...mapNodeRow(row),
-      ...(row.owner_id ? { ownerId: row.owner_id } : {}),
-      ...(row.owner_name ? { ownerName: row.owner_name } : {}),
+      ...mapNodeRowWithOwner(row),
       tokenHash: row.token_hash,
     };
   }
 
   getAllNodesWithBots(ownerId: string): NodeWithBots[] {
     const stmt = this.db.prepare(`
-      SELECT DISTINCT n.id, n.name, n.platform, n.skills_json, n.extensions_json, n.status, n.visibility, n.last_seen_at, n.created_at, n.pid, n.started_at, n.version,
-             n.owner_id, u.username AS owner_name
+      SELECT DISTINCT ${NODE_WITH_OWNER_COLUMNS}
       FROM nodes n
       LEFT JOIN users u ON u.id = n.owner_id
       LEFT JOIN bots b ON b.node_id = n.id
       WHERE n.owner_id = ? OR n.visibility = 'team' OR b.visibility = 'team'
       ORDER BY n.created_at ASC
     `);
-    const rows = stmt.all(ownerId) as (NodeRow & { owner_id: string | null; owner_name: string | null })[];
+    const rows = stmt.all(ownerId) as NodeRowWithOwner[];
     return rows.map((row) => {
       const isTeamShared = row.owner_id !== ownerId;
       const allBots = this.getBotsForNode(row.id);
@@ -902,10 +921,7 @@ export class HubDatabase {
           }))
         : allBots;
       return {
-        ...mapNodeRow(row),
-        ...(row.owner_id ? { ownerId: row.owner_id } : {}),
-        ...(row.owner_name ? { ownerName: row.owner_name } : {}),
-        ...(isTeamShared ? { isTeamShared: true } : {}),
+        ...mapNodeRowWithOwner(row, ownerId),
         bots,
       };
     });
@@ -991,99 +1007,65 @@ export class HubDatabase {
   // --- Bots ---
   getBot(id: string): BotConfig | undefined {
     const stmt = this.db.prepare(`
-      SELECT b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id,
-             b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json,
-             b.visibility, b.updated_at, n.owner_id, u.username AS owner_name
+      SELECT ${BOT_WITH_OWNER_COLUMNS}
       FROM bots b
       LEFT JOIN nodes n ON n.id = b.node_id
       LEFT JOIN users u ON u.id = n.owner_id
       WHERE b.id = ?
     `);
-    const row = stmt.get(id) as (BotRow & { owner_id: string | null; owner_name: string | null }) | undefined;
+    const row = stmt.get(id) as BotRowWithOwner | undefined;
     if (!row) return undefined;
-    return {
-      ...mapBotRow(row),
-      ...(row.owner_id ? { ownerId: row.owner_id } : {}),
-      ...(row.owner_name ? { ownerName: row.owner_name } : {}),
-    };
+    return mapBotRowWithOwner(row);
   }
 
   getBotsForNode(nodeId: string): BotConfig[] {
     const stmt = this.db.prepare(`
-      SELECT b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id,
-             b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json,
-             b.visibility, b.updated_at, n.owner_id, u.username AS owner_name
+      SELECT ${BOT_WITH_OWNER_COLUMNS}
       FROM bots b
       LEFT JOIN nodes n ON n.id = b.node_id
       LEFT JOIN users u ON u.id = n.owner_id
       WHERE b.node_id = ?
       ORDER BY b.id ASC
     `);
-    const rows = stmt.all(nodeId) as (BotRow & { owner_id: string | null; owner_name: string | null })[];
-    return rows.map((row) => ({
-      ...mapBotRow(row),
-      ...(row.owner_id ? { ownerId: row.owner_id } : {}),
-      ...(row.owner_name ? { ownerName: row.owner_name } : {}),
-    }));
+    const rows = stmt.all(nodeId) as BotRowWithOwner[];
+    return rows.map((row) => mapBotRowWithOwner(row));
   }
 
   getAllBots(ownerId?: string): BotConfig[] {
     if (ownerId) {
       const stmt = this.db.prepare(`
-        SELECT b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id,
-               b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json,
-               b.visibility, b.updated_at, n.owner_id, u.username AS owner_name
+        SELECT ${BOT_WITH_OWNER_COLUMNS}
         FROM bots b
         JOIN nodes n ON n.id = b.node_id
         LEFT JOIN users u ON u.id = n.owner_id
         WHERE n.owner_id = ?
         ORDER BY b.id ASC
       `);
-      const rows = stmt.all(ownerId) as (BotRow & { owner_id: string | null; owner_name: string | null })[];
-      return rows.map((row) => ({
-        ...mapBotRow(row),
-        ...(row.owner_id ? { ownerId: row.owner_id } : {}),
-        ...(row.owner_name ? { ownerName: row.owner_name } : {}),
-      }));
+      const rows = stmt.all(ownerId) as BotRowWithOwner[];
+      return rows.map((row) => mapBotRowWithOwner(row));
     }
     const stmt = this.db.prepare(`
-      SELECT b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id,
-             b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json,
-             b.visibility, b.updated_at, n.owner_id, u.username AS owner_name
+      SELECT ${BOT_WITH_OWNER_COLUMNS}
       FROM bots b
       LEFT JOIN nodes n ON n.id = b.node_id
       LEFT JOIN users u ON u.id = n.owner_id
       ORDER BY b.id ASC
     `);
-    const rows = stmt.all() as (BotRow & { owner_id: string | null; owner_name: string | null })[];
-    return rows.map((row) => ({
-      ...mapBotRow(row),
-      ...(row.owner_id ? { ownerId: row.owner_id } : {}),
-      ...(row.owner_name ? { ownerName: row.owner_name } : {}),
-    }));
+    const rows = stmt.all() as BotRowWithOwner[];
+    return rows.map((row) => mapBotRowWithOwner(row));
   }
 
   getAccessibleBots(userId: string): BotConfig[] {
     const stmt = this.db.prepare(`
-      SELECT b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id,
-             b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json,
-             b.visibility, b.updated_at, n.owner_id, u.username AS owner_name
+      SELECT ${BOT_WITH_OWNER_COLUMNS}
       FROM bots b
       JOIN nodes n ON n.id = b.node_id
       LEFT JOIN users u ON u.id = n.owner_id
       WHERE n.owner_id = ? OR b.visibility = 'team' OR n.visibility = 'team'
       ORDER BY b.id ASC
     `);
-    const rows = stmt.all(userId) as (BotRow & { owner_id: string | null; owner_name: string | null })[];
-    return rows.map((row) => {
-      const isTeamShared = row.owner_id !== userId;
-      return {
-        ...mapBotRow(row),
-        ...(row.owner_id ? { ownerId: row.owner_id } : {}),
-        ...(row.owner_name ? { ownerName: row.owner_name } : {}),
-        isTeamShared,
-      };
-    });
+    const rows = stmt.all(userId) as BotRowWithOwner[];
+    return rows.map((row) => mapBotRowWithOwner(row, userId));
   }
 
   canUserUseBot(botId: string, userId: string): boolean {
@@ -1261,7 +1243,6 @@ export class HubDatabase {
       parallelRoundtable: Boolean(row.parallel_roundtable),
       parentSessionId: row.parent_session_id ?? undefined,
       ...(row.owner_id ? { ownerId: row.owner_id } : {}),
-      participants: this.listSessionParticipants(row.id),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       messageCount: Number(row.message_count),
@@ -1270,6 +1251,7 @@ export class HubDatabase {
     }));
   }
 
+  /** 兼容别名：多用户可访问会话查询入口（含参与者） */
   getAccessibleSessions(userId: string): SessionRecord[] {
     return this.getAllSessions(userId);
   }

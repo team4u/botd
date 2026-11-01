@@ -286,6 +286,7 @@ export class GroupRouter {
         try {
           payload = JSON.parse(task.payloadJson);
         } catch {}
+        // 补发任务只携带旧的 wakeupMessage/commandText 引用，但 prepareTurnInput 按增量游标（cursorMap）重新收集全部未读消息，因此补发回合的语义等于"执行最新未读增量"，与内存队列路径一致，不会重复消费历史。
         state.queue.push({
           botId: task.botId,
           chainBudget: new ChainBudget(),

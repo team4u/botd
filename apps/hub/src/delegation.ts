@@ -108,6 +108,7 @@ export function registerDelegationRoutes(
       message: parentNoticeMsg.message,
     });
 
+    // 注意：此处"复制"产物为同 storagePath 多行引用（不复制文件）。删除安全性依赖 artifact-service 的按引用计数回收（见 reclaimUnreferencedFiles），修改删除逻辑前必须保持该不变量。
     // 若请求中指定了 artifactIds，或父会话存在产物，则将对应产物复制/关联给子会话
     const targetArtifacts = (Array.isArray(body.artifactIds) && body.artifactIds.length > 0)
       ? body.artifactIds

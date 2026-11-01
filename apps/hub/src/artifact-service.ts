@@ -197,6 +197,7 @@ export class ArtifactService {
     });
   }
 
+  // 同一物理文件可能被多个 artifact id 引用（委派/分叉复制）；读取路径无共享副作用。
   getArtifactContent(
     actor: ArtifactActor,
     artifactId: string
@@ -262,6 +263,8 @@ export class ArtifactService {
     this.reclaimUnreferencedFiles(this.db.listArtifactCleanupPending().map((item) => item.storagePath));
   }
 
+  // 不变量：多个 artifacts 行共享同一 storage_path 是合法形态（子会话委派/分叉时的引用复制）。
+  // 回收判定必须始终以"是否仍有任意行引用该路径"为准，禁止改为"删行即删文件"。
   private reclaimUnreferencedFiles(candidatePaths: string[]): void {
     for (const filePath of new Set(candidatePaths)) {
       if (this.db.isArtifactStoragePathReferenced(filePath)) {
