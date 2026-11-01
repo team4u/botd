@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   Bot,
+  User as UserIcon,
   BellRing,
   Info,
   Copy,
@@ -475,6 +476,12 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   if (isUser) {
     return (
       <div data-message-id={message.id} className="flex flex-col items-end my-2 px-3 sm:px-6 group">
+        {message.senderUsername && (
+          <div className="flex items-center gap-1 mb-1 mr-1 text-[11px] font-medium text-zinc-500 dark:text-zinc-400 select-none">
+            <UserIcon className="w-3 h-3 text-zinc-400 dark:text-zinc-500 shrink-0" />
+            <span>{message.senderUsername}</span>
+          </div>
+        )}
         <div
           className={`bg-zinc-100 dark:bg-zinc-800 border border-zinc-200/80 dark:border-zinc-700/60 px-4 py-2.5 rounded-2xl rounded-br-sm max-w-[85%] sm:max-w-[75%] shadow-xs user-bubble ${
             isEditing ? 'ring-2 ring-blue-500/60' : ''

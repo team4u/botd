@@ -331,6 +331,10 @@ export const api = {
   },
 
   // BOTs
+  async listBots(): Promise<BotConfig[]> {
+    return request<BotConfig[]>('/api/bots');
+  },
+
   async createBot(input: SaveBotInput): Promise<BotConfig> {
     return request<BotConfig>('/api/bots', {
       method: 'POST',
