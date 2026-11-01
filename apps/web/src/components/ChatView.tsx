@@ -805,6 +805,25 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       </header>
 
+      {/* 子会话模式返回父会话横幅 */}
+      {session.parentSessionId && (
+        <div className="mx-3 sm:mx-4 mt-2.5 px-3 py-1.5 bg-blue-50/80 dark:bg-blue-950/40 border border-blue-200/80 dark:border-blue-900/60 rounded-lg flex items-center justify-between gap-2 text-xs text-blue-800 dark:text-blue-300 shrink-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-medium shrink-0">子会话模式</span>
+            <span className="text-blue-600/70 dark:text-blue-400/60 text-[11px] truncate">由父会话派生</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              window.location.hash = `#?s=${session.parentSessionId}`;
+            }}
+            className="inline-flex items-center gap-1 px-2.5 py-1 bg-white dark:bg-zinc-900 border border-blue-300 dark:border-blue-800 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-950/60 rounded-lg text-xs font-medium transition-colors shrink-0 cursor-pointer shadow-2xs"
+          >
+            ← 返回父会话
+          </button>
+        </div>
+      )}
+
       {/* 排队挂起横幅：目标计算节点离线，任务已入队等待节点恢复 */}
       {session.status === 'queued' && (
         <div className="mx-3 sm:mx-4 mt-2.5 px-3 py-2 bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/60 rounded-lg flex items-center gap-2 text-xs text-amber-800 dark:text-amber-300 shrink-0">

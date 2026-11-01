@@ -32,6 +32,7 @@ import { ArtifactService } from './artifact-service.js';
 import { registerTriggerRoutes } from './triggers.js';
 import { registerBgJobRoutes } from './bg-jobs.js';
 import { registerSkillSyncAndAskRoutes } from './skill-sync.js';
+import { registerDelegationRoutes } from './delegation.js';
 import {
   requireAdmin,
   resolveOwnedBotRpc,
@@ -776,6 +777,7 @@ export function createHub(options?: HubOptions): HubInstance {
       memberBotIds,
       ownerId: user.id,
       parallelRoundtable: Boolean(body.parallelRoundtable),
+      parentSessionId: body.parentSessionId,
     });
 
     return c.json(session);
@@ -1177,6 +1179,7 @@ export function createHub(options?: HubOptions): HubInstance {
   const triggerScheduler = registerTriggerRoutes(app, db, router, getSessionOwnerId);
   registerBgJobRoutes(app, db, connections);
   registerSkillSyncAndAskRoutes(app, db, connections, router, getSessionOwnerId);
+  registerDelegationRoutes(app, db, router, sseHub, getSessionOwnerId);
 
   // 10. Serve static web files & SPA fallback
   app.use('*', createStaticMiddleware(options?.webDir));

@@ -1,4 +1,4 @@
-import type { MessageRecord, MessageSearchHit, SessionMode, SessionRecord } from '@botd/protocol';
+import type { DelegateSessionInput, DelegateSessionResult, MessageRecord, MessageSearchHit, SessionMode, SessionRecord } from '@botd/protocol';
 import { Command, Option } from 'commander';
 import { cliAction, readGlobals } from '../context.js';
 import { HubClient } from '../hub-client.js';
@@ -222,6 +222,51 @@ export function registerSessionsCommands(program: Command): void {
           { anchorMessageId: String(options.anchor).trim() },
         );
         printResult(forked, g.json);
+      })(options, command),
+    );
+
+  sessions
+    .command('delegate <parentSessionId>')
+    .description('Delegate a task to a sub-session executed by a bot')
+    .requiredOption('--bot <botId>', 'Bot ID to execute the task')
+    .requiredOption('--prompt <prompt>', 'Task prompt for the sub-session')
+    .option('--title <title>', 'Sub-session title')
+    .addOption(
+      new Option('--mode <mode>', 'Session mode').choices(['direct', 'lead', 'roundtable']),
+    )
+    .action((parentSessionId: string, options: Record<string, unknown>, command: Command) =>
+      cliAction(async (_opts, cmd) => {
+        const g = readGlobals(cmd);
+        const client = await HubClient.connect(g);
+        const input: DelegateSessionInput = {
+          botId: String(options.bot).trim(),
+          prompt: String(options.prompt).trim(),
+        };
+        if (typeof options.title === 'string' && options.title.trim()) {
+          input.title = options.title.trim();
+        }
+        if (typeof options.mode === 'string' && options.mode.trim()) {
+          input.mode = options.mode.trim() as SessionMode;
+        }
+        const result = await client.post<DelegateSessionResult>(
+          `/api/sessions/${encodeURIComponent(parentSessionId)}/delegate`,
+          input,
+        );
+        printResult(result, g.json);
+      })(options, command),
+    );
+
+  sessions
+    .command('subsessions <parentSessionId>')
+    .description('List sub-sessions of a parent session')
+    .action((parentSessionId: string, options: Record<string, unknown>, command: Command) =>
+      cliAction(async (_opts, cmd) => {
+        const g = readGlobals(cmd);
+        const client = await HubClient.connect(g);
+        const list = await client.get<SessionRecord[]>(
+          `/api/sessions/${encodeURIComponent(parentSessionId)}/subsessions`,
+        );
+        printResult(list, g.json);
       })(options, command),
     );
 }
