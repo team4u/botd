@@ -159,6 +159,10 @@ export interface SessionRecord {
   memberBotIds: string[];
   status: SessionStatus;
   activeBotId?: string;
+  /** 圆桌并发盲评时同时处于活跃推理中的 BOT ID 列表 */
+  activeBotIds?: string[];
+  /** 若由父会话派生的子会话，记录父会话 ID */
+  parentSessionId?: string;
   createdAt: string;
   updatedAt: string;
   /** 会话内消息总数（用户+助手+系统），由 Hub 查询时附加，可选字段 */
@@ -173,6 +177,72 @@ export interface SessionRecord {
   pinned?: boolean;
   /** 圆桌模式下是否开启独立并发盲评（所有成员并发独立作答，最后由 Lead 总结） */
   parallelRoundtable?: boolean;
+}
+
+export interface SessionShareRecord {
+  id: string;
+  sessionId: string;
+  token: string;
+  createdAt: string;
+  expiresAt?: string;
+}
+
+export interface SharedBotSummary {
+  id: string;
+  name: string;
+  description: string;
+  modelProvider: string;
+  modelId: string;
+}
+
+export interface SharedSessionSnapshot {
+  share: SessionShareRecord;
+  session: Pick<
+    SessionRecord,
+    'id' | 'title' | 'mode' | 'leadBotId' | 'memberBotIds' | 'parallelRoundtable' | 'createdAt' | 'updatedAt'
+  >;
+  bots: SharedBotSummary[];
+  messages: MessageRecord[];
+  artifacts: ArtifactRecord[];
+}
+
+export interface DelegateSessionInput {
+  botId: string;
+  title?: string;
+  prompt: string;
+  memberBotIds?: string[];
+  mode?: SessionMode;
+}
+
+export interface DelegateSessionResult {
+  parentSessionId: string;
+  childSession: SessionRecord;
+  initialMessage: MessageRecord;
+}
+
+export type NotificationChannelKind = 'webhook' | 'feishu' | 'slack' | 'telegram';
+export type NotificationEventKind = 'assistant_reply' | 'ask_request' | 'wakeup';
+
+export interface NotificationChannelRecord {
+  id: string;
+  sessionId: string;
+  name: string;
+  kind: NotificationChannelKind;
+  targetUrl: string;
+  secret?: string;
+  events: NotificationEventKind[];
+  enabled: boolean;
+  lastTriggeredAt?: string;
+  createdAt: string;
+}
+
+export interface CreateNotificationChannelInput {
+  name: string;
+  kind: NotificationChannelKind;
+  targetUrl: string;
+  secret?: string;
+  events?: NotificationEventKind[];
+  enabled?: boolean;
 }
 
 export interface MessageRecord {
@@ -190,7 +260,7 @@ export interface MessageRecord {
 }
 
 export type SessionSseEvent =
-  | { type: 'session_status'; sessionId: string; status: SessionStatus; activeBotId?: string }
+  | { type: 'session_status'; sessionId: string; status: SessionStatus; activeBotId?: string; activeBotIds?: string[] }
   | { type: 'text_delta'; sessionId: string; botId: string; delta: string }
   | { type: 'tool_status'; sessionId: string; botId: string; toolName: string; status: 'running' | 'done'; summary?: string }
   | { type: 'message_created'; message: MessageRecord }
@@ -320,6 +390,7 @@ export interface CreateSessionInput {
   leadBotId: string;
   memberBotIds: string[];
   parallelRoundtable?: boolean;
+  parentSessionId?: string;
 }
 export interface NodeIdentity { nodeId: string; name: string; hubUrl: string; token: string }
 export interface PairingResult { code: string; expiresAt: string }
