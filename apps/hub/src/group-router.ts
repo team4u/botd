@@ -280,21 +280,33 @@ export class GroupRouter {
     // Check store-and-forward queue
     const pendingTasks = this.db.listPendingOutboundTasks(nodeId);
     for (const task of pendingTasks) {
-      this.db.markOutboundTaskDispatched(task.id);
       const state = this.getOrCreateState(task.sessionId);
-      if (state.queue.length === 0 && !state.isRunning) {
-        let payload: { generation?: number; wakeupMessage?: string; commandText?: string } = {};
-        try {
-          payload = JSON.parse(task.payloadJson);
-        } catch {}
-        // 补发任务只携带旧的 wakeupMessage/commandText 引用，但 prepareTurnInput 按增量游标（cursorMap）重新收集全部未读消息，因此补发回合的语义等于"执行最新未读增量"，与内存队列路径一致，不会重复消费历史。
-        state.queue.push({
-          botId: task.botId,
-          chainBudget: new ChainBudget(),
-          generation: state.generation,
-          wakeupMessage: payload.wakeupMessage,
-          commandText: payload.commandText,
-        });
+      // 同一 bot 在内存队列已有待执行项时跳过（离线路径 processQueue 会把队首项重新
+      // unshift 回内存队列并落库，两项语义都是"执行最新未读增量"，重复入队会双跑）；
+      // 不同 bot 的多条离线任务全部入队，由 processQueue 串行消费，其 finally 分支续跑剩余任务。
+      const alreadyQueued = state.queue.some((item) => item.botId === task.botId);
+      if (alreadyQueued) {
+        this.db.markOutboundTaskDispatched(task.id);
+        if (!state.isRunning) {
+          this.processQueue(task.sessionId).catch(() => {});
+        }
+        continue;
+      }
+      let payload: { generation?: number; wakeupMessage?: string; commandText?: string } = {};
+      try {
+        payload = JSON.parse(task.payloadJson);
+      } catch {}
+      // 补发任务只携带旧的 wakeupMessage/commandText 引用，但 prepareTurnInput 按增量游标（cursorMap）重新收集全部未读消息，因此补发回合的语义等于"执行最新未读增量"，与内存队列路径一致，不会重复消费历史。
+      state.queue.push({
+        botId: task.botId,
+        chainBudget: new ChainBudget(),
+        generation: state.generation,
+        wakeupMessage: payload.wakeupMessage,
+        commandText: payload.commandText,
+      });
+      // 确认入队后才标记 dispatched，避免"已标记永不执行"的任务丢失
+      this.db.markOutboundTaskDispatched(task.id);
+      if (!state.isRunning) {
         this.processQueue(task.sessionId).catch(() => {});
       }
     }
@@ -633,7 +645,17 @@ export class GroupRouter {
       if (bot) {
         const rpc = this.connections.getNodeRpc(bot.nodeId);
         if (rpc) {
-          await rpc.cancelTurn(sessionId, botId).catch(() => {});
+          // fire-and-forget：取消不应被节点状态拖死（节点可能已静默失联，rpc 会挂到超时）；
+          // 通知已通过 generation 递增与会话状态广播生效，节点侧取消仅作尽力而为的联动。
+          const cancelFn: any = (rpc as any).cancelTurn;
+          if (typeof cancelFn?.asEvent === 'function') {
+            void cancelFn.asEvent(sessionId, botId).catch(() => {});
+          } else {
+            void Promise.race([
+              Promise.resolve(cancelFn.call(rpc, sessionId, botId)).catch(() => {}),
+              new Promise((resolve) => setTimeout(resolve, 5_000)),
+            ]);
+          }
         }
       }
     }

@@ -60,7 +60,7 @@ ENV NODE_ENV=production
 ENV BOTD_HOST=0.0.0.0
 ENV BOTD_PORT=3000
 ENV BOTD_DB_PATH=/data/hub.sqlite
-ENV BOTD_ADMIN_PASSWORD=admin
+# 不设置默认管理员密码：未提供 BOTD_ADMIN_PASSWORD 时 hub 生成一次性随机密码并打印到日志
 ENV BOTD_DATA_DIR=/data/node
 ENV PATH="/usr/local/bin:/app/node_modules/.bin:$PATH"
 

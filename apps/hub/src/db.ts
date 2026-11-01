@@ -328,6 +328,7 @@ export class HubDatabase {
         username TEXT NOT NULL UNIQUE,
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL DEFAULT 'member',
+        token_epoch INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
       );
 
@@ -503,13 +504,17 @@ export class HubDatabase {
       `ALTER TABLE pending_asks ADD COLUMN preview_content TEXT`,
       `ALTER TABLE messages ADD COLUMN sender_user_id TEXT`,
       `ALTER TABLE messages ADD COLUMN sender_username TEXT`,
+      `ALTER TABLE users ADD COLUMN token_epoch INTEGER NOT NULL DEFAULT 0`,
     ];
 
     for (const sql of migrations) {
       try {
         this.db.exec(sql);
-      } catch {
-        // Ignore if column already exists
+      } catch (err: any) {
+        // 仅忽略幂等迁移的正常冲突（列已存在）；其余错误必须终止启动，防止带隐患运行
+        if (!String(err?.message || '').includes('duplicate column name')) {
+          throw err;
+        }
       }
     }
 
@@ -517,6 +522,7 @@ export class HubDatabase {
     this.db.exec(`UPDATE nodes SET owner_id = 'user_admin' WHERE owner_id IS NULL`);
     this.db.exec(`UPDATE sessions SET owner_id = 'user_admin' WHERE owner_id IS NULL`);
 
+    // 全部建表/迁移/回填成功后才提升 schema 版本号
     this.db.exec(`PRAGMA user_version = ${HUB_SCHEMA_VERSION}`);
   }
 
@@ -769,6 +775,19 @@ export class HubDatabase {
     };
   }
 
+  /** 用户当前 token epoch：用于改密后让旧 token 失效；用户不存在返回 undefined */
+  getUserTokenEpoch(id: string): number | undefined {
+    const row = this.db.prepare('SELECT token_epoch FROM users WHERE id = ?').get(id) as
+      | { token_epoch: number | bigint }
+      | undefined;
+    return row === undefined ? undefined : Number(row.token_epoch);
+  }
+
+  /** 递增 token epoch：所有已签发 token 立即失效（改密/重置密码路径调用） */
+  incrementUserTokenEpoch(id: string): void {
+    this.db.prepare('UPDATE users SET token_epoch = token_epoch + 1 WHERE id = ?').run(id);
+  }
+
   getUserByUsername(username: string): UserRecord | undefined {
     const stmt = this.db.prepare('SELECT id, username, role, created_at FROM users WHERE username = ?');
     const row = stmt.get(username) as {
@@ -820,8 +839,12 @@ export class HubDatabase {
   }
 
   updateUserPassword(id: string, passwordHash: string): void {
-    const stmt = this.db.prepare('UPDATE users SET password_hash = ? WHERE id = ?');
-    stmt.run(passwordHash, id);
+    // 改密后旧 token 必须全部失效：同事务内更新哈希并递增 token epoch
+    this.inTransaction(() => {
+      const stmt = this.db.prepare('UPDATE users SET password_hash = ? WHERE id = ?');
+      stmt.run(passwordHash, id);
+      this.db.prepare('UPDATE users SET token_epoch = token_epoch + 1 WHERE id = ?').run(id);
+    });
   }
 
   /** 删除用户，并级联删除其全部 sessions 及这些 sessions 的 messages */
@@ -925,6 +948,13 @@ export class HubDatabase {
         bots,
       };
     });
+  }
+
+  /** 仅按归属查节点（不含团队可见）：用于删除用户前的归属校验，避免团队共享资源阻断删除 */
+  countNodesOwnedBy(ownerId: string): number {
+    const stmt = this.db.prepare('SELECT COUNT(*) AS count FROM nodes WHERE owner_id = ?');
+    const row = stmt.get(ownerId) as { count: number | bigint };
+    return Number(row.count);
   }
 
   updateNodeStatus(id: string, status: 'online' | 'offline', lastSeenAt?: string): void {
@@ -1311,6 +1341,11 @@ export class HubDatabase {
     return row?.owner_id ?? undefined;
   }
 
+  /** 模块自建表（如 session_shares / notification_channels）存在才返回 true */
+  private hasTable(name: string): boolean {
+    return this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
+  }
+
   deleteSession(id: string): boolean {
     return this.inTransaction(() => {
       const session = this.getSession(id);
@@ -1327,6 +1362,14 @@ export class HubDatabase {
       deletePendingAsks.run(id);
       this.db.prepare('DELETE FROM session_participants WHERE session_id = ?').run(id);
       this.db.prepare('DELETE FROM outbound_task_queue WHERE session_id = ?').run(id);
+      // session_shares / notification_channels 由 share.ts / channels.ts 路由注册时自建，
+      // 未注册过这些路由的部署（如纯 DB 使用方）里表不存在，跳过即可
+      if (this.hasTable('session_shares')) {
+        this.db.prepare('DELETE FROM session_shares WHERE session_id = ?').run(id);
+      }
+      if (this.hasTable('notification_channels')) {
+        this.db.prepare('DELETE FROM notification_channels WHERE session_id = ?').run(id);
+      }
       const deleteSessionStmt = this.db.prepare('DELETE FROM sessions WHERE id = ?');
       deleteSessionStmt.run(id);
       return true;
@@ -1568,13 +1611,15 @@ export class HubDatabase {
     `);
 
     const rows = this.db.prepare(`
-      SELECT role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
+      SELECT role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
       FROM messages
       WHERE session_id = ? AND rowid <= ?
       ORDER BY rowid ASC
     `).all(sourceSessionId, anchorRowid) as {
       role: string;
       sender_bot_id: string | null;
+      sender_user_id: string | null;
+      sender_username: string | null;
       model_badge: string | null;
       content: string;
       mentions_json: string;
@@ -1585,8 +1630,8 @@ export class HubDatabase {
     }[];
     // 逐行 INSERT（新 msg id、新 session_id），created_at 保留原值以保真时间线
     const insertMessage = this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, sender_bot_id, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertArtifact = this.db.prepare(`
       INSERT INTO artifacts (id, session_id, filename, mime_type, size_bytes, sender_bot_id, storage_path, created_at)
@@ -1655,6 +1700,8 @@ export class HubDatabase {
           newSessionId,
           row.role,
           row.sender_bot_id,
+          row.sender_user_id,
+          row.sender_username,
           row.model_badge,
           row.content,
           row.mentions_json,

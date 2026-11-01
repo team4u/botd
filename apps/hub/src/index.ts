@@ -3,6 +3,7 @@ import type { Server } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { streamSSE } from 'hono/streaming';
 import { serve } from '@hono/node-server';
 import {
@@ -35,6 +36,7 @@ import { registerBgJobRoutes } from './bg-jobs.js';
 import { registerSkillSyncAndAskRoutes } from './skill-sync.js';
 import { registerDelegationRoutes } from './delegation.js';
 import { registerChannelRoutes } from './channels.js';
+import { MAX_ARTIFACT_BYTES } from './artifact-service.js';
 import {
   requireAdmin,
   resolveOwnedBotRpc,
@@ -57,7 +59,7 @@ export interface StartHubOptions extends HubOptions {
 }
 
 export interface HubInstance {
-  app: Hono<{ Variables: { user: UserRecord } }>;
+  app: Hono<{ Variables: { user: UserRecord; viaNode?: boolean } }>;
   db: HubDatabase;
   connections: NodeConnectionManager;
   router: GroupRouter;
@@ -138,8 +140,19 @@ export function createHub(options?: HubOptions): HubInstance {
   if (!savedSecret) {
     db.setSetting('auth_secret', auth.getSecret());
   }
-  const adminPassword = options?.adminPassword || process.env.BOTD_ADMIN_PASSWORD || 'admin';
-  db.ensureBootstrapAdmin(auth.hashPassword(adminPassword));
+  const adminPassword = options?.adminPassword || process.env.BOTD_ADMIN_PASSWORD;
+  if (adminPassword) {
+    db.ensureBootstrapAdmin(auth.hashPassword(adminPassword));
+  } else {
+    // 未配置管理员密码时生成一次性随机密码：绝不允许可预测的默认凭据自举
+    const generated = randomBytes(12).toString('base64url');
+    db.ensureBootstrapAdmin(auth.hashPassword(generated));
+    console.warn('==============================================================');
+    console.warn('[botd] BOTD_ADMIN_PASSWORD is not set.');
+    console.warn(`[botd] Bootstrap admin password (one-time): ${generated}`);
+    console.warn('[botd] Set BOTD_ADMIN_PASSWORD to override, then restart.');
+    console.warn('==============================================================');
+  }
   // SessionRecord 未暴露 ownerId，读取归属；SseHub 借此把会话事件同步派发给 owner 的全局订阅者
   const getSessionOwnerId = (sessionId: string): string | undefined => {
     return db.getSessionOwner(sessionId);
@@ -150,8 +163,15 @@ export function createHub(options?: HubOptions): HubInstance {
   const router = new GroupRouter(db, connections, sseHub);
   connections.setRouter(router);
 
-  const app = new Hono<{ Variables: { user: UserRecord } }>();
-  app.onError((error, c) => c.json({ error: error.message || 'Internal server error' }, 500));
+  const app = new Hono<{ Variables: { user: UserRecord; viaNode?: boolean } }>();
+  app.onError((error, c) => {
+    // 内部错误不外泄原文：日志留底，对外仅返回通用 500；业务错误（带 status 属性）保留原语义
+    if (error && typeof error === 'object' && 'status' in error && typeof (error as any).status === 'number') {
+      return c.json({ error: error.message || 'Internal server error' }, (error as any).status);
+    }
+    console.error('[hub] Unhandled request error:', error);
+    return c.json({ error: 'Internal server error' }, 500);
+  });
   app.notFound(c => c.json({ error: 'Not found' }, 404));
 
   // 1. Health check (public)
@@ -162,6 +182,19 @@ export function createHub(options?: HubOptions): HubInstance {
       activeTurns: router.getActiveTurnCount(),
     })
   );
+
+  // 1b. Global request body limits (anti-OOM on unauthenticated endpoints)
+  // 常规 JSON 路由 1MB；webhook 回调 64KB；artifact 上传按 MAX_ARTIFACT_BYTES 放宽：
+  // 二进制流路径直传原始字节（16MB），base64 JSON 路径有 ~1.34 倍膨胀，留足余量。
+  const ARTIFACT_BODY_LIMIT = Math.ceil(MAX_ARTIFACT_BYTES * 1.4) + 64 * 1024;
+  const bodyLimited = (maxSize: number) =>
+    bodyLimit({
+      maxSize,
+      onError: (c) => c.json({ error: 'Payload Too Large' }, 413),
+    });
+  app.use('/api/sessions/:id/artifacts', bodyLimited(ARTIFACT_BODY_LIMIT));
+  app.use('/api/webhooks/*', bodyLimited(64 * 1024));
+  app.use('/api/*', bodyLimited(1024 * 1024));
 
   // 2. Cookie authentication middleware for /api/*
   app.use('/api/*', async (c, next) => {
@@ -179,8 +212,9 @@ export function createHub(options?: HubOptions): HubInstance {
     }
 
     const cookie = c.req.header('cookie');
-    const verified = auth.verifyCookie(cookie);
+    const verified = auth.verifyCookie(cookie, (userId) => db.getUserTokenEpoch(userId) ?? 0);
     let user = verified ? db.getUser(verified.userId) : undefined;
+    let viaNode = false;
     if (!user) {
       const headerNodeId = c.req.header('x-botd-node-id');
       const headerNodeToken = c.req.header('x-botd-node-token');
@@ -190,6 +224,7 @@ export function createHub(options?: HubOptions): HubInstance {
           const ownerId = db.getNodeOwner(headerNodeId);
           if (ownerId) {
             user = db.getUser(ownerId);
+            viaNode = true;
           }
         }
       }
@@ -197,7 +232,19 @@ export function createHub(options?: HubOptions): HubInstance {
     if (!user) {
       return c.json({ error: 'Unauthorized' }, 401);
     }
+
+    // 节点令牌仅限节点运行所需 API：用户管理/改密/配对码创建等管理面一律拒绝
+    if (viaNode) {
+      const isAdminScoped =
+        reqPath.startsWith('/api/users') ||
+        (reqPath.startsWith('/api/nodes/pairing') && method === 'POST');
+      if (isAdminScoped) {
+        return c.json({ error: 'Forbidden: node tokens cannot access user management endpoints' }, 403);
+      }
+    }
+
     c.set('user', user);
+    c.set('viaNode', viaNode);
 
     return next();
   });
@@ -214,7 +261,7 @@ export function createHub(options?: HubOptions): HubInstance {
       return c.json({ error: 'Invalid username or password' }, 401);
     }
 
-    const { token, maxAgeSeconds } = auth.issueToken(user.id);
+    const { token, maxAgeSeconds } = auth.issueToken(user.id, db.getUserTokenEpoch(user.id) ?? 0);
     c.header('Set-Cookie', `botd_token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}`);
     return c.json({
       ok: true,
@@ -266,7 +313,7 @@ export function createHub(options?: HubOptions): HubInstance {
     if (!db.getUser(id)) {
       return c.json({ error: 'User not found' }, 404);
     }
-    if (db.getAllNodesWithBots(id).length > 0) {
+    if (db.countNodesOwnedBy(id) > 0) {
       return c.json({ error: 'User still owns nodes; delete their nodes first' }, 409);
     }
     artifacts.deleteUser(id);
@@ -302,10 +349,29 @@ export function createHub(options?: HubOptions): HubInstance {
       || !isText(body.name) || (body.platform !== undefined && !['linux', 'darwin', 'win32'].includes(body.platform))) {
       return c.json({ error: 'Invalid pairing input' }, 400);
     }
-    const ownerUserId = auth.consumePairingCode(body.code);
+
+    // 配对码暴破防护：按来源 IP 失败指数退避（1s 起，上限 5 分钟）。
+    // 持有效配对码的请求不拦截（失败退避只针对暴破猜测），避免误伤正常配对重试。
+    const clientIp =
+      c.req.header('x-forwarded-for')?.split(',')[0]?.trim()
+      || c.req.header('x-real-ip')
+      || 'unknown';
+    const ownerUserId = auth.peekPairingCodeOwner(body.code);
     if (!ownerUserId) {
+      const backoffMs = auth.pairingBackoffRemainingMs(clientIp);
+      if (backoffMs > 0) {
+        return c.json({ error: `Too many failed pairing attempts; retry in ${Math.ceil(backoffMs / 1000)}s` }, 429);
+      }
+      // 该 IP 记一次失败；若猜测的码确实存在，也对其连续失败计数（5 次即作废）
+      auth.recordPairingFailure(clientIp, body.code);
       return c.json({ error: 'Invalid or expired pairing code' }, 400);
     }
+    // 消费配对码（一次性语义）并清除该 IP 的失败退避
+    const pairedUserId = auth.consumePairingCode(body.code);
+    if (!pairedUserId) {
+      return c.json({ error: 'Invalid or expired pairing code' }, 400);
+    }
+    auth.clearPairingFailures(clientIp);
 
     const nodeId = `node_${randomUUID()}`;
     const token = randomBytes(24).toString('hex');
@@ -313,7 +379,7 @@ export function createHub(options?: HubOptions): HubInstance {
     const name = body.name || 'Test node';
     const platform = (body.platform as PlatformType) || 'linux';
 
-    db.createNode({ id: nodeId, name, platform, tokenHash, ownerId: ownerUserId });
+    db.createNode({ id: nodeId, name, platform, tokenHash, ownerId: pairedUserId });
 
     const proto = c.req.header('x-forwarded-proto') || (c.req.url.startsWith('https:') ? 'https' : 'http');
     const host = c.req.header('host') || '127.0.0.1';
@@ -1141,6 +1207,14 @@ export function createHub(options?: HubOptions): HubInstance {
     // resetMemberSessions 内部要查会话成员，必须在 deleteSession 之前调用
     await router.resetMemberSessions(id);
     artifacts.deleteSession(id);
+    // 广播 idle 让子会话委派的 SSE 监听闭包自行清理，避免永久挂在 SseHub.listeners
+    sseHub.broadcast(id, {
+      type: 'session_status',
+      sessionId: id,
+      status: 'idle',
+      activeBotId: undefined,
+      activeBotIds: [],
+    });
     return c.json({ ok: true });
   });
 

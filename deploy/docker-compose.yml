@@ -16,7 +16,8 @@ services:
       - BOTD_HOST=0.0.0.0
       - BOTD_PORT=3000
       - BOTD_DB_PATH=/data/hub.sqlite
-      - BOTD_ADMIN_PASSWORD=${BOTD_ADMIN_PASSWORD:-admin}
+      # 管理员密码必填：留空时 hub 启动会生成一次性随机密码并打印到日志
+      - BOTD_ADMIN_PASSWORD=${BOTD_ADMIN_PASSWORD:-}
     volumes:
       - hub-data:/data
     healthcheck:

@@ -39,6 +39,10 @@ export interface NodeConnection {
   nodeId: string;
   ws: WebSocket;
   rpc: BirpcReturn<NodeRpcFunctions, HubRpcFunctions>;
+  /** 心跳标记：收到 pong 置 true，每轮 ping 前检查并重置 */
+  alive: boolean;
+  /** 连续未收到 pong 的轮数，达到阈值即判定死链 */
+  missedPongs: number;
 }
 
 export class NodeConnectionManager {
@@ -49,6 +53,7 @@ export class NodeConnectionManager {
   private sseHub: SseHub;
   private router?: GroupRouterDelegate;
   private artifactService: ArtifactService;
+  private heartbeatTimer?: NodeJS.Timeout;
 
   constructor(
     db: HubDatabase,
@@ -312,8 +317,12 @@ export class NodeConnectionManager {
       timeout: 30 * 60 * 1000,
     });
 
-    const conn: NodeConnection = { nodeId, ws, rpc };
+    const conn: NodeConnection = { nodeId, ws, rpc, alive: true, missedPongs: 0 };
     this.connections.set(nodeId, conn);
+    this.startHeartbeat();
+    ws.on('pong', () => {
+      conn.alive = true;
+    });
 
     const cleanup = () => {
       if (this.connections.get(nodeId)?.ws === ws) {
@@ -329,6 +338,36 @@ export class NodeConnectionManager {
 
     ws.on('close', cleanup);
     ws.on('error', cleanup);
+  }
+
+  /**
+   * 服务端协议层心跳：每 30s ping 一次，连续 2 轮无 pong 即 terminate，
+   * 触发 close 清理路径（节点置 offline），避免 NAT 静默失联后 runTurn RPC 挂死。
+   */
+  private startHeartbeat(): void {
+    if (this.heartbeatTimer) return;
+    this.heartbeatTimer = setInterval(() => {
+      for (const conn of this.connections.values()) {
+        if (conn.ws.readyState !== WebSocket.OPEN) continue;
+        if (!conn.alive) {
+          conn.missedPongs++;
+          if (conn.missedPongs >= 2) {
+            console.warn(`[ws-hub] Node ${conn.nodeId} missed 2 heartbeats, terminating connection`);
+            conn.ws.terminate();
+            continue;
+          }
+        } else {
+          conn.missedPongs = 0;
+        }
+        conn.alive = false;
+        try {
+          conn.ws.ping();
+        } catch {
+          // ignore
+        }
+      }
+    }, 30_000);
+    this.heartbeatTimer.unref?.();
   }
 
   private assertNodeBotInSession(nodeId: string, botId: string, sessionId: string): void {
@@ -379,6 +418,10 @@ export class NodeConnectionManager {
       }
     }
     this.connections.clear();
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
     try {
       this.wss.close();
     } catch {
