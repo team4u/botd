@@ -34,6 +34,9 @@ export interface IncrementalMessageResult {
   rowid: number;
 }
 
+export const HUB_SCHEMA_VERSION = 2;
+
+export { isValidCommandName } from '@botd/protocol';
 const PREVIEW_MAX_LENGTH = 60;
 
 const buildPreview = (content: string): string | undefined => {
@@ -134,6 +137,7 @@ type NodeRow = {
   created_at: string;
   pid: number | null;
   started_at: string | null;
+  version: string | null;
 };
 
 const mapNodeRow = (row: NodeRow): NodeRecord => ({
@@ -147,6 +151,7 @@ const mapNodeRow = (row: NodeRow): NodeRecord => ({
   createdAt: row.created_at,
   ...(typeof row.pid === 'number' ? { pid: row.pid } : {}),
   ...(typeof row.started_at === 'string' && row.started_at.length > 0 ? { startedAt: row.started_at } : {}),
+  ...(row.version != null ? { version: row.version } : {}),
 });
 
 type BotRow = {
@@ -208,10 +213,12 @@ const mapTriggerRow = (row: TriggerRow): TriggerRecord => ({
 
 export class HubDatabase {
   public db: DatabaseSync;
+  public readonly dbPath: string;
 
   constructor(options?: HubDatabaseOptions) {
     const defaultDir = process.env.BOTD_HUB_DATA_DIR || path.join(os.homedir(), '.botd');
     const dbPath = options?.dbPath ?? process.env.BOTD_DB_PATH ?? path.join(defaultDir, 'hub.sqlite');
+    this.dbPath = dbPath;
     if (dbPath !== ':memory:') {
       fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
     }
@@ -219,6 +226,29 @@ export class HubDatabase {
     if (dbPath !== ':memory:' && process.platform !== 'win32') fs.chmodSync(dbPath, 0o600);
     this.initSchema();
     this.resetStaleMetadata();
+  }
+
+  public getSchemaVersion(): number {
+    const row = this.db.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined;
+    return Number(row?.user_version ?? 0);
+  }
+
+  public backupDatabase(destPath?: string): string {
+    if (this.dbPath === ':memory:') {
+      return '';
+    }
+    const resolvedDest = destPath ?? `${this.dbPath}.bak-v${this.getSchemaVersion()}`;
+    fs.mkdirSync(path.dirname(path.resolve(resolvedDest)), { recursive: true });
+    if (fs.existsSync(resolvedDest)) {
+      fs.rmSync(resolvedDest, { force: true });
+    }
+    this.db.exec(`VACUUM INTO ${JSON.stringify(resolvedDest).replaceAll('"', "'")}`);
+    if (process.platform !== 'win32') {
+      try {
+        fs.chmodSync(resolvedDest, 0o600);
+      } catch {}
+    }
+    return resolvedDest;
   }
 
   public resetStaleMetadata(): void {
@@ -241,6 +271,16 @@ export class HubDatabase {
   }
 
   private initSchema(): void {
+    if (this.dbPath !== ':memory:') {
+      const hasNodesTable = Boolean(
+        this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'nodes'").get()
+      );
+      const currentUserVersion = this.getSchemaVersion();
+      if (hasNodesTable && currentUserVersion < HUB_SCHEMA_VERSION) {
+        this.backupDatabase(`${path.resolve(this.dbPath)}.bak-v${currentUserVersion}`);
+      }
+    }
+
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
@@ -261,7 +301,8 @@ export class HubDatabase {
         last_seen_at TEXT NOT NULL,
         created_at TEXT NOT NULL,
         pid INTEGER,
-        started_at TEXT
+        started_at TEXT,
+        version TEXT
       );
 
       CREATE TABLE IF NOT EXISTS bots (
@@ -356,6 +397,7 @@ export class HubDatabase {
       `ALTER TABLE bots ADD COLUMN enabled_extensions_json TEXT NOT NULL DEFAULT '[]'`,
       `ALTER TABLE nodes ADD COLUMN pid INTEGER`,
       `ALTER TABLE nodes ADD COLUMN started_at TEXT`,
+      `ALTER TABLE nodes ADD COLUMN version TEXT`,
       `ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE nodes ADD COLUMN owner_id TEXT`,
       `ALTER TABLE sessions ADD COLUMN owner_id TEXT`,
@@ -378,6 +420,8 @@ export class HubDatabase {
     // 自举管理员固定 id 为 user_admin：存量 nodes/sessions 归属回填
     this.db.exec(`UPDATE nodes SET owner_id = 'user_admin' WHERE owner_id IS NULL`);
     this.db.exec(`UPDATE sessions SET owner_id = 'user_admin' WHERE owner_id IS NULL`);
+
+    this.db.exec(`PRAGMA user_version = ${HUB_SCHEMA_VERSION}`);
   }
 
   // --- Session Resets Pending ---
@@ -550,14 +594,14 @@ export class HubDatabase {
   }
 
   getNode(id: string): NodeRecord | undefined {
-    const stmt = this.db.prepare('SELECT id, name, platform, skills_json, extensions_json, status, last_seen_at, created_at, pid, started_at FROM nodes WHERE id = ?');
+    const stmt = this.db.prepare('SELECT id, name, platform, skills_json, extensions_json, status, last_seen_at, created_at, pid, started_at, version FROM nodes WHERE id = ?');
     const row = stmt.get(id) as NodeRow | undefined;
     if (!row) return undefined;
     return mapNodeRow(row);
   }
 
   getNodeWithSecret(id: string): (NodeRecord & { tokenHash: string }) | undefined {
-    const stmt = this.db.prepare('SELECT id, name, platform, token_hash, skills_json, extensions_json, status, last_seen_at, created_at, pid, started_at FROM nodes WHERE id = ?');
+    const stmt = this.db.prepare('SELECT id, name, platform, token_hash, skills_json, extensions_json, status, last_seen_at, created_at, pid, started_at, version FROM nodes WHERE id = ?');
     const row = stmt.get(id) as (NodeRow & { token_hash: string }) | undefined;
     if (!row) return undefined;
     return {
@@ -567,7 +611,7 @@ export class HubDatabase {
   }
 
   getAllNodesWithBots(ownerId: string): NodeWithBots[] {
-    const stmt = this.db.prepare('SELECT id, name, platform, skills_json, extensions_json, status, last_seen_at, created_at, pid, started_at FROM nodes WHERE owner_id = ? ORDER BY created_at ASC');
+    const stmt = this.db.prepare('SELECT id, name, platform, skills_json, extensions_json, status, last_seen_at, created_at, pid, started_at, version FROM nodes WHERE owner_id = ? ORDER BY created_at ASC');
     const rows = stmt.all(ownerId) as NodeRow[];
     return rows.map((row) => ({
       ...mapNodeRow(row),
@@ -588,15 +632,16 @@ export class HubDatabase {
     skills: string[],
     extensions: string[] = [],
     pid?: number,
-    startedAt?: string
+    startedAt?: string,
+    version?: string
   ): void {
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
       UPDATE nodes
-      SET name = ?, platform = ?, skills_json = ?, extensions_json = ?, pid = ?, started_at = ?, status = 'online', last_seen_at = ?
+      SET name = ?, platform = ?, skills_json = ?, extensions_json = ?, pid = ?, started_at = ?, version = ?, status = 'online', last_seen_at = ?
       WHERE id = ?
     `);
-    stmt.run(name, platform, JSON.stringify(skills), JSON.stringify(extensions), pid ?? null, startedAt ?? null, now, id);
+    stmt.run(name, platform, JSON.stringify(skills), JSON.stringify(extensions), pid ?? null, startedAt ?? null, version ?? null, now, id);
   }
 
   deleteNode(id: string): void {

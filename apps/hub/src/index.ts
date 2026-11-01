@@ -58,6 +58,7 @@ export interface HubInstance {
   db: HubDatabase;
   connections: NodeConnectionManager;
   router: GroupRouter;
+  drain: (timeoutMs?: number) => Promise<{ drained: boolean; remaining: number }>;
   close: () => Promise<void>;
 }
 
@@ -146,7 +147,13 @@ export function createHub(options?: HubOptions): HubInstance {
   app.notFound(c => c.json({ error: 'Not found' }, 404));
 
   // 1. Health check (public)
-  app.get('/api/health', (c) => c.json({ ok: true }));
+  app.get('/api/health', (c) =>
+    c.json({
+      ok: true,
+      draining: router.isDraining(),
+      activeTurns: router.getActiveTurnCount(),
+    })
+  );
 
   // 2. Cookie authentication middleware for /api/*
   app.use('/api/*', async (c, next) => {
@@ -457,6 +464,58 @@ export function createHub(options?: HubOptions): HubInstance {
       const message = err && typeof err === 'object' && 'message' in err && err.message
         ? String(err.message)
         : 'Failed to restart daemon';
+      return c.json({ error: message }, 502);
+    }
+  });
+
+  app.get('/api/nodes/:nodeId/upgrade/check', async (c) => {
+    const { nodeId } = c.req.param();
+    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+    if (!nodeRpc.ok) return nodeRpc.response;
+
+    if (typeof nodeRpc.rpc.checkUpgrade !== 'function') {
+      return c.json({ error: 'Node does not support upgrade checks' }, 501);
+    }
+
+    try {
+      const registryUrl = c.req.query('registryUrl') || undefined;
+      const result = await nodeRpc.rpc.checkUpgrade({ registryUrl });
+      return c.json(result);
+    } catch (err: any) {
+      const message = err && typeof err === 'object' && 'message' in err && err.message
+        ? String(err.message)
+        : 'Failed to check upgrade';
+      if (message.includes('not found')) {
+        return c.json({ error: 'Node does not support upgrade checks' }, 501);
+      }
+      return c.json({ error: message }, 502);
+    }
+  });
+
+  app.post('/api/nodes/:nodeId/upgrade', async (c) => {
+    const { nodeId } = c.req.param();
+    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+    if (!nodeRpc.ok) return nodeRpc.response;
+
+    if (typeof nodeRpc.rpc.upgradeDaemon !== 'function') {
+      return c.json({ error: 'Node does not support upgrades' }, 501);
+    }
+
+    const body = await c.req.json<{ targetVersion?: string; registryUrl?: string }>().catch(() => null);
+
+    try {
+      const result = await nodeRpc.rpc.upgradeDaemon({
+        targetVersion: body?.targetVersion,
+        registryUrl: body?.registryUrl,
+      });
+      return c.json(result);
+    } catch (err: any) {
+      const message = err && typeof err === 'object' && 'message' in err && err.message
+        ? String(err.message)
+        : 'Failed to upgrade daemon';
+      if (message.includes('not found')) {
+        return c.json({ error: 'Node does not support upgrades' }, 501);
+      }
       return c.json({ error: message }, 502);
     }
   });
@@ -861,6 +920,10 @@ export function createHub(options?: HubOptions): HubInstance {
     if (!sRes.ok) return sRes.response;
     const session = sRes.session;
 
+    if (router.isDraining()) {
+      return c.json({ error: 'Hub is draining for upgrade, please retry shortly' }, 503);
+    }
+
     const body = (await c.req.json<{ content?: string; attachments?: MessageAttachment[] }>().catch(() => ({ content: '' }))) as {
       content?: string;
       attachments?: MessageAttachment[];
@@ -1135,6 +1198,9 @@ export function createHub(options?: HubOptions): HubInstance {
   app.use('*', createStaticMiddleware(options?.webDir));
 
   let isClosed = false;
+  const drain = async (timeoutMs?: number): Promise<{ drained: boolean; remaining: number }> => {
+    return router.drain(timeoutMs);
+  };
   const close = async (): Promise<void> => {
     if (isClosed) return;
     isClosed = true;
@@ -1150,6 +1216,7 @@ export function createHub(options?: HubOptions): HubInstance {
     db,
     connections,
     router,
+    drain,
     close,
   };
 }
@@ -1223,13 +1290,14 @@ export async function startHub(options?: StartHubOptions): Promise<StartHubResul
 // Direct execution entry
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   startHub()
-    .then(({ port, close }) => {
-      console.log(`Cloud Hub listening on http://127.0.0.1:${port}`);
+    .then((hub) => {
+      console.log(`Cloud Hub listening on http://127.0.0.1:${hub.port}`);
       let stopping = false;
       const shutdown = async () => {
         if (stopping) return;
         stopping = true;
-        await close();
+        await hub.drain(25_000);
+        await hub.close();
         process.exit(0);
       };
       process.once('SIGTERM', () => { void shutdown(); });

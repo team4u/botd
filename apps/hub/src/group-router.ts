@@ -170,11 +170,56 @@ export class GroupRouter {
     }
   >();
   private closed = false;
+  private draining = false;
 
   constructor(db: HubDatabase, connections: NodeConnectionManager, sseHub: SseHub) {
     this.db = db;
     this.connections = connections;
     this.sseHub = sseHub;
+  }
+
+  isDraining(): boolean {
+    return this.draining;
+  }
+
+  getActiveTurnCount(): number {
+    let count = 0;
+    for (const state of this.states.values()) {
+      if (state.isRunning) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  async drain(timeoutMs = 30_000): Promise<{ drained: boolean; remaining: number }> {
+    this.draining = true;
+    for (const [sessionId, state] of this.states.entries()) {
+      state.queue = [];
+      if (!state.isRunning) {
+        const cur = this.db.getSession(sessionId);
+        if (cur && cur.status === 'queued') {
+          this.db.updateSessionStatus(sessionId, 'idle', undefined);
+          this.sseHub.broadcast(sessionId, {
+            type: 'session_status',
+            sessionId,
+            status: 'idle',
+            activeBotId: undefined,
+          });
+        }
+      }
+    }
+
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const remaining = this.getActiveTurnCount();
+      if (remaining === 0) {
+        return { drained: true, remaining: 0 };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const remaining = this.getActiveTurnCount();
+    return { drained: remaining === 0, remaining };
   }
 
   private getSessionOwner(sessionId: string, _session?: SessionRecord): string | undefined {
@@ -218,7 +263,7 @@ export class GroupRouter {
   }
 
   onNodeOnline(nodeId: string): void {
-    if (this.closed) return;
+    if (this.closed || this.draining) return;
     for (const [sessionId, state] of this.states.entries()) {
       if (state.queue.length > 0 && !state.isRunning) {
         const frontItem = state.queue[0];
@@ -326,7 +371,7 @@ export class GroupRouter {
     content: string,
     commandInfo?: { commandText: string; targetBotId?: string }
   ): void {
-    if (this.closed) return;
+    if (this.closed || this.draining) return;
     const session = this.db.getSession(sessionId);
     if (!session) return;
 
@@ -404,7 +449,7 @@ export class GroupRouter {
     replyToBotId?: string,
     options?: { noTurn?: boolean }
   ): Promise<void> {
-    if (this.closed) throw new Error('Hub is shutting down');
+    if (this.closed || this.draining) throw new Error('Hub is shutting down');
     const session = this.db.getSession(sessionId);
     if (!session) return;
 
@@ -691,7 +736,7 @@ export class GroupRouter {
     state.isRunning = true;
 
     try {
-      while (!this.closed && state.queue.length > 0) {
+      while (!this.closed && !this.draining && state.queue.length > 0) {
         const frontItem = state.queue[0];
         const isParallel = Boolean(frontItem.parallelGroupId);
         const rawBatch: QueueItem[] = [];
@@ -832,9 +877,10 @@ export class GroupRouter {
       state.activeBotIds.clear();
 
       // If new items were queued during finalization, resume processing
-      if (this.closed) {
+      if (this.closed || this.draining) {
         state.queue = [];
-      } else if (state.queue.length > 0) {
+      }
+      if (!this.closed && !this.draining && state.queue.length > 0) {
         const cur = this.db.getSession(sessionId);
         if (cur && cur.status !== 'queued') {
           this.processQueue(sessionId).catch(() => {});
@@ -856,6 +902,7 @@ export class GroupRouter {
 
   close(): void {
     this.closed = true;
+    this.draining = true;
     for (const entry of this.pendingAsks.values()) {
       clearTimeout(entry.timer);
       entry.reject(new Error('Hub closed'));
