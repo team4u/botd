@@ -34,8 +34,6 @@ export interface IncrementalMessageResult {
   rowid: number;
 }
 
-export { isValidCommandName } from '@botd/protocol';
-
 const PREVIEW_MAX_LENGTH = 60;
 
 const buildPreview = (content: string): string | undefined => {
@@ -161,7 +159,6 @@ type BotRow = {
   thinking_level: string | null;
   enabled_skills_json: string;
   enabled_extensions_json: string;
-  web_command_names_json: string | null;
   updated_at: string;
 };
 
@@ -175,7 +172,6 @@ const mapBotRow = (row: BotRow): BotConfig => ({
   thinkingLevel: (row.thinking_level as ThinkingLevel) ?? 'medium',
   enabledSkills: parseOptionalJson<string[]>(row.enabled_skills_json) ?? [],
   enabledExtensions: parseOptionalJson<string[]>(row.enabled_extensions_json) ?? [],
-  webCommandNames: parseOptionalJson<string[]>(row.web_command_names_json) ?? [],
   updatedAt: row.updated_at,
 });
 
@@ -278,7 +274,6 @@ export class HubDatabase {
         thinking_level TEXT DEFAULT 'medium',
         enabled_skills_json TEXT NOT NULL DEFAULT '[]',
         enabled_extensions_json TEXT NOT NULL DEFAULT '[]',
-        web_command_names_json TEXT NOT NULL DEFAULT '[]',
         updated_at TEXT NOT NULL
       );
 
@@ -359,7 +354,6 @@ export class HubDatabase {
     const migrations = [
       `ALTER TABLE nodes ADD COLUMN extensions_json TEXT NOT NULL DEFAULT '[]'`,
       `ALTER TABLE bots ADD COLUMN enabled_extensions_json TEXT NOT NULL DEFAULT '[]'`,
-      `ALTER TABLE bots ADD COLUMN web_command_names_json TEXT NOT NULL DEFAULT '[]'`,
       `ALTER TABLE nodes ADD COLUMN pid INTEGER`,
       `ALTER TABLE nodes ADD COLUMN started_at TEXT`,
       `ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`,
@@ -659,21 +653,21 @@ export class HubDatabase {
 
   // --- Bots ---
   getBot(id: string): BotConfig | undefined {
-    const stmt = this.db.prepare('SELECT id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, web_command_names_json, updated_at FROM bots WHERE id = ?');
+    const stmt = this.db.prepare('SELECT id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, updated_at FROM bots WHERE id = ?');
     const row = stmt.get(id) as BotRow | undefined;
     return row ? mapBotRow(row) : undefined;
   }
 
   getBotsForNode(nodeId: string): BotConfig[] {
-    const stmt = this.db.prepare('SELECT id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, web_command_names_json, updated_at FROM bots WHERE node_id = ? ORDER BY id ASC');
+    const stmt = this.db.prepare('SELECT id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, updated_at FROM bots WHERE node_id = ? ORDER BY id ASC');
     const rows = stmt.all(nodeId) as BotRow[];
     return rows.map(mapBotRow);
   }
 
   saveBot(bot: BotConfig): void {
     const stmt = this.db.prepare(`
-      INSERT INTO bots (id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, web_command_names_json, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO bots (id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         node_id = excluded.node_id,
         name = excluded.name,
@@ -683,7 +677,6 @@ export class HubDatabase {
         thinking_level = excluded.thinking_level,
         enabled_skills_json = excluded.enabled_skills_json,
         enabled_extensions_json = excluded.enabled_extensions_json,
-        web_command_names_json = excluded.web_command_names_json,
         updated_at = excluded.updated_at
     `);
     stmt.run(
@@ -696,7 +689,6 @@ export class HubDatabase {
       bot.thinkingLevel ?? 'medium',
       JSON.stringify(bot.enabledSkills || []),
       JSON.stringify(bot.enabledExtensions || []),
-      JSON.stringify(bot.webCommandNames ? Array.from(new Set(bot.webCommandNames)) : []),
       bot.updatedAt || new Date().toISOString()
     );
   }

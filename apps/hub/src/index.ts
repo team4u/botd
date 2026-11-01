@@ -340,103 +340,76 @@ export function createHub(options?: HubOptions): HubInstance {
     return c.json({ ok: true });
   });
 
-  app.get('/api/nodes/:nodeId/skills/:skillId', async (c) => {
-    const { nodeId, skillId } = c.req.param();
-    if (!isSafeId(skillId)) {
-      return c.json({ error: 'Invalid skill id format' }, 400);
-    }
-    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
-    if (!nodeRpc.ok) return nodeRpc.response;
-    try {
-      const content = await nodeRpc.rpc.readFile({ kind: 'skill', id: skillId });
-      return c.json({ content });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to read skill' }, 500);
-    }
-  });
+  const nodeResourceConfigs = [
+    {
+      kind: 'skill' as const,
+      subpath: 'skills',
+      paramName: 'skillId',
+      onAdd: (nodeId: string, id: string) => db.addNodeSkill(nodeId, id),
+      onRemove: (nodeId: string, id: string) => db.removeNodeSkill(nodeId, id),
+    },
+    {
+      kind: 'extension' as const,
+      subpath: 'extensions',
+      paramName: 'extId',
+      onAdd: (nodeId: string, id: string) => db.addNodeExtension(nodeId, id),
+      onRemove: (nodeId: string, id: string) => db.removeNodeExtension(nodeId, id),
+    },
+  ];
 
-  app.put('/api/nodes/:nodeId/skills/:skillId', async (c) => {
-    const { nodeId, skillId } = c.req.param();
-    if (!isSafeId(skillId)) {
-      return c.json({ error: 'Invalid skill id format' }, 400);
-    }
-    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
-    if (!nodeRpc.ok) return nodeRpc.response;
-    const body = await c.req.json<{ content?: string }>().catch(() => null);
-    if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
-    try {
-      await nodeRpc.rpc.writeFile({ kind: 'skill', id: skillId }, body.content);
-      db.addNodeSkill(nodeId, skillId);
-      return c.json({ ok: true });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to write skill' }, 500);
-    }
-  });
+  for (const { kind, subpath, paramName, onAdd, onRemove } of nodeResourceConfigs) {
+    app.get(`/api/nodes/:nodeId/${subpath}/:${paramName}`, async (c) => {
+      const nodeId = c.req.param('nodeId');
+      const id = c.req.param(paramName);
+      if (!isSafeId(id)) {
+        return c.json({ error: `Invalid ${kind} id format` }, 400);
+      }
+      const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+      if (!nodeRpc.ok) return nodeRpc.response;
+      try {
+        const content = await nodeRpc.rpc.readFile({ kind, id });
+        return c.json({ content });
+      } catch (err: any) {
+        return c.json({ error: err?.message || `Failed to read ${kind}` }, 500);
+      }
+    });
 
-  app.delete('/api/nodes/:nodeId/skills/:skillId', async (c) => {
-    const { nodeId, skillId } = c.req.param();
-    if (!isSafeId(skillId)) {
-      return c.json({ error: 'Invalid skill id format' }, 400);
-    }
-    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
-    if (!nodeRpc.ok) return nodeRpc.response;
-    try {
-      await nodeRpc.rpc.deleteResource({ kind: 'skill', id: skillId });
-      db.removeNodeSkill(nodeId, skillId);
-      return c.json({ ok: true });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to delete skill' }, 500);
-    }
-  });
+    app.put(`/api/nodes/:nodeId/${subpath}/:${paramName}`, async (c) => {
+      const nodeId = c.req.param('nodeId');
+      const id = c.req.param(paramName);
+      if (!isSafeId(id)) {
+        return c.json({ error: `Invalid ${kind} id format` }, 400);
+      }
+      const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+      if (!nodeRpc.ok) return nodeRpc.response;
+      const body = await c.req.json<{ content?: string }>().catch(() => null);
+      if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
+      try {
+        await nodeRpc.rpc.writeFile({ kind, id }, body.content);
+        onAdd(nodeId, id);
+        return c.json({ ok: true });
+      } catch (err: any) {
+        return c.json({ error: err?.message || `Failed to write ${kind}` }, 500);
+      }
+    });
 
-  app.get('/api/nodes/:nodeId/extensions/:extId', async (c) => {
-    const { nodeId, extId } = c.req.param();
-    if (!isSafeId(extId)) {
-      return c.json({ error: 'Invalid extension id format' }, 400);
-    }
-    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
-    if (!nodeRpc.ok) return nodeRpc.response;
-    try {
-      const content = await nodeRpc.rpc.readFile({ kind: 'extension', id: extId });
-      return c.json({ content });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to read extension' }, 500);
-    }
-  });
-
-  app.put('/api/nodes/:nodeId/extensions/:extId', async (c) => {
-    const { nodeId, extId } = c.req.param();
-    if (!isSafeId(extId)) {
-      return c.json({ error: 'Invalid extension id format' }, 400);
-    }
-    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
-    if (!nodeRpc.ok) return nodeRpc.response;
-    const body = await c.req.json<{ content?: string }>().catch(() => null);
-    if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
-    try {
-      await nodeRpc.rpc.writeFile({ kind: 'extension', id: extId }, body.content);
-      db.addNodeExtension(nodeId, extId);
-      return c.json({ ok: true });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to write extension' }, 500);
-    }
-  });
-
-  app.delete('/api/nodes/:nodeId/extensions/:extId', async (c) => {
-    const { nodeId, extId } = c.req.param();
-    if (!isSafeId(extId)) {
-      return c.json({ error: 'Invalid extension id format' }, 400);
-    }
-    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
-    if (!nodeRpc.ok) return nodeRpc.response;
-    try {
-      await nodeRpc.rpc.deleteResource({ kind: 'extension', id: extId });
-      db.removeNodeExtension(nodeId, extId);
-      return c.json({ ok: true });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to delete extension' }, 500);
-    }
-  });
+    app.delete(`/api/nodes/:nodeId/${subpath}/:${paramName}`, async (c) => {
+      const nodeId = c.req.param('nodeId');
+      const id = c.req.param(paramName);
+      if (!isSafeId(id)) {
+        return c.json({ error: `Invalid ${kind} id format` }, 400);
+      }
+      const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+      if (!nodeRpc.ok) return nodeRpc.response;
+      try {
+        await nodeRpc.rpc.deleteResource({ kind, id });
+        onRemove(nodeId, id);
+        return c.json({ ok: true });
+      } catch (err: any) {
+        return c.json({ error: err?.message || `Failed to delete ${kind}` }, 500);
+      }
+    });
+  }
 
   app.post('/api/nodes/:nodeId/install', async (c) => {
     const { nodeId } = c.req.param();
@@ -513,7 +486,6 @@ export function createHub(options?: HubOptions): HubInstance {
       thinkingLevel: body.thinkingLevel ?? 'medium',
       enabledSkills: Array.isArray(body.enabledSkills) ? body.enabledSkills : [],
       enabledExtensions: Array.isArray(body.enabledExtensions) ? body.enabledExtensions : [],
-      webCommandNames: Array.isArray(body.webCommandNames) ? Array.from(new Set(body.webCommandNames)) : [],
       updatedAt: new Date().toISOString(),
     };
 
@@ -548,9 +520,6 @@ export function createHub(options?: HubOptions): HubInstance {
       ...existing,
       ...botPatch,
       enabledExtensions: Array.isArray(body.enabledExtensions) ? body.enabledExtensions : (existing.enabledExtensions ?? []),
-      webCommandNames: Array.isArray(body.webCommandNames)
-        ? Array.from(new Set(body.webCommandNames))
-        : (existing.webCommandNames ?? []),
       id: botId,
       nodeId: existing.nodeId,
       updatedAt: new Date().toISOString(),
@@ -595,61 +564,45 @@ export function createHub(options?: HubOptions): HubInstance {
     }
   });
 
-  app.get('/api/bots/:botId/system', async (c) => {
-    const botId = c.req.param('botId');
-    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
-    if (!botRpc.ok) return botRpc.response;
+  const botMarkdownRoutes: Array<{
+    subpath: 'system' | 'memory';
+    kind: 'system' | 'memory';
+    filename: 'SYSTEM.md' | 'MEMORY.md';
+    label: string;
+  }> = [
+    { subpath: 'system', kind: 'system', filename: 'SYSTEM.md', label: 'system prompt' },
+    { subpath: 'memory', kind: 'memory', filename: 'MEMORY.md', label: 'memory' },
+  ];
 
-    try {
-      const content = await botRpc.rpc.readFile({ kind: 'system', botId, id: 'SYSTEM.md' });
-      return c.json({ content });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to read system prompt' }, 500);
-    }
-  });
+  for (const { subpath, kind, filename, label } of botMarkdownRoutes) {
+    app.get(`/api/bots/:botId/${subpath}`, async (c) => {
+      const botId = c.req.param('botId');
+      const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
+      if (!botRpc.ok) return botRpc.response;
 
-  app.put('/api/bots/:botId/system', async (c) => {
-    const botId = c.req.param('botId');
-    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
-    if (!botRpc.ok) return botRpc.response;
+      try {
+        const content = await botRpc.rpc.readFile({ kind, botId, id: filename });
+        return c.json({ content });
+      } catch (err: any) {
+        return c.json({ error: err?.message || `Failed to read ${label}` }, 500);
+      }
+    });
 
-    const body = await c.req.json<{ content?: string }>().catch(() => null);
-    if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
-    try {
-      await botRpc.rpc.writeFile({ kind: 'system', botId, id: 'SYSTEM.md' }, body.content);
-      return c.json({ ok: true });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to write system prompt' }, 500);
-    }
-  });
+    app.put(`/api/bots/:botId/${subpath}`, async (c) => {
+      const botId = c.req.param('botId');
+      const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
+      if (!botRpc.ok) return botRpc.response;
 
-  app.get('/api/bots/:botId/memory', async (c) => {
-    const botId = c.req.param('botId');
-    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
-    if (!botRpc.ok) return botRpc.response;
-
-    try {
-      const content = await botRpc.rpc.readFile({ kind: 'memory', botId, id: 'MEMORY.md' });
-      return c.json({ content });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to read memory' }, 500);
-    }
-  });
-
-  app.put('/api/bots/:botId/memory', async (c) => {
-    const botId = c.req.param('botId');
-    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
-    if (!botRpc.ok) return botRpc.response;
-
-    const body = await c.req.json<{ content?: string }>().catch(() => null);
-    if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
-    try {
-      await botRpc.rpc.writeFile({ kind: 'memory', botId, id: 'MEMORY.md' }, body.content);
-      return c.json({ ok: true });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to write memory' }, 500);
-    }
-  });
+      const body = await c.req.json<{ content?: string }>().catch(() => null);
+      if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
+      try {
+        await botRpc.rpc.writeFile({ kind, botId, id: filename }, body.content);
+        return c.json({ ok: true });
+      } catch (err: any) {
+        return c.json({ error: err?.message || `Failed to write ${label}` }, 500);
+      }
+    });
+  }
 
   const readNodeBotEnv = async (
     rpc: NodeRpc,

@@ -155,8 +155,7 @@ export class NodeConnectionManager {
         }
 
         // Reconcile the cache with the node's authoritative local inventory.
-        this.db.db.exec('BEGIN');
-        try {
+        this.db.inTransaction(() => {
           this.db.updateNodeMetadata(nodeId, info.name, info.platform, info.skills, extensions, pid, startedAt);
           for (const cached of this.db.getBotsForNode(nodeId)) {
             if (!botIds.has(cached.id)) this.db.deleteBot(cached.id);
@@ -164,13 +163,8 @@ export class NodeConnectionManager {
           for (const bot of info.bots) this.db.saveBot({
             ...bot,
             enabledExtensions: bot.enabledExtensions ?? [],
-            webCommandNames: Array.from(new Set(bot.webCommandNames ?? [])),
           });
-          this.db.db.exec('COMMIT');
-        } catch (error) {
-          this.db.db.exec('ROLLBACK');
-          throw error;
-        }
+        });
 
         this.router?.onNodeOnline?.(nodeId);
 
@@ -239,28 +233,12 @@ export class NodeConnectionManager {
       },
 
       requestWakeupTurn: async (input) => {
-        const bot = this.db.getBot(input.botId);
-        if (!bot || bot.nodeId !== nodeId) {
-          throw new Error(`Forbidden: bot ${input.botId} does not belong to node ${nodeId}`);
-        }
-
-        const session = this.db.getSession(input.sessionId);
-        if (!session) {
-          throw new Error(`Session ${input.sessionId} not found`);
-        }
-
-        const isMember = session.memberBotIds.includes(input.botId) || session.leadBotId === input.botId;
-        if (!isMember) {
-          throw new Error(`Forbidden: bot ${input.botId} is not a member of session ${input.sessionId}`);
-        }
+        this.assertNodeBotInSession(nodeId, input.botId, input.sessionId);
 
         if (this.router) {
           // 延时唤醒：在 Hub 上创建 once 触发器，到点再触发推理回合
           if (typeof input.delaySeconds === 'number' && Number.isFinite(input.delaySeconds) && input.delaySeconds > 0) {
-            const ownerRow = this.db.db.prepare('SELECT owner_id FROM sessions WHERE id = ?').get(input.sessionId) as
-              | { owner_id: string | null }
-              | undefined;
-            const ownerId = ownerRow?.owner_id ?? 'user_admin';
+            const ownerId = this.db.getSessionOwner(input.sessionId) ?? 'user_admin';
             const runAt = new Date(Date.now() + Math.floor(input.delaySeconds) * 1000).toISOString();
             const prompt =
               input.replyToBotId && !input.wakeupMessage.includes(`@${input.replyToBotId}`)
@@ -287,20 +265,7 @@ export class NodeConnectionManager {
       },
 
       requestHumanInput: async (input) => {
-        const bot = this.db.getBot(input.botId);
-        if (!bot || bot.nodeId !== nodeId) {
-          throw new Error(`Forbidden: bot ${input.botId} does not belong to node ${nodeId}`);
-        }
-
-        const session = this.db.getSession(input.sessionId);
-        if (!session) {
-          throw new Error(`Session ${input.sessionId} not found`);
-        }
-
-        const isMember = session.memberBotIds.includes(input.botId) || session.leadBotId === input.botId;
-        if (!isMember) {
-          throw new Error(`Forbidden: bot ${input.botId} is not a member of session ${input.sessionId}`);
-        }
+        this.assertNodeBotInSession(nodeId, input.botId, input.sessionId);
 
         if (!this.router?.requestHumanInput) {
           throw new Error('Interactive human input is not supported by router');
@@ -359,6 +324,23 @@ export class NodeConnectionManager {
 
     ws.on('close', cleanup);
     ws.on('error', cleanup);
+  }
+
+  private assertNodeBotInSession(nodeId: string, botId: string, sessionId: string): void {
+    const bot = this.db.getBot(botId);
+    if (!bot || bot.nodeId !== nodeId) {
+      throw new Error(`Forbidden: bot ${botId} does not belong to node ${nodeId}`);
+    }
+
+    const session = this.db.getSession(sessionId);
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+
+    const isMember = session.memberBotIds.includes(botId) || session.leadBotId === botId;
+    if (!isMember) {
+      throw new Error(`Forbidden: bot ${botId} is not a member of session ${sessionId}`);
+    }
   }
 
   getNodeRpc(nodeId: string): BirpcReturn<NodeRpcFunctions, HubRpcFunctions> | undefined {

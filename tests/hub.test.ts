@@ -661,56 +661,6 @@ test('GET /api/bots/:botId/commands auth, offline, not-found and success', async
   assert.deepEqual(await offline.json(), { error: 'Node is offline' });
 });
 
-test('legacy webCommandNames metadata remains compatible with persistence and schema migration', async t => {
-  const f = await fixture(t);
-  const node = await f.addNode(['bot-config']);
-
-  // Valid creation with webCommandNames, colon allowed, deduplication applied
-  const createRes = await f.json('/api/bots', 'POST', {
-    id: 'bot-new',
-    nodeId: node.identity.nodeId,
-    name: 'New Bot',
-    description: 'desc',
-    modelProvider: 'openai',
-    modelId: 'test-model',
-    thinkingLevel: 'medium',
-    enabledSkills: [],
-    enabledExtensions: [],
-    webCommandNames: ['skill:calc', 'review', 'skill:calc', 'ext:custom_action'],
-    systemMd: 'System prompt',
-  });
-  assert.deepEqual(createRes.webCommandNames, ['skill:calc', 'review', 'ext:custom_action']);
-
-  // Verify DB read
-  const fetched = await f.json('/api/bots/bot-new', 'GET').catch(() => null);
-  // GET /api/bots/:id doesn't exist directly, check via nodes or DB:
-  const nodes = await f.json<any[]>('/api/nodes');
-  const thisBot = nodes.flatMap(n => n.bots).find(b => b.id === 'bot-new');
-  assert.deepEqual(thisBot.webCommandNames, ['skill:calc', 'review', 'ext:custom_action']);
-
-  // Update webCommandNames
-  const updated = await f.json('/api/bots/bot-new', 'PUT', {
-    webCommandNames: ['review', 'new:cmd'],
-  });
-  assert.deepEqual(updated.webCommandNames, ['review', 'new:cmd']);
-
-  // Invalid: leading slash forbidden
-  const badSlash = await f.request('/api/bots/bot-new', 'PUT', { webCommandNames: ['/review'] });
-  assert.equal(badSlash.status, 400);
-
-  // Invalid: slash inside forbidden
-  const badPath = await f.request('/api/bots/bot-new', 'PUT', { webCommandNames: ['path/cmd'] });
-  assert.equal(badPath.status, 400);
-
-  // Invalid: whitespace forbidden
-  const badSpace = await f.request('/api/bots/bot-new', 'PUT', { webCommandNames: ['cmd with space'] });
-  assert.equal(badSpace.status, 400);
-
-  // Invalid: empty string forbidden
-  const badEmpty = await f.request('/api/bots/bot-new', 'PUT', { webCommandNames: [''] });
-  assert.equal(badEmpty.status, 400);
-});
-
 test('command routing, execution and path compatibility', async t => {
   const f = await fixture(t);
   const calls: Parameters<NodeRpcFunctions['runTurn']>[0][] = [];

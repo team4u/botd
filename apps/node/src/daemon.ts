@@ -23,11 +23,9 @@ import {
   listSkills,
   readFileTarget,
   readBot,
-  readBotEnv,
   readNodeIdentity,
   saveBot,
   seedStorageIfEmpty,
-  writeBotEnv,
   writeFileTarget,
 } from './storage.js';
 import {
@@ -264,8 +262,6 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       deleteBot: async (botId) => {
         await deleteBot(dataDir, botId);
       },
-      getBotEnv: (botId) => readBotEnv(dataDir, botId),
-      setBotEnv: (botId, env) => writeBotEnv(dataDir, botId, env),
       readFile: async (target) => {
         return await readFileTarget(dataDir, target as Parameters<typeof readFileTarget>[1]);
       },

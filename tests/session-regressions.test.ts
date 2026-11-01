@@ -92,7 +92,6 @@ async function createTestContext(t: TestContext): Promise<TestEnv> {
         thinkingLevel: 'medium',
         enabledSkills: [],
         enabledExtensions: [],
-        webCommandNames: [],
         updatedAt: new Date().toISOString(),
       });
     }

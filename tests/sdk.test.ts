@@ -308,7 +308,6 @@ test('getBotCommands automatically lists isolated enabled resources without mode
     modelId: 'unconfigured-model',
     enabledSkills: ['test-skill'],
     enabledExtensions: ['allowed-ext', 'forbidden-ext'],
-    webCommandNames: ['allowed_cmd'],
     updatedAt: new Date().toISOString(),
   };
   await saveBot(dataDir, bot, 'Command bot system');
@@ -338,10 +337,6 @@ test('getBotCommands automatically lists isolated enabled resources without mode
   assert.equal(commands.find(c => c.name === 'shadowed')?.source, 'extension', 'Extension must take precedence over the same-named prompt');
   assert(!commands.some(c => c.name === 'hotkeys' || c.name === 'settings'), 'Builtin TUI commands are not part of the SDK command directory');
 
-  const withoutLegacyMetadata = { ...bot };
-  delete withoutLegacyMetadata.webCommandNames;
-  assert.deepEqual(await getBotCommands(dataDir, withoutLegacyMetadata), commands);
-  assert.deepEqual(await getBotCommands(dataDir, { ...bot, webCommandNames: [] }), commands);
   const disabledExtensionCommands = await getBotCommands(dataDir, { ...bot, enabledExtensions: ['allowed-ext'] });
   assert(!disabledExtensionCommands.some(c => c.name === 'forbidden_cmd'), 'BOT extension enablement still controls availability');
   assert.equal(disabledExtensionCommands.find(c => c.name === 'shadowed')?.source, 'prompt');
@@ -550,7 +545,6 @@ test('executeBotTurn automatically executes enabled extension commands without m
     modelId: 'local',
     enabledSkills: [],
     enabledExtensions: ['cmd-ext'],
-    webCommandNames: [],
     updatedAt: new Date().toISOString(),
   };
   await saveBot(dataDir, bot, 'Command test bot');

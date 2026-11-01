@@ -154,8 +154,6 @@ export interface BotConfig {
   thinkingLevel?: ThinkingLevel;
   enabledSkills: string[];
   enabledExtensions?: string[];
-  /** @deprecated Legacy metadata, ignored by command discovery and execution. */
-  webCommandNames?: string[];
   updatedAt: string;
 }
 
@@ -363,8 +361,6 @@ export interface NodeRpcFunctions {
   deleteBot(botId: string): Promise<void>;
   readFile(target: { kind: 'system' | 'memory' | 'env' | 'skill' | 'extension'; botId?: string; id: string }): Promise<string>;
   writeFile(target: { kind: 'system' | 'memory' | 'env' | 'skill' | 'extension'; botId?: string; id: string }, content: string): Promise<void>;
-  getBotEnv?(botId: string): Promise<Record<string, string>>;
-  setBotEnv?(botId: string, env: Record<string, string>): Promise<Record<string, string>>;
   installResource(input: {
     source: string;
     kind?: 'auto' | 'skill' | 'extension';
@@ -448,9 +444,6 @@ export const SAFE_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
 export const isSafeId = (value: unknown): value is string =>
   typeof value === 'string' && SAFE_ID_REGEX.test(value);
 
-export const isValidCommandName = (name: unknown): name is string =>
-  typeof name === 'string' && name.length > 0 && !name.includes('/') && !/\s/.test(name);
-
 export const BOT_ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export const RESERVED_BOT_ENV_KEYS = new Set(['PATH', 'PWD', 'HOME', 'USER', 'SHELL']);
 export const isValidBotEnvKey = (key: unknown): key is string =>
@@ -467,12 +460,14 @@ export const isBotConfig = (value: unknown): value is BotConfig => {
     isSafeId(v.nodeId) &&
     typeof v.name === 'string' && v.name.trim().length > 0 &&
     typeof v.description === 'string' &&
-    typeof v.modelProvider === 'string' && v.modelProvider.trim().length > 0 &&
-    typeof v.modelId === 'string' && v.modelId.trim().length > 0 &&
+    typeof v.modelProvider === 'string' &&
+    v.modelProvider.trim().length > 0 &&
+    typeof v.modelId === 'string' &&
+    v.modelId.trim().length > 0 &&
     (v.thinkingLevel === undefined || isThinkingLevel(v.thinkingLevel)) &&
-    Array.isArray(v.enabledSkills) && v.enabledSkills.every(isSafeId) &&
-    (v.enabledExtensions === undefined || (Array.isArray(v.enabledExtensions) && v.enabledExtensions.every(isSafeId))) &&
-    (v.webCommandNames === undefined || (Array.isArray(v.webCommandNames) && v.webCommandNames.every(isValidCommandName)))
+    Array.isArray(v.enabledSkills) &&
+    v.enabledSkills.every(isSafeId) &&
+    (v.enabledExtensions === undefined || (Array.isArray(v.enabledExtensions) && v.enabledExtensions.every(isSafeId)))
   );
 };
 

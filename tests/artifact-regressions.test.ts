@@ -146,7 +146,6 @@ test('Database helper contracts: getSessionOwner and row mappings', async (t) =>
     thinkingLevel: 'medium',
     enabledSkills: ['skill-a'],
     enabledExtensions: [],
-    webCommandNames: [],
     updatedAt: new Date().toISOString(),
   });
 
@@ -227,7 +226,6 @@ test('Access control: cross-user owner rejected, same-owner cross-node allowed',
     thinkingLevel: 'medium',
     enabledSkills: [],
     enabledExtensions: [],
-    webCommandNames: [],
     updatedAt: new Date().toISOString(),
   });
 

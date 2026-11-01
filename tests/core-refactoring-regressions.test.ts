@@ -268,7 +268,6 @@ test('全量 7 档 ThinkingLevel 在节点 registerNode 与 HTTP /api/bots 中�
     thinkingLevel: level,
     enabledSkills: [],
     enabledExtensions: [],
-    webCommandNames: [],
     updatedAt: new Date().toISOString(),
   }));
 
@@ -510,7 +509,6 @@ test('协议层权威校验原语（isSafeId, isValidBotEnvKey, isBotConfig）�
     thinkingLevel: 'medium',
     enabledSkills: ['skill-1'],
     enabledExtensions: ['ext-1'],
-    webCommandNames: ['cmd1', 'cmd2'],
     updatedAt: new Date().toISOString(),
   };
 
@@ -540,8 +538,6 @@ test('协议层权威校验原语（isSafeId, isValidBotEnvKey, isBotConfig）�
   assert.equal(isBotConfig({ ...baseConfig, modelId: '' }), false);
   assert.equal(isBotConfig({ ...baseConfig, enabledSkills: ['bad/skill'] }), false);
   assert.equal(isBotConfig({ ...baseConfig, enabledExtensions: ['bad/ext'] }), false);
-  assert.equal(isBotConfig({ ...baseConfig, webCommandNames: ['bad/cmd'] }), false);
-  assert.equal(isBotConfig({ ...baseConfig, webCommandNames: ['bad cmd'] }), false);
   assert.equal(isBotConfig(null), false);
   assert.equal(isBotConfig([]), false);
   assert.equal(isBotConfig('string'), false);
