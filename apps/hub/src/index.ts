@@ -34,6 +34,7 @@ import { registerTriggerRoutes } from './triggers.js';
 import { registerBgJobRoutes } from './bg-jobs.js';
 import { registerSkillSyncAndAskRoutes } from './skill-sync.js';
 import { registerDelegationRoutes } from './delegation.js';
+import { registerChannelRoutes } from './channels.js';
 import {
   requireAdmin,
   resolveOwnedBotRpc,
@@ -60,6 +61,7 @@ export interface HubInstance {
   db: HubDatabase;
   connections: NodeConnectionManager;
   router: GroupRouter;
+  sseHub: SseHub;
   drain: (timeoutMs?: number) => Promise<{ drained: boolean; remaining: number }>;
   close: () => Promise<void>;
 }
@@ -1217,6 +1219,7 @@ export function createHub(options?: HubOptions): HubInstance {
   registerBgJobRoutes(app, db, connections);
   registerSkillSyncAndAskRoutes(app, db, connections, router, getSessionOwnerId);
   registerDelegationRoutes(app, db, router, sseHub, getSessionOwnerId);
+  const unsubscribeChannels = registerChannelRoutes(app, db, router, sseHub, getSessionOwnerId);
 
   // 10. Serve static web files & SPA fallback
   app.use('*', createStaticMiddleware(options?.webDir));
@@ -1228,6 +1231,7 @@ export function createHub(options?: HubOptions): HubInstance {
   const close = async (): Promise<void> => {
     if (isClosed) return;
     isClosed = true;
+    unsubscribeChannels();
     triggerScheduler.stop();
     router.close();
     connections.close();
@@ -1240,6 +1244,7 @@ export function createHub(options?: HubOptions): HubInstance {
     db,
     connections,
     router,
+    sseHub,
     drain,
     close,
   };
