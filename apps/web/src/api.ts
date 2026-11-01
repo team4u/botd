@@ -19,8 +19,10 @@ import type {
   TriggerRecord,
   CreateTriggerInput,
   MessageSearchHit,
+  NodeUpgradeCheckResult,
+  NodeUpgradeResult,
 } from '@botd/protocol';
-import type { UserInfo } from './types';
+import type { UserInfo } from './types.js';
 
 export type { MessageSearchHit };
 
@@ -223,6 +225,17 @@ export const api = {
     return request(`/api/nodes/${encodeURIComponent(nodeId)}/restart`, {
       method: 'POST',
       body: JSON.stringify({}),
+    });
+  },
+
+  async checkNodeUpgrade(nodeId: string): Promise<NodeUpgradeCheckResult> {
+    return request<NodeUpgradeCheckResult>(`/api/nodes/${encodeURIComponent(nodeId)}/upgrade/check`);
+  },
+
+  async upgradeNode(nodeId: string, targetVersion?: string): Promise<NodeUpgradeResult> {
+    return request<NodeUpgradeResult>(`/api/nodes/${encodeURIComponent(nodeId)}/upgrade`, {
+      method: 'POST',
+      body: JSON.stringify(targetVersion ? { targetVersion } : {}),
     });
   },
 

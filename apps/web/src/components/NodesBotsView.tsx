@@ -17,8 +17,9 @@ import {
   RotateCw,
   PowerOff,
   Share2,
+  ArrowUpCircle,
 } from 'lucide-react';
-import type { NodeWithBots, BotConfig } from '@botd/protocol';
+import type { NodeWithBots, BotConfig, NodeUpgradeCheckResult } from '@botd/protocol';
 import { PairingModal } from './PairingModal';
 import { SkillEditorModal } from './SkillEditorModal';
 import { ExtensionEditorModal } from './ExtensionEditorModal';
@@ -116,6 +117,12 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
   // Node restart state & confirm dialog
   const [nodeToRestart, setNodeToRestart] = useState<NodeWithBots | null>(null);
   const [restartingNodeIds, setRestartingNodeIds] = useState<Set<string>>(new Set());
+
+  // Node upgrade state & confirm dialog
+  const [nodeToUpgrade, setNodeToUpgrade] = useState<NodeWithBots | null>(null);
+  const [upgradeCheckInfo, setUpgradeCheckInfo] = useState<NodeUpgradeCheckResult | null>(null);
+  const [checkingUpgradeNodeId, setCheckingUpgradeNodeId] = useState<string | null>(null);
+  const [upgradingNodeIds, setUpgradingNodeIds] = useState<Set<string>>(new Set());
 
   // Refs for tracking active restart pollers and timers for cleanup
   const pollTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
@@ -226,9 +233,21 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
 
   const startRestartPolling = (
     nodeId: string,
-    prevPid: number | undefined,
-    prevStartedAt: string | undefined
+    nodeNameOrPrevPid?: string | number,
+    prevPidOrStartedAt?: number | string,
+    prevStartedAtParam?: string
   ) => {
+    let prevPid: number | undefined;
+    let prevStartedAt: string | undefined;
+
+    if (typeof nodeNameOrPrevPid === 'string') {
+      prevPid = typeof prevPidOrStartedAt === 'number' ? prevPidOrStartedAt : undefined;
+      prevStartedAt = prevStartedAtParam;
+    } else {
+      prevPid = typeof nodeNameOrPrevPid === 'number' ? nodeNameOrPrevPid : undefined;
+      prevStartedAt = typeof prevPidOrStartedAt === 'string' ? prevPidOrStartedAt : undefined;
+    }
+
     const existingTimer = pollTimersRef.current.get(nodeId);
     if (existingTimer) {
       clearTimeout(existingTimer);
@@ -252,6 +271,11 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
         pollTimersRef.current.delete(nodeId);
         activePollsRef.current.delete(nodeId);
         setRestartingNodeIds((prev) => {
+          const next = new Set(prev);
+          next.delete(nodeId);
+          return next;
+        });
+        setUpgradingNodeIds((prev) => {
           const next = new Set(prev);
           next.delete(nodeId);
           return next;
@@ -289,6 +313,11 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
             pollTimersRef.current.delete(nodeId);
             activePollsRef.current.delete(nodeId);
             setRestartingNodeIds((prev) => {
+              const next = new Set(prev);
+              next.delete(nodeId);
+              return next;
+            });
+            setUpgradingNodeIds((prev) => {
               const next = new Set(prev);
               next.delete(nodeId);
               return next;
@@ -340,6 +369,62 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
     }
 
     startRestartPolling(nodeId, prevPid, prevStartedAt);
+  };
+
+  const handleOpenUpgradeModal = (node: NodeWithBots) => {
+    setNodeToUpgrade(node);
+    setUpgradeCheckInfo(null);
+    setCheckingUpgradeNodeId(node.id);
+    api.checkNodeUpgrade(node.id)
+      .then((info) => {
+        setUpgradeCheckInfo(info);
+      })
+      .catch((err: any) => {
+        console.warn('[NodesBotsView] Check upgrade failed:', err);
+      })
+      .finally(() => {
+        setCheckingUpgradeNodeId((current) => (current === node.id ? null : current));
+      });
+  };
+
+  const handleConfirmUpgrade = async () => {
+    if (!nodeToUpgrade) return;
+
+    const node = nodeToUpgrade;
+    const nodeId = node.id;
+    const nodeName = node.name;
+    const prevPid = node.pid;
+    const prevStartedAt = node.startedAt;
+    const targetVersion = upgradeCheckInfo?.latestVersion;
+
+    setNodeToUpgrade(null);
+    setUpgradingNodeIds((prev) => {
+      const next = new Set(prev);
+      next.add(nodeId);
+      return next;
+    });
+
+    try {
+      const result = await api.upgradeNode(nodeId, targetVersion);
+      if (!result.upgraded) {
+        setUpgradingNodeIds((prev) => {
+          const next = new Set(prev);
+          next.delete(nodeId);
+          return next;
+        });
+        onAddToast('info', `节点已是最新版本 v${result.targetVersion}`);
+        return;
+      }
+
+      startRestartPolling(nodeId, nodeName, prevPid, prevStartedAt);
+    } catch (err: any) {
+      setUpgradingNodeIds((prev) => {
+        const next = new Set(prev);
+        next.delete(nodeId);
+        return next;
+      });
+      onAddToast('error', err?.message || '升级节点失败');
+    }
   };
 
   const handleSyncSkill = async (nodeId: string, skillId: string) => {
@@ -490,6 +575,7 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
           nodes.map((node) => {
             const isOnline = node.status === 'online';
             const isRestarting = restartingNodeIds.has(node.id);
+            const isUpgrading = upgradingNodeIds.has(node.id);
             const absoluteLastSeen = new Date(node.lastSeenAt).toLocaleString();
             const isRemovingNode = deletingNodeId === node.id;
             const uptimeText = node.startedAt ? formatUptime(node.startedAt) : '';
@@ -524,6 +610,11 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                         <span className="text-[11px] px-1.5 py-0.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded font-mono text-zinc-600 dark:text-zinc-400 shrink-0">
                           {node.platform}
                         </span>
+                        {node.version && (
+                          <span className="text-[10px] px-1.5 py-0.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded font-mono text-zinc-600 dark:text-zinc-400 shrink-0">
+                            v{node.version}
+                          </span>
+                        )}
                       </h2>
                       <div className="flex items-center gap-3 mt-0.5">
                         <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate">
@@ -545,9 +636,14 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Status Indicator, Restart & Remove */}
+                  {/* Status Indicator, Upgrade, Restart & Remove */}
                   <div className="flex items-center gap-1.5 shrink-0">
-                    {isRestarting ? (
+                    {isUpgrading ? (
+                      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin-fast text-amber-500" />
+                        <span>升级中</span>
+                      </span>
+                    ) : isRestarting ? (
                       <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400">
                         <Loader2 className="w-3.5 h-3.5 animate-spin-fast text-amber-500" />
                         <span>重启中</span>
@@ -566,8 +662,23 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
 
                     <button
                       type="button"
+                      onClick={() => handleOpenUpgradeModal(node)}
+                      disabled={!isOnline || isRestarting || isUpgrading}
+                      className="p-1.5 text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 dark:text-zinc-500 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                      title={!isOnline ? '节点已离线，无法升级' : '升级计算节点'}
+                      aria-label={`升级节点 ${node.name}`}
+                    >
+                      {isUpgrading ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin-fast text-amber-500" />
+                      ) : (
+                        <ArrowUpCircle className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
                       onClick={() => setNodeToRestart(node)}
-                      disabled={!isOnline || isRestarting}
+                      disabled={!isOnline || isRestarting || isUpgrading}
                       className="p-1.5 text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 dark:text-zinc-500 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                       title={!isOnline ? '节点已离线，无法重启' : '重启计算节点'}
                       aria-label={`重启节点 ${node.name}`}
@@ -993,6 +1104,61 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
               <br />
               重启期间节点会短暂离线，随后自动恢复连接。
             </>
+          ) : null
+        }
+      />
+
+      <ConfirmDialog
+        isOpen={nodeToUpgrade !== null}
+        title="升级计算节点"
+        confirmText="确认升级"
+        confirmDisabled={nodeToUpgrade ? upgradingNodeIds.has(nodeToUpgrade.id) : false}
+        busy={nodeToUpgrade ? upgradingNodeIds.has(nodeToUpgrade.id) : false}
+        onConfirm={handleConfirmUpgrade}
+        onClose={() => {
+          if (!nodeToUpgrade || !upgradingNodeIds.has(nodeToUpgrade.id)) {
+            setNodeToUpgrade(null);
+            setUpgradeCheckInfo(null);
+          }
+        }}
+        message={
+          nodeToUpgrade ? (
+            <div className="space-y-3">
+              <div>
+                确定要升级计算节点「<strong>{nodeToUpgrade.name}</strong>」吗？
+              </div>
+              <div className="text-xs space-y-1.5 p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200/80 dark:border-zinc-800/80">
+                <div className="text-zinc-700 dark:text-zinc-300">
+                  当前版本：<span className="font-mono">{nodeToUpgrade.version || '未知'}</span>
+                </div>
+                {checkingUpgradeNodeId === nodeToUpgrade.id ? (
+                  <div className="flex items-center gap-1.5 text-zinc-500">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin-fast text-zinc-400" />
+                    <span>正在检查最新版本...</span>
+                  </div>
+                ) : upgradeCheckInfo ? (
+                  <>
+                    {upgradeCheckInfo.updateAvailable ? (
+                      <div className="text-emerald-600 dark:text-emerald-400 font-medium">
+                        发现新版本 v{upgradeCheckInfo.latestVersion}
+                      </div>
+                    ) : (
+                      <div className="text-zinc-500 dark:text-zinc-400">
+                        当前已是最新版本 (v{upgradeCheckInfo.currentVersion})
+                      </div>
+                    )}
+                    {upgradeCheckInfo.blocked && (
+                      <div className="p-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 rounded-lg text-amber-800 dark:text-amber-300 text-[11px]">
+                        上次升级至 v{upgradeCheckInfo.blocked.version} 失败回滚原因：{upgradeCheckInfo.blocked.reason}
+                      </div>
+                    )}
+                  </>
+                ) : null}
+              </div>
+              <p className="text-zinc-500 dark:text-zinc-400 text-[11px] leading-relaxed">
+                升级期间节点会先等待在途任务完成、自动校验新版本，若新版本启动异常会自动回滚至当前版本。
+              </p>
+            </div>
           ) : null
         }
       />
