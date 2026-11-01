@@ -14,6 +14,7 @@ export interface LocalIpcDeps {
     nodeId: string;
     name: string;
     hubUrl: string;
+    token?: string;
   };
   dataDir: string;
   socketPath: string;
@@ -275,32 +276,68 @@ export function createLocalIpcServer(deps: LocalIpcDeps): http.Server {
           assertSafeId(String(botId), 'Bot ID');
         }
 
+        let fileBuffer: Buffer | null = null;
         if (filePath && !contentBase64) {
           const resolvedPath = path.resolve(String(filePath));
-          const fileBuf = await fs.readFile(resolvedPath);
-          contentBase64 = fileBuf.toString('base64');
+          fileBuffer = await fs.readFile(resolvedPath);
           if (!filename) {
             filename = path.basename(resolvedPath);
           }
+        } else if (typeof contentBase64 === 'string') {
+          fileBuffer = Buffer.from(contentBase64, 'base64');
         }
 
-        if (typeof filename !== 'string' || !filename.trim() || typeof contentBase64 !== 'string') {
+        if (typeof filename !== 'string' || !filename.trim() || !fileBuffer) {
           sendJson(res, 400, { error: 'Missing filename or contentBase64' });
           return;
         }
 
-        const hubRpc = requireHubRpc(deps);
+        let uploadedArtifact: any = null;
 
-        const artifact = await hubRpc.uploadArtifact({
-          sessionId,
-          ...(botId ? { botId: String(botId) } : {}),
-          filename: String(filename),
-          ...(mimeType ? { mimeType: String(mimeType) } : {}),
-          contentBase64: String(contentBase64),
-          ...(message ? { message: String(message) } : {}),
-        });
+        if (deps.identity.token && deps.identity.hubUrl) {
+          try {
+            const uploadUrl = `${deps.identity.hubUrl.replace(/\/$/, '')}/api/sessions/${encodeURIComponent(sessionId)}/artifacts`;
+            const headers: Record<string, string> = {
+              'content-type': 'application/octet-stream',
+              'x-botd-node-id': deps.identity.nodeId,
+              'x-botd-node-token': deps.identity.token,
+              'x-artifact-filename': encodeURIComponent(filename),
+              ...(mimeType ? { 'x-artifact-mime-type': String(mimeType) } : {}),
+              ...(botId ? { 'x-artifact-bot-id': String(botId) } : {}),
+              ...(message ? { 'x-artifact-message': encodeURIComponent(String(message)) } : {}),
+            };
 
-        sendJson(res, 200, { ok: true, artifact, ...artifact });
+            const resp = await fetch(uploadUrl, {
+              method: 'POST',
+              headers,
+              body: new Uint8Array(fileBuffer),
+            });
+
+            if (resp.ok) {
+              uploadedArtifact = await resp.json();
+            }
+          } catch {
+            // Network or HTTP error -> fallback to hubRpc
+          }
+        }
+
+        if (!uploadedArtifact) {
+          const hubRpc = requireHubRpc(deps);
+          const base64Content = typeof contentBase64 === 'string'
+            ? contentBase64
+            : fileBuffer.toString('base64');
+
+          uploadedArtifact = await hubRpc.uploadArtifact({
+            sessionId,
+            ...(botId ? { botId: String(botId) } : {}),
+            filename: String(filename),
+            ...(mimeType ? { mimeType: String(mimeType) } : {}),
+            contentBase64: base64Content,
+            ...(message ? { message: String(message) } : {}),
+          });
+        }
+
+        sendJson(res, 200, { ok: true, artifact: uploadedArtifact, ...uploadedArtifact });
         return;
       }
 
@@ -314,10 +351,78 @@ export function createLocalIpcServer(deps: LocalIpcDeps): http.Server {
           return;
         }
 
+        let fileBuffer: Buffer | null = null;
+        let artifactRecord: any = null;
+
+        if (deps.identity.token && deps.identity.hubUrl) {
+          try {
+            const pullUrl = `${deps.identity.hubUrl.replace(/\/$/, '')}/api/artifacts/${encodeURIComponent(artifactId)}/content`;
+            const resp = await fetch(pullUrl, {
+              method: 'GET',
+              headers: {
+                'x-botd-node-id': deps.identity.nodeId,
+                'x-botd-node-token': deps.identity.token,
+              },
+            });
+
+            if (resp.ok) {
+              const arrayBuf = await resp.arrayBuffer();
+              fileBuffer = Buffer.from(arrayBuf);
+
+              let filename = '';
+              const disp = resp.headers.get('content-disposition');
+              if (disp) {
+                const match = disp.match(/filename="?([^";]+)"?/i);
+                if (match && match[1]) {
+                  try {
+                    filename = decodeURIComponent(match[1]);
+                  } catch {
+                    filename = match[1];
+                  }
+                }
+              }
+
+              artifactRecord = {
+                id: resp.headers.get('x-artifact-id') || artifactId,
+                sessionId: resp.headers.get('x-artifact-session-id') || '',
+                filename: filename || `artifact-${artifactId}`,
+                mimeType: resp.headers.get('content-type') || 'application/octet-stream',
+                sizeBytes: fileBuffer.length,
+                createdAt: resp.headers.get('x-artifact-created-at') || new Date().toISOString(),
+              };
+              const senderBotId = resp.headers.get('x-artifact-sender-bot-id');
+              if (senderBotId) {
+                artifactRecord.senderBotId = senderBotId;
+              }
+            }
+          } catch {
+            // Network or HTTP error -> fallback to hubRpc
+          }
+        }
+
+        let savedTo: string | undefined;
+        let contentBase64: string | undefined;
+
+        if (fileBuffer && artifactRecord) {
+          if (outputPath) {
+            savedTo = path.resolve(String(outputPath));
+            await ensureDir(path.dirname(savedTo));
+            await fs.writeFile(savedTo, fileBuffer);
+          } else {
+            contentBase64 = fileBuffer.toString('base64');
+          }
+          sendJson(res, 200, {
+            ok: true,
+            artifact: artifactRecord,
+            ...artifactRecord,
+            ...(savedTo ? { savedTo } : { contentBase64 }),
+          });
+          return;
+        }
+
         const hubRpc = requireHubRpc(deps);
 
         const result = await hubRpc.downloadArtifact(String(artifactId));
-        let savedTo: string | undefined;
         if (outputPath) {
           savedTo = path.resolve(String(outputPath));
           await ensureDir(path.dirname(savedTo));
