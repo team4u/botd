@@ -143,6 +143,24 @@ describe('HubClient & CLI Config Scoping', () => {
     }
   });
 
+  test('automatic login preserves credentials previously saved for the same Hub', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'botd-cli-saved-login-'));
+    const originalFetch = globalThis.fetch;
+    try {
+      await writeCliConfig(dir, { hubUrl: 'https://saved-hub.invalid/', username: 'saved-user', password: 'saved-test-password' });
+      globalThis.fetch = async () => new Response('{}', {
+        headers: { 'set-cookie': 'botd_token=saved-test-token; HttpOnly' },
+      });
+      await HubClient.connect({ dataDir: dir, hubUrl: 'https://saved-hub.invalid' });
+      const saved = await readCliConfig(dir);
+      assert.equal(saved.password, 'saved-test-password');
+      assert.equal(saved.token, 'saved-test-token');
+    } finally {
+      globalThis.fetch = originalFetch;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test('HubClient.connect accepts explicit credentials for a new Hub', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'botd-hub-client-test-'));
     const originalFetch = globalThis.fetch;

@@ -126,6 +126,22 @@ export interface NodeRecord {
   createdAt: string;
   pid?: number;
   startedAt?: string;
+  version?: string;
+}
+
+export interface NodeUpgradeCheckResult {
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  blocked?: { version: string; reason: string; at: string };
+}
+
+export interface NodeUpgradeResult {
+  ok: true;
+  previousVersion: string;
+  targetVersion: string;
+  upgraded: boolean;
+  pid?: number;
 }
 
 export interface BotConfig {
@@ -289,6 +305,7 @@ export interface HubRpcFunctions {
     extensions?: string[];
     pid?: number;
     startedAt?: string;
+    version?: string;
   }): Promise<void>;
   heartbeat(nodeId: string): Promise<void>;
   onSessionStream(event: {
@@ -333,6 +350,8 @@ export interface HubRpcFunctions {
 
 export interface NodeRpcFunctions {
   restartDaemon(): Promise<{ ok: true; pid: number }>;
+  checkUpgrade?(options?: { registryUrl?: string }): Promise<NodeUpgradeCheckResult>;
+  upgradeDaemon?(options?: { targetVersion?: string; registryUrl?: string }): Promise<NodeUpgradeResult>;
   getModelCatalog(): Promise<ModelCatalog>;
   getCommands(botId: string): Promise<ChatCommand[]>;
   startProviderLogin(input: { providerId: string; method: ProviderAuthType }): Promise<ProviderLoginState>;

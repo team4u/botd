@@ -73,7 +73,10 @@ export class HubClient {
       throw new CliError('No Hub configured. Run: botd login <hubUrl> --password <password>');
     }
 
-    const client = new HubClient(hubUrl, token, username, password, options);
+    const client = new HubClient(hubUrl, token, username, password, {
+      ...options,
+      persistPassword: options.persistPassword ?? Boolean(isConfigHubMatch && !options.password && config.password),
+    });
     if (!client.token) {
       if (!client.password) {
         throw new CliError(`Not logged in to ${hubUrl}. Run: botd login <hubUrl> --password <password>`, 401);
