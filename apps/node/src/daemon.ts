@@ -44,6 +44,7 @@ import { BgJobManager } from './bg-jobs.js';
 import { ensureBuiltinSkill } from './builtin-skill.js';
 import { ensureWindowsShell, isWindows } from './windows-shell.js';
 import { notifyDaemonReady, spawnReplacementDaemon } from './daemon-launch.js';
+import { getNodeVersion, checkNodeUpgrade, performNodeUpgrade } from './upgrader.js';
 
 export interface DaemonHandle {
   nodeId: string;
@@ -162,6 +163,7 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       extensions,
       pid: process.pid,
       startedAt: startedAtIso,
+      version: getNodeVersion(),
     });
   };
 
@@ -228,6 +230,19 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
         }, 100).unref();
 
         return { ok: true as const, pid: childPid };
+      },
+      checkUpgrade: async (opts) => {
+        return await checkNodeUpgrade(dataDir, opts);
+      },
+      upgradeDaemon: async (opts) => {
+        return await performNodeUpgrade(dataDir, {
+          ...opts,
+          onScheduleShutdown: () => {
+            setTimeout(() => {
+              void handleShutdown();
+            }, 100).unref();
+          },
+        });
       },
       getCommands: async (botId) => {
         assertSafeId(botId, 'Bot ID');

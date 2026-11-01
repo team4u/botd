@@ -10,10 +10,39 @@ export interface DaemonSpawnSpec {
 
 export interface BuildDaemonSpawnSpecOptions {
   dataDir: string;
+  cliEntryOverride?: string;
+  envOverrides?: Record<string, string>;
 }
 
 export function buildDaemonSpawnSpec(options: BuildDaemonSpawnSpecOptions): DaemonSpawnSpec {
-  const { cliPath, isTypeScript } = resolveCliEntry();
+  let targetCliPath: string | undefined;
+  let isTypeScript = false;
+
+  if (options.cliEntryOverride && options.cliEntryOverride.trim() !== '') {
+    targetCliPath = path.resolve(options.cliEntryOverride);
+    isTypeScript = targetCliPath.endsWith('.ts');
+  } else {
+    try {
+      const currentJsonPath = path.join(options.dataDir, 'current.json');
+      if (fsSync.existsSync(currentJsonPath)) {
+        const raw = fsSync.readFileSync(currentJsonPath, 'utf8');
+        const parsed = JSON.parse(raw) as { entryPath?: string };
+        if (parsed && typeof parsed.entryPath === 'string' && fsSync.existsSync(parsed.entryPath)) {
+          targetCliPath = path.resolve(parsed.entryPath);
+          isTypeScript = targetCliPath.endsWith('.ts');
+        }
+      }
+    } catch {
+      // ignore read or parse errors
+    }
+  }
+
+  if (!targetCliPath) {
+    const defaultEntry = resolveCliEntry();
+    targetCliPath = defaultEntry.cliPath;
+    isTypeScript = defaultEntry.isTypeScript;
+  }
+
   const cliArgs = ['start', '--data-dir', options.dataDir];
 
   const loaderUrl = isTypeScript ? getTsxLoaderUrl() : undefined;
@@ -24,7 +53,7 @@ export function buildDaemonSpawnSpec(options: BuildDaemonSpawnSpecOptions): Daem
 
   return {
     execPath: process.execPath,
-    args: [...loaderArgs, cliPath, ...cliArgs],
+    args: [...loaderArgs, targetCliPath, ...cliArgs],
   };
 }
 
@@ -48,6 +77,8 @@ export interface SpawnReplacementDaemonOptions {
   timeoutMs?: number;
   bindRetryMs?: number;
   spawnFn?: typeof spawn;
+  cliEntryOverride?: string;
+  envOverrides?: Record<string, string>;
 }
 
 /**
@@ -64,7 +95,11 @@ export function spawnReplacementDaemon(
   const bindRetryMs = options.bindRetryMs ?? 20_000;
   const logFile = options.logFile || path.join(options.dataDir, 'daemon.log');
 
-  const { execPath, args } = buildDaemonSpawnSpec({ dataDir: options.dataDir });
+  const { execPath, args } = buildDaemonSpawnSpec({
+    dataDir: options.dataDir,
+    cliEntryOverride: options.cliEntryOverride,
+    envOverrides: options.envOverrides,
+  });
 
   return new Promise((resolve, reject) => {
     let outFd: number;
@@ -82,6 +117,7 @@ export function spawnReplacementDaemon(
         windowsHide: true,
         env: {
           ...process.env,
+          ...options.envOverrides,
           BOTD_DAEMON_DETACHED: '1',
           BOTD_DAEMON_LOG: logFile,
           BOTD_DAEMON_BIND_RETRY_MS: String(bindRetryMs),

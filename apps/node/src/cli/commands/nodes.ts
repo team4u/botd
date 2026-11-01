@@ -1,5 +1,5 @@
 import { Command, Option } from 'commander';
-import type { NodeWithBots, PairingResult } from '@botd/protocol';
+import type { NodeWithBots, PairingResult, NodeUpgradeCheckResult, NodeUpgradeResult } from '@botd/protocol';
 import { cliAction, readGlobals } from '../context.js';
 import { HubClient } from '../hub-client.js';
 import { printResult } from '../render.js';
@@ -57,6 +57,41 @@ export function registerNodesCommands(program: Command): void {
         };
         const result = await client.post(`/api/nodes/${encodeURIComponent(targetNodeId)}/install`, body);
         printResult(result, globals.json);
+      })(options, command)
+    );
+
+  nodes
+    .command('upgrade <nodeId>')
+    .description('Check or trigger an upgrade on a connected node')
+    .option('--version <ver>', 'target version to upgrade to')
+    .option('--registry <url>', 'npm registry URL')
+    .option('--check', 'check for available upgrade without applying')
+    .action((nodeId: string, options: Record<string, unknown>, command: Command) =>
+      cliAction(async (options, command) => {
+        const targetNodeId = nodeId || (command.args[0] as string);
+        const globals = readGlobals(command);
+        const client = await HubClient.connect(globals);
+        const targetVersion = typeof options.version === 'string' ? options.version : undefined;
+        const registryUrl = typeof options.registry === 'string' ? options.registry : undefined;
+
+        if (options.check === true) {
+          const params = new URLSearchParams();
+          if (registryUrl) params.set('registryUrl', registryUrl);
+          const queryString = params.toString() ? `?${params.toString()}` : '';
+          const result = await client.get<NodeUpgradeCheckResult>(
+            `/api/nodes/${encodeURIComponent(targetNodeId)}/upgrade/check${queryString}`,
+          );
+          printResult(result, globals.json);
+        } else {
+          const body: Record<string, unknown> = {};
+          if (targetVersion) body.targetVersion = targetVersion;
+          if (registryUrl) body.registryUrl = registryUrl;
+          const result = await client.post<NodeUpgradeResult>(
+            `/api/nodes/${encodeURIComponent(targetNodeId)}/upgrade`,
+            body,
+          );
+          printResult(result, globals.json);
+        }
       })(options, command)
     );
 }
