@@ -572,46 +572,6 @@ export function createHub(options?: HubOptions): HubInstance {
     return c.json(botConfig);
   });
 
-  app.post('/api/nodes/:nodeId/bots', async (c) => {
-    const nodeId = c.req.param('nodeId');
-    const body = await c.req.json<SaveBotInput>().catch(() => null);
-    if (!body) return c.json({ error: 'Invalid BOT configuration' }, 400);
-    const bodyWithNode = { ...body, nodeId };
-    if (!isBotConfig(bodyWithNode) || typeof bodyWithNode.systemMd !== 'string') {
-      return c.json({ error: 'Invalid BOT configuration' }, 400);
-    }
-    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
-    if (!nodeRpc.ok) return nodeRpc.response;
-
-    const existing = db.getBot(bodyWithNode.id);
-    if (existing && existing.nodeId !== nodeId) {
-      return c.json({ error: `Bot id "${bodyWithNode.id}" already owned by node "${existing.nodeId}"` }, 409);
-    }
-
-    const botConfig: BotConfig = {
-      id: bodyWithNode.id,
-      nodeId,
-      name: bodyWithNode.name,
-      description: bodyWithNode.description || '',
-      modelProvider: bodyWithNode.modelProvider,
-      modelId: bodyWithNode.modelId,
-      thinkingLevel: bodyWithNode.thinkingLevel ?? 'medium',
-      enabledSkills: Array.isArray(bodyWithNode.enabledSkills) ? bodyWithNode.enabledSkills : [],
-      enabledExtensions: Array.isArray(bodyWithNode.enabledExtensions) ? bodyWithNode.enabledExtensions : [],
-      visibility: bodyWithNode.visibility === 'team' ? 'team' : 'private',
-      updatedAt: new Date().toISOString(),
-    };
-
-    try {
-      await nodeRpc.rpc.saveBot(botConfig, bodyWithNode.systemMd || '');
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to save bot on node' }, 500);
-    }
-
-    db.saveBot(botConfig);
-    return c.json(botConfig);
-  });
-
   app.put('/api/bots/:botId', async (c) => {
     const botId = c.req.param('botId');
     const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
@@ -626,41 +586,6 @@ export function createHub(options?: HubOptions): HubInstance {
 
     if (body.nodeId && body.nodeId !== existing.nodeId) {
       return c.json({ error: 'Cannot transfer bot to a different node' }, 409);
-    }
-
-    const { systemMd: requestedSystem, ...botPatch } = body;
-    const botConfig: BotConfig = {
-      ...existing,
-      ...botPatch,
-      enabledExtensions: Array.isArray(body.enabledExtensions) ? body.enabledExtensions : (existing.enabledExtensions ?? []),
-      visibility: body.visibility === 'team' ? 'team' : (body.visibility === 'private' ? 'private' : (existing.visibility ?? 'private')),
-      id: botId,
-      nodeId: existing.nodeId,
-      updatedAt: new Date().toISOString(),
-    };
-
-    try {
-      const systemMd = requestedSystem ?? await rpc.readFile({ kind: 'system', botId, id: 'SYSTEM.md' });
-      await rpc.saveBot(botConfig, systemMd);
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to save bot on node' }, 500);
-    }
-
-    db.saveBot(botConfig);
-    return c.json(botConfig);
-  });
-
-  app.put('/api/nodes/:nodeId/bots/:botId', async (c) => {
-    const botId = c.req.param('botId');
-    const nodeId = c.req.param('nodeId');
-    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
-    if (!botRpc.ok) return botRpc.response;
-    const { bot: existing, rpc } = botRpc;
-
-    const body = await c.req.json<Partial<BotConfig> & { systemMd?: string }>().catch(() => null);
-    if (!isObject(body) || !isBotConfig({ ...existing, ...body, id: botId, nodeId })
-      || (body.systemMd !== undefined && typeof body.systemMd !== 'string')) {
-      return c.json({ error: 'Invalid BOT configuration' }, 400);
     }
 
     const { systemMd: requestedSystem, ...botPatch } = body;
@@ -1053,7 +978,7 @@ export function createHub(options?: HubOptions): HubInstance {
     const participants = db.listSessionParticipants(id);
     const isMultiUser = participants.length > 0 || (session.ownerId !== undefined && user.id !== session.ownerId);
 
-    const messageContent = isMultiUser && !content.startsWith(`[User: ${user.username}]`)
+    const routerContent = isMultiUser && !content.startsWith(`[User: ${user.username}]`)
       ? `[User: ${user.username}]: ${content}`
       : content;
 
@@ -1065,7 +990,9 @@ export function createHub(options?: HubOptions): HubInstance {
       id: `msg_${randomUUID()}`,
       sessionId: id,
       role: 'user',
-      content: messageContent,
+      senderUserId: user.id,
+      senderUsername: user.username,
+      content,
       mentions,
       attachments,
     });
@@ -1075,7 +1002,8 @@ export function createHub(options?: HubOptions): HubInstance {
       message: msgResult.message,
     });
 
-    router.handleUserMessage(id, msgResult.message.id, messageContent, cmdResult.isCommand ? {
+    // TODO(后续在 formatIncrementalMessages 中消费 senderUsername)
+    router.handleUserMessage(id, msgResult.message.id, routerContent, cmdResult.isCommand ? {
       commandText: cmdResult.commandText!,
       targetBotId: cmdResult.targetBotId,
     } : undefined);

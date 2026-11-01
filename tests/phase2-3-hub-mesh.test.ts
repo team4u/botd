@@ -446,11 +446,13 @@ test('Task 3.2: session_participants multi-user group session collaboration', as
     alice.cookie
   );
 
-  // Check the message in DB: since multi-user session, content is prefixed with [User: alice]: ...
+  // Check the message in DB: multi-user session stores clean content and structured sender info
   const updatedMsgs = await f.json<MessageRecord[]>(`/api/sessions/${groupSession.id}/messages`);
   const aliceMsg = updatedMsgs.find((m) => m.role === 'user');
   assert(aliceMsg);
-  assert.equal(aliceMsg.content, '[User: alice]: Here to help debug');
+  assert.equal(aliceMsg.content, 'Here to help debug');
+  assert.equal(aliceMsg.senderUsername, 'alice');
+  assert.equal(aliceMsg.senderUserId, alice.user.id);
 
   // Alice tries to delete the session -> 403 Forbidden (only owner can delete)
   const aliceDeleteRes = await f.request(`/api/sessions/${groupSession.id}`, 'DELETE', undefined, alice.cookie);
