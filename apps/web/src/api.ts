@@ -19,10 +19,20 @@ import type {
   TriggerRecord,
   CreateTriggerInput,
   MessageSearchHit,
+  NotificationChannelRecord,
+  CreateNotificationChannelInput,
+  NotificationChannelKind,
+  NotificationEventKind,
 } from '@botd/protocol';
 import type { UserInfo } from './types';
 
-export type { MessageSearchHit };
+export type {
+  MessageSearchHit,
+  NotificationChannelRecord,
+  CreateNotificationChannelInput,
+  NotificationChannelKind,
+  NotificationEventKind,
+};
 
 export class ApiError extends Error {
   status: number;
@@ -577,6 +587,58 @@ export const api = {
       `/api/triggers/${encodeURIComponent(triggerId)}`,
       {
         method: 'DELETE',
+      }
+    );
+  },
+
+  // Notification channels (出站通道桥接)
+  async listSessionChannels(sessionId: string): Promise<NotificationChannelRecord[]> {
+    return request<NotificationChannelRecord[]>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/channels`
+    );
+  },
+
+  async createSessionChannel(
+    sessionId: string,
+    input: CreateNotificationChannelInput
+  ): Promise<NotificationChannelRecord> {
+    return request<NotificationChannelRecord>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/channels`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }
+    );
+  },
+
+  async updateChannel(
+    channelId: string,
+    patch: Partial<CreateNotificationChannelInput>
+  ): Promise<NotificationChannelRecord> {
+    return request<NotificationChannelRecord>(
+      `/api/channels/${encodeURIComponent(channelId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }
+    );
+  },
+
+  async deleteChannel(channelId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(
+      `/api/channels/${encodeURIComponent(channelId)}`,
+      {
+        method: 'DELETE',
+      }
+    );
+  },
+
+  async testChannel(channelId: string): Promise<{ ok: boolean; status?: number }> {
+    return request<{ ok: boolean; status?: number }>(
+      `/api/channels/${encodeURIComponent(channelId)}/test`,
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
       }
     );
   },

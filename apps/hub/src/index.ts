@@ -32,6 +32,7 @@ import { ArtifactService } from './artifact-service.js';
 import { registerTriggerRoutes } from './triggers.js';
 import { registerBgJobRoutes } from './bg-jobs.js';
 import { registerSkillSyncAndAskRoutes } from './skill-sync.js';
+import { registerChannelRoutes } from './channels.js';
 import {
   requireAdmin,
   resolveOwnedBotRpc,
@@ -58,6 +59,7 @@ export interface HubInstance {
   db: HubDatabase;
   connections: NodeConnectionManager;
   router: GroupRouter;
+  sseHub: SseHub;
   close: () => Promise<void>;
 }
 
@@ -157,7 +159,8 @@ export function createHub(options?: HubOptions): HubInstance {
       reqPath === '/api/health' ||
       (reqPath === '/api/auth/login' && method === 'POST') ||
       (reqPath === '/api/nodes/pairing/exchange' && method === 'POST') ||
-      (reqPath.startsWith('/api/webhooks/') && method === 'POST')
+      (reqPath.startsWith('/api/webhooks/') && method === 'POST') ||
+      reqPath.startsWith('/api/public/asks/')
     ) {
       return next();
     }
@@ -1177,6 +1180,7 @@ export function createHub(options?: HubOptions): HubInstance {
   const triggerScheduler = registerTriggerRoutes(app, db, router, getSessionOwnerId);
   registerBgJobRoutes(app, db, connections);
   registerSkillSyncAndAskRoutes(app, db, connections, router, getSessionOwnerId);
+  const unsubscribeChannels = registerChannelRoutes(app, db, router, sseHub, getSessionOwnerId);
 
   // 10. Serve static web files & SPA fallback
   app.use('*', createStaticMiddleware(options?.webDir));
@@ -1185,6 +1189,7 @@ export function createHub(options?: HubOptions): HubInstance {
   const close = async (): Promise<void> => {
     if (isClosed) return;
     isClosed = true;
+    unsubscribeChannels();
     triggerScheduler.stop();
     router.close();
     connections.close();
@@ -1197,6 +1202,7 @@ export function createHub(options?: HubOptions): HubInstance {
     db,
     connections,
     router,
+    sseHub,
     close,
   };
 }

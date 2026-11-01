@@ -11,10 +11,19 @@ export interface SseHubOptions {
 export class SseHub {
   private listeners = new Map<string, Set<SseListener>>();
   private userListeners = new Map<string, Set<GlobalSseListener>>();
+  private internalListeners = new Set<(sessionId: string, event: SessionSseEvent) => void>();
   private getSessionOwnerId?: (sessionId: string) => string | undefined;
 
   constructor(options?: SseHubOptions) {
     this.getSessionOwnerId = options?.getSessionOwnerId;
+  }
+
+  /** 注册内部会话广播监听器（用于外部通知通道等内部业务处理） */
+  onBroadcast(listener: (sessionId: string, event: SessionSseEvent) => void): () => void {
+    this.internalListeners.add(listener);
+    return () => {
+      this.internalListeners.delete(listener);
+    };
   }
 
   subscribe(sessionId: string, listener: SseListener): () => void {
@@ -49,6 +58,13 @@ export class SseHub {
   }
 
   broadcast(sessionId: string, event: SessionSseEvent): void {
+    for (const listener of this.internalListeners) {
+      try {
+        listener(sessionId, event);
+      } catch {
+        // ignore listener errors
+      }
+    }
     const set = this.listeners.get(sessionId);
     if (set) {
       for (const listener of set) {
@@ -88,5 +104,6 @@ export class SseHub {
   close(): void {
     this.listeners.clear();
     this.userListeners.clear();
+    this.internalListeners.clear();
   }
 }

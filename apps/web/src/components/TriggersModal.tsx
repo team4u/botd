@@ -13,6 +13,8 @@ import {
   CheckCircle2,
   Pencil,
   Check,
+  Send,
+  Share2,
 } from 'lucide-react';
 import type {
   SessionRecord,
@@ -20,6 +22,9 @@ import type {
   TriggerRecord,
   TriggerKind,
   CreateTriggerInput,
+  NotificationChannelRecord,
+  NotificationChannelKind,
+  NotificationEventKind,
 } from '@botd/protocol';
 import { isValidCronExpr, describeCronExpr } from '@botd/protocol';
 import { api } from '../api';
@@ -107,9 +112,29 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
   onClose,
   onAddToast,
 }) => {
+  const [activeTab, setActiveTab] = useState<'inbound' | 'outbound'>('inbound');
+
   const [triggers, setTriggers] = useState<TriggerRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Channels state
+  const [channels, setChannels] = useState<NotificationChannelRecord[]>([]);
+  const [channelsLoading, setChannelsLoading] = useState(false);
+  const [showAddChannelForm, setShowAddChannelForm] = useState(false);
+  const [channelName, setChannelName] = useState('');
+  const [channelKind, setChannelKind] = useState<NotificationChannelKind>('feishu');
+  const [channelTargetUrl, setChannelTargetUrl] = useState('');
+  const [channelSecret, setChannelSecret] = useState('');
+  const [channelEvents, setChannelEvents] = useState<NotificationEventKind[]>([
+    'assistant_reply',
+    'ask_request',
+    'wakeup',
+  ]);
+  const [channelSubmitting, setChannelSubmitting] = useState(false);
+  const [testingChannelId, setTestingChannelId] = useState<string | null>(null);
+  const [togglingChannelId, setTogglingChannelId] = useState<string | null>(null);
+  const [deletingChannelId, setDeletingChannelId] = useState<string | null>(null);
 
   // New trigger form state (also reused as edit form via editingTrigger)
   const [showAddForm, setShowAddForm] = useState(false);
@@ -146,6 +171,27 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
     }
   };
 
+  const fetchChannels = async () => {
+    setChannelsLoading(true);
+    try {
+      const list = await api.listSessionChannels(session.id);
+      setChannels(list);
+    } catch (err: any) {
+      onAddToast('error', err?.message || '获取出站通道失败');
+    } finally {
+      setChannelsLoading(false);
+    }
+  };
+
+  const resetChannelForm = () => {
+    setChannelName('');
+    setChannelKind('feishu');
+    setChannelTargetUrl('');
+    setChannelSecret('');
+    setChannelEvents(['assistant_reply', 'ask_request', 'wakeup']);
+    setShowAddChannelForm(false);
+  };
+
   const resetForm = () => {
     setName('');
     setPrompt('');
@@ -158,11 +204,14 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       fetchTriggers();
+      fetchChannels();
       setShowAddForm(false);
+      setShowAddChannelForm(false);
       setEditingTrigger(null);
       setRunConfirmTrigger(null);
       setCopiedUrlId(null);
       resetForm();
+      resetChannelForm();
     }
   }, [isOpen, session.id]);
 
@@ -331,6 +380,89 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
     }
   };
 
+  const handleCreateChannel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmedName = channelName.trim();
+    const trimmedUrl = channelTargetUrl.trim();
+    if (!trimmedName) {
+      onAddToast('error', '请输入通道名称');
+      return;
+    }
+    if (!trimmedUrl) {
+      onAddToast('error', '请输入推送目标 URL');
+      return;
+    }
+    if (channelEvents.length === 0) {
+      onAddToast('error', '请至少勾选一个触发事件');
+      return;
+    }
+
+    setChannelSubmitting(true);
+    try {
+      const created = await api.createSessionChannel(session.id, {
+        name: trimmedName,
+        kind: channelKind,
+        targetUrl: trimmedUrl,
+        secret: channelSecret.trim() || undefined,
+        events: channelEvents,
+        enabled: true,
+      });
+      setChannels((prev) => [...prev, created]);
+      resetChannelForm();
+      onAddToast('success', `出站通道「${created.name}」已创建`);
+    } catch (err: any) {
+      onAddToast('error', err?.message || '创建出站通道失败');
+    } finally {
+      setChannelSubmitting(false);
+    }
+  };
+
+  const handleToggleChannel = async (channel: NotificationChannelRecord) => {
+    setTogglingChannelId(channel.id);
+    try {
+      const updated = await api.updateChannel(channel.id, { enabled: !channel.enabled });
+      setChannels((prev) => prev.map((c) => (c.id === channel.id ? updated : c)));
+      onAddToast('success', `已${updated.enabled ? '启用' : '停用'}通道「${channel.name}」`);
+    } catch (err: any) {
+      onAddToast('error', err?.message || '更新通道状态失败');
+    } finally {
+      setTogglingChannelId(null);
+    }
+  };
+
+  const handleTestChannel = async (channel: NotificationChannelRecord) => {
+    setTestingChannelId(channel.id);
+    try {
+      const res = await api.testChannel(channel.id);
+      if (res.ok) {
+        setChannels((prev) =>
+          prev.map((c) =>
+            c.id === channel.id ? { ...c, lastTriggeredAt: new Date().toISOString() } : c
+          )
+        );
+        onAddToast('success', `通道「${channel.name}」测试通知发送成功`);
+      }
+    } catch (err: any) {
+      onAddToast('error', err?.message || '测试通知发送失败');
+    } finally {
+      setTestingChannelId(null);
+    }
+  };
+
+  const handleDeleteChannel = async (channel: NotificationChannelRecord) => {
+    if (!window.confirm(`确认删除外部通知通道「${channel.name}」吗？`)) return;
+    setDeletingChannelId(channel.id);
+    try {
+      await api.deleteChannel(channel.id);
+      setChannels((prev) => prev.filter((c) => c.id !== channel.id));
+      onAddToast('success', `已删除通道「${channel.name}」`);
+    } catch (err: any) {
+      onAddToast('error', err?.message || '删除通道失败');
+    } finally {
+      setDeletingChannelId(null);
+    }
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 bg-black/40 dark:bg-black/70 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4 overflow-y-auto animate-in fade-in"
@@ -343,13 +475,47 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
         <div className="w-10 h-1 bg-zinc-300 dark:bg-zinc-700 rounded-full mx-auto my-2 sm:hidden shrink-0" />
 
         {/* Header */}
-        <div className="px-5 py-3.5 sm:px-6 sm:py-4 border-b border-zinc-100 dark:border-zinc-800/60 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2">
-            <Zap className="w-4 h-4 text-amber-500 shrink-0" />
-            <h2 id="triggers-modal-title" className="text-sm sm:text-base font-semibold text-zinc-900 dark:text-zinc-100">
-              会话触发器与自动化
-            </h2>
+        <div className="px-5 py-3 sm:px-6 sm:py-3.5 border-b border-zinc-100 dark:border-zinc-800/60 flex items-center justify-between shrink-0 flex-wrap gap-2">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <Zap className="w-4 h-4 text-amber-500 shrink-0" />
+              <h2 id="triggers-modal-title" className="text-sm sm:text-base font-semibold text-zinc-900 dark:text-zinc-100">
+                自动化与消息桥接
+              </h2>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex items-center bg-zinc-100 dark:bg-zinc-800/70 p-0.5 rounded-lg text-xs font-medium">
+              <button
+                type="button"
+                onClick={() => setActiveTab('inbound')}
+                className={`h-7 px-2.5 rounded-md transition-colors cursor-pointer flex items-center gap-1.5 ${
+                  activeTab === 'inbound'
+                    ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-xs'
+                    : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
+                }`}
+              >
+                <Radio className="w-3 h-3" />
+                <span>入站触发器 (Webhook / 定时)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('outbound');
+                  fetchChannels();
+                }}
+                className={`h-7 px-2.5 rounded-md transition-colors cursor-pointer flex items-center gap-1.5 ${
+                  activeTab === 'outbound'
+                    ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-xs'
+                    : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
+                }`}
+              >
+                <Share2 className="w-3 h-3" />
+                <span>出站消息桥接 (飞书 / Slack / TG / Webhook)</span>
+              </button>
+            </div>
           </div>
+
           <button
             onClick={onClose}
             className="p-1.5 text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
@@ -367,26 +533,28 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
             </div>
           )}
 
-          {/* Action bar: Add Trigger button */}
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-zinc-500 dark:text-zinc-400">
-              共配置 {triggers.length} 个自动化触发器
-            </span>
-            {!showAddForm && (
-              <button
-                type="button"
-                onClick={() => {
-                  setEditingTrigger(null);
-                  resetForm();
-                  setShowAddForm(true);
-                }}
-                className="h-8 px-2.5 text-xs font-medium rounded-lg bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white flex items-center gap-1.5 transition-colors cursor-pointer"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>新建触发器</span>
-              </button>
-            )}
-          </div>
+          {activeTab === 'inbound' ? (
+            <div className="space-y-4 animate-in fade-in">
+              {/* Action bar: Add Trigger button */}
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                  共配置 {triggers.length} 个自动化触发器
+                </span>
+                {!showAddForm && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingTrigger(null);
+                      resetForm();
+                      setShowAddForm(true);
+                    }}
+                    className="h-8 px-2.5 text-xs font-medium rounded-lg bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>新建触发器</span>
+                  </button>
+                )}
+              </div>
 
           {/* Create Form */}
           {showAddForm && (
@@ -893,6 +1061,420 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                   </div>
                 );
               })}
+            </div>
+          )}
+          </div>
+          ) : (
+            <div className="space-y-4 animate-in fade-in">
+              {/* Action bar: Add Channel button */}
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                  共配置 {channels.length} 个外部消息通道
+                </span>
+                {!showAddChannelForm && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      resetChannelForm();
+                      setShowAddChannelForm(true);
+                    }}
+                    className="h-8 px-2.5 text-xs font-medium rounded-lg bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>新建出站通道</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Create Channel Form */}
+              {showAddChannelForm && (
+                <form onSubmit={handleCreateChannel} className="p-4 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/40 space-y-3.5 animate-in fade-in">
+                  <div className="flex items-center justify-between border-b border-zinc-200/80 dark:border-zinc-800 pb-2.5">
+                    <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                      新建出站消息通道
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddChannelForm(false)}
+                      className="text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200 cursor-pointer"
+                    >
+                      取消
+                    </button>
+                  </div>
+
+                  {/* Channel Kind selector */}
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
+                      通道类型
+                    </label>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setChannelKind('feishu')}
+                        className={`h-8 px-2.5 text-xs font-medium rounded-lg border flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
+                          channelKind === 'feishu'
+                            ? 'bg-blue-50 dark:bg-blue-950/50 border-blue-400 dark:border-blue-700 text-blue-700 dark:text-blue-300'
+                            : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                        }`}
+                      >
+                        <span>飞书机器人</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setChannelKind('slack')}
+                        className={`h-8 px-2.5 text-xs font-medium rounded-lg border flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
+                          channelKind === 'slack'
+                            ? 'bg-purple-50 dark:bg-purple-950/50 border-purple-400 dark:border-purple-700 text-purple-700 dark:text-purple-300'
+                            : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                        }`}
+                      >
+                        <span>Slack</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setChannelKind('telegram')}
+                        className={`h-8 px-2.5 text-xs font-medium rounded-lg border flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
+                          channelKind === 'telegram'
+                            ? 'bg-sky-50 dark:bg-sky-950/50 border-sky-400 dark:border-sky-700 text-sky-700 dark:text-sky-300'
+                            : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                        }`}
+                      >
+                        <span>Telegram</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setChannelKind('webhook')}
+                        className={`h-8 px-2.5 text-xs font-medium rounded-lg border flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
+                          channelKind === 'webhook'
+                            ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-400 dark:border-emerald-700 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/60 text-emerald-700'
+                            : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                        }`}
+                      >
+                        <span>通用 Webhook</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Channel Name */}
+                  <div>
+                    <label htmlFor="channel-name" className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                      通道名称
+                    </label>
+                    <input
+                      id="channel-name"
+                      type="text"
+                      value={channelName}
+                      onChange={(e) => setChannelName(e.target.value)}
+                      placeholder="例如：开发团队飞书群 / 生产告警"
+                      className="w-full h-8 px-2.5 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      required
+                    />
+                  </div>
+
+                  {/* Target URL */}
+                  <div>
+                    <label htmlFor="channel-target-url" className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                      目标 Webhook URL
+                    </label>
+                    <input
+                      id="channel-target-url"
+                      type="url"
+                      value={channelTargetUrl}
+                      onChange={(e) => setChannelTargetUrl(e.target.value)}
+                      placeholder={
+                        channelKind === 'feishu'
+                          ? 'https://open.feishu.cn/open-apis/bot/v2/hook/xxx'
+                          : channelKind === 'slack'
+                          ? 'https://hooks.slack.com/services/xxx/xxx/xxx'
+                          : channelKind === 'telegram'
+                          ? 'https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<CHAT_ID>'
+                          : 'https://your-domain.com/api/botd-webhook'
+                      }
+                      className="w-full h-8 px-2.5 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      required
+                    />
+                  </div>
+
+                  {/* Secret (Webhook only or optional) */}
+                  {channelKind === 'webhook' && (
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label htmlFor="channel-secret" className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                          签名密钥 Secret (选填)
+                        </label>
+                        <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                          带 X-Botd-Signature: sha256=... 验签头
+                        </span>
+                      </div>
+                      <input
+                        id="channel-secret"
+                        type="password"
+                        value={channelSecret}
+                        onChange={(e) => setChannelSecret(e.target.value)}
+                        placeholder="选填，用于计算 HMAC-SHA256 签名"
+                        className="w-full h-8 px-2.5 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                  )}
+
+                  {/* Trigger Events */}
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
+                      触发事件（多选）
+                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg p-2 cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                        <input
+                          type="checkbox"
+                          checked={channelEvents.includes('assistant_reply')}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setChannelEvents((prev) => [...prev, 'assistant_reply']);
+                            } else {
+                              setChannelEvents((prev) => prev.filter((k) => k !== 'assistant_reply'));
+                            }
+                          }}
+                          className="rounded text-blue-600 focus:ring-blue-500"
+                        />
+                        <div>
+                          <div className="font-medium text-xs">智能体回复</div>
+                          <div className="text-[11px] text-zinc-400">大模型生成回合响应</div>
+                        </div>
+                      </label>
+
+                      <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg p-2 cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                        <input
+                          type="checkbox"
+                          checked={channelEvents.includes('ask_request')}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setChannelEvents((prev) => [...prev, 'ask_request']);
+                            } else {
+                              setChannelEvents((prev) => prev.filter((k) => k !== 'ask_request'));
+                            }
+                          }}
+                          className="rounded text-blue-600 focus:ring-blue-500"
+                        />
+                        <div>
+                          <div className="font-medium text-xs">botd ask 确认</div>
+                          <div className="text-[11px] text-zinc-400">手机免登录一键点击回调</div>
+                        </div>
+                      </label>
+
+                      <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg p-2 cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                        <input
+                          type="checkbox"
+                          checked={channelEvents.includes('wakeup')}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setChannelEvents((prev) => [...prev, 'wakeup']);
+                            } else {
+                              setChannelEvents((prev) => prev.filter((k) => k !== 'wakeup'));
+                            }
+                          }}
+                          className="rounded text-blue-600 focus:ring-blue-500"
+                        />
+                        <div>
+                          <div className="font-medium text-xs">异步唤醒</div>
+                          <div className="text-[11px] text-zinc-400">外部触发或定时唤醒</div>
+                        </div>
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* Form Actions */}
+                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-200/80 dark:border-zinc-800">
+                    <button
+                      type="button"
+                      onClick={() => setShowAddChannelForm(false)}
+                      className="h-8 px-2.5 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 rounded-lg cursor-pointer"
+                    >
+                      取消
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={channelSubmitting}
+                      className="h-8 px-2.5 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      {channelSubmitting ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin-fast" />
+                          <span>创建中...</span>
+                        </>
+                      ) : (
+                        <span>创建通道</span>
+                      )}
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* Channels List */}
+              {channelsLoading && channels.length === 0 ? (
+                <div className="py-12 flex flex-col items-center justify-center text-zinc-400 gap-2">
+                  <Loader2 className="w-6 h-6 animate-spin-fast text-zinc-500" />
+                  <span className="text-xs">加载出站通道...</span>
+                </div>
+              ) : channels.length === 0 ? (
+                <div className="py-12 text-center border-2 border-dashed border-zinc-200 dark:border-zinc-800 rounded-lg">
+                  <Send className="w-8 h-8 text-zinc-300 dark:text-zinc-700 mx-auto mb-2" />
+                  <p className="text-xs font-medium text-zinc-600 dark:text-zinc-400">暂无出站消息通道</p>
+                  <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1 max-w-sm mx-auto">
+                    支持将智能体回复、交互确认与唤醒通知推送到飞书群、Slack、Telegram 或内部系统。
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {channels.map((ch) => {
+                    const isTesting = testingChannelId === ch.id;
+                    const isToggling = togglingChannelId === ch.id;
+                    const isDeleting = deletingChannelId === ch.id;
+
+                    const kindLabel =
+                      ch.kind === 'feishu'
+                        ? '飞书机器人'
+                        : ch.kind === 'slack'
+                        ? 'Slack'
+                        : ch.kind === 'telegram'
+                        ? 'Telegram'
+                        : 'Webhook';
+
+                    const kindColor =
+                      ch.kind === 'feishu'
+                        ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-900/60'
+                        : ch.kind === 'slack'
+                        ? 'bg-purple-50 dark:bg-purple-950/50 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-900/60'
+                        : ch.kind === 'telegram'
+                        ? 'bg-sky-50 dark:bg-sky-950/50 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-900/60'
+                        : 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/60';
+
+                    return (
+                      <div
+                        key={ch.id}
+                        className={`p-3.5 rounded-lg border transition-all ${
+                          ch.enabled
+                            ? 'bg-white dark:bg-zinc-900/90 border-zinc-200 dark:border-zinc-800'
+                            : 'bg-zinc-50 dark:bg-zinc-900/40 border-zinc-200/60 dark:border-zinc-800/40 opacity-70'
+                        }`}
+                      >
+                        {/* Header: Badge, Name, Controls */}
+                        <div className="flex items-center justify-between gap-2 mb-2">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className={`px-1.5 py-0.5 rounded text-[11px] font-medium border shrink-0 ${kindColor}`}>
+                              {kindLabel}
+                            </span>
+                            <span className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 truncate">
+                              {ch.name}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {/* Enable/Disable toggle */}
+                            <button
+                              type="button"
+                              onClick={() => handleToggleChannel(ch)}
+                              disabled={isToggling}
+                              className={`h-7 px-2 text-[11px] font-medium rounded-lg border transition-colors cursor-pointer ${
+                                ch.enabled
+                                  ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800/60 hover:bg-emerald-100 dark:hover:bg-emerald-900/50'
+                                  : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border-zinc-200 dark:border-zinc-700 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                              }`}
+                              title={ch.enabled ? '点击停用' : '点击启用'}
+                            >
+                              {isToggling ? (
+                                <Loader2 className="w-3 h-3 animate-spin-fast" />
+                              ) : ch.enabled ? (
+                                '已启用'
+                              ) : (
+                                '已停用'
+                              )}
+                            </button>
+
+                            {/* Test Push button */}
+                            <button
+                              type="button"
+                              onClick={() => handleTestChannel(ch)}
+                              disabled={isTesting}
+                              className="h-7 px-2 text-[11px] font-medium rounded-lg border border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/50 transition-colors cursor-pointer flex items-center gap-1"
+                              title="向目标 URL 发送一条测试消息"
+                            >
+                              {isTesting ? (
+                                <Loader2 className="w-3 h-3 animate-spin-fast text-blue-500" />
+                              ) : (
+                                <Send className="w-3 h-3" />
+                              )}
+                              <span>测试推送</span>
+                            </button>
+
+                            {/* Delete button */}
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteChannel(ch)}
+                              disabled={isDeleting}
+                              className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 rounded-lg transition-colors cursor-pointer disabled:opacity-40"
+                              title="删除通道"
+                            >
+                              {isDeleting ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin-fast text-rose-500" />
+                              ) : (
+                                <Trash2 className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* URL row */}
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <span
+                            className="flex-1 min-w-0 h-7 px-2 text-[11px] font-mono bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg text-zinc-500 dark:text-zinc-400 truncate flex items-center select-all"
+                            title={ch.targetUrl}
+                          >
+                            {ch.targetUrl}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleCopyUrl(ch.id, ch.targetUrl)}
+                            className="h-7 w-7 rounded-lg border border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 dark:text-zinc-400 flex items-center justify-center shrink-0 cursor-pointer"
+                            title={copiedUrlId === ch.id ? '已复制' : '复制目标 URL'}
+                          >
+                            {copiedUrlId === ch.id ? (
+                              <Check className="w-3 h-3 text-emerald-500" />
+                            ) : (
+                              <Copy className="w-3 h-3" />
+                            )}
+                          </button>
+                        </div>
+
+                        {/* Events and status */}
+                        <div className="flex items-center justify-between gap-2 pt-2 border-t border-zinc-100 dark:border-zinc-800/60 text-[11px] flex-wrap">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-zinc-400">推送事件:</span>
+                            {ch.events.map((ev) => (
+                              <span
+                                key={ev}
+                                className="px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 font-medium"
+                              >
+                                {ev === 'assistant_reply'
+                                  ? '智能体回复'
+                                  : ev === 'ask_request'
+                                  ? 'botd ask 交互'
+                                  : '异步唤醒'}
+                              </span>
+                            ))}
+                          </div>
+
+                          {ch.lastTriggeredAt && (
+                            <div className="text-zinc-400 dark:text-zinc-500 flex items-center gap-1">
+                              <Clock className="w-3 h-3" />
+                              <span>上次推送: {new Date(ch.lastTriggeredAt).toLocaleString()}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </div>
