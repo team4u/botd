@@ -21,6 +21,8 @@ import type {
   MessageSearchHit,
   NodeUpgradeCheckResult,
   NodeUpgradeResult,
+  SessionShareRecord,
+  SharedSessionSnapshot,
 } from '@botd/protocol';
 import type { UserInfo } from './types.js';
 
@@ -498,6 +500,23 @@ export const api = {
     });
   },
 
+  // Share links
+  async getSessionShare(sessionId: string): Promise<{ share: SessionShareRecord | null }> {
+    return getSessionShare(sessionId);
+  },
+
+  async createSessionShare(sessionId: string, regenerate?: boolean): Promise<SessionShareRecord> {
+    return createSessionShare(sessionId, regenerate);
+  },
+
+  async revokeSessionShare(sessionId: string): Promise<{ ok: boolean }> {
+    return revokeSessionShare(sessionId);
+  },
+
+  async getPublicShare(token: string): Promise<SharedSessionSnapshot> {
+    return getPublicShare(token);
+  },
+
   // Artifacts
   async uploadArtifact(
     sessionId: string,
@@ -671,6 +690,27 @@ export function subscribeSessionEvents(
   return () => {
     eventSource.close();
   };
+}
+
+export async function getSessionShare(sessionId: string): Promise<{ share: SessionShareRecord | null }> {
+  return request<{ share: SessionShareRecord | null }>(`/api/sessions/${encodeURIComponent(sessionId)}/share`);
+}
+
+export async function createSessionShare(sessionId: string, regenerate?: boolean): Promise<SessionShareRecord> {
+  return request<SessionShareRecord>(`/api/sessions/${encodeURIComponent(sessionId)}/share`, {
+    method: 'POST',
+    body: JSON.stringify({ regenerate: Boolean(regenerate) }),
+  });
+}
+
+export async function revokeSessionShare(sessionId: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/share`, {
+    method: 'DELETE',
+  });
+}
+
+export async function getPublicShare(token: string): Promise<SharedSessionSnapshot> {
+  return request<SharedSessionSnapshot>(`/api/public/shares/${encodeURIComponent(token)}`);
 }
 
 /**

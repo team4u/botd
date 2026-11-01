@@ -22,6 +22,7 @@ import { GroupSettingsModal } from './components/GroupSettingsModal';
 import { NodesBotsView } from './components/NodesBotsView';
 import { SettingsModal } from './components/SettingsModal';
 import { UsersModal } from './components/UsersModal';
+import { SharedSessionView } from './components/SharedSessionView';
 import { ToastContainer } from './components/Toast';
 import { Loader2, Menu, Bot } from 'lucide-react';
 import {
@@ -95,6 +96,33 @@ const playNotificationBeep = () => {
 };
 
 export const App: React.FC = () => {
+  // 检测公开分享链接参数（?share=token 或 #?share=token）
+  const [shareToken, setShareToken] = useState<string | null>(() => {
+    return (
+      new URLSearchParams(window.location.search).get('share') ||
+      new URLSearchParams(window.location.hash.replace(/^#[?]?/, '')).get('share')
+    );
+  });
+
+  useEffect(() => {
+    const handleUrlChange = () => {
+      const token =
+        new URLSearchParams(window.location.search).get('share') ||
+        new URLSearchParams(window.location.hash.replace(/^#[?]?/, '')).get('share');
+      setShareToken(token);
+    };
+    window.addEventListener('popstate', handleUrlChange);
+    window.addEventListener('hashchange', handleUrlChange);
+    return () => {
+      window.removeEventListener('popstate', handleUrlChange);
+      window.removeEventListener('hashchange', handleUrlChange);
+    };
+  }, []);
+
+  if (shareToken) {
+    return <SharedSessionView token={shareToken} />;
+  }
+
   // Auth state
   const [authChecking, setAuthChecking] = useState(true);
   const [authenticated, setAuthenticated] = useState(false);
