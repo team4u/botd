@@ -104,7 +104,7 @@ function validateSessionMembers(
   if (!leadBot) {
     return { ok: false, error: `Lead bot ${leadBotIdInput} not found`, status: 400 };
   }
-  if (db.getNodeOwner(leadBot.nodeId) !== userId) {
+  if (!db.canUserUseBot(leadBotIdInput, userId)) {
     return { ok: false, error: 'Forbidden', status: 403 };
   }
 
@@ -119,7 +119,7 @@ function validateSessionMembers(
     if (!memberBot) {
       return { ok: false, error: `Member bot ${mid} not found`, status: 400 };
     }
-    if (db.getNodeOwner(memberBot.nodeId) !== userId) {
+    if (!db.canUserUseBot(mid, userId)) {
       return { ok: false, error: 'Forbidden', status: 403 };
     }
   }
@@ -530,6 +530,10 @@ export function createHub(options?: HubOptions): HubInstance {
   });
 
   // 7. Bot management (Node is authoritative)
+  app.get('/api/bots', (c) => {
+    return c.json(db.getAccessibleBots(c.get('user').id));
+  });
+
   app.post('/api/bots', async (c) => {
     const body = await c.req.json<SaveBotInput>().catch(() => null);
     if (!isBotConfig(body) || typeof body.systemMd !== 'string') {
@@ -554,11 +558,52 @@ export function createHub(options?: HubOptions): HubInstance {
       thinkingLevel: body.thinkingLevel ?? 'medium',
       enabledSkills: Array.isArray(body.enabledSkills) ? body.enabledSkills : [],
       enabledExtensions: Array.isArray(body.enabledExtensions) ? body.enabledExtensions : [],
+      visibility: body.visibility === 'team' ? 'team' : 'private',
       updatedAt: new Date().toISOString(),
     };
 
     try {
       await nodeRpc.rpc.saveBot(botConfig, body.systemMd || '');
+    } catch (err: any) {
+      return c.json({ error: err?.message || 'Failed to save bot on node' }, 500);
+    }
+
+    db.saveBot(botConfig);
+    return c.json(botConfig);
+  });
+
+  app.post('/api/nodes/:nodeId/bots', async (c) => {
+    const nodeId = c.req.param('nodeId');
+    const body = await c.req.json<SaveBotInput>().catch(() => null);
+    if (!body) return c.json({ error: 'Invalid BOT configuration' }, 400);
+    const bodyWithNode = { ...body, nodeId };
+    if (!isBotConfig(bodyWithNode) || typeof bodyWithNode.systemMd !== 'string') {
+      return c.json({ error: 'Invalid BOT configuration' }, 400);
+    }
+    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+    if (!nodeRpc.ok) return nodeRpc.response;
+
+    const existing = db.getBot(bodyWithNode.id);
+    if (existing && existing.nodeId !== nodeId) {
+      return c.json({ error: `Bot id "${bodyWithNode.id}" already owned by node "${existing.nodeId}"` }, 409);
+    }
+
+    const botConfig: BotConfig = {
+      id: bodyWithNode.id,
+      nodeId,
+      name: bodyWithNode.name,
+      description: bodyWithNode.description || '',
+      modelProvider: bodyWithNode.modelProvider,
+      modelId: bodyWithNode.modelId,
+      thinkingLevel: bodyWithNode.thinkingLevel ?? 'medium',
+      enabledSkills: Array.isArray(bodyWithNode.enabledSkills) ? bodyWithNode.enabledSkills : [],
+      enabledExtensions: Array.isArray(bodyWithNode.enabledExtensions) ? bodyWithNode.enabledExtensions : [],
+      visibility: bodyWithNode.visibility === 'team' ? 'team' : 'private',
+      updatedAt: new Date().toISOString(),
+    };
+
+    try {
+      await nodeRpc.rpc.saveBot(botConfig, bodyWithNode.systemMd || '');
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to save bot on node' }, 500);
     }
@@ -588,6 +633,42 @@ export function createHub(options?: HubOptions): HubInstance {
       ...existing,
       ...botPatch,
       enabledExtensions: Array.isArray(body.enabledExtensions) ? body.enabledExtensions : (existing.enabledExtensions ?? []),
+      visibility: body.visibility === 'team' ? 'team' : (body.visibility === 'private' ? 'private' : (existing.visibility ?? 'private')),
+      id: botId,
+      nodeId: existing.nodeId,
+      updatedAt: new Date().toISOString(),
+    };
+
+    try {
+      const systemMd = requestedSystem ?? await rpc.readFile({ kind: 'system', botId, id: 'SYSTEM.md' });
+      await rpc.saveBot(botConfig, systemMd);
+    } catch (err: any) {
+      return c.json({ error: err?.message || 'Failed to save bot on node' }, 500);
+    }
+
+    db.saveBot(botConfig);
+    return c.json(botConfig);
+  });
+
+  app.put('/api/nodes/:nodeId/bots/:botId', async (c) => {
+    const botId = c.req.param('botId');
+    const nodeId = c.req.param('nodeId');
+    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
+    if (!botRpc.ok) return botRpc.response;
+    const { bot: existing, rpc } = botRpc;
+
+    const body = await c.req.json<Partial<BotConfig> & { systemMd?: string }>().catch(() => null);
+    if (!isObject(body) || !isBotConfig({ ...existing, ...body, id: botId, nodeId })
+      || (body.systemMd !== undefined && typeof body.systemMd !== 'string')) {
+      return c.json({ error: 'Invalid BOT configuration' }, 400);
+    }
+
+    const { systemMd: requestedSystem, ...botPatch } = body;
+    const botConfig: BotConfig = {
+      ...existing,
+      ...botPatch,
+      enabledExtensions: Array.isArray(body.enabledExtensions) ? body.enabledExtensions : (existing.enabledExtensions ?? []),
+      visibility: body.visibility === 'team' ? 'team' : (body.visibility === 'private' ? 'private' : (existing.visibility ?? 'private')),
       id: botId,
       nodeId: existing.nodeId,
       updatedAt: new Date().toISOString(),
@@ -770,8 +851,12 @@ export function createHub(options?: HubOptions): HubInstance {
     return c.json(hits);
   });
 
+  app.get('/api/approvals/pending', (c) => {
+    return c.json(db.listPendingAsksForUser(c.get('user').id));
+  });
+
   app.get('/api/sessions', (c) => {
-    const sessions = db.getAllSessions(c.get('user').id);
+    const sessions = db.getAccessibleSessions(c.get('user').id);
     return c.json(
       sessions.map((s) => {
         if (s.status === 'running') {
@@ -964,6 +1049,14 @@ export function createHub(options?: HubOptions): HubInstance {
       return c.json({ error: cmdResult.error }, 400);
     }
 
+    const user = c.get('user');
+    const participants = db.listSessionParticipants(id);
+    const isMultiUser = participants.length > 0 || (session.ownerId !== undefined && user.id !== session.ownerId);
+
+    const messageContent = isMultiUser && !content.startsWith(`[User: ${user.username}]`)
+      ? `[User: ${user.username}]: ${content}`
+      : content;
+
     const mentions = cmdResult.targetBotId
       ? [cmdResult.targetBotId]
       : (cmdResult.isCommand ? [] : extractMentions(content, validBots));
@@ -972,7 +1065,7 @@ export function createHub(options?: HubOptions): HubInstance {
       id: `msg_${randomUUID()}`,
       sessionId: id,
       role: 'user',
-      content,
+      content: messageContent,
       mentions,
       attachments,
     });
@@ -982,7 +1075,7 @@ export function createHub(options?: HubOptions): HubInstance {
       message: msgResult.message,
     });
 
-    router.handleUserMessage(id, msgResult.message.id, content, cmdResult.isCommand ? {
+    router.handleUserMessage(id, msgResult.message.id, messageContent, cmdResult.isCommand ? {
       commandText: cmdResult.commandText!,
       targetBotId: cmdResult.targetBotId,
     } : undefined);
@@ -1107,6 +1200,9 @@ export function createHub(options?: HubOptions): HubInstance {
     const sRes = resolveOwnedSession(c, db, id);
     if (!sRes.ok) return sRes.response;
     const session = sRes.session;
+    if (db.getSessionOwner(id) !== c.get('user').id) {
+      return c.json({ error: 'Only owner can delete session' }, 403);
+    }
     if (session.status === 'running') {
       return c.json({ error: 'Stop the session before deleting it' }, 409);
     }
@@ -1117,6 +1213,58 @@ export function createHub(options?: HubOptions): HubInstance {
     // resetMemberSessions 内部要查会话成员，必须在 deleteSession 之前调用
     await router.resetMemberSessions(id);
     artifacts.deleteSession(id);
+    return c.json({ ok: true });
+  });
+
+  // Session Participants API
+  app.get('/api/sessions/:id/participants', (c) => {
+    const id = c.req.param('id');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    return c.json(db.listSessionParticipants(id));
+  });
+
+  app.post('/api/sessions/:id/participants', async (c) => {
+    const id = c.req.param('id');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    if (db.getSessionOwner(id) !== c.get('user').id) {
+      return c.json({ error: 'Only session owner can add participants' }, 403);
+    }
+    const body = await c.req.json<{ userId?: string; username?: string; role?: 'owner' | 'member' }>().catch(() => null);
+    if (!body || (!body.userId && !body.username)) {
+      return c.json({ error: 'userId or username required' }, 400);
+    }
+    const targetUser = body.username ? db.getUserByUsername(body.username) : db.getUser(body.userId!);
+    if (!targetUser) {
+      return c.json({ error: 'User not found' }, 404);
+    }
+    const role = body.role === 'owner' ? 'owner' : 'member';
+    db.addSessionParticipant(id, targetUser.id, role);
+    return c.json({
+      ok: true,
+      participant: {
+        sessionId: id,
+        userId: targetUser.id,
+        username: targetUser.username,
+        role,
+        joinedAt: new Date().toISOString(),
+      },
+    });
+  });
+
+  app.delete('/api/sessions/:id/participants/:userId', (c) => {
+    const id = c.req.param('id');
+    const userId = c.req.param('userId');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    const callerId = c.get('user').id;
+    const isOwner = db.getSessionOwner(id) === callerId;
+    const isSelf = callerId === userId;
+    if (!isOwner && !isSelf) {
+      return c.json({ error: 'Forbidden' }, 403);
+    }
+    db.removeSessionParticipant(id, userId);
     return c.json({ ok: true });
   });
 

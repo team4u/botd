@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  AskPreviewType,
+  IncomingArtifactRef,
   MessageRecord,
   PendingAskRecord,
   SessionRecord,
@@ -43,6 +45,7 @@ export interface PreparedTurnItem {
   incrementalText: string;
   deliveredSnapshotRowid: number;
   attachments: NonNullable<MessageRecord['attachments']>;
+  incomingArtifacts: IncomingArtifactRef[];
 }
 
 export interface SessionRuntimeState {
@@ -166,7 +169,7 @@ export class GroupRouter {
       record: PendingAskRecord;
       resolve: (answer: string) => void;
       reject: (err: Error) => void;
-      timer: NodeJS.Timeout;
+      timer?: NodeJS.Timeout;
     }
   >();
   private closed = false;
@@ -231,7 +234,7 @@ export class GroupRouter {
     const bot = this.db.getBot(botId);
     if (!session || !bot || ![session.leadBotId, ...session.memberBotIds].includes(botId)) return false;
     const ownerId = this.getSessionOwner(sessionId, session);
-    return ownerId !== undefined && this.db.getNodeOwner(bot.nodeId) === ownerId;
+    return ownerId !== undefined && this.db.canUserUseBot(botId, ownerId);
   }
 
   private getOrCreateState(sessionId: string): SessionRuntimeState {
@@ -272,6 +275,28 @@ export class GroupRouter {
 
   onNodeOnline(nodeId: string): void {
     if (this.closed || this.draining) return;
+
+    // Check store-and-forward queue
+    const pendingTasks = this.db.listPendingOutboundTasks(nodeId);
+    for (const task of pendingTasks) {
+      this.db.markOutboundTaskDispatched(task.id);
+      const state = this.getOrCreateState(task.sessionId);
+      if (state.queue.length === 0 && !state.isRunning) {
+        let payload: { generation?: number; wakeupMessage?: string; commandText?: string } = {};
+        try {
+          payload = JSON.parse(task.payloadJson);
+        } catch {}
+        state.queue.push({
+          botId: task.botId,
+          chainBudget: new ChainBudget(),
+          generation: state.generation,
+          wakeupMessage: payload.wakeupMessage,
+          commandText: payload.commandText,
+        });
+        this.processQueue(task.sessionId).catch(() => {});
+      }
+    }
+
     for (const [sessionId, state] of this.states.entries()) {
       if (state.queue.length > 0 && !state.isRunning) {
         const frontItem = state.queue[0];
@@ -295,6 +320,8 @@ export class GroupRouter {
     prompt: string;
     options?: string[];
     timeoutSeconds?: number;
+    previewType?: AskPreviewType;
+    previewContent?: string;
   }): Promise<{ answer: string }> {
     if (this.closed) throw new Error('Hub is shutting down');
     const session = this.db.getSession(input.sessionId);
@@ -302,8 +329,11 @@ export class GroupRouter {
 
     const askId = `ask_${randomUUID()}`;
     const now = new Date();
-    const timeoutSec = input.timeoutSeconds && input.timeoutSeconds > 0 ? input.timeoutSeconds : 300;
-    const expiresAt = new Date(now.getTime() + timeoutSec * 1000).toISOString();
+    const isIndefinite = input.timeoutSeconds === 0;
+    const timeoutSec = isIndefinite
+      ? 0
+      : (input.timeoutSeconds && input.timeoutSeconds > 0 ? input.timeoutSeconds : 300);
+    const expiresAt = isIndefinite ? undefined : new Date(now.getTime() + timeoutSec * 1000).toISOString();
 
     const record: PendingAskRecord = {
       id: askId,
@@ -313,20 +343,25 @@ export class GroupRouter {
       options: input.options ?? [],
       status: 'pending',
       createdAt: now.toISOString(),
-      expiresAt,
+      ...(expiresAt ? { expiresAt } : {}),
+      ...(input.previewType ? { previewType: input.previewType } : {}),
+      ...(input.previewContent ? { previewContent: input.previewContent } : {}),
     };
     this.db.savePendingAsk(record);
 
     return new Promise<{ answer: string }>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const entry = this.pendingAsks.get(askId);
-        if (entry) {
-          entry.record.status = 'expired';
-          this.db.updatePendingAskStatus(askId, 'expired');
-          this.pendingAsks.delete(askId);
-          entry.reject(new Error(`Interactive ask timed out after ${timeoutSec}s`));
-        }
-      }, timeoutSec * 1000);
+      let timer: NodeJS.Timeout | undefined;
+      if (!isIndefinite) {
+        timer = setTimeout(() => {
+          const entry = this.pendingAsks.get(askId);
+          if (entry) {
+            entry.record.status = 'expired';
+            this.db.updatePendingAskStatus(askId, 'expired');
+            this.pendingAsks.delete(askId);
+            entry.reject(new Error(`Interactive ask timed out after ${timeoutSec}s`));
+          }
+        }, timeoutSec * 1000);
+      }
 
       this.pendingAsks.set(askId, {
         record,
@@ -368,7 +403,7 @@ export class GroupRouter {
       if (entry.record.sessionId !== sessionId) return undefined;
       if (entry.record.status !== 'pending') return undefined;
 
-      clearTimeout(entry.timer);
+      if (entry.timer) clearTimeout(entry.timer);
       entry.record.status = 'answered';
       entry.record.answer = answer;
       this.db.updatePendingAskStatus(askId, 'answered', answer);
@@ -548,7 +583,7 @@ export class GroupRouter {
     // Reject any pending asks
     for (const [askId, entry] of this.pendingAsks.entries()) {
       if (entry.record.sessionId === sessionId) {
-        clearTimeout(entry.timer);
+        if (entry.timer) clearTimeout(entry.timer);
         this.pendingAsks.delete(askId);
         entry.record.status = 'expired';
         this.db.updatePendingAskStatus(askId, 'expired');
@@ -623,6 +658,7 @@ export class GroupRouter {
     incrementalText: string;
     deliveredSnapshotRowid: number;
     attachments: NonNullable<MessageRecord['attachments']>;
+    incomingArtifacts: IncomingArtifactRef[];
   } {
     const lastRowid = session.cursorMap[item.botId] ?? 0;
     const rawIncResult = this.db.getIncrementalMessages(session.id, lastRowid);
@@ -635,10 +671,24 @@ export class GroupRouter {
     const deliveredSnapshotRowid =
       rawIncResult.length > 0 ? Math.max(...rawIncResult.map((r) => r.rowid)) : lastRowid;
     const attachments = incResult.flatMap((r) => r.message.attachments ?? []);
+
+    const sessionArtifacts = this.db.listSessionArtifacts(session.id);
+    const incomingArtifacts: IncomingArtifactRef[] = sessionArtifacts
+      .filter((art) => art.senderBotId !== item.botId)
+      .map((art) => ({
+        id: art.id,
+        filename: art.filename,
+        mimeType: art.mimeType,
+        sizeBytes: art.sizeBytes,
+        url: `/api/artifacts/${art.id}/download`,
+        ...(art.senderBotId ? { fromBotName: art.senderBotId } : {}),
+      }));
+
     return {
       incrementalText,
       deliveredSnapshotRowid,
       attachments,
+      incomingArtifacts,
     };
   }
 
@@ -707,6 +757,7 @@ export class GroupRouter {
         incrementalMessages: prep.incrementalText,
         ...(item.commandText ? { commandText: item.commandText } : {}),
         ...(prep.attachments.length > 0 ? { attachments: prep.attachments } : {}),
+        ...(prep.incomingArtifacts.length > 0 ? { incomingArtifacts: prep.incomingArtifacts } : {}),
       });
     } catch (err: any) {
       if (turnGen !== state.generation) return 'cancelled';
@@ -866,7 +917,7 @@ export class GroupRouter {
             break;
           }
           const botOwner = this.db.getNodeOwner(bot.nodeId);
-          if (sessionOwner && botOwner && botOwner !== sessionOwner) {
+          if (sessionOwner && botOwner && botOwner !== sessionOwner && !this.db.canUserUseBot(item.botId, sessionOwner)) {
             console.warn(`[group-router] Skipping turn for bot @${item.botId}: owner mismatch (session: ${sessionOwner}, bot: ${botOwner})`);
             continue;
           }
@@ -880,7 +931,7 @@ export class GroupRouter {
             const bot = this.db.getBot(item.botId);
             if (!bot) continue;
             const botOwner = this.db.getNodeOwner(bot.nodeId);
-            if (sessionOwner && botOwner && botOwner !== sessionOwner) continue;
+            if (sessionOwner && botOwner && botOwner !== sessionOwner && !this.db.canUserUseBot(item.botId, sessionOwner)) continue;
             activeBatch.push(item);
           }
         }
@@ -897,6 +948,22 @@ export class GroupRouter {
           }
         }
         if (anyOffline) {
+          for (const item of activeBatch) {
+            const bot = this.db.getBot(item.botId);
+            if (bot && !this.connections.getNodeRpc(bot.nodeId)) {
+              this.db.enqueueOutboundTask({
+                nodeId: bot.nodeId,
+                botId: item.botId,
+                sessionId,
+                taskType: 'turn',
+                payload: {
+                  generation: item.generation,
+                  wakeupMessage: item.wakeupMessage,
+                  commandText: item.commandText,
+                },
+              });
+            }
+          }
           state.queue.unshift(...activeBatch);
           this.db.updateSessionStatus(sessionId, 'queued', undefined);
           this.sseHub.broadcast(sessionId, {
@@ -1007,7 +1074,7 @@ export class GroupRouter {
     this.closed = true;
     this.draining = true;
     for (const entry of this.pendingAsks.values()) {
-      clearTimeout(entry.timer);
+      if (entry.timer) clearTimeout(entry.timer);
       entry.reject(new Error('Hub closed'));
     }
     this.pendingAsks.clear();

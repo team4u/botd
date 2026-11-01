@@ -95,7 +95,7 @@ export function resolveOwnedSession(
   if (!session) {
     return { ok: false as const, response: c.json({ error: 'Session not found' }, 404) };
   }
-  if (db.getSessionOwner(sessionId) !== c.get('user').id) {
+  if (!db.canUserAccessSession(sessionId, c.get('user').id)) {
     return { ok: false as const, response: c.json({ error: 'Forbidden' }, 403) };
   }
   return { ok: true as const, session };

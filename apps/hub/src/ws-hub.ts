@@ -161,10 +161,14 @@ export class NodeConnectionManager {
           for (const cached of this.db.getBotsForNode(nodeId)) {
             if (!botIds.has(cached.id)) this.db.deleteBot(cached.id);
           }
-          for (const bot of info.bots) this.db.saveBot({
-            ...bot,
-            enabledExtensions: bot.enabledExtensions ?? [],
-          });
+          for (const bot of info.bots) {
+            const existingBot = this.db.getBot(bot.id);
+            this.db.saveBot({
+              ...bot,
+              visibility: bot.visibility ?? existingBot?.visibility ?? 'private',
+              enabledExtensions: bot.enabledExtensions ?? [],
+            });
+          }
         });
 
         this.router?.onNodeOnline?.(nodeId);

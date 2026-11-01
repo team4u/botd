@@ -16,6 +16,8 @@ import {
   Eye,
   EyeOff,
   Search,
+  Lock,
+  Users,
 } from 'lucide-react';
 import { api } from '../api';
 import { SearchableSelect } from './SearchableSelect';
@@ -78,6 +80,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | ''>('medium');
   const [enabledSkills, setEnabledSkills] = useState<string[]>([]);
   const [enabledExtensions, setEnabledExtensions] = useState<string[]>([]);
+  const [visibility, setVisibility] = useState<'private' | 'team'>('private');
   const [systemMd, setSystemMd] = useState(DEFAULT_SYSTEM_MD);
   const [memoryMd, setMemoryMd] = useState('');
   // 技能搜索：实时过滤，已勾选技能始终可见
@@ -177,6 +180,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       setThinkingLevel(bot.thinkingLevel || '');
       setEnabledSkills(bot.enabledSkills || []);
       setEnabledExtensions(bot.enabledExtensions || []);
+      setVisibility(bot.visibility === 'team' ? 'team' : 'private');
       setIsCustomProvider(false);
       setCustomProviderInput('');
 
@@ -229,6 +233,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       setThinkingLevel('medium');
       setEnabledSkills([]);
       setEnabledExtensions([]);
+      setVisibility('private');
       setIsCustomProvider(false);
       setCustomProviderInput('');
       setSystemMd(DEFAULT_SYSTEM_MD);
@@ -436,6 +441,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       thinkingLevel: thinkingLevel || undefined,
       enabledSkills,
       enabledExtensions,
+      visibility,
       systemMd,
     };
 
@@ -646,6 +652,44 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                         className="w-full h-8 px-2.5 text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
                       />
                     </div>
+                  </div>
+
+                  {/* Visibility setting */}
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                      可见范围
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setVisibility('private')}
+                        className={`h-8 px-2.5 text-xs rounded-lg font-medium border flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                          visibility === 'private'
+                            ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-transparent'
+                            : 'border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900'
+                        }`}
+                      >
+                        <Lock className="w-3.5 h-3.5" />
+                        <span>仅自己可见</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setVisibility('team')}
+                        className={`h-8 px-2.5 text-xs rounded-lg font-medium border flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                          visibility === 'team'
+                            ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-transparent'
+                            : 'border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900'
+                        }`}
+                      >
+                        <Users className="w-3.5 h-3.5" />
+                        <span>团队共享</span>
+                      </button>
+                    </div>
+                    <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
+                      {visibility === 'team'
+                        ? '团队成员可将此 BOT 拉入群聊、发起单聊或子任务委派'
+                        : '仅限节点创建者本人可见与使用'}
+                    </p>
                   </div>
 
                   {/* Model Provider & Model Section - Visual Noise Reduced */}
