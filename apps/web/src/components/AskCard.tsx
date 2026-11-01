@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { HelpCircle, Loader2, Send, CheckCircle2 } from 'lucide-react';
+import { HelpCircle, Loader2, Send, CheckCircle2, ChevronDown } from 'lucide-react';
 import type { PendingAskRecord, BotConfig } from '@botd/protocol';
 
 export interface AskCardProps {
@@ -13,6 +13,11 @@ export const AskCard: React.FC<AskCardProps> = ({ ask, bot, onRespond }) => {
   const [submitting, setSubmitting] = useState(false);
   const [chosenOption, setChosenOption] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const hasPreview = Boolean(ask.previewContent && ask.previewContent.trim().length > 0);
+  const [previewExpanded, setPreviewExpanded] = useState(() =>
+    Boolean(ask.previewContent && ask.previewContent.length <= 4000)
+  );
 
   const isAnswered = ask.status === 'answered' || Boolean(ask.answer);
   const botId = bot?.id || ask.botId;
@@ -40,6 +45,8 @@ export const AskCard: React.FC<AskCardProps> = ({ ask, bot, onRespond }) => {
     handleRespond(customAnswer);
   };
 
+  const previewBadge = (ask.previewType || 'text').toUpperCase();
+
   return (
     <div className="rounded-xl border border-blue-200 dark:border-blue-900/60 bg-blue-50/60 dark:bg-blue-950/30 p-3 text-xs space-y-2.5">
       {/* Header */}
@@ -61,6 +68,57 @@ export const AskCard: React.FC<AskCardProps> = ({ ask, bot, onRespond }) => {
       <div className="p-2.5 rounded-lg bg-white/70 dark:bg-zinc-900/50 border border-blue-100 dark:border-blue-900/40 text-xs text-zinc-800 dark:text-zinc-200 leading-relaxed font-medium">
         {ask.prompt}
       </div>
+
+      {/* Collapsible preview section */}
+      {hasPreview && (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() => setPreviewExpanded((v) => !v)}
+              className="flex items-center gap-1 text-[11px] font-medium text-blue-700 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 transition-colors cursor-pointer"
+            >
+              <ChevronDown
+                className={`w-3.5 h-3.5 transition-transform duration-200 ${
+                  previewExpanded ? '' : '-rotate-90'
+                }`}
+              />
+              <span>{previewExpanded ? '收起预览' : '展开预览'}</span>
+            </button>
+            <span className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300">
+              {previewBadge}
+            </span>
+          </div>
+
+          {previewExpanded && (
+            <div className="overflow-hidden rounded-lg border border-blue-100 dark:border-blue-900/40 bg-white/90 dark:bg-zinc-950/90">
+              {ask.previewType === 'diff' ? (
+                <div className="font-mono text-[11px] leading-relaxed p-2 overflow-x-auto max-h-80 overflow-y-auto select-text">
+                  {ask.previewContent!.split('\n').map((line, idx) => {
+                    let lineClass = 'text-zinc-700 dark:text-zinc-300';
+                    if (line.startsWith('+')) {
+                      lineClass = 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300';
+                    } else if (line.startsWith('-')) {
+                      lineClass = 'bg-rose-500/10 text-rose-700 dark:text-rose-300';
+                    } else if (line.startsWith('@@')) {
+                      lineClass = 'text-blue-600 dark:text-blue-400 font-semibold';
+                    }
+                    return (
+                      <div key={idx} className={`px-1.5 py-0.5 whitespace-pre-wrap break-all ${lineClass}`}>
+                        {line || '\u00A0'}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <pre className="font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all overflow-x-auto max-h-80 overflow-y-auto p-2.5 text-zinc-800 dark:text-zinc-200 select-text">
+                  {ask.previewContent}
+                </pre>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Error message */}
       {error && (

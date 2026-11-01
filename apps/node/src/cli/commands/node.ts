@@ -3,7 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { Command, Option } from 'commander';
-import { parseDelayDuration, type BgJobRecord, type NodeUpgradeResult } from '@botd/protocol';
+import { parseDelayDuration, type BgJobRecord, type NodeUpgradeResult, type AskPreviewType } from '@botd/protocol';
 import { cliAction, readGlobals } from '../context.js';
 import { CliError } from '../errors.js';
 import { writeNodeIdentity, getDaemonSocketPath } from '../../storage.js';
@@ -89,7 +89,9 @@ export async function postJsonOverSocket<T>(
         });
       },
     );
-    req.setTimeout(timeoutMs, () => req.destroy(new Error('Daemon request timed out')));
+    if (timeoutMs > 0) {
+      req.setTimeout(timeoutMs, () => req.destroy(new Error('Daemon request timed out')));
+    }
     req.on('error', (err) => reject(err));
     req.write(data);
     req.end();
@@ -734,9 +736,12 @@ export function registerNodeCommands(program: Command): void {
     .command('ask <prompt>')
     .description('Ask the user an interactive question in the active session and wait for their response')
     .option('--options <items>', 'Comma-separated choices (e.g. "确认,取消")')
-    .option('--timeout <seconds>', 'Timeout in seconds (default 300)', '300')
+    .option('--timeout <seconds>', 'Timeout in seconds (default 300, 0 for infinite)', '300')
     .option('--session <id>', 'Session ID (or env BOTD_SESSION_ID)')
     .option('--bot <id>', 'Bot ID (or env BOTD_BOT_ID)')
+    .option('--file <path>', 'File to attach as preview (diff, markdown, or text)')
+    .option('--diff', 'Set preview type to diff (reads stdin if --file is omitted)')
+    .option('--stdin', 'Read preview content from stdin')
     .action(
       (prompt: string, options: Record<string, unknown>, command: Command) =>
         cliAction(async () => {
@@ -745,15 +750,89 @@ export function registerNodeCommands(program: Command): void {
           const sessionId = (options.session as string | undefined) || process.env.BOTD_SESSION_ID;
           const botId = (options.bot as string | undefined) || process.env.BOTD_BOT_ID;
           const rawOptions = options.options as string | undefined;
-          const timeoutSeconds = Number(options.timeout);
+          const rawTimeout = options.timeout as string | undefined;
+          const timeoutSeconds = rawTimeout !== undefined ? Number(rawTimeout) : 300;
+          const filePath = options.file as string | undefined;
+          const isDiff = Boolean(options.diff);
+          const isStdin = Boolean(options.stdin);
 
           if (!sessionId || !botId) {
             throw new CliError('Missing --session or --bot (or env BOTD_SESSION_ID / BOTD_BOT_ID)');
           }
 
+          const MAX_PREVIEW_BYTES = 256 * 1024;
+          let previewContent: string | undefined;
+          let previewType: AskPreviewType | undefined;
+
+          if (filePath) {
+            try {
+              const fileData = await fs.promises.readFile(path.resolve(filePath), 'utf8');
+              if (Buffer.byteLength(fileData, 'utf8') > MAX_PREVIEW_BYTES) {
+                previewContent = Buffer.from(fileData, 'utf8').subarray(0, MAX_PREVIEW_BYTES).toString('utf8');
+              } else {
+                previewContent = fileData;
+              }
+            } catch (err: unknown) {
+              throw new CliError(`Failed to read preview file: ${err instanceof Error ? err.message : String(err)}`);
+            }
+            if (isDiff || /\.(diff|patch)$/i.test(filePath)) {
+              previewType = 'diff';
+            } else if (/\.md$/i.test(filePath)) {
+              previewType = 'markdown';
+            } else {
+              previewType = 'text';
+            }
+          } else if (isDiff || isStdin) {
+            previewType = isDiff ? 'diff' : 'text';
+            if (!process.stdin.isTTY) {
+              try {
+                previewContent = await new Promise<string>((resolve, reject) => {
+                  const chunks: Buffer[] = [];
+                  let totalBytes = 0;
+                  const onData = (chunk: Buffer | string) => {
+                    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+                    chunks.push(buf);
+                    totalBytes += buf.length;
+                    if (totalBytes >= MAX_PREVIEW_BYTES) {
+                      process.stdin.removeListener('data', onData);
+                      process.stdin.removeListener('end', onEnd);
+                      process.stdin.removeListener('error', onError);
+                      process.stdin.pause();
+                      resolve(Buffer.concat(chunks).subarray(0, MAX_PREVIEW_BYTES).toString('utf8'));
+                    }
+                  };
+                  const onEnd = () => {
+                    process.stdin.removeListener('data', onData);
+                    process.stdin.removeListener('error', onError);
+                    resolve(Buffer.concat(chunks).subarray(0, MAX_PREVIEW_BYTES).toString('utf8'));
+                  };
+                  const onError = (err: Error) => {
+                    process.stdin.removeListener('data', onData);
+                    process.stdin.removeListener('end', onEnd);
+                    reject(err);
+                  };
+                  process.stdin.on('data', onData);
+                  process.stdin.on('end', onEnd);
+                  process.stdin.on('error', onError);
+                  process.stdin.resume();
+                });
+              } catch (err: unknown) {
+                throw new CliError(`Failed to read stdin: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            }
+          }
+
+          if (!previewContent || previewContent.length === 0) {
+            previewContent = undefined;
+            if (!filePath && !isDiff) {
+              previewType = undefined;
+            }
+          }
+
           const effectiveTimeoutSeconds =
-            Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds : 300;
-          const timeoutMsForAsk = Math.max(timeoutMs, effectiveTimeoutSeconds * 1000);
+            Number.isFinite(timeoutSeconds) && timeoutSeconds >= 0 ? timeoutSeconds : 300;
+          const timeoutMsForAsk =
+            effectiveTimeoutSeconds === 0 ? 0 : Math.max(timeoutMs, effectiveTimeoutSeconds * 1000);
 
           const socketPath = getDaemonSocketPath(dataDir);
           let answer: string;
@@ -769,6 +848,8 @@ export function registerNodeCommands(program: Command): void {
                   ? rawOptions.split(',').map((item) => item.trim()).filter(Boolean)
                   : undefined,
                 timeoutSeconds: effectiveTimeoutSeconds,
+                ...(previewType ? { previewType } : {}),
+                ...(previewContent ? { previewContent } : {}),
               },
               timeoutMsForAsk,
             );

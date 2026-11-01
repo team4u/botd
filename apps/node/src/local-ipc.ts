@@ -9,6 +9,7 @@ import { getNodeVersion, checkNodeUpgrade, performNodeUpgrade } from './upgrader
 
 export const MAX_WAKE_BODY_BYTES = 64 * 1024;
 export const MAX_ARTIFACT_BODY_BYTES = 15 * 1024 * 1024;
+export const MAX_ASK_BODY_BYTES = 512 * 1024;
 
 export interface LocalIpcDeps {
   identity: {
@@ -266,10 +267,10 @@ export function createLocalIpcServer(deps: LocalIpcDeps): http.Server {
       }
 
       if (method === 'POST' && reqUrl === '/ask') {
-        const payload = await parseJsonBody(req, res, MAX_WAKE_BODY_BYTES);
+        const payload = await parseJsonBody(req, res, MAX_ASK_BODY_BYTES);
         if (!payload) return;
 
-        const { sessionId, botId, prompt, options, timeoutSeconds } = payload;
+        const { sessionId, botId, prompt, options, timeoutSeconds, previewType, previewContent } = payload;
         if (
           typeof sessionId !== 'string' ||
           typeof botId !== 'string' ||
@@ -292,7 +293,11 @@ export function createLocalIpcServer(deps: LocalIpcDeps): http.Server {
           botId,
           prompt: String(prompt),
           ...(Array.isArray(options) ? { options: options.map(String) } : {}),
-          ...(typeof timeoutSeconds === 'number' && timeoutSeconds > 0 ? { timeoutSeconds } : {}),
+          ...(typeof timeoutSeconds === 'number' && timeoutSeconds >= 0 ? { timeoutSeconds } : {}),
+          ...(previewType === 'diff' || previewType === 'markdown' || previewType === 'text'
+            ? { previewType }
+            : {}),
+          ...(typeof previewContent === 'string' && previewContent ? { previewContent } : {}),
         });
 
         sendJson(res, 200, { ok: true, answer: result.answer });
