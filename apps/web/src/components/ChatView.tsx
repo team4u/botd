@@ -22,6 +22,7 @@ import {
   Package,
   SquareTerminal,
   ChevronUp,
+  Share2,
 } from 'lucide-react';
 import type {
   SessionRecord,
@@ -40,6 +41,7 @@ import { AskCard } from './AskCard';
 import { TriggersModal } from './TriggersModal';
 import { ArtifactsDrawer } from './ArtifactsDrawer';
 import { BgJobsDrawer } from './BgJobsDrawer';
+import { ShareSessionModal } from './ShareSessionModal';
 import { api } from '../api';
 import { onGlobalEvent } from '../events';
 import { useKeyboardInset } from '../utils/viewport';
@@ -131,6 +133,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   // 定时与触发器弹窗开关
   const [triggersOpen, setTriggersOpen] = useState(false);
+  // 分享对话弹窗开关
+  const [shareModalOpen, setShareModalOpen] = useState(false);
 
   // 回到底部按钮触发的程序化平滑滚动标记，避免滚动动画的中间位置误触发 userScrolledUp
   const programmaticScrollRef = useRef(false);
@@ -699,6 +703,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
             )}
           </div>
 
+          {/* 分享对话入口 */}
+          <button
+            onClick={() => setShareModalOpen(true)}
+            className="h-8 w-8 rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-center transition-colors cursor-pointer"
+            title="分享对话"
+            aria-label="分享对话"
+          >
+            <Share2 className="w-4 h-4" />
+          </button>
+
           <div className="relative" ref={menuRef}>
             <button
               onClick={() => setMenuOpen((v) => !v)}
@@ -744,6 +758,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 >
                   <Pencil className="w-3.5 h-3.5" />
                   <span>重命名…</span>
+                </button>
+
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setShareModalOpen(true);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                >
+                  <Share2 className="w-3.5 h-3.5" />
+                  <span>分享对话</span>
                 </button>
 
                 {session.mode !== 'direct' && (
@@ -1034,6 +1060,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
         botMap={botMap}
         onClose={() => setArtifactsOpen(false)}
       />
+
+      {/* 分享对话弹窗 */}
+      {shareModalOpen && (
+        <ShareSessionModal
+          sessionId={session.id}
+          onClose={() => setShareModalOpen(false)}
+        />
+      )}
 
       {/* 后台任务抽屉 */}
       <BgJobsDrawer

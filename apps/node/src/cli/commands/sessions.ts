@@ -1,4 +1,4 @@
-import type { MessageRecord, MessageSearchHit, SessionMode, SessionRecord } from '@botd/protocol';
+import type { MessageRecord, MessageSearchHit, SessionMode, SessionRecord, SessionShareRecord } from '@botd/protocol';
 import { Command, Option } from 'commander';
 import { cliAction, readGlobals } from '../context.js';
 import { HubClient } from '../hub-client.js';
@@ -222,6 +222,33 @@ export function registerSessionsCommands(program: Command): void {
           { anchorMessageId: String(options.anchor).trim() },
         );
         printResult(forked, g.json);
+      })(options, command),
+    );
+
+  sessions
+    .command('share <sessionId>')
+    .description('Create, view or revoke a public share link for a session')
+    .option('--revoke', 'Revoke the existing share link')
+    .option('--regenerate', 'Regenerate a new share token')
+    .action((sessionId: string, options: Record<string, unknown>, command: Command) =>
+      cliAction(async (_opts, cmd) => {
+        const g = readGlobals(cmd);
+        const client = await HubClient.connect(g);
+
+        if (options.revoke) {
+          const res = await client.delete<{ ok: boolean }>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/share`,
+          );
+          printResult(res, g.json);
+          return;
+        }
+
+        const share = await client.post<SessionShareRecord>(
+          `/api/sessions/${encodeURIComponent(sessionId)}/share`,
+          { regenerate: Boolean(options.regenerate) },
+        );
+        const shareUrl = `${client.url}/?share=${encodeURIComponent(share.token)}`;
+        printResult({ ...share, url: shareUrl }, g.json);
       })(options, command),
     );
 }

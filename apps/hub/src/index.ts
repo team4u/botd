@@ -28,6 +28,7 @@ import { GroupRouter, extractMentions, parseSlashCommand } from './group-router.
 import { createStaticMiddleware } from './static.js';
 import { registerProviderRoutes } from './providers.js';
 import { registerArtifactRoutes } from './artifacts.js';
+import { registerShareRoutes } from './share.js';
 import { ArtifactService } from './artifact-service.js';
 import { registerTriggerRoutes } from './triggers.js';
 import { registerBgJobRoutes } from './bg-jobs.js';
@@ -157,7 +158,8 @@ export function createHub(options?: HubOptions): HubInstance {
       reqPath === '/api/health' ||
       (reqPath === '/api/auth/login' && method === 'POST') ||
       (reqPath === '/api/nodes/pairing/exchange' && method === 'POST') ||
-      (reqPath.startsWith('/api/webhooks/') && method === 'POST')
+      (reqPath.startsWith('/api/webhooks/') && method === 'POST') ||
+      (reqPath.startsWith('/api/public/') && (method === 'GET' || method === 'POST'))
     ) {
       return next();
     }
@@ -1174,6 +1176,7 @@ export function createHub(options?: HubOptions): HubInstance {
 
   registerProviderRoutes(app, db, connections);
   registerArtifactRoutes(app, artifacts);
+  registerShareRoutes(app, db, artifacts, getSessionOwnerId);
   const triggerScheduler = registerTriggerRoutes(app, db, router, getSessionOwnerId);
   registerBgJobRoutes(app, db, connections);
   registerSkillSyncAndAskRoutes(app, db, connections, router, getSessionOwnerId);
