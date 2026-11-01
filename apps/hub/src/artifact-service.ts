@@ -35,6 +35,16 @@ export interface UploadArtifactInput {
   message?: string;
 }
 
+export interface UploadArtifactBufferInput {
+  sessionId: string;
+  botId?: string;
+  senderBotId?: string;
+  filename: string;
+  mimeType?: string;
+  content: Buffer | Uint8Array;
+  message?: string;
+}
+
 export class ArtifactService {
   private db: HubDatabase;
   private sseHub: SseHub;
@@ -64,7 +74,7 @@ export class ArtifactService {
     }
   }
 
-  uploadArtifact(actor: ArtifactActor, input: UploadArtifactInput): ArtifactRecord {
+  uploadArtifactBuffer(actor: ArtifactActor, input: UploadArtifactBufferInput): ArtifactRecord {
     const session = this.db.getSession(input.sessionId);
     if (!session) {
       throw new ArtifactError(`Session ${input.sessionId} not found`, 404);
@@ -96,11 +106,14 @@ export class ArtifactService {
     if (typeof input.filename !== 'string' || !input.filename.trim()) {
       throw new ArtifactError('Invalid artifact upload: filename is required', 400);
     }
-    if (typeof input.contentBase64 !== 'string' || input.contentBase64.length === 0) {
-      throw new ArtifactError('Invalid artifact upload: contentBase64 is required', 400);
+    if (!input.content || !(Buffer.isBuffer(input.content) || input.content instanceof Uint8Array)) {
+      throw new ArtifactError('Invalid artifact upload: content is required', 400);
     }
 
-    const buffer = Buffer.from(input.contentBase64, 'base64');
+    const buffer = Buffer.isBuffer(input.content)
+      ? input.content
+      : Buffer.from(input.content.buffer, input.content.byteOffset, input.content.byteLength);
+
     if (buffer.length === 0) {
       throw new ArtifactError('Artifact content is empty', 400);
     }
@@ -166,6 +179,22 @@ export class ArtifactService {
     }
 
     return artifact;
+  }
+
+  uploadArtifact(actor: ArtifactActor, input: UploadArtifactInput): ArtifactRecord {
+    if (typeof input.contentBase64 !== 'string' || input.contentBase64.length === 0) {
+      throw new ArtifactError('Invalid artifact upload: contentBase64 is required', 400);
+    }
+    const buffer = Buffer.from(input.contentBase64, 'base64');
+    return this.uploadArtifactBuffer(actor, {
+      sessionId: input.sessionId,
+      botId: input.botId,
+      senderBotId: input.senderBotId,
+      filename: input.filename,
+      mimeType: input.mimeType,
+      content: buffer,
+      message: input.message,
+    });
   }
 
   getArtifactContent(
