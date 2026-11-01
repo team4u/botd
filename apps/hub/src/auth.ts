@@ -13,8 +13,12 @@ export class AuthManager {
   private authSecret: string;
   private pairingCodes = new Map<string, PairingEntry>();
 
-  constructor() {
-    this.authSecret = randomBytes(32).toString('hex');
+  constructor(initialSecret?: string) {
+    this.authSecret = initialSecret || randomBytes(32).toString('hex');
+  }
+
+  getSecret(): string {
+    return this.authSecret;
   }
 
   hashPassword(password: string): string {

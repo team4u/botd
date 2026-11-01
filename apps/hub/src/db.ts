@@ -12,6 +12,7 @@ import type {
   MessageSearchHit,
   NodeRecord,
   NodeWithBots,
+  PendingAskRecord,
   PlatformType,
   SessionMode,
   SessionRecord,
@@ -389,6 +390,25 @@ export class HubDatabase {
         error TEXT NOT NULL,
         failed_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS pending_asks (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        bot_id TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        options_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'pending',
+        answer TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_pending_asks_session ON pending_asks(session_id, status);
     `);
 
     const migrations = [
@@ -470,6 +490,102 @@ export class HubDatabase {
   removeArtifactCleanupPending(storagePath: string): void {
     const stmt = this.db.prepare('DELETE FROM artifact_cleanup_pending WHERE storage_path = ?');
     stmt.run(storagePath);
+  }
+
+  // --- Settings ---
+  getSetting<T = unknown>(key: string): T | undefined {
+    const stmt = this.db.prepare('SELECT value_json FROM settings WHERE key = ?');
+    const row = stmt.get(key) as { value_json: string } | undefined;
+    if (!row) return undefined;
+    return parseOptionalJson<T>(row.value_json);
+  }
+
+  setSetting(key: string, value: unknown): void {
+    const now = new Date().toISOString();
+    const valueJson = JSON.stringify(value);
+    const stmt = this.db.prepare(`
+      INSERT INTO settings (key, value_json, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
+    `);
+    stmt.run(key, valueJson, now);
+  }
+
+  // --- Pending Asks ---
+  savePendingAsk(ask: PendingAskRecord): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO pending_asks (id, session_id, bot_id, prompt, options_json, status, answer, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        session_id = excluded.session_id,
+        bot_id = excluded.bot_id,
+        prompt = excluded.prompt,
+        options_json = excluded.options_json,
+        status = excluded.status,
+        answer = excluded.answer,
+        created_at = excluded.created_at,
+        expires_at = excluded.expires_at
+    `);
+    stmt.run(
+      ask.id,
+      ask.sessionId,
+      ask.botId,
+      ask.prompt,
+      JSON.stringify(ask.options ?? []),
+      ask.status,
+      ask.answer ?? null,
+      ask.createdAt,
+      ask.expiresAt ?? null
+    );
+  }
+
+  updatePendingAskStatus(askId: string, status: 'pending' | 'answered' | 'expired', answer?: string): void {
+    if (answer !== undefined) {
+      const stmt = this.db.prepare('UPDATE pending_asks SET status = ?, answer = ? WHERE id = ?');
+      stmt.run(status, answer, askId);
+    } else {
+      const stmt = this.db.prepare('UPDATE pending_asks SET status = ? WHERE id = ?');
+      stmt.run(status, askId);
+    }
+  }
+
+  getPendingAsksForSession(sessionId: string): PendingAskRecord[] {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE pending_asks
+      SET status = 'expired'
+      WHERE session_id = ? AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?
+    `).run(sessionId, now);
+
+    const stmt = this.db.prepare(`
+      SELECT id, session_id, bot_id, prompt, options_json, status, answer, created_at, expires_at
+      FROM pending_asks
+      WHERE session_id = ? AND status = 'pending'
+      ORDER BY created_at ASC
+    `);
+    const rows = stmt.all(sessionId) as {
+      id: string;
+      session_id: string;
+      bot_id: string;
+      prompt: string;
+      options_json: string;
+      status: string;
+      answer: string | null;
+      created_at: string;
+      expires_at: string | null;
+    }[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      botId: row.bot_id,
+      prompt: row.prompt,
+      options: parseOptionalJson<string[]>(row.options_json) ?? [],
+      status: row.status as 'pending' | 'answered' | 'expired',
+      ...(row.answer !== null && row.answer !== undefined ? { answer: row.answer } : {}),
+      createdAt: row.created_at,
+      ...(row.expires_at !== null && row.expires_at !== undefined ? { expiresAt: row.expires_at } : {}),
+    }));
   }
 
   // --- Users ---
@@ -569,6 +685,7 @@ export class HubDatabase {
         this.db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM triggers WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM artifacts WHERE session_id IN (${placeholders})`).run(...sessionIds);
+        this.db.prepare(`DELETE FROM pending_asks WHERE session_id IN (${placeholders})`).run(...sessionIds);
       }
       this.db.prepare('DELETE FROM sessions WHERE owner_id = ?').run(id);
       this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
@@ -883,6 +1000,8 @@ export class HubDatabase {
       deleteTriggers.run(id);
       const deleteArtifacts = this.db.prepare('DELETE FROM artifacts WHERE session_id = ?');
       deleteArtifacts.run(id);
+      const deletePendingAsks = this.db.prepare('DELETE FROM pending_asks WHERE session_id = ?');
+      deletePendingAsks.run(id);
       const deleteSessionStmt = this.db.prepare('DELETE FROM sessions WHERE id = ?');
       deleteSessionStmt.run(id);
       return true;

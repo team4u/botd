@@ -675,7 +675,7 @@ export const App: React.FC = () => {
           setSessions((prev) =>
             prev.map((s) =>
               s.id === event.sessionId
-                ? { ...s, status: event.status, activeBotId: event.activeBotId }
+                ? { ...s, status: event.status, activeBotId: event.activeBotId, activeBotIds: event.activeBotIds }
                 : s
             )
           );
@@ -683,6 +683,18 @@ export const App: React.FC = () => {
           if (event.status === 'idle' || event.status === 'failed') {
             setStreamingStatesMap(clearStreamingMap());
             setCancelling(false);
+          } else if (event.status === 'running' && event.activeBotIds && event.activeBotIds.length > 1) {
+            setStreamingStatesMap((prevMap) => {
+              let updated = false;
+              const nextMap = { ...prevMap };
+              for (const botId of event.activeBotIds!) {
+                if (!nextMap[botId]) {
+                  nextMap[botId] = { botId, delta: '', tools: [] };
+                  updated = true;
+                }
+              }
+              return updated ? nextMap : prevMap;
+            });
           }
           break;
         }
@@ -755,7 +767,7 @@ export const App: React.FC = () => {
           setSessions((prev) =>
             prev.map((s) =>
               s.id === eventSessionId
-                ? { ...s, status: event.status, activeBotId: event.activeBotId }
+                ? { ...s, status: event.status, activeBotId: event.activeBotId, activeBotIds: event.activeBotIds }
                 : s
             )
           );

@@ -256,6 +256,14 @@ export class GroupRouter {
     return state.activeBotId ?? (state.activeBotIds.size > 0 ? Array.from(state.activeBotIds)[0] : undefined);
   }
 
+  getActiveBotIds(sessionId: string): string[] {
+    const state = this.states.get(sessionId);
+    if (!state?.isRunning) return [];
+    return state.activeBotIds.size > 0
+      ? Array.from(state.activeBotIds)
+      : (state.activeBotId ? [state.activeBotId] : []);
+  }
+
   isBotActiveInSession(sessionId: string, botId: string): boolean {
     const state = this.states.get(sessionId);
     if (!state || !state.isRunning) return false;
@@ -307,12 +315,14 @@ export class GroupRouter {
       createdAt: now.toISOString(),
       expiresAt,
     };
+    this.db.savePendingAsk(record);
 
     return new Promise<{ answer: string }>((resolve, reject) => {
       const timer = setTimeout(() => {
         const entry = this.pendingAsks.get(askId);
         if (entry) {
           entry.record.status = 'expired';
+          this.db.updatePendingAskStatus(askId, 'expired');
           this.pendingAsks.delete(askId);
           entry.reject(new Error(`Interactive ask timed out after ${timeoutSec}s`));
         }
@@ -335,9 +345,18 @@ export class GroupRouter {
 
   getPendingAsks(sessionId: string): PendingAskRecord[] {
     const result: PendingAskRecord[] = [];
+    const seen = new Set<string>();
     for (const entry of this.pendingAsks.values()) {
       if (entry.record.sessionId === sessionId && entry.record.status === 'pending') {
+        seen.add(entry.record.id);
         result.push(entry.record);
+      }
+    }
+    const dbAsks = this.db.getPendingAsksForSession(sessionId);
+    for (const ask of dbAsks) {
+      if (!seen.has(ask.id)) {
+        seen.add(ask.id);
+        result.push(ask);
       }
     }
     return result;
@@ -345,24 +364,44 @@ export class GroupRouter {
 
   respondToAsk(sessionId: string, askId: string, answer: string): PendingAskRecord | undefined {
     const entry = this.pendingAsks.get(askId);
-    if (!entry || entry.record.sessionId !== sessionId) return undefined;
-    if (entry.record.status !== 'pending') return undefined;
+    if (entry) {
+      if (entry.record.sessionId !== sessionId) return undefined;
+      if (entry.record.status !== 'pending') return undefined;
 
-    clearTimeout(entry.timer);
-    entry.record.status = 'answered';
-    entry.record.answer = answer;
-    this.pendingAsks.delete(askId);
+      clearTimeout(entry.timer);
+      entry.record.status = 'answered';
+      entry.record.answer = answer;
+      this.db.updatePendingAskStatus(askId, 'answered', answer);
+      this.pendingAsks.delete(askId);
 
-    entry.resolve(answer);
+      entry.resolve(answer);
 
-    this.sseHub.broadcast(sessionId, {
-      type: 'interaction_resolved',
-      sessionId,
-      askId,
-      answer,
-    });
+      this.sseHub.broadcast(sessionId, {
+        type: 'interaction_resolved',
+        sessionId,
+        askId,
+        answer,
+      });
 
-    return entry.record;
+      return entry.record;
+    }
+
+    const dbAsks = this.db.getPendingAsksForSession(sessionId);
+    const dbAsk = dbAsks.find((a) => a.id === askId);
+    if (dbAsk && dbAsk.status === 'pending') {
+      dbAsk.status = 'answered';
+      dbAsk.answer = answer;
+      this.db.updatePendingAskStatus(askId, 'answered', answer);
+      this.sseHub.broadcast(sessionId, {
+        type: 'interaction_resolved',
+        sessionId,
+        askId,
+        answer,
+      });
+      return dbAsk;
+    }
+
+    return undefined;
   }
 
   handleUserMessage(
@@ -511,8 +550,14 @@ export class GroupRouter {
       if (entry.record.sessionId === sessionId) {
         clearTimeout(entry.timer);
         this.pendingAsks.delete(askId);
+        entry.record.status = 'expired';
+        this.db.updatePendingAskStatus(askId, 'expired');
         entry.reject(new Error('Session cancelled'));
       }
+    }
+    const dbAsks = this.db.getPendingAsksForSession(sessionId);
+    for (const ask of dbAsks) {
+      this.db.updatePendingAskStatus(ask.id, 'expired');
     }
 
     // Advance generation so current turn & queued items of this generation are discarded
@@ -528,6 +573,7 @@ export class GroupRouter {
       sessionId,
       status: 'idle',
       activeBotId: undefined,
+      activeBotIds: [],
     });
 
     for (const botId of activeBotsToCancel) {
@@ -630,8 +676,21 @@ export class GroupRouter {
             sessionId,
             status: 'failed',
             activeBotId: undefined,
+            activeBotIds: [],
           });
           state.queue = [];
+        } else {
+          state.activeBotIds.delete(item.botId);
+          if (state.activeBotIds.size > 0) {
+            state.activeBotId = state.activeBotIds.values().next().value;
+            this.sseHub.broadcast(sessionId, {
+              type: 'session_status',
+              sessionId,
+              status: 'running',
+              activeBotId: state.activeBotId,
+              activeBotIds: Array.from(state.activeBotIds),
+            });
+          }
         }
         return 'failed';
       }
@@ -666,8 +725,21 @@ export class GroupRouter {
           sessionId,
           status: 'failed',
           activeBotId: undefined,
+          activeBotIds: [],
         });
         state.queue = [];
+      } else {
+        state.activeBotIds.delete(item.botId);
+        if (state.activeBotIds.size > 0) {
+          state.activeBotId = state.activeBotIds.values().next().value;
+          this.sseHub.broadcast(sessionId, {
+            type: 'session_status',
+            sessionId,
+            status: 'running',
+            activeBotId: state.activeBotId,
+            activeBotIds: Array.from(state.activeBotIds),
+          });
+        }
       }
       return 'failed';
     }
@@ -703,6 +775,20 @@ export class GroupRouter {
         ...(turnResult.usage ? { usage: turnResult.usage } : {}),
       },
     });
+
+    if (isParallel) {
+      state.activeBotIds.delete(item.botId);
+      if (state.activeBotIds.size > 0) {
+        state.activeBotId = state.activeBotIds.values().next().value;
+        this.sseHub.broadcast(sessionId, {
+          type: 'session_status',
+          sessionId,
+          status: 'running',
+          activeBotId: state.activeBotId,
+          activeBotIds: Array.from(state.activeBotIds),
+        });
+      }
+    }
 
     if (item.replyToBotId && !replyMentions.includes(item.replyToBotId)) {
       if (item.chainBudget.consumeRelay()) {
@@ -775,7 +861,7 @@ export class GroupRouter {
             });
             this.sseHub.broadcast(sessionId, { type: 'message_created', message: sysMsg.message });
             this.db.updateSessionStatus(sessionId, 'failed', undefined);
-            this.sseHub.broadcast(sessionId, { type: 'session_status', sessionId, status: 'failed', activeBotId: undefined });
+            this.sseHub.broadcast(sessionId, { type: 'session_status', sessionId, status: 'failed', activeBotId: undefined, activeBotIds: [] });
             state.queue = [];
             break;
           }
@@ -818,19 +904,35 @@ export class GroupRouter {
             sessionId,
             status: 'queued',
             activeBotId: undefined,
+            activeBotIds: [],
           });
           break;
         }
 
-        state.activeBotId = activeBatch[0].botId;
-        state.activeBotIds = new Set(activeBatch.map((item) => item.botId));
-        this.db.updateSessionStatus(sessionId, 'running', state.activeBotId);
-        this.sseHub.broadcast(sessionId, {
-          type: 'session_status',
-          sessionId,
-          status: 'running',
-          activeBotId: state.activeBotId,
-        });
+        if (isParallel) {
+          state.activeBotId = activeBatch[0].botId;
+          state.activeBotIds = new Set(activeBatch.map((item) => item.botId));
+          this.db.updateSessionStatus(sessionId, 'running', state.activeBotId);
+          this.sseHub.broadcast(sessionId, {
+            type: 'session_status',
+            sessionId,
+            status: 'running',
+            activeBotId: state.activeBotId,
+            activeBotIds: Array.from(state.activeBotIds),
+          });
+        } else {
+          const item = activeBatch[0];
+          state.activeBotId = item.botId;
+          state.activeBotIds = new Set([item.botId]);
+          this.db.updateSessionStatus(sessionId, 'running', item.botId);
+          this.sseHub.broadcast(sessionId, {
+            type: 'session_status',
+            sessionId,
+            status: 'running',
+            activeBotId: item.botId,
+            activeBotIds: [item.botId],
+          });
+        }
 
         const groupContextPrompt = buildGroupContextPrompt(session);
         const turnGen = state.generation;
@@ -894,6 +996,7 @@ export class GroupRouter {
             sessionId,
             status: 'idle',
             activeBotId: undefined,
+            activeBotIds: [],
           });
         }
       }

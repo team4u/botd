@@ -130,7 +130,11 @@ function validateSessionMembers(
 
 export function createHub(options?: HubOptions): HubInstance {
   const db = new HubDatabase({ dbPath: options?.dbPath });
-  const auth = new AuthManager();
+  const savedSecret = db.getSetting<string>('auth_secret');
+  const auth = new AuthManager(savedSecret);
+  if (!savedSecret) {
+    db.setSetting('auth_secret', auth.getSecret());
+  }
   const adminPassword = options?.adminPassword || process.env.BOTD_ADMIN_PASSWORD || 'admin';
   db.ensureBootstrapAdmin(auth.hashPassword(adminPassword));
   // SessionRecord 未暴露 ownerId，读取归属；SseHub 借此把会话事件同步派发给 owner 的全局订阅者
@@ -763,7 +767,21 @@ export function createHub(options?: HubOptions): HubInstance {
     return c.json(hits);
   });
 
-  app.get('/api/sessions', (c) => c.json(db.getAllSessions(c.get('user').id)));
+  app.get('/api/sessions', (c) => {
+    const sessions = db.getAllSessions(c.get('user').id);
+    return c.json(
+      sessions.map((s) => {
+        if (s.status === 'running') {
+          const activeBotIds = router.getActiveBotIds(s.id);
+          return {
+            ...s,
+            ...(activeBotIds.length > 0 ? { activeBotIds } : {}),
+          };
+        }
+        return s;
+      })
+    );
+  });
 
   app.post('/api/sessions', async (c) => {
     const user = c.get('user');
