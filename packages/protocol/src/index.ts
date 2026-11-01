@@ -10,6 +10,8 @@ export interface ToolCallRecord {
   summary?: string;
   status: 'running' | 'done' | 'error';
   durationMs?: number;
+  outputPreview?: string;
+  isError?: boolean;
 }
 
 export interface TurnUsage {
@@ -17,6 +19,42 @@ export interface TurnUsage {
   outputTokens: number;
   totalTokens: number;
   contextWindow?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}
+
+export interface IncomingArtifactRef {
+  id: string;
+  filename: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  url?: string;
+  fromBotName?: string;
+}
+
+export type AskPreviewType = 'diff' | 'markdown' | 'text';
+export type ResourceVisibility = 'private' | 'team';
+
+export type OutboundTaskStatus = 'queued_offline' | 'dispatched' | 'expired' | 'failed';
+
+export interface OutboundTaskRecord {
+  id: string;
+  nodeId: string;
+  botId: string;
+  sessionId: string;
+  taskType: string;
+  payloadJson: string;
+  status: OutboundTaskStatus;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface SessionParticipantRecord {
+  sessionId: string;
+  userId: string;
+  username?: string;
+  role: 'owner' | 'member';
+  joinedAt: string;
 }
 
 export interface ArtifactRecord {
@@ -45,6 +83,9 @@ export interface PendingAskRecord {
   options: string[];
   status: 'pending' | 'answered' | 'expired';
   answer?: string;
+  previewType?: AskPreviewType;
+  previewContent?: string;
+  sessionTitle?: string;
   createdAt: string;
   expiresAt?: string;
 }
@@ -122,6 +163,10 @@ export interface NodeRecord {
   status: 'online' | 'offline';
   skills: string[];
   extensions: string[];
+  visibility?: ResourceVisibility;
+  ownerId?: string;
+  ownerName?: string;
+  isTeamShared?: boolean;
   lastSeenAt: string;
   createdAt: string;
   pid?: number;
@@ -154,6 +199,10 @@ export interface BotConfig {
   thinkingLevel?: ThinkingLevel;
   enabledSkills: string[];
   enabledExtensions?: string[];
+  visibility?: ResourceVisibility;
+  ownerId?: string;
+  ownerName?: string;
+  isTeamShared?: boolean;
   updatedAt: string;
 }
 
@@ -191,6 +240,10 @@ export interface SessionRecord {
   pinned?: boolean;
   /** 圆桌模式下是否开启独立并发盲评（所有成员并发独立作答，最后由 Lead 总结） */
   parallelRoundtable?: boolean;
+  /** 会话创建者 ID */
+  ownerId?: string;
+  /** 多人协同会话参与者列表 */
+  participants?: SessionParticipantRecord[];
 }
 
 export interface SessionShareRecord {
@@ -226,6 +279,7 @@ export interface DelegateSessionInput {
   prompt: string;
   memberBotIds?: string[];
   mode?: SessionMode;
+  artifactIds?: string[];
 }
 
 export interface DelegateSessionResult {
@@ -330,6 +384,8 @@ export interface HubRpcFunctions {
     prompt: string;
     options?: string[];
     timeoutSeconds?: number;
+    previewType?: AskPreviewType;
+    previewContent?: string;
   }): Promise<{ answer: string }>;
   uploadArtifact(input: {
     sessionId: string;
@@ -382,6 +438,8 @@ export interface NodeRpcFunctions {
     commandText?: string;
     /** Attachments sent in incremental user messages for this turn */
     attachments?: MessageAttachment[];
+    /** Upstream artifacts automatically synced across nodes for this turn */
+    incomingArtifacts?: IncomingArtifactRef[];
   }): Promise<{
     replyText: string;
     modelBadge: string;
@@ -467,7 +525,8 @@ export const isBotConfig = (value: unknown): value is BotConfig => {
     (v.thinkingLevel === undefined || isThinkingLevel(v.thinkingLevel)) &&
     Array.isArray(v.enabledSkills) &&
     v.enabledSkills.every(isSafeId) &&
-    (v.enabledExtensions === undefined || (Array.isArray(v.enabledExtensions) && v.enabledExtensions.every(isSafeId)))
+    (v.enabledExtensions === undefined || (Array.isArray(v.enabledExtensions) && v.enabledExtensions.every(isSafeId))) &&
+    (v.visibility === undefined || v.visibility === 'private' || v.visibility === 'team')
   );
 };
 
