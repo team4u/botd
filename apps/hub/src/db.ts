@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import type {
   ArtifactRecord,
+  AskPreviewType,
   BotConfig,
   MessageAttachment,
   MessageRecord,
@@ -12,9 +13,13 @@ import type {
   MessageSearchHit,
   NodeRecord,
   NodeWithBots,
+  OutboundTaskRecord,
+  OutboundTaskStatus,
   PendingAskRecord,
   PlatformType,
+  ResourceVisibility,
   SessionMode,
+  SessionParticipantRecord,
   SessionRecord,
   SessionStatus,
   ThinkingLevel,
@@ -138,6 +143,7 @@ type NodeRow = {
   pid: number | null;
   started_at: string | null;
   version: string | null;
+  visibility?: string | null;
 };
 
 const mapNodeRow = (row: NodeRow): NodeRecord => ({
@@ -147,6 +153,7 @@ const mapNodeRow = (row: NodeRow): NodeRecord => ({
   skills: parseOptionalJson<string[]>(row.skills_json) ?? [],
   extensions: parseOptionalJson<string[]>(row.extensions_json) ?? [],
   status: row.status as 'online' | 'offline',
+  visibility: (row.visibility === 'team' ? 'team' : 'private') as ResourceVisibility,
   lastSeenAt: row.last_seen_at,
   createdAt: row.created_at,
   ...(typeof row.pid === 'number' ? { pid: row.pid } : {}),
@@ -164,6 +171,7 @@ type BotRow = {
   thinking_level: string | null;
   enabled_skills_json: string;
   enabled_extensions_json: string;
+  visibility?: string | null;
   updated_at: string;
 };
 
@@ -177,6 +185,7 @@ const mapBotRow = (row: BotRow): BotConfig => ({
   thinkingLevel: (row.thinking_level as ThinkingLevel) ?? 'medium',
   enabledSkills: parseOptionalJson<string[]>(row.enabled_skills_json) ?? [],
   enabledExtensions: parseOptionalJson<string[]>(row.enabled_extensions_json) ?? [],
+  visibility: (row.visibility === 'team' ? 'team' : 'private') as ResourceVisibility,
   updatedAt: row.updated_at,
 });
 
@@ -298,6 +307,7 @@ export class HubDatabase {
         skills_json TEXT NOT NULL DEFAULT '[]',
         extensions_json TEXT NOT NULL DEFAULT '[]',
         status TEXT NOT NULL DEFAULT 'offline',
+        visibility TEXT NOT NULL DEFAULT 'private',
         last_seen_at TEXT NOT NULL,
         created_at TEXT NOT NULL,
         pid INTEGER,
@@ -315,6 +325,7 @@ export class HubDatabase {
         thinking_level TEXT DEFAULT 'medium',
         enabled_skills_json TEXT NOT NULL DEFAULT '[]',
         enabled_extensions_json TEXT NOT NULL DEFAULT '[]',
+        visibility TEXT NOT NULL DEFAULT 'private',
         updated_at TEXT NOT NULL
       );
 
@@ -406,10 +417,34 @@ export class HubDatabase {
         options_json TEXT NOT NULL DEFAULT '[]',
         status TEXT NOT NULL DEFAULT 'pending',
         answer TEXT,
+        preview_type TEXT,
+        preview_content TEXT,
         created_at TEXT NOT NULL,
         expires_at TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_pending_asks_session ON pending_asks(session_id, status);
+
+      CREATE TABLE IF NOT EXISTS outbound_task_queue (
+        id TEXT PRIMARY KEY,
+        node_id TEXT NOT NULL,
+        bot_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        task_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued_offline',
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_outbound_task_queue_node ON outbound_task_queue(node_id, status);
+
+      CREATE TABLE IF NOT EXISTS session_participants (
+        session_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'member',
+        joined_at TEXT NOT NULL,
+        PRIMARY KEY (session_id, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_participants_user ON session_participants(user_id);
     `);
 
     const migrations = [
@@ -428,6 +463,10 @@ export class HubDatabase {
       `ALTER TABLE messages ADD COLUMN attachments_json TEXT`,
       `ALTER TABLE triggers ADD COLUMN run_at TEXT`,
       `ALTER TABLE sessions ADD COLUMN parent_session_id TEXT`,
+      `ALTER TABLE nodes ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`,
+      `ALTER TABLE bots ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`,
+      `ALTER TABLE pending_asks ADD COLUMN preview_type TEXT`,
+      `ALTER TABLE pending_asks ADD COLUMN preview_content TEXT`,
     ];
 
     for (const sql of migrations) {
@@ -516,8 +555,8 @@ export class HubDatabase {
   // --- Pending Asks ---
   savePendingAsk(ask: PendingAskRecord): void {
     const stmt = this.db.prepare(`
-      INSERT INTO pending_asks (id, session_id, bot_id, prompt, options_json, status, answer, created_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO pending_asks (id, session_id, bot_id, prompt, options_json, status, answer, preview_type, preview_content, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         session_id = excluded.session_id,
         bot_id = excluded.bot_id,
@@ -525,6 +564,8 @@ export class HubDatabase {
         options_json = excluded.options_json,
         status = excluded.status,
         answer = excluded.answer,
+        preview_type = excluded.preview_type,
+        preview_content = excluded.preview_content,
         created_at = excluded.created_at,
         expires_at = excluded.expires_at
     `);
@@ -536,6 +577,8 @@ export class HubDatabase {
       JSON.stringify(ask.options ?? []),
       ask.status,
       ask.answer ?? null,
+      ask.previewType ?? null,
+      ask.previewContent ?? null,
       ask.createdAt,
       ask.expiresAt ?? null
     );
@@ -560,7 +603,7 @@ export class HubDatabase {
     `).run(sessionId, now);
 
     const stmt = this.db.prepare(`
-      SELECT id, session_id, bot_id, prompt, options_json, status, answer, created_at, expires_at
+      SELECT id, session_id, bot_id, prompt, options_json, status, answer, preview_type, preview_content, created_at, expires_at
       FROM pending_asks
       WHERE session_id = ? AND status = 'pending'
       ORDER BY created_at ASC
@@ -573,6 +616,8 @@ export class HubDatabase {
       options_json: string;
       status: string;
       answer: string | null;
+      preview_type: string | null;
+      preview_content: string | null;
       created_at: string;
       expires_at: string | null;
     }[];
@@ -585,6 +630,57 @@ export class HubDatabase {
       options: parseOptionalJson<string[]>(row.options_json) ?? [],
       status: row.status as 'pending' | 'answered' | 'expired',
       ...(row.answer !== null && row.answer !== undefined ? { answer: row.answer } : {}),
+      ...(row.preview_type ? { previewType: row.preview_type as AskPreviewType } : {}),
+      ...(row.preview_content ? { previewContent: row.preview_content } : {}),
+      createdAt: row.created_at,
+      ...(row.expires_at !== null && row.expires_at !== undefined ? { expiresAt: row.expires_at } : {}),
+    }));
+  }
+
+  listPendingAsksForUser(userId: string): PendingAskRecord[] {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE pending_asks
+      SET status = 'expired'
+      WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?
+    `).run(now);
+
+    const stmt = this.db.prepare(`
+      SELECT pa.id, pa.session_id, pa.bot_id, pa.prompt, pa.options_json, pa.status, pa.answer,
+             pa.preview_type, pa.preview_content, pa.created_at, pa.expires_at, s.title AS session_title
+      FROM pending_asks pa
+      JOIN sessions s ON s.id = pa.session_id
+      LEFT JOIN session_participants sp ON sp.session_id = pa.session_id AND sp.user_id = ?
+      WHERE pa.status = 'pending'
+        AND (s.owner_id = ? OR sp.user_id = ?)
+      ORDER BY pa.created_at DESC
+    `);
+    const rows = stmt.all(userId, userId, userId) as {
+      id: string;
+      session_id: string;
+      bot_id: string;
+      prompt: string;
+      options_json: string;
+      status: string;
+      answer: string | null;
+      preview_type: string | null;
+      preview_content: string | null;
+      created_at: string;
+      expires_at: string | null;
+      session_title: string;
+    }[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      botId: row.bot_id,
+      prompt: row.prompt,
+      options: parseOptionalJson<string[]>(row.options_json) ?? [],
+      status: row.status as 'pending' | 'answered' | 'expired',
+      ...(row.answer !== null && row.answer !== undefined ? { answer: row.answer } : {}),
+      ...(row.preview_type ? { previewType: row.preview_type as AskPreviewType } : {}),
+      ...(row.preview_content ? { previewContent: row.preview_content } : {}),
+      sessionTitle: row.session_title,
       createdAt: row.created_at,
       ...(row.expires_at !== null && row.expires_at !== undefined ? { expiresAt: row.expires_at } : {}),
     }));
@@ -633,6 +729,23 @@ export class HubDatabase {
       username: row.username,
       role: row.role as UserRole,
       passwordHash: row.password_hash,
+      createdAt: row.created_at,
+    };
+  }
+
+  getUserByUsername(username: string): UserRecord | undefined {
+    const stmt = this.db.prepare('SELECT id, username, role, created_at FROM users WHERE username = ?');
+    const row = stmt.get(username) as {
+      id: string;
+      username: string;
+      role: string;
+      created_at: string;
+    } | undefined;
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      username: row.username,
+      role: row.role as UserRole,
       createdAt: row.created_at,
     };
   }
@@ -688,20 +801,32 @@ export class HubDatabase {
         this.db.prepare(`DELETE FROM triggers WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM artifacts WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM pending_asks WHERE session_id IN (${placeholders})`).run(...sessionIds);
+        this.db.prepare(`DELETE FROM session_participants WHERE session_id IN (${placeholders})`).run(...sessionIds);
+        this.db.prepare(`DELETE FROM outbound_task_queue WHERE session_id IN (${placeholders})`).run(...sessionIds);
       }
+      this.db.prepare('DELETE FROM session_participants WHERE user_id = ?').run(id);
       this.db.prepare('DELETE FROM sessions WHERE owner_id = ?').run(id);
       this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
     });
   }
 
   // --- Nodes ---
-  createNode(data: { id: string; name: string; platform: PlatformType; tokenHash: string; ownerId: string; pid?: number; startedAt?: string }): void {
+  createNode(data: {
+    id: string;
+    name: string;
+    platform: PlatformType;
+    tokenHash: string;
+    ownerId: string;
+    pid?: number;
+    startedAt?: string;
+    visibility?: ResourceVisibility;
+  }): void {
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
-      INSERT INTO nodes (id, name, platform, token_hash, skills_json, extensions_json, status, last_seen_at, created_at, pid, started_at, owner_id)
-      VALUES (?, ?, ?, ?, '[]', '[]', 'offline', ?, ?, ?, ?, ?)
+      INSERT INTO nodes (id, name, platform, token_hash, skills_json, extensions_json, status, visibility, last_seen_at, created_at, pid, started_at, owner_id)
+      VALUES (?, ?, ?, ?, '[]', '[]', 'offline', ?, ?, ?, ?, ?, ?)
     `);
-    stmt.run(data.id, data.name, data.platform, data.tokenHash, now, now, data.pid ?? null, data.startedAt ?? null, data.ownerId);
+    stmt.run(data.id, data.name, data.platform, data.tokenHash, data.visibility ?? 'private', now, now, data.pid ?? null, data.startedAt ?? null, data.ownerId);
   }
 
   /** 返回节点归属用户 id；节点不存在返回 undefined */
@@ -712,29 +837,70 @@ export class HubDatabase {
   }
 
   getNode(id: string): NodeRecord | undefined {
-    const stmt = this.db.prepare('SELECT id, name, platform, skills_json, extensions_json, status, last_seen_at, created_at, pid, started_at, version FROM nodes WHERE id = ?');
-    const row = stmt.get(id) as NodeRow | undefined;
-    if (!row) return undefined;
-    return mapNodeRow(row);
-  }
-
-  getNodeWithSecret(id: string): (NodeRecord & { tokenHash: string }) | undefined {
-    const stmt = this.db.prepare('SELECT id, name, platform, token_hash, skills_json, extensions_json, status, last_seen_at, created_at, pid, started_at, version FROM nodes WHERE id = ?');
-    const row = stmt.get(id) as (NodeRow & { token_hash: string }) | undefined;
+    const stmt = this.db.prepare(`
+      SELECT n.id, n.name, n.platform, n.skills_json, n.extensions_json, n.status, n.visibility, n.last_seen_at, n.created_at, n.pid, n.started_at, n.version,
+             n.owner_id, u.username AS owner_name
+      FROM nodes n
+      LEFT JOIN users u ON u.id = n.owner_id
+      WHERE n.id = ?
+    `);
+    const row = stmt.get(id) as (NodeRow & { owner_id: string | null; owner_name: string | null }) | undefined;
     if (!row) return undefined;
     return {
       ...mapNodeRow(row),
+      ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+      ...(row.owner_name ? { ownerName: row.owner_name } : {}),
+    };
+  }
+
+  getNodeWithSecret(id: string): (NodeRecord & { tokenHash: string }) | undefined {
+    const stmt = this.db.prepare(`
+      SELECT n.id, n.name, n.platform, n.token_hash, n.skills_json, n.extensions_json, n.status, n.visibility, n.last_seen_at, n.created_at, n.pid, n.started_at, n.version,
+             n.owner_id, u.username AS owner_name
+      FROM nodes n
+      LEFT JOIN users u ON u.id = n.owner_id
+      WHERE n.id = ?
+    `);
+    const row = stmt.get(id) as (NodeRow & { token_hash: string; owner_id: string | null; owner_name: string | null }) | undefined;
+    if (!row) return undefined;
+    return {
+      ...mapNodeRow(row),
+      ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+      ...(row.owner_name ? { ownerName: row.owner_name } : {}),
       tokenHash: row.token_hash,
     };
   }
 
   getAllNodesWithBots(ownerId: string): NodeWithBots[] {
-    const stmt = this.db.prepare('SELECT id, name, platform, skills_json, extensions_json, status, last_seen_at, created_at, pid, started_at, version FROM nodes WHERE owner_id = ? ORDER BY created_at ASC');
-    const rows = stmt.all(ownerId) as NodeRow[];
-    return rows.map((row) => ({
-      ...mapNodeRow(row),
-      bots: this.getBotsForNode(row.id),
-    }));
+    const stmt = this.db.prepare(`
+      SELECT DISTINCT n.id, n.name, n.platform, n.skills_json, n.extensions_json, n.status, n.visibility, n.last_seen_at, n.created_at, n.pid, n.started_at, n.version,
+             n.owner_id, u.username AS owner_name
+      FROM nodes n
+      LEFT JOIN users u ON u.id = n.owner_id
+      LEFT JOIN bots b ON b.node_id = n.id
+      WHERE n.owner_id = ? OR n.visibility = 'team' OR b.visibility = 'team'
+      ORDER BY n.created_at ASC
+    `);
+    const rows = stmt.all(ownerId) as (NodeRow & { owner_id: string | null; owner_name: string | null })[];
+    return rows.map((row) => {
+      const isTeamShared = row.owner_id !== ownerId;
+      const allBots = this.getBotsForNode(row.id);
+      const bots = isTeamShared
+        ? allBots.filter((b) => b.visibility === 'team' || row.visibility === 'team').map((b) => ({
+            ...b,
+            isTeamShared: true,
+            ownerId: row.owner_id ?? undefined,
+            ownerName: row.owner_name ?? undefined,
+          }))
+        : allBots;
+      return {
+        ...mapNodeRow(row),
+        ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+        ...(row.owner_name ? { ownerName: row.owner_name } : {}),
+        ...(isTeamShared ? { isTeamShared: true } : {}),
+        bots,
+      };
+    });
   }
 
   updateNodeStatus(id: string, status: 'online' | 'offline', lastSeenAt?: string): void {
@@ -816,21 +982,118 @@ export class HubDatabase {
 
   // --- Bots ---
   getBot(id: string): BotConfig | undefined {
-    const stmt = this.db.prepare('SELECT id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, updated_at FROM bots WHERE id = ?');
-    const row = stmt.get(id) as BotRow | undefined;
-    return row ? mapBotRow(row) : undefined;
+    const stmt = this.db.prepare(`
+      SELECT b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id,
+             b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json,
+             b.visibility, b.updated_at, n.owner_id, u.username AS owner_name
+      FROM bots b
+      LEFT JOIN nodes n ON n.id = b.node_id
+      LEFT JOIN users u ON u.id = n.owner_id
+      WHERE b.id = ?
+    `);
+    const row = stmt.get(id) as (BotRow & { owner_id: string | null; owner_name: string | null }) | undefined;
+    if (!row) return undefined;
+    return {
+      ...mapBotRow(row),
+      ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+      ...(row.owner_name ? { ownerName: row.owner_name } : {}),
+    };
   }
 
   getBotsForNode(nodeId: string): BotConfig[] {
-    const stmt = this.db.prepare('SELECT id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, updated_at FROM bots WHERE node_id = ? ORDER BY id ASC');
-    const rows = stmt.all(nodeId) as BotRow[];
-    return rows.map(mapBotRow);
+    const stmt = this.db.prepare(`
+      SELECT b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id,
+             b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json,
+             b.visibility, b.updated_at, n.owner_id, u.username AS owner_name
+      FROM bots b
+      LEFT JOIN nodes n ON n.id = b.node_id
+      LEFT JOIN users u ON u.id = n.owner_id
+      WHERE b.node_id = ?
+      ORDER BY b.id ASC
+    `);
+    const rows = stmt.all(nodeId) as (BotRow & { owner_id: string | null; owner_name: string | null })[];
+    return rows.map((row) => ({
+      ...mapBotRow(row),
+      ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+      ...(row.owner_name ? { ownerName: row.owner_name } : {}),
+    }));
+  }
+
+  getAllBots(ownerId?: string): BotConfig[] {
+    if (ownerId) {
+      const stmt = this.db.prepare(`
+        SELECT b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id,
+               b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json,
+               b.visibility, b.updated_at, n.owner_id, u.username AS owner_name
+        FROM bots b
+        JOIN nodes n ON n.id = b.node_id
+        LEFT JOIN users u ON u.id = n.owner_id
+        WHERE n.owner_id = ?
+        ORDER BY b.id ASC
+      `);
+      const rows = stmt.all(ownerId) as (BotRow & { owner_id: string | null; owner_name: string | null })[];
+      return rows.map((row) => ({
+        ...mapBotRow(row),
+        ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+        ...(row.owner_name ? { ownerName: row.owner_name } : {}),
+      }));
+    }
+    const stmt = this.db.prepare(`
+      SELECT b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id,
+             b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json,
+             b.visibility, b.updated_at, n.owner_id, u.username AS owner_name
+      FROM bots b
+      LEFT JOIN nodes n ON n.id = b.node_id
+      LEFT JOIN users u ON u.id = n.owner_id
+      ORDER BY b.id ASC
+    `);
+    const rows = stmt.all() as (BotRow & { owner_id: string | null; owner_name: string | null })[];
+    return rows.map((row) => ({
+      ...mapBotRow(row),
+      ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+      ...(row.owner_name ? { ownerName: row.owner_name } : {}),
+    }));
+  }
+
+  getAccessibleBots(userId: string): BotConfig[] {
+    const stmt = this.db.prepare(`
+      SELECT b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id,
+             b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json,
+             b.visibility, b.updated_at, n.owner_id, u.username AS owner_name
+      FROM bots b
+      JOIN nodes n ON n.id = b.node_id
+      LEFT JOIN users u ON u.id = n.owner_id
+      WHERE n.owner_id = ? OR b.visibility = 'team' OR n.visibility = 'team'
+      ORDER BY b.id ASC
+    `);
+    const rows = stmt.all(userId) as (BotRow & { owner_id: string | null; owner_name: string | null })[];
+    return rows.map((row) => {
+      const isTeamShared = row.owner_id !== userId;
+      return {
+        ...mapBotRow(row),
+        ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+        ...(row.owner_name ? { ownerName: row.owner_name } : {}),
+        isTeamShared,
+      };
+    });
+  }
+
+  canUserUseBot(botId: string, userId: string): boolean {
+    const bot = this.getBot(botId);
+    if (!bot) return false;
+    const node = this.getNode(bot.nodeId);
+    if (!node) return false;
+    const nodeOwner = this.getNodeOwner(bot.nodeId);
+    if (nodeOwner === userId) return true;
+    if (bot.visibility === 'team') return true;
+    if (node.visibility === 'team') return true;
+    return false;
   }
 
   saveBot(bot: BotConfig): void {
     const stmt = this.db.prepare(`
-      INSERT INTO bots (id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO bots (id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, visibility, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         node_id = excluded.node_id,
         name = excluded.name,
@@ -840,6 +1103,7 @@ export class HubDatabase {
         thinking_level = excluded.thinking_level,
         enabled_skills_json = excluded.enabled_skills_json,
         enabled_extensions_json = excluded.enabled_extensions_json,
+        visibility = excluded.visibility,
         updated_at = excluded.updated_at
     `);
     stmt.run(
@@ -852,6 +1116,7 @@ export class HubDatabase {
       bot.thinkingLevel ?? 'medium',
       JSON.stringify(bot.enabledSkills || []),
       JSON.stringify(bot.enabledExtensions || []),
+      bot.visibility === 'team' ? 'team' : 'private',
       bot.updatedAt || new Date().toISOString()
     );
   }
@@ -906,7 +1171,7 @@ export class HubDatabase {
   }
 
   getSession(id: string): (SessionRecord & { cursorMap: Record<string, number> }) | undefined {
-    const stmt = this.db.prepare('SELECT id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, archived, pinned, parallel_roundtable, parent_session_id, created_at, updated_at FROM sessions WHERE id = ?');
+    const stmt = this.db.prepare('SELECT id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, archived, pinned, parallel_roundtable, parent_session_id, owner_id, created_at, updated_at FROM sessions WHERE id = ?');
     const row = stmt.get(id) as {
       id: string;
       title: string;
@@ -920,6 +1185,7 @@ export class HubDatabase {
       pinned: number;
       parallel_roundtable: number;
       parent_session_id: string | null;
+      owner_id: string | null;
       created_at: string;
       updated_at: string;
     } | undefined;
@@ -937,6 +1203,8 @@ export class HubDatabase {
       pinned: Boolean(row.pinned),
       parallelRoundtable: Boolean(row.parallel_roundtable),
       parentSessionId: row.parent_session_id ?? undefined,
+      ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+      participants: this.listSessionParticipants(row.id),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -944,15 +1212,16 @@ export class HubDatabase {
 
   getAllSessions(ownerId: string): SessionRecord[] {
     const stmt = this.db.prepare(`
-      SELECT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.pinned, s.parallel_roundtable, s.parent_session_id, s.created_at, s.updated_at,
+      SELECT DISTINCT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.pinned, s.parallel_roundtable, s.parent_session_id, s.owner_id, s.created_at, s.updated_at,
         (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
         (SELECT m.content FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_content,
         (SELECT m.created_at FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_at
       FROM sessions s
-      WHERE s.owner_id = ?
+      LEFT JOIN session_participants sp ON sp.session_id = s.id
+      WHERE s.owner_id = ? OR sp.user_id = ?
       ORDER BY s.updated_at DESC
     `);
-    const rows = stmt.all(ownerId) as {
+    const rows = stmt.all(ownerId, ownerId) as {
       id: string;
       title: string;
       mode: string;
@@ -964,6 +1233,7 @@ export class HubDatabase {
       pinned: number;
       parallel_roundtable: number;
       parent_session_id: string | null;
+      owner_id: string | null;
       created_at: string;
       updated_at: string;
       message_count: number | bigint;
@@ -982,12 +1252,18 @@ export class HubDatabase {
       pinned: Boolean(row.pinned),
       parallelRoundtable: Boolean(row.parallel_roundtable),
       parentSessionId: row.parent_session_id ?? undefined,
+      ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+      participants: this.listSessionParticipants(row.id),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       messageCount: Number(row.message_count),
       lastMessagePreview: buildPreview(row.last_message_content ?? ''),
       lastMessageAt: row.last_message_at ?? undefined,
     }));
+  }
+
+  getAccessibleSessions(userId: string): SessionRecord[] {
+    return this.getAllSessions(userId);
   }
 
   listSubSessions(parentSessionId: string): SessionRecord[] {
@@ -1059,10 +1335,190 @@ export class HubDatabase {
       deleteArtifacts.run(id);
       const deletePendingAsks = this.db.prepare('DELETE FROM pending_asks WHERE session_id = ?');
       deletePendingAsks.run(id);
+      this.db.prepare('DELETE FROM session_participants WHERE session_id = ?').run(id);
+      this.db.prepare('DELETE FROM outbound_task_queue WHERE session_id = ?').run(id);
       const deleteSessionStmt = this.db.prepare('DELETE FROM sessions WHERE id = ?');
       deleteSessionStmt.run(id);
       return true;
     });
+  }
+
+  // --- Session Participants ---
+  listSessionParticipants(sessionId: string): SessionParticipantRecord[] {
+    const stmt = this.db.prepare(`
+      SELECT sp.session_id, sp.user_id, sp.role, sp.joined_at, u.username
+      FROM session_participants sp
+      LEFT JOIN users u ON u.id = sp.user_id
+      WHERE sp.session_id = ?
+      ORDER BY sp.joined_at ASC
+    `);
+    const rows = stmt.all(sessionId) as {
+      session_id: string;
+      user_id: string;
+      role: 'owner' | 'member';
+      joined_at: string;
+      username: string | null;
+    }[];
+    return rows.map((r) => ({
+      sessionId: r.session_id,
+      userId: r.user_id,
+      role: r.role,
+      joinedAt: r.joined_at,
+      ...(r.username ? { username: r.username } : {}),
+    }));
+  }
+
+  addSessionParticipant(sessionId: string, userId: string, role: 'owner' | 'member' = 'member'): void {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT INTO session_participants (session_id, user_id, role, joined_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(session_id, user_id) DO UPDATE SET role = excluded.role
+    `);
+    stmt.run(sessionId, userId, role, now);
+  }
+
+  removeSessionParticipant(sessionId: string, userId: string): void {
+    const stmt = this.db.prepare('DELETE FROM session_participants WHERE session_id = ? AND user_id = ?');
+    stmt.run(sessionId, userId);
+  }
+
+  isSessionParticipant(sessionId: string, userId: string): boolean {
+    const stmt = this.db.prepare('SELECT 1 FROM session_participants WHERE session_id = ? AND user_id = ? LIMIT 1');
+    return stmt.get(sessionId, userId) !== undefined;
+  }
+
+  canUserAccessSession(sessionId: string, userId: string): boolean {
+    const ownerId = this.getSessionOwner(sessionId);
+    if (ownerId === userId) return true;
+    return this.isSessionParticipant(sessionId, userId);
+  }
+
+  // --- Outbound Task Queue (Offline Store-and-Forward) ---
+  enqueueOutboundTask(input: {
+    id?: string;
+    nodeId: string;
+    botId: string;
+    sessionId: string;
+    taskType: string;
+    payload?: unknown;
+    ttlHours?: number;
+  }): OutboundTaskRecord {
+    const id = input.id ?? `task_${randomUUID()}`;
+    const now = new Date();
+    const ttl = input.ttlHours ?? 72;
+    const expiresAt = new Date(now.getTime() + ttl * 3600 * 1000).toISOString();
+    const payloadJson = typeof input.payload === 'string' ? input.payload : JSON.stringify(input.payload ?? {});
+
+    const existing = this.db.prepare(`
+      SELECT id FROM outbound_task_queue
+      WHERE session_id = ? AND bot_id = ? AND status = 'queued_offline'
+      LIMIT 1
+    `).get(input.sessionId, input.botId) as { id: string } | undefined;
+
+    if (existing) {
+      this.db.prepare(`
+        UPDATE outbound_task_queue
+        SET payload_json = ?, expires_at = ?
+        WHERE id = ?
+      `).run(payloadJson, expiresAt, existing.id);
+      return this.getOutboundTask(existing.id)!;
+    }
+
+    const stmt = this.db.prepare(`
+      INSERT INTO outbound_task_queue (id, node_id, bot_id, session_id, task_type, payload_json, status, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'queued_offline', ?, ?)
+    `);
+    const createdAt = now.toISOString();
+    stmt.run(id, input.nodeId, input.botId, input.sessionId, input.taskType, payloadJson, createdAt, expiresAt);
+    return {
+      id,
+      nodeId: input.nodeId,
+      botId: input.botId,
+      sessionId: input.sessionId,
+      taskType: input.taskType,
+      payloadJson,
+      status: 'queued_offline',
+      createdAt,
+      expiresAt,
+    };
+  }
+
+  getOutboundTask(id: string): OutboundTaskRecord | undefined {
+    const stmt = this.db.prepare(`
+      SELECT id, node_id, bot_id, session_id, task_type, payload_json, status, created_at, expires_at
+      FROM outbound_task_queue
+      WHERE id = ?
+    `);
+    const row = stmt.get(id) as {
+      id: string;
+      node_id: string;
+      bot_id: string;
+      session_id: string;
+      task_type: string;
+      payload_json: string;
+      status: string;
+      created_at: string;
+      expires_at: string;
+    } | undefined;
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      nodeId: row.node_id,
+      botId: row.bot_id,
+      sessionId: row.session_id,
+      taskType: row.task_type,
+      payloadJson: row.payload_json,
+      status: row.status as OutboundTaskStatus,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+    };
+  }
+
+  listPendingOutboundTasks(nodeId: string): OutboundTaskRecord[] {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE outbound_task_queue
+      SET status = 'expired'
+      WHERE status = 'queued_offline' AND expires_at <= ?
+    `).run(now);
+
+    const stmt = this.db.prepare(`
+      SELECT id, node_id, bot_id, session_id, task_type, payload_json, status, created_at, expires_at
+      FROM outbound_task_queue
+      WHERE node_id = ? AND status = 'queued_offline' AND expires_at > ?
+      ORDER BY created_at ASC
+    `);
+    const rows = stmt.all(nodeId, now) as {
+      id: string;
+      node_id: string;
+      bot_id: string;
+      session_id: string;
+      task_type: string;
+      payload_json: string;
+      status: string;
+      created_at: string;
+      expires_at: string;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      nodeId: r.node_id,
+      botId: r.bot_id,
+      sessionId: r.session_id,
+      taskType: r.task_type,
+      payloadJson: r.payload_json,
+      status: r.status as OutboundTaskStatus,
+      createdAt: r.created_at,
+      expiresAt: r.expires_at,
+    }));
+  }
+
+  markOutboundTaskDispatched(id: string): void {
+    this.db.prepare(`
+      UPDATE outbound_task_queue
+      SET status = 'dispatched'
+      WHERE id = ?
+    `).run(id);
   }
 
   clearSessionMessages(id: string): boolean {

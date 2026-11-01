@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Users, Sparkles, Loader2, Save } from 'lucide-react';
-import type { SessionRecord, SessionMode, BotConfig, CreateSessionInput } from '@botd/protocol';
+import { X, Users, Sparkles, Loader2, Save, UserPlus, Trash2 } from 'lucide-react';
+import type { SessionRecord, SessionMode, BotConfig, CreateSessionInput, SessionParticipantRecord } from '@botd/protocol';
 import { CheckList } from './CheckList.js';
 
 export interface GroupSettingsDraft {
@@ -152,6 +152,10 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
   const [parallelRoundtable, setParallelRoundtable] = useState(session.parallelRoundtable ?? false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [participants, setParticipants] = useState<SessionParticipantRecord[]>([]);
+  const [inviteUsername, setInviteUsername] = useState('');
+  const [inviting, setInviting] = useState(false);
+  const [participantError, setParticipantError] = useState<string | null>(null);
 
   const lastInitializedSessionIdRef = useRef<string | null>(null);
   const draftRef = useRef<GroupSettingsDraft>({
@@ -191,6 +195,60 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
       setError(step.nextDraft.error);
     }
   }, [isOpen, session.id, session, bots]);
+
+  useEffect(() => {
+    if (!isOpen || !session.id) return;
+    let active = true;
+    fetch(`/api/sessions/${encodeURIComponent(session.id)}/participants`, {
+      headers: { 'content-type': 'application/json' },
+    })
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => {
+        if (active && Array.isArray(data)) setParticipants(data);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [isOpen, session.id]);
+
+  const handleInviteParticipant = async () => {
+    const cleanUsername = inviteUsername.trim();
+    if (!cleanUsername) return;
+    setInviting(true);
+    setParticipantError(null);
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/participants`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: cleanUsername }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setParticipantError(data.error || '邀请失败');
+        return;
+      }
+      setInviteUsername('');
+      if (data.participant) {
+        setParticipants((prev) => [...prev.filter((p) => p.userId !== data.participant.userId), data.participant]);
+      }
+    } catch (err: any) {
+      setParticipantError(err?.message || '邀请失败');
+    } finally {
+      setInviting(false);
+    }
+  };
+
+  const handleRemoveParticipant = async (userId: string) => {
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/participants/${encodeURIComponent(userId)}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        setParticipants((prev) => prev.filter((p) => p.userId !== userId));
+      }
+    } catch {}
+  };
 
   if (!isOpen) return null;
 
@@ -410,6 +468,79 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
               );
             }}
           />
+
+          {/* 团队协同成员 (Session Participants) */}
+          <div className="pt-2 border-t border-zinc-100 dark:border-zinc-800/60">
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                协同成员 ({participants.length})
+              </label>
+              <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                邀请团队成员协同排障与查看会话
+              </span>
+            </div>
+
+            {participantError && (
+              <div className="mb-2 p-2 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-rose-700 dark:text-rose-300 text-[11px] rounded-lg">
+                {participantError}
+              </div>
+            )}
+
+            <div className="flex gap-2 mb-2">
+              <input
+                type="text"
+                value={inviteUsername}
+                onChange={(e) => setInviteUsername(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleInviteParticipant();
+                  }
+                }}
+                placeholder="输入用户名邀请..."
+                className="flex-1 h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder-zinc-400 dark:placeholder-zinc-500 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              />
+              <button
+                type="button"
+                onClick={handleInviteParticipant}
+                disabled={inviting || !inviteUsername.trim()}
+                className="h-8 px-3 text-xs font-medium bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 dark:text-zinc-900 text-white rounded-lg disabled:opacity-50 flex items-center gap-1.5 cursor-pointer shrink-0"
+              >
+                {inviting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UserPlus className="w-3.5 h-3.5" />}
+                <span>邀请</span>
+              </button>
+            </div>
+
+            {participants.length > 0 && (
+              <div className="space-y-1 max-h-32 overflow-y-auto rounded-lg border border-zinc-200 dark:border-zinc-800 p-1.5 bg-zinc-50/50 dark:bg-zinc-900/50">
+                {participants.map((p) => (
+                  <div
+                    key={p.userId}
+                    className="flex items-center justify-between px-2 py-1 text-xs rounded-md bg-white dark:bg-zinc-800/80 border border-zinc-100 dark:border-zinc-700/50"
+                  >
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="font-medium text-zinc-800 dark:text-zinc-200 truncate">
+                        {p.username || p.userId}
+                      </span>
+                      <span className="text-[10px] px-1 py-0.2 bg-zinc-100 dark:bg-zinc-700 rounded text-zinc-500 dark:text-zinc-400">
+                        {p.role === 'owner' ? '所有者' : '成员'}
+                      </span>
+                    </div>
+                    {p.role !== 'owner' && (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveParticipant(p.userId)}
+                        className="p-1 text-zinc-400 hover:text-rose-500 dark:hover:text-rose-400 rounded transition-colors cursor-pointer"
+                        title="移除协同成员"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           <div className="pt-3 flex items-center justify-end gap-2 border-t border-zinc-100 dark:border-zinc-800/60 pb-[max(1rem,env(safe-area-inset-bottom,0px))]">
             <button
