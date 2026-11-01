@@ -3,13 +3,15 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { Command, Option } from 'commander';
-import { parseDelayDuration, type BgJobRecord } from '@botd/protocol';
+import { parseDelayDuration, type BgJobRecord, type NodeUpgradeResult } from '@botd/protocol';
 import { cliAction, readGlobals } from '../context.js';
 import { CliError } from '../errors.js';
 import { writeNodeIdentity, getDaemonSocketPath } from '../../storage.js';
 import { startDaemon, type DaemonHandle } from '../../daemon.js';
 import { installResourceToNode } from '../../installer.js';
 import { buildDaemonSpawnSpec } from '../../daemon-launch.js';
+import { checkNodeUpgrade, performNodeUpgrade } from '../../upgrader.js';
+import { installNodeService, uninstallNodeService, getNodeServiceStatus } from '../../service.js';
 
 // ---------------------------------------------------------------------------
 // Daemon control-plane helpers (Unix socket / Windows named pipe)
@@ -128,6 +130,7 @@ interface DaemonStatus {
   pid: number;
   uptimeSeconds: number;
   hubConnected: boolean;
+  version?: string;
 }
 
 const waitMs = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -331,10 +334,13 @@ export function registerNodeCommands(program: Command): void {
           if (json) {
             console.log(JSON.stringify({ running: true, ...status }, null, 2));
           } else {
-            console.log(`daemon: running (pid ${status.pid}, up ${status.uptimeSeconds}s)`);
-            console.log(`node:   ${status.name} (${status.nodeId})`);
-            console.log(`hub:    ${status.hubUrl} (${status.hubConnected ? 'connected' : 'disconnected'})`);
-            console.log(`socket: ${status.socketPath}`);
+            console.log(`daemon:  running (pid ${status.pid}, up ${status.uptimeSeconds}s)`);
+            if (status.version) {
+              console.log(`version: ${status.version}`);
+            }
+            console.log(`node:    ${status.name} (${status.nodeId})`);
+            console.log(`hub:     ${status.hubUrl} (${status.hubConnected ? 'connected' : 'disconnected'})`);
+            console.log(`socket:  ${status.socketPath}`);
           }
           return;
         }
@@ -342,6 +348,92 @@ export function registerNodeCommands(program: Command): void {
         else console.log('daemon: not running');
         process.exitCode = 1;
       }),
+    );
+
+  program
+    .command('upgrade')
+    .description('Check for or perform a node upgrade')
+    .option('--version <ver>', 'target version to upgrade to')
+    .option('--registry <url>', 'npm registry URL')
+    .option('--check', 'check for available upgrade without upgrading')
+    .option('--force', 'force upgrade even if version matches current')
+    .action(
+      cliAction(async (options, command) => {
+        const { dataDir, json } = readGlobals(command);
+        const registryUrl = typeof options.registry === 'string' ? options.registry : undefined;
+        const targetVersion = typeof options.version === 'string' ? options.version : undefined;
+        const force = Boolean(options.force);
+
+        if (options.check) {
+          const result = await checkNodeUpgrade(dataDir, { registryUrl, currentVersion: targetVersion });
+          if (json) {
+            console.log(JSON.stringify(result, null, 2));
+          } else {
+            console.log(`Current version:  ${result.currentVersion}`);
+            console.log(`Latest version:   ${result.latestVersion}`);
+            console.log(`Update available: ${result.updateAvailable ? 'yes' : 'no'}`);
+            if (result.blocked) {
+              console.log(`Blocked version:  ${result.blocked.version} (reason: ${result.blocked.reason}, at: ${result.blocked.at})`);
+            }
+          }
+          return;
+        }
+
+        const socketPath = getDaemonSocketPath(dataDir);
+        const status = await getDaemonStatus(socketPath);
+        let result: NodeUpgradeResult;
+
+        if (status) {
+          result = await postJsonOverSocket<NodeUpgradeResult>(
+            socketPath,
+            '/upgrade',
+            { targetVersion, registryUrl, force },
+            60_000,
+          );
+        } else {
+          result = await performNodeUpgrade(dataDir, { targetVersion, registryUrl, force });
+        }
+
+        if (json) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          if (result.upgraded) {
+            console.log(
+              `Successfully upgraded from ${result.previousVersion} to ${result.targetVersion} (new PID: ${result.pid ?? 'unknown'})`,
+            );
+          } else {
+            console.log(`Already at target version ${result.targetVersion} (no upgrade needed)`);
+          }
+        }
+      }),
+    );
+
+  program
+    .command('service <action>')
+    .description('Manage OS-level background service (install, uninstall, status)')
+    .option('--dry-run', 'generate service configuration without applying system changes')
+    .action((action: string, options: Record<string, unknown>, command: Command) =>
+      cliAction(async (options, command) => {
+        const act = action || (command.args[0] as string);
+        const { dataDir, json } = readGlobals(command);
+        const dryRun = Boolean(options.dryRun);
+
+        if (act === 'install') {
+          const res = await installNodeService(dataDir, { dryRun });
+          if (json) console.log(JSON.stringify(res, null, 2));
+          else console.log(res.message || `Service installed (${res.platform})`);
+        } else if (act === 'uninstall') {
+          const res = await uninstallNodeService(dataDir, { dryRun });
+          if (json) console.log(JSON.stringify(res, null, 2));
+          else console.log(res.message || `Service uninstalled (${res.platform})`);
+        } else if (act === 'status') {
+          const res = await getNodeServiceStatus(dataDir);
+          if (json) console.log(JSON.stringify(res, null, 2));
+          else console.log(res.installed ? `Service installed: ${res.platform} (${res.configPath})` : 'Service not installed');
+        } else {
+          throw new CliError(`Unknown service action: "${act}". Valid actions: install, uninstall, status`);
+        }
+      })(options, command)
     );
 
   program

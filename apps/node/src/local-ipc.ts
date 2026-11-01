@@ -5,6 +5,7 @@ import type { BirpcReturn } from 'birpc';
 import type { HubRpcFunctions, NodeRpcFunctions } from '@botd/protocol';
 import { assertSafeId, ensureDir } from './storage.js';
 import type { BgJobManager } from './bg-jobs.js';
+import { getNodeVersion, checkNodeUpgrade, performNodeUpgrade } from './upgrader.js';
 
 export const MAX_WAKE_BODY_BYTES = 64 * 1024;
 export const MAX_ARTIFACT_BODY_BYTES = 15 * 1024 * 1024;
@@ -54,7 +55,7 @@ export function parseJsonBody<T = any>(
     req.on('end', () => {
       if (exceeded) return;
       try {
-        resolve(JSON.parse(body) as T);
+        resolve(body.trim() ? (JSON.parse(body) as T) : ({} as T));
       } catch {
         sendJson(res, 400, { error: 'Invalid JSON' });
         resolve(null);
@@ -96,7 +97,46 @@ export function createLocalIpcServer(deps: LocalIpcDeps): http.Server {
           pid: process.pid,
           uptimeSeconds: Math.floor((Date.now() - deps.startedAt) / 1000),
           hubConnected: deps.isHubConnected(),
+          version: getNodeVersion(),
         });
+        return;
+      }
+
+      if (method === 'GET' && reqUrl.startsWith('/upgrade/check')) {
+        req.resume();
+        const urlObj = new URL(reqUrl, 'http://localhost');
+        const registryUrl = urlObj.searchParams.get('registryUrl') || undefined;
+        try {
+          const result = await checkNodeUpgrade(deps.dataDir, { registryUrl });
+          sendJson(res, 200, result);
+        } catch (err: any) {
+          sendJson(res, 500, { error: err?.message || String(err) });
+        }
+        return;
+      }
+
+      if (method === 'POST' && reqUrl === '/upgrade') {
+        const payload = await parseJsonBody<{ targetVersion?: string; registryUrl?: string; force?: boolean }>(
+          req,
+          res,
+          MAX_WAKE_BODY_BYTES,
+        );
+        if (!payload) return;
+        try {
+          const result = await performNodeUpgrade(deps.dataDir, {
+            targetVersion: payload.targetVersion,
+            registryUrl: payload.registryUrl,
+            force: payload.force,
+            onScheduleShutdown: () => {
+              setTimeout(() => {
+                void deps.handleShutdown();
+              }, 100).unref();
+            },
+          });
+          sendJson(res, 200, result);
+        } catch (err: any) {
+          sendJson(res, 500, { error: err?.message || String(err) });
+        }
         return;
       }
 
