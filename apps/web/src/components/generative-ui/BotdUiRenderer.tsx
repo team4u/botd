@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useMemo, useRef, useState } from 'react';
+import React, { createContext, useContext, useMemo, useState } from 'react';
 import { createStateStore, type StateStore } from '@json-render/core';
 import {
   defineRegistry,
@@ -6,7 +6,7 @@ import {
   Renderer,
   useBoundProp,
   useStateStore,
-  type ComponentRenderProps,
+  type BaseComponentProps,
 } from '@json-render/react';
 import { AlertCircle, ChevronDown, Loader2 } from 'lucide-react';
 import { validateUiSpec, type BotdUiSpec } from '@botd/protocol';
@@ -36,18 +36,18 @@ function extractStatePath(rawProp: unknown, bindingPath?: string): string | unde
 }
 
 const StackComponent: React.FC<
-  ComponentRenderProps<{ direction?: 'vertical' | 'horizontal'; gap?: 'sm' | 'md' }>
-> = ({ element, children }) => {
-  const props = element.props;
+  BaseComponentProps<{ direction?: 'vertical' | 'horizontal'; gap?: 'sm' | 'md' }>
+> = (ctx) => {
+  const props = ctx.props ?? (ctx as any).element?.props ?? {};
   const direction = props.direction === 'horizontal' ? 'flex-row flex-wrap items-center' : 'flex-col';
   const gap = props.gap === 'sm' ? 'gap-2' : 'gap-3';
-  return <div className={`flex ${direction} ${gap} w-full`}>{children}</div>;
+  return <div className={`flex ${direction} ${gap} w-full`}>{ctx.children}</div>;
 };
 
 const CardComponent: React.FC<
-  ComponentRenderProps<{ title: string; subtitle?: string; badge?: string }>
-> = ({ element, children }) => {
-  const props = element.props;
+  BaseComponentProps<{ title: string; subtitle?: string; badge?: string }>
+> = (ctx) => {
+  const props = ctx.props ?? (ctx as any).element?.props ?? {};
   return (
     <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/80 p-3 space-y-2.5 shadow-2xs w-full">
       <div className="flex items-center justify-between gap-2">
@@ -63,32 +63,32 @@ const CardComponent: React.FC<
           </span>
         )}
       </div>
-      {children && <div className="space-y-2.5">{children}</div>}
+      {ctx.children && <div className="space-y-2.5">{ctx.children}</div>}
     </div>
   );
 };
 
-const MetricGridComponent: React.FC<ComponentRenderProps<{ columns?: 2 | 3 | 4 }>> = ({ element, children }) => {
-  const props = element.props;
+const MetricGridComponent: React.FC<BaseComponentProps<{ columns?: 2 | 3 | 4 }>> = (ctx) => {
+  const props = ctx.props ?? (ctx as any).element?.props ?? {};
   const cols =
     props.columns === 2
       ? 'grid-cols-1 sm:grid-cols-2'
       : props.columns === 4
         ? 'grid-cols-2 sm:grid-cols-4'
         : 'grid-cols-1 sm:grid-cols-3';
-  return <div className={`grid gap-2 w-full ${cols}`}>{children}</div>;
+  return <div className={`grid gap-2 w-full ${cols}`}>{ctx.children}</div>;
 };
 
 const MetricCardComponent: React.FC<
-  ComponentRenderProps<{
+  BaseComponentProps<{
     label: string;
     value: string;
     hint?: string;
     status?: 'ok' | 'warn' | 'error';
     trend?: 'up' | 'down' | 'flat';
   }>
-> = ({ element }) => {
-  const props = element.props;
+> = (ctx) => {
+  const props = ctx.props ?? (ctx as any).element?.props ?? {};
   const statusDot =
     props.status === 'ok'
       ? 'bg-emerald-500'
@@ -125,11 +125,11 @@ const MetricCardComponent: React.FC<
 };
 
 const KeyValueListComponent: React.FC<
-  ComponentRenderProps<{
+  BaseComponentProps<{
     items: Array<{ key: string; value: string; mono?: boolean; badge?: string }>;
   }>
-> = ({ element }) => {
-  const props = element.props;
+> = (ctx) => {
+  const props = ctx.props ?? (ctx as any).element?.props ?? {};
   const items = Array.isArray(props.items) ? props.items : [];
   return (
     <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/40 divide-y divide-zinc-100 dark:divide-zinc-800/80 w-full overflow-hidden">
@@ -157,16 +157,17 @@ const KeyValueListComponent: React.FC<
 };
 
 const TextInputComponent: React.FC<
-  ComponentRenderProps<{
+  BaseComponentProps<{
     label: string;
     value?: string;
     placeholder?: string;
     hint?: string;
   }>
-> = ({ element, bindings }) => {
-  const props = element.props;
+> = (ctx) => {
+  const props = ctx.props ?? (ctx as any).element?.props ?? {};
+  const bindings = ctx.bindings;
   const { mode, disabled } = useUiRenderContext();
-  const rawProp = (element.props as Record<string, unknown> | undefined)?.value;
+  const rawProp = props.value;
   const statePath = extractStatePath(rawProp, bindings?.value);
   const store = useStateStore();
   const [, setBoundVal] = useBoundProp<string>(props.value, statePath);
@@ -202,15 +203,16 @@ const TextInputComponent: React.FC<
 };
 
 const SelectComponent: React.FC<
-  ComponentRenderProps<{
+  BaseComponentProps<{
     label: string;
     value?: string;
     options: Array<{ value: string; label: string }>;
   }>
-> = ({ element, bindings }) => {
-  const props = element.props;
+> = (ctx) => {
+  const props = ctx.props ?? (ctx as any).element?.props ?? {};
+  const bindings = ctx.bindings;
   const { mode, disabled } = useUiRenderContext();
-  const rawProp = (element.props as Record<string, unknown> | undefined)?.value;
+  const rawProp = props.value;
   const statePath = extractStatePath(rawProp, bindings?.value);
   const store = useStateStore();
   const [, setBoundVal] = useBoundProp<string>(props.value, statePath);
@@ -251,15 +253,16 @@ const SelectComponent: React.FC<
 };
 
 const SwitchComponent: React.FC<
-  ComponentRenderProps<{
+  BaseComponentProps<{
     label: string;
     checked?: boolean;
     hint?: string;
   }>
-> = ({ element, bindings }) => {
-  const props = element.props;
+> = (ctx) => {
+  const props = ctx.props ?? (ctx as any).element?.props ?? {};
+  const bindings = ctx.bindings;
   const { mode, disabled } = useUiRenderContext();
-  const rawProp = (element.props as Record<string, unknown> | undefined)?.checked;
+  const rawProp = props.checked;
   const statePath = extractStatePath(rawProp, bindings?.checked);
   const store = useStateStore();
   const [, setBoundVal] = useBoundProp<boolean>(props.checked, statePath);
@@ -305,25 +308,23 @@ const SwitchComponent: React.FC<
   );
 };
 
-const ActionBarComponent: React.FC<ComponentRenderProps<{ align?: 'left' | 'right' | 'between' }>> = ({
-  element,
-  children,
-}) => {
-  const props = element.props;
+const ActionBarComponent: React.FC<BaseComponentProps<{ align?: 'left' | 'right' | 'between' }>> = (ctx) => {
+  const props = ctx.props ?? (ctx as any).element?.props ?? {};
   const justify =
     props.align === 'left' ? 'justify-start' : props.align === 'between' ? 'justify-between' : 'justify-end';
-  return <div className={`flex items-center gap-1.5 pt-1 w-full ${justify}`}>{children}</div>;
+  return <div className={`flex items-center gap-1.5 pt-1 w-full ${justify}`}>{ctx.children}</div>;
 };
 
 const ButtonComponent: React.FC<
-  ComponentRenderProps<{
+  BaseComponentProps<{
     label: string;
     variant?: 'primary' | 'secondary' | 'danger';
   }>
-> = ({ element, emit }) => {
-  const props = element.props;
+> = (ctx) => {
+  const props = ctx.props ?? (ctx as any).element?.props ?? {};
+  const emit = ctx.emit;
+  const on = ctx.on;
   const { mode, disabled, onSubmit, getStoreSnapshot } = useUiRenderContext();
-  const pressBinding = (element.on as any)?.press;
   const [submitting, setSubmitting] = useState(false);
 
   const variantClass =
@@ -339,7 +340,8 @@ const ButtonComponent: React.FC<
     if (isDisabled) return;
     setSubmitting(true);
     try {
-      if (pressBinding && pressBinding.action === 'submit') {
+      const pressHandle = typeof on === 'function' ? on('press') : undefined;
+      if (pressHandle?.bound) {
         emit('press');
       } else if (mode === 'ask' && onSubmit) {
         const currentState = getStoreSnapshot ? getStoreSnapshot() : {};
@@ -400,10 +402,33 @@ export const BotdUiRenderer: React.FC<BotdUiRendererProps> = ({
   disabled = false,
   onSubmit,
 }) => {
-  const storeRef = useRef<StateStore | null>(null);
-  if (!storeRef.current) {
-    storeRef.current = createStateStore(spec.state ?? {});
-  }
+  const store = useMemo<StateStore>(() => createStateStore(spec.state ?? {}), [spec]);
+
+  const normalizedSpec = useMemo(() => {
+    if (!spec || !spec.elements) return spec;
+    const nextElements = { ...spec.elements };
+    let changed = false;
+    for (const [key, el] of Object.entries(spec.elements)) {
+      if (!el || !el.props) continue;
+      const p = el.props as Record<string, unknown>;
+      let nextProps = p;
+      if (el.type === 'TextInput' || el.type === 'Select') {
+        if (p.value && typeof p.value === 'object' && ('$state' in p.value) && !('$bindState' in p.value)) {
+          nextProps = { ...nextProps, value: { ...p.value, $bindState: (p.value as any).$state } };
+          changed = true;
+        }
+      } else if (el.type === 'Switch') {
+        if (p.checked && typeof p.checked === 'object' && ('$state' in p.checked) && !('$bindState' in p.checked)) {
+          nextProps = { ...nextProps, checked: { ...p.checked, $bindState: (p.checked as any).$state } };
+          changed = true;
+        }
+      }
+      if (nextProps !== p) {
+        nextElements[key] = { ...el, props: nextProps };
+      }
+    }
+    return changed ? { ...spec, elements: nextElements } : spec;
+  }, [spec]);
 
   const hasButtons = useMemo(() => {
     return Object.values(spec.elements).some((el) => el.type === 'Button');
@@ -412,7 +437,7 @@ export const BotdUiRenderer: React.FC<BotdUiRendererProps> = ({
   const handlers = useMemo(
     () => ({
       submit: async (params: Record<string, unknown> = {}) => {
-        const currentState = storeRef.current ? storeRef.current.getSnapshot() : {};
+        const currentState = store ? store.getSnapshot() : {};
         const payload = {
           ...(params?.decision !== undefined ? { decision: params.decision } : {}),
           ...(params && Object.keys(params).length > 0 ? { params } : {}),
@@ -422,7 +447,7 @@ export const BotdUiRenderer: React.FC<BotdUiRendererProps> = ({
         onSubmit?.(jsonStr);
       },
     }),
-    [onSubmit],
+    [store, onSubmit],
   );
 
   const contextValue = useMemo<UiRenderContextValue>(
@@ -430,23 +455,23 @@ export const BotdUiRenderer: React.FC<BotdUiRendererProps> = ({
       mode,
       disabled,
       onSubmit,
-      getStoreSnapshot: () => (storeRef.current ? storeRef.current.getSnapshot() : {}),
+      getStoreSnapshot: () => (store ? store.getSnapshot() : {}),
     }),
-    [mode, disabled, onSubmit],
+    [mode, disabled, onSubmit, store],
   );
 
   return (
     <UiRenderContext.Provider value={contextValue}>
-      <JSONUIProvider registry={botdRegistry} store={storeRef.current} handlers={handlers}>
+      <JSONUIProvider registry={botdRegistry} store={store} handlers={handlers}>
         <div className="w-full space-y-2">
-          <Renderer spec={spec as any} registry={botdRegistry} />
+          <Renderer spec={normalizedSpec as any} registry={botdRegistry} />
           {mode === 'ask' && !hasButtons && (
             <div className="flex justify-end pt-1">
               <button
                 type="button"
                 disabled={disabled}
                 onClick={() => {
-                  const currentState = storeRef.current ? storeRef.current.getSnapshot() : {};
+                  const currentState = store ? store.getSnapshot() : {};
                   onSubmit?.(JSON.stringify({ decision: 'submit', state: currentState }));
                 }}
                 className="h-8 px-3 text-xs font-medium rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
