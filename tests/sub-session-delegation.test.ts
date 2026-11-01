@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
-import type { DelegateSessionResult, MessageRecord, SessionRecord } from '@botd/protocol';
+import type { DelegateSessionResult, MessageRecord, SessionRecord } from '../packages/protocol/src/index.js';
 import { createHub, startHub } from '../apps/hub/src/index.js';
 import { buildProgram } from '../apps/node/src/cli/program.js';
 
@@ -92,7 +92,6 @@ async function createTestContext(t: TestContext): Promise<TestEnv> {
         thinkingLevel: 'medium',
         enabledSkills: [],
         enabledExtensions: [],
-        webCommandNames: [],
         updatedAt: new Date().toISOString(),
       });
     }
@@ -416,7 +415,6 @@ test('CLI: botd sessions delegate 与 subsessions', async (t) => {
     thinkingLevel: 'medium',
     enabledSkills: [],
     enabledExtensions: [],
-    webCommandNames: [],
     updatedAt: new Date().toISOString(),
   });
 

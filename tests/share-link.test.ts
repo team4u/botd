@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import type { SharedSessionSnapshot, SessionShareRecord } from '@botd/protocol';
+import type { SharedSessionSnapshot, SessionShareRecord } from '../packages/protocol/src/index.js';
 import { createHub, startHub } from '../apps/hub/src/index.js';
 import { buildProgram } from '../apps/node/src/cli/program.js';
 import { registerSessionsCommands } from '../apps/node/src/cli/commands/sessions.js';
@@ -69,7 +69,6 @@ async function setupTestContext() {
         thinkingLevel: 'medium',
         enabledSkills: [],
         enabledExtensions: [],
-        webCommandNames: [],
         updatedAt: new Date().toISOString(),
       });
     }
@@ -283,7 +282,7 @@ test('Session share link: full lifecycle and authorization', async (t) => {
 
   // Verify bot summaries (sensitive fields like prompt / env stripped)
   assert.equal(snapshot.bots.length, 2);
-  const leadBot = snapshot.bots.find((b) => b.id === 'bot_lead');
+  const leadBot = snapshot.bots.find((b: { id: string }) => b.id === 'bot_lead');
   assert.ok(leadBot);
   assert.equal(leadBot.name, 'Lead Architect');
   assert.equal(leadBot.modelProvider, 'anthropic');
