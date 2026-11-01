@@ -1,0 +1,27 @@
+{
+  "name": "botd",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.34.9",
+  "engines": { "node": ">=24.12.0" },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @botd/hub --filter @botd/web dev",
+    "dev:hub": "pnpm --filter @botd/hub dev",
+    "dev:web": "pnpm --filter @botd/web dev",
+    "node": "pnpm --filter @botd/node cli",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck && tsc -p tsconfig.tests.json",
+    "test": "tsx --test tests/*.test.ts",
+    "start": "pnpm --filter @botd/hub start"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3",
+    "@types/ws": "^8.18.0",
+    "ws": "^8.18.0",
+    "birpc": "^2.9.0"
+  }
+}

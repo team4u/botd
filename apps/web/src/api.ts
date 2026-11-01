@@ -1,0 +1,439 @@
+import type {
+  NodeWithBots,
+  SaveBotInput,
+  BotConfig,
+  SessionRecord,
+  CreateSessionInput,
+  MessageRecord,
+  SessionSseEvent,
+  PairingResult,
+  ModelCatalog,
+  ProviderAuthType,
+  ProviderLoginState,
+  ChatCommand,
+} from '@botd/protocol';
+import type { UserInfo } from './types';
+
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+export class AuthRequiredError extends ApiError {
+  constructor(message = '需要登录认证') {
+    super(message, 401);
+    this.name = 'AuthRequiredError';
+  }
+}
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers || {});
+  if (!headers.has('Content-Type') && options.body && typeof options.body === 'string') {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  const response = await fetch(path, {
+    ...options,
+    headers,
+    credentials: 'include',
+  });
+
+  if (response.status === 401) {
+    throw new AuthRequiredError();
+  }
+
+  if (!response.ok) {
+    let errorMsg = `请求失败: HTTP ${response.status}`;
+    try {
+      const errorJson = await response.json();
+      if (errorJson && typeof errorJson.error === 'string') {
+        errorMsg = errorJson.error;
+      }
+    } catch {
+      // response is not JSON
+    }
+    throw new ApiError(errorMsg, response.status);
+  }
+
+  // Handle 204 or empty response
+  if (response.status === 204) {
+    return {} as T;
+  }
+
+  return response.json();
+}
+
+export const api = {
+  // Auth
+  async checkAuth(): Promise<boolean> {
+    try {
+      const res = await fetch('/api/auth/me', { credentials: 'include' });
+      if (res.ok) {
+        return true;
+      }
+      if (res.status === 401) {
+        return false;
+      }
+      // If /api/auth/me not implemented, test with /api/nodes
+      const testRes = await fetch('/api/nodes', { credentials: 'include' });
+      return testRes.status !== 401;
+    } catch {
+      return false;
+    }
+  },
+
+  async login(username: string, password: string): Promise<{ ok: boolean; user: UserInfo }> {
+    return request<{ ok: boolean; user: UserInfo }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    });
+  },
+
+  async me(): Promise<{ authenticated: boolean; user: UserInfo }> {
+    return request<{ authenticated: boolean; user: UserInfo }>('/api/auth/me');
+  },
+
+  async logout(): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>('/api/auth/logout', {
+      method: 'POST',
+    });
+  },
+
+  // Users（仅 admin，后端对非 admin 返回 403）
+  async listUsers(): Promise<UserInfo[]> {
+    return request<UserInfo[]>('/api/users');
+  },
+
+  async createUser(input: {
+    username: string;
+    password: string;
+    role?: 'admin' | 'member';
+  }): Promise<UserInfo> {
+    return request<UserInfo>('/api/users', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async deleteUser(userId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/api/users/${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  async resetUserPassword(userId: string, password: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/api/users/${encodeURIComponent(userId)}/password`, {
+      method: 'PUT',
+      body: JSON.stringify({ password }),
+    });
+  },
+
+  async getModelCatalog(nodeId?: string): Promise<ModelCatalog> {
+    const query = nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : '';
+    return request<ModelCatalog>(`/api/models/catalog${query}`);
+  },
+
+  async startProviderLogin(
+    nodeId: string,
+    providerId: string,
+    method: ProviderAuthType
+  ): Promise<ProviderLoginState> {
+    return request<ProviderLoginState>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/providers/${encodeURIComponent(providerId)}/login`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ method }),
+      }
+    );
+  },
+
+  async getProviderLogin(nodeId: string, loginId: string): Promise<ProviderLoginState> {
+    return request<ProviderLoginState>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/provider-logins/${encodeURIComponent(loginId)}`
+    );
+  },
+
+  async respondProviderLogin(
+    nodeId: string,
+    loginId: string,
+    promptId: string,
+    value: string
+  ): Promise<ProviderLoginState> {
+    return request<ProviderLoginState>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/provider-logins/${encodeURIComponent(loginId)}/respond`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ promptId, value }),
+      }
+    );
+  },
+
+  async cancelProviderLogin(nodeId: string, loginId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/provider-logins/${encodeURIComponent(loginId)}`,
+      {
+        method: 'DELETE',
+      }
+    );
+  },
+
+  async logoutProviderAuth(nodeId: string, providerId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/providers/${encodeURIComponent(providerId)}/auth`,
+      {
+        method: 'DELETE',
+      }
+    );
+  },
+
+  // Nodes & Pairing
+  async getNodes(): Promise<NodeWithBots[]> {
+    return request<NodeWithBots[]>('/api/nodes');
+  },
+
+  async createPairingCode(): Promise<PairingResult> {
+    return request<PairingResult>('/api/nodes/pairing', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
+  async deleteNode(nodeId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/api/nodes/${encodeURIComponent(nodeId)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  async restartNode(nodeId: string): Promise<{ ok: true; pid: number }> {
+    return request(`/api/nodes/${encodeURIComponent(nodeId)}/restart`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
+  // Skills
+  async getSkill(nodeId: string, skillId: string): Promise<{ content: string }> {
+    return request<{ content: string }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/skills/${encodeURIComponent(skillId)}`
+    );
+  },
+
+  async saveSkill(nodeId: string, skillId: string, content: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/skills/${encodeURIComponent(skillId)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ content }),
+      }
+    );
+  },
+
+  async deleteSkill(nodeId: string, skillId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/skills/${encodeURIComponent(skillId)}`,
+      { method: 'DELETE' }
+    );
+  },
+
+  // Extensions & Resource Installer
+  async getExtension(nodeId: string, extId: string): Promise<{ content: string }> {
+    return request<{ content: string }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/extensions/${encodeURIComponent(extId)}`
+    );
+  },
+
+  async saveExtension(nodeId: string, extId: string, content: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/extensions/${encodeURIComponent(extId)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ content }),
+      }
+    );
+  },
+
+  async deleteExtension(nodeId: string, extId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/extensions/${encodeURIComponent(extId)}`,
+      { method: 'DELETE' }
+    );
+  },
+
+  async installResource(
+    nodeId: string,
+    input: { source: string; kind?: 'auto' | 'skill' | 'extension'; customId?: string }
+  ): Promise<{ kind: 'skill' | 'extension'; id: string }> {
+    return request<{ kind: 'skill' | 'extension'; id: string }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/install`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }
+    );
+  },
+
+  // BOTs
+  async createBot(input: SaveBotInput): Promise<BotConfig> {
+    return request<BotConfig>('/api/bots', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async updateBot(botId: string, input: SaveBotInput): Promise<BotConfig> {
+    return request<BotConfig>(`/api/bots/${encodeURIComponent(botId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async deleteBot(botId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/api/bots/${encodeURIComponent(botId)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  async getBotSystem(botId: string): Promise<{ content: string }> {
+    return request<{ content: string }>(`/api/bots/${encodeURIComponent(botId)}/system`);
+  },
+
+  async saveBotSystem(botId: string, content: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/api/bots/${encodeURIComponent(botId)}/system`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    });
+  },
+
+  async getBotMemory(botId: string): Promise<{ content: string }> {
+    return request<{ content: string }>(`/api/bots/${encodeURIComponent(botId)}/memory`);
+  },
+
+  async saveBotMemory(botId: string, content: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/api/bots/${encodeURIComponent(botId)}/memory`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    });
+  },
+
+  async getBotCommands(botId: string): Promise<ChatCommand[]> {
+    return request<ChatCommand[]>(`/api/bots/${encodeURIComponent(botId)}/commands`);
+  },
+
+  // Sessions
+  async getSessions(): Promise<SessionRecord[]> {
+    return request<SessionRecord[]>('/api/sessions');
+  },
+
+  async createSession(input: CreateSessionInput): Promise<SessionRecord> {
+    return request<SessionRecord>('/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async updateSession(sessionId: string, input: Partial<CreateSessionInput>): Promise<SessionRecord> {
+    return request<SessionRecord>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async setSessionArchived(sessionId: string, archived: boolean): Promise<SessionRecord> {
+    return request<SessionRecord>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ archived }),
+    });
+  },
+
+  async getSessionMessages(sessionId: string, signal?: AbortSignal): Promise<MessageRecord[]> {
+    return request<MessageRecord[]>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      signal,
+    });
+  },
+
+  async sendMessage(sessionId: string, content: string): Promise<MessageRecord> {
+    return request<MessageRecord>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ content }),
+    });
+  },
+
+  async editUserMessage(sessionId: string, messageId: string, content: string): Promise<MessageRecord> {
+    return request<MessageRecord>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ content }),
+      }
+    );
+  },
+
+  async cancelSession(sessionId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
+  // 从指定消息（含）分叉出新会话：只读源会话并复制出新会话，原会话不受影响
+  async forkSession(sessionId: string, anchorMessageId: string): Promise<SessionRecord> {
+    return request<SessionRecord>(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
+      method: 'POST',
+      body: JSON.stringify({ anchorMessageId }),
+    });
+  },
+
+  async deleteSession(sessionId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  async clearSessionMessages(sessionId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      method: 'DELETE',
+    });
+  },
+};
+
+/**
+ * Connect to SSE stream for a specific session.
+ * Returns an unsubscribe callback to cleanly close the connection.
+ */
+export function subscribeSessionEvents(
+  sessionId: string,
+  callbacks: {
+    onEvent: (event: SessionSseEvent) => void;
+    onError?: (error: Event) => void;
+    onOpen?: () => void;
+  }
+): () => void {
+  const url = `/api/sessions/${encodeURIComponent(sessionId)}/events`;
+  const eventSource = new EventSource(url, { withCredentials: true });
+
+  eventSource.onopen = () => {
+    callbacks.onOpen?.();
+  };
+
+  eventSource.onmessage = (event) => {
+    try {
+      if (!event.data) return;
+      const parsed = JSON.parse(event.data) as SessionSseEvent;
+      callbacks.onEvent(parsed);
+    } catch (err) {
+      console.warn('[SSE] Failed to parse message data:', err, event.data);
+    }
+  };
+
+  eventSource.onerror = (err) => {
+    callbacks.onError?.(err);
+  };
+
+  return () => {
+    eventSource.close();
+  };
+}

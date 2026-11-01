@@ -1,0 +1,40 @@
+# Git
+.git
+.gitignore
+
+# Package manager & dependencies
+node_modules
+.pnpm-store
+
+# Build outputs
+dist
+dist-*
+
+# Local runtime state and databases
+.botd
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+
+# Environment variables & secrets (keep .env.example)
+.env
+.env.*
+!.env.example
+
+# Host Pi directory isolation (strict: never bundle host ~/.pi or .pi into Docker)
+.pi
+~/.pi
+**/.pi
+
+# Test & coverage artifacts
+tests
+test-results
+playwright-report
+coverage
+
+# Temporary files & OS caches
+tmp
+temp
+.DS_Store
+Thumbs.db

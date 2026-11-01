@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="50%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="100%" stop-color="#93c5fd"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#1e3a8a" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <!-- Background rounded card -->
+  <rect x="32" y="32" width="448" height="448" rx="112" fill="url(#grad)" filter="url(#shadow)"/>
+
+  <!-- Network Node connections -->
+  <circle cx="156" cy="168" r="14" fill="#93c5fd" opacity="0.6"/>
+  <circle cx="356" cy="168" r="14" fill="#93c5fd" opacity="0.6"/>
+  <circle cx="256" cy="120" r="18" fill="#dbeafe"/>
+  <path d="M156 168 L256 120 L356 168" stroke="#93c5fd" stroke-width="4" stroke-dasharray="6 6" opacity="0.6"/>
+
+  <!-- Center Robot Head -->
+  <rect x="136" y="196" width="240" height="190" rx="36" fill="#ffffff"/>
+  
+  <!-- Antenna -->
+  <line x1="256" y1="140" x2="256" y2="196" stroke="#ffffff" stroke-width="12" stroke-linecap="round"/>
+
+  <!-- Screen face -->
+  <rect x="166" y="226" width="180" height="130" rx="20" fill="#0f172a"/>
+
+  <!-- Glowing eyes (Nodes) -->
+  <circle cx="216" cy="285" r="22" fill="url(#accent)"/>
+  <circle cx="296" cy="285" r="22" fill="url(#accent)"/>
+  <circle cx="222" cy="280" r="7" fill="#ffffff"/>
+  <circle cx="302" cy="280" r="7" fill="#ffffff"/>
+
+  <!-- Friendly smile / terminal line -->
+  <path d="M228 325 Q256 342 284 325" stroke="#38bdf8" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- Side Ear / Nodes -->
+  <rect x="116" y="260" width="20" height="62" rx="10" fill="#cbd5e1"/>
+  <rect x="376" y="260" width="20" height="62" rx="10" fill="#cbd5e1"/>
+
+  <!-- Bottom dots representing multi-node status -->
+  <circle cx="216" cy="425" r="8" fill="#ffffff" opacity="0.9"/>
+  <circle cx="256" cy="425" r="8" fill="#67e8f9" opacity="0.9"/>
+  <circle cx="296" cy="425" r="8" fill="#ffffff" opacity="0.9"/>
+</svg>

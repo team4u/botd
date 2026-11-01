@@ -1,0 +1,32 @@
+{
+  "name": "@botd/hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@botd/protocol": "workspace:*",
+    "@botd/models": "workspace:*",
+    "@hono/node-server": "^1.13.8",
+    "birpc": "^2.9.0",
+    "hono": "^4.7.4",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.botd/
+.env
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+playwright-report/
+test-results/

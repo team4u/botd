@@ -1,0 +1,65 @@
+services:
+  # ----------------------------------------------------------------------------
+  # Cloud Hub Service
+  # Serves both the Hono backend API / WSS and Web SPA on port 3000
+  # ----------------------------------------------------------------------------
+  hub:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: botd:latest
+    container_name: botd-hub
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - BOTD_HOST=0.0.0.0
+      - BOTD_PORT=3000
+      - BOTD_DB_PATH=/data/hub.sqlite
+      - BOTD_ADMIN_PASSWORD=${BOTD_ADMIN_PASSWORD:-admin}
+    volumes:
+      - hub-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    command: ["hub"]
+
+  # ----------------------------------------------------------------------------
+  # Optional Cloud Node Service (profile: cloud-node)
+  # Co-located node daemon running with Pi SDK and independent data directory
+  # ----------------------------------------------------------------------------
+  cloud-node:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: botd:latest
+    container_name: botd-cloud-node
+    restart: unless-stopped
+    profiles:
+      - cloud-node
+    environment:
+      - BOTD_DATA_DIR=/data/node
+      # Model provider API keys (optional direct environment variable overrides)
+      - BOTD_API_KEY_ANTHROPIC=${BOTD_API_KEY_ANTHROPIC:-}
+      - BOTD_API_KEY_OPENAI=${BOTD_API_KEY_OPENAI:-}
+      - BOTD_API_KEY_DEEPSEEK=${BOTD_API_KEY_DEEPSEEK:-}
+      - BOTD_API_KEY_GOOGLE=${BOTD_API_KEY_GOOGLE:-}
+      - BOTD_API_KEY_OPENROUTER=${BOTD_API_KEY_OPENROUTER:-}
+    volumes:
+      - node-data:/data/node
+    depends_on:
+      hub:
+        condition: service_healthy
+    command: ["start"]
+
+volumes:
+  # Persistent volume for Cloud Hub SQLite database and meta files
+  hub-data:
+    name: botd-hub-data
+
+  # Persistent volume for Cloud Node configuration, skills, and bot workspaces
+  node-data:
+    name: botd-node-data

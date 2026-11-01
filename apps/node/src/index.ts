@@ -1,0 +1,38 @@
+export { startDaemon, type DaemonHandle } from './daemon.js';
+export {
+  executeBotTurn,
+  getBotCommands,
+  cancelBotTurn,
+  cancelAllBotTurns,
+  getActiveSessionCount,
+  ensureBotdBinWrapper,
+} from './runtime.js';
+export {
+  assertSafeId,
+  getDataDir,
+  ensureDir,
+  writeSecureFile,
+  readNodeIdentity,
+  writeNodeIdentity,
+  getBotDir,
+  getSkillDir,
+  getExtensionDir,
+  listBots,
+  readBot,
+  saveBot,
+  deleteBot,
+  listSkills,
+  readSkill,
+  writeSkill,
+  listExtensions,
+  readExtension,
+  writeExtension,
+  deleteResource,
+  readFileTarget,
+  writeFileTarget,
+  seedStorageIfEmpty,
+} from './storage.js';
+export {
+  installResourceToNode,
+  type InstallInput,
+} from './installer.js';

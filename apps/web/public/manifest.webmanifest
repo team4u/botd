@@ -1,0 +1,19 @@
+{
+  "name": "botd - 多节点个人 BOT 平台",
+  "short_name": "botd",
+  "description": "UNIX 哲学多节点个人 AI BOT 协作平台",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#2563eb",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

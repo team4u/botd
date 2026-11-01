@@ -1,0 +1,31 @@
+{
+  "name": "@botd/node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "botd": "dist/cli.js"
+  },
+  "scripts": {
+    "cli": "tsx src/cli.ts",
+    "dev": "tsx src/cli.ts start",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@botd/models": "workspace:*",
+    "@botd/protocol": "workspace:*",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "birpc": "^2.9.0",
+    "commander": "^15.0.0",
+    "partysocket": "^1.1.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3"
+  }
+}
