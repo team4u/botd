@@ -329,6 +329,7 @@ export class HubDatabase {
         active_bot_id TEXT,
         archived INTEGER NOT NULL DEFAULT 0,
         parallel_roundtable INTEGER NOT NULL DEFAULT 0,
+        parent_session_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -426,6 +427,7 @@ export class HubDatabase {
       `ALTER TABLE messages ADD COLUMN usage_json TEXT`,
       `ALTER TABLE messages ADD COLUMN attachments_json TEXT`,
       `ALTER TABLE triggers ADD COLUMN run_at TEXT`,
+      `ALTER TABLE sessions ADD COLUMN parent_session_id TEXT`,
     ];
 
     for (const sql of migrations) {
@@ -868,11 +870,12 @@ export class HubDatabase {
     memberBotIds: string[];
     ownerId: string;
     parallelRoundtable?: boolean;
+    parentSessionId?: string;
   }): SessionRecord {
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
-      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parallel_roundtable)
-      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?)
+      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parallel_roundtable, parent_session_id)
+      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?, ?)
     `);
     const parallelRoundtable = input.parallelRoundtable ?? false;
     stmt.run(
@@ -884,7 +887,8 @@ export class HubDatabase {
       now,
       now,
       input.ownerId,
-      parallelRoundtable ? 1 : 0
+      parallelRoundtable ? 1 : 0,
+      input.parentSessionId ?? null
     );
     return {
       id: input.id,
@@ -897,11 +901,12 @@ export class HubDatabase {
       createdAt: now,
       updatedAt: now,
       ...(parallelRoundtable ? { parallelRoundtable } : {}),
+      ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
     };
   }
 
   getSession(id: string): (SessionRecord & { cursorMap: Record<string, number> }) | undefined {
-    const stmt = this.db.prepare('SELECT id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, archived, pinned, parallel_roundtable, created_at, updated_at FROM sessions WHERE id = ?');
+    const stmt = this.db.prepare('SELECT id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, archived, pinned, parallel_roundtable, parent_session_id, created_at, updated_at FROM sessions WHERE id = ?');
     const row = stmt.get(id) as {
       id: string;
       title: string;
@@ -914,6 +919,7 @@ export class HubDatabase {
       archived: number;
       pinned: number;
       parallel_roundtable: number;
+      parent_session_id: string | null;
       created_at: string;
       updated_at: string;
     } | undefined;
@@ -930,6 +936,7 @@ export class HubDatabase {
       archived: Boolean(row.archived),
       pinned: Boolean(row.pinned),
       parallelRoundtable: Boolean(row.parallel_roundtable),
+      parentSessionId: row.parent_session_id ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -937,7 +944,7 @@ export class HubDatabase {
 
   getAllSessions(ownerId: string): SessionRecord[] {
     const stmt = this.db.prepare(`
-      SELECT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.pinned, s.parallel_roundtable, s.created_at, s.updated_at,
+      SELECT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.pinned, s.parallel_roundtable, s.parent_session_id, s.created_at, s.updated_at,
         (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
         (SELECT m.content FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_content,
         (SELECT m.created_at FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_at
@@ -956,6 +963,7 @@ export class HubDatabase {
       archived: number;
       pinned: number;
       parallel_roundtable: number;
+      parent_session_id: string | null;
       created_at: string;
       updated_at: string;
       message_count: number | bigint;
@@ -973,6 +981,55 @@ export class HubDatabase {
       archived: Boolean(row.archived),
       pinned: Boolean(row.pinned),
       parallelRoundtable: Boolean(row.parallel_roundtable),
+      parentSessionId: row.parent_session_id ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      messageCount: Number(row.message_count),
+      lastMessagePreview: buildPreview(row.last_message_content ?? ''),
+      lastMessageAt: row.last_message_at ?? undefined,
+    }));
+  }
+
+  listSubSessions(parentSessionId: string): SessionRecord[] {
+    const stmt = this.db.prepare(`
+      SELECT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.pinned, s.parallel_roundtable, s.parent_session_id, s.created_at, s.updated_at,
+        (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
+        (SELECT m.content FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_content,
+        (SELECT m.created_at FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_at
+      FROM sessions s
+      WHERE s.parent_session_id = ?
+      ORDER BY s.created_at ASC
+    `);
+    const rows = stmt.all(parentSessionId) as {
+      id: string;
+      title: string;
+      mode: string;
+      lead_bot_id: string;
+      member_bot_ids_json: string;
+      status: string;
+      active_bot_id: string | null;
+      archived: number;
+      pinned: number;
+      parallel_roundtable: number;
+      parent_session_id: string | null;
+      created_at: string;
+      updated_at: string;
+      message_count: number | bigint;
+      last_message_content: string | null;
+      last_message_at: string | null;
+    }[];
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      mode: row.mode as SessionMode,
+      leadBotId: row.lead_bot_id,
+      memberBotIds: JSON.parse(row.member_bot_ids_json || '[]'),
+      status: row.status as SessionStatus,
+      activeBotId: row.active_bot_id ?? undefined,
+      archived: Boolean(row.archived),
+      pinned: Boolean(row.pinned),
+      parallelRoundtable: Boolean(row.parallel_roundtable),
+      parentSessionId: row.parent_session_id ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       messageCount: Number(row.message_count),
@@ -1051,8 +1108,8 @@ export class HubDatabase {
     const now = new Date().toISOString();
     const newSessionId = `sess_${randomUUID()}`;
     const insertSession = this.db.prepare(`
-      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parallel_roundtable)
-      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?)
+      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parallel_roundtable, parent_session_id)
+      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?, ?)
     `);
 
     const rows = this.db.prepare(`
@@ -1093,7 +1150,8 @@ export class HubDatabase {
         now,
         now,
         ownerId,
-        source.parallelRoundtable ? 1 : 0
+        source.parallelRoundtable ? 1 : 0,
+        source.parentSessionId ?? null
       );
 
       for (const row of rows) {
@@ -1168,6 +1226,7 @@ export class HubDatabase {
       archived?: boolean;
       pinned?: boolean;
       parallelRoundtable?: boolean;
+      parentSessionId?: string;
     }
   ): SessionRecord | undefined {
     const session = this.getSession(id);
@@ -1182,10 +1241,11 @@ export class HubDatabase {
     const archived = patch.archived ?? session.archived ?? false;
     const pinned = patch.pinned ?? session.pinned ?? false;
     const parallelRoundtable = patch.parallelRoundtable ?? session.parallelRoundtable ?? false;
+    const parentSessionId = patch.parentSessionId !== undefined ? patch.parentSessionId : session.parentSessionId;
 
     const stmt = this.db.prepare(`
       UPDATE sessions
-      SET title = ?, mode = ?, lead_bot_id = ?, member_bot_ids_json = ?, status = ?, active_bot_id = ?, archived = ?, pinned = ?, parallel_roundtable = ?, updated_at = ?
+      SET title = ?, mode = ?, lead_bot_id = ?, member_bot_ids_json = ?, status = ?, active_bot_id = ?, archived = ?, pinned = ?, parallel_roundtable = ?, parent_session_id = ?, updated_at = ?
       WHERE id = ?
     `);
     stmt.run(
@@ -1198,6 +1258,7 @@ export class HubDatabase {
       archived ? 1 : 0,
       pinned ? 1 : 0,
       parallelRoundtable ? 1 : 0,
+      parentSessionId ?? null,
       now,
       id
     );
@@ -1213,6 +1274,7 @@ export class HubDatabase {
       archived,
       pinned,
       parallelRoundtable,
+      parentSessionId: parentSessionId ?? undefined,
       createdAt: session.createdAt,
       updatedAt: now,
     };

@@ -7,8 +7,7 @@ import { parseDelayDuration, type BgJobRecord, type NodeUpgradeResult } from '@b
 import { cliAction, readGlobals } from '../context.js';
 import { CliError } from '../errors.js';
 import { writeNodeIdentity, getDaemonSocketPath } from '../../storage.js';
-import { startDaemon, type DaemonHandle } from '../../daemon.js';
-import { installResourceToNode } from '../../installer.js';
+import type { DaemonHandle } from '../../daemon.js';
 import { buildDaemonSpawnSpec } from '../../daemon-launch.js';
 import { checkNodeUpgrade, performNodeUpgrade } from '../../upgrader.js';
 import { installNodeService, uninstallNodeService, getNodeServiceStatus } from '../../service.js';
@@ -249,6 +248,7 @@ export function registerNodeCommands(program: Command): void {
 
     let daemon: DaemonHandle;
     try {
+      const { startDaemon } = await import('../../daemon.js');
       daemon = await startDaemon(dataDir);
     } catch (err: unknown) {
       throw new CliError(`Daemon start error: ${err instanceof Error ? err.message : String(err)}`);
@@ -806,6 +806,7 @@ export function registerNodeCommands(program: Command): void {
 
           let result: { kind: 'skill' | 'extension'; id: string };
           try {
+            const { installResourceToNode } = await import('../../installer.js');
             result = await installResourceToNode(dataDir, { source, kind, customId });
           } catch (err: unknown) {
             throw new CliError(`Install failed: ${err instanceof Error ? err.message : String(err)}`);

@@ -3,16 +3,7 @@ import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import {
-  createAgentSession,
-  createBashToolDefinition,
-  createPowerShellToolDefinition,
-  type ToolDefinition,
-  SessionManager,
-  SettingsManager,
-  type AgentSession,
-} from '@earendil-works/pi-coding-agent';
-import { getModel } from '@earendil-works/pi-ai/compat';
+import type { ToolDefinition, AgentSession } from '@earendil-works/pi-coding-agent';
 import type { BirpcReturn } from 'birpc';
 import type { HubRpcFunctions, NodeRpcFunctions, BotConfig, ToolCallRecord, TurnUsage } from '@botd/protocol';
 import {
@@ -25,10 +16,35 @@ import {
 } from './storage.js';
 import { createRuntimeForProvider, configureProviderAuth } from './models.js';
 import { BUILTIN_SKILL_ID } from './builtin-skill.js';
-import { collectBotCommands, loadBotResources } from './commands.js';
-import { guardExtensionCommands } from './web-command-ui.js';
 import { resolveWindowsBash, windowsShellPathPrefix, isWindows } from './windows-shell.js';
-export { getBotCommands } from './commands.js';
+
+let turnDepsPromise: Promise<{
+  piAgent: typeof import('@earendil-works/pi-coding-agent');
+  piAiCompat: typeof import('@earendil-works/pi-ai/compat');
+  commandsMod: typeof import('./commands.js');
+  webCommandUiMod: typeof import('./web-command-ui.js');
+}> | undefined;
+
+function loadTurnDeps() {
+  return (turnDepsPromise ??= Promise.all([
+    import('@earendil-works/pi-coding-agent'),
+    import('@earendil-works/pi-ai/compat'),
+    import('./commands.js'),
+    import('./web-command-ui.js'),
+  ]).then(([piAgent, piAiCompat, commandsMod, webCommandUiMod]) => ({
+    piAgent,
+    piAiCompat,
+    commandsMod,
+    webCommandUiMod,
+  })));
+}
+
+export async function getBotCommands(
+  ...args: Parameters<typeof import('./commands.js').getBotCommands>
+): ReturnType<typeof import('./commands.js').getBotCommands> {
+  const { commandsMod } = await loadTurnDeps();
+  return commandsMod.getBotCommands(...args);
+}
 
 const pendingRuns = new Set<string>();
 const activeSessions = new Map<string, AgentSession>();
@@ -193,6 +209,18 @@ export async function executeBotTurn(
   let unsubscribe: (() => void) | null = null;
 
   try {
+    const { piAgent, piAiCompat, commandsMod, webCommandUiMod } = await loadTurnDeps();
+    const {
+      createAgentSession,
+      createBashToolDefinition,
+      createPowerShellToolDefinition,
+      SessionManager,
+      SettingsManager,
+    } = piAgent;
+    const { getModel } = piAiCompat;
+    const { collectBotCommands, loadBotResources } = commandsMod;
+    const { guardExtensionCommands } = webCommandUiMod;
+
     const botDir = getBotDir(dataDir, bot.id);
     const workspaceDir = path.join(botDir, 'workspace');
     const sessionDir = path.join(botDir, 'sessions');

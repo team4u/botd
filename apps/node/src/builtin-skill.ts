@@ -90,6 +90,7 @@ real failure modes. No placeholders, no invented flags.
 - \`botd nodes list --json\` — all nodes with their bots/status/pid.
 - \`botd sessions list --json\` / \`botd sessions messages <id> --json\` /
   \`botd sessions search <query> --json\` — search message history across all sessions.
+- \`botd sessions delegate <parentSessionId> --bot <botId> --prompt "<task>"\` — delegate a sub-task to a child session executed by the specified bot.
 - \`botd chat send <sessionId> "<message>" --wait 120 --json\` — post a message to
   another session and wait for its BOTs to answer (bot-to-bot communication).
 - \`botd bots env list <botId>\` / \`botd bots env set <botId> <KEY> <value>\` /

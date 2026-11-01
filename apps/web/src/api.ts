@@ -23,6 +23,8 @@ import type {
   NodeUpgradeResult,
   SessionShareRecord,
   SharedSessionSnapshot,
+  DelegateSessionInput,
+  DelegateSessionResult,
 } from '@botd/protocol';
 import type { UserInfo } from './types.js';
 
@@ -406,6 +408,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(input),
     });
+  },
+
+  async delegateSession(sessionId: string, input: DelegateSessionInput): Promise<DelegateSessionResult> {
+    return request<DelegateSessionResult>(`/api/sessions/${encodeURIComponent(sessionId)}/delegate`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async listSubSessions(sessionId: string): Promise<SessionRecord[]> {
+    return request<SessionRecord[]>(`/api/sessions/${encodeURIComponent(sessionId)}/subsessions`);
   },
 
   async updateSession(sessionId: string, input: Partial<CreateSessionInput>): Promise<SessionRecord> {

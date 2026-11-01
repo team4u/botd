@@ -199,6 +199,7 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
   rws = new ReconnectingWebSocket(wsUrl, [], {
     WebSocket: WsWebSocket as any,
     connectionTimeout: 10_000,
+    minReconnectionDelay: Number(process.env.BOTD_WS_MIN_RECONNECT_DELAY_MS) || 200,
     maxRetries: Infinity,
   });
 

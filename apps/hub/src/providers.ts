@@ -1,6 +1,5 @@
 import type { Hono } from 'hono';
 import { isSafeId, type ProviderAuthType, type UserRecord } from '@botd/protocol';
-import { getBuiltinModelCatalog } from '@botd/models';
 import type { HubDatabase } from './db.js';
 import type { NodeConnectionManager } from './ws-hub.js';
 import { resolveOwnedNodeRpc } from './http-helpers.js';
@@ -8,13 +7,16 @@ import { resolveOwnedNodeRpc } from './http-helpers.js';
 const messageOf = (error: unknown) =>
   error && typeof error === 'object' && 'message' in error ? String(error.message) : 'Node request failed';
 
+let builtinCatalogPromise: Promise<ReturnType<typeof import('@botd/models').getBuiltinModelCatalog>> | undefined;
+function getCachedBuiltinCatalog() {
+  return (builtinCatalogPromise ??= import('@botd/models').then(m => m.getBuiltinModelCatalog()));
+}
+
 export function registerProviderRoutes(
   app: Hono<{ Variables: { user: UserRecord } }>,
   db: HubDatabase,
   connections: NodeConnectionManager
 ): void {
-  const builtinCatalog = getBuiltinModelCatalog();
-
   app.get('/api/models/catalog', async c => {
     const nodeId = c.req.query('nodeId');
     if (nodeId) {
@@ -26,6 +28,7 @@ export function registerProviderRoutes(
         return c.json({ error: messageOf(error) }, /Login not found/i.test(messageOf(error)) ? 404 : 502);
       }
     }
+    const builtinCatalog = await getCachedBuiltinCatalog();
     return c.json({
       ...builtinCatalog,
       providers: builtinCatalog.providers.map(provider => ({

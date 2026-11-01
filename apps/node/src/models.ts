@@ -1,10 +1,20 @@
 import path from 'node:path';
-import { ModelRuntime, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
-import { buildModelCatalog } from '@botd/models';
+import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import type { ModelCatalog } from '@botd/protocol';
 import { ensureDir, listExtensions } from './storage.js';
 
+let piCodingAgentPromise: Promise<typeof import('@earendil-works/pi-coding-agent')> | undefined;
+function loadPiCodingAgent() {
+  return (piCodingAgentPromise ??= import('@earendil-works/pi-coding-agent'));
+}
+
+let modelsPkgPromise: Promise<typeof import('@botd/models')> | undefined;
+function loadModelsPkg() {
+  return (modelsPkgPromise ??= import('@botd/models'));
+}
+
 export async function createIsolatedModelRuntime(dataDir: string): Promise<ModelRuntime> {
+  const { ModelRuntime } = await loadPiCodingAgent();
   const agentDir = path.join(dataDir, '.agent');
   await ensureDir(agentDir, 0o700);
   return ModelRuntime.create({
@@ -28,6 +38,7 @@ async function activateExtensionProviders(runtime: ModelRuntime, dataDir: string
   try {
     const extensionIds = await listExtensions(dataDir);
     if (extensionIds.length === 0) return registeredProviderIds;
+    const { DefaultResourceLoader, SettingsManager } = await loadPiCodingAgent();
     const extensionPaths = extensionIds.map((id) => path.join(dataDir, 'extensions', id));
     const settingsManager = SettingsManager.inMemory({});
     const resourceLoader = new DefaultResourceLoader({
@@ -120,6 +131,7 @@ export async function getNodeModelCatalog(dataDir: string): Promise<ModelCatalog
   }
 
   const credentials = new Map((await runtime.listCredentials()).map(credential => [credential.providerId, credential.type]));
+  const { buildModelCatalog } = await loadModelsPkg();
   const catalog = buildModelCatalog(runtime.getProviders());
   return {
     ...catalog,
