@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Menu,
   Users,
@@ -31,6 +31,7 @@ import type {
   NodeRecord,
   MessageAttachment,
   PendingAskRecord,
+  BgJobRecord,
 } from '@botd/protocol';
 import type { StreamingAssistantState } from '../types';
 import { MessageItem, formatShortModel } from './MessageItem';
@@ -217,15 +218,120 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [bgJobsOpen, setBgJobsOpen] = useState(false);
   const [artifactsUnseen, setArtifactsUnseen] = useState(false);
   const [hasRunningBgJobs, setHasRunningBgJobs] = useState(false);
+  const [bgJobs, setBgJobs] = useState<BgJobRecord[]>([]);
+  const [selectedBgJobId, setSelectedBgJobId] = useState<string | null>(null);
 
-  // 切换会话时重置抽屉红点/蓝点标记
+  // ===== 子会话委派任务列表 =====
+  const [subSessions, setSubSessions] = useState<SessionRecord[]>([]);
+
+  const loadSubSessions = useCallback(async () => {
+    try {
+      const subs = await api.listSubSessions(session.id);
+      setSubSessions(subs);
+    } catch {
+      setSubSessions([]);
+    }
+  }, [session.id]);
+
+  useEffect(() => {
+    void loadSubSessions();
+  }, [loadSubSessions]);
+
+  // 当 messages 中有包含 #?s=sess_ 的 callback 消息到达时重新拉取子会话列表
+  const lastSubCallbackMsgRef = useRef<string>('');
+  useEffect(() => {
+    const callbackWithSub = messages.find(
+      (m) => m.role === 'callback' && m.content.includes('#?s=sess_')
+    );
+    const key = callbackWithSub ? `${callbackWithSub.id}:${callbackWithSub.content}` : '';
+    if (key && key !== lastSubCallbackMsgRef.current) {
+      lastSubCallbackMsgRef.current = key;
+      void loadSubSessions();
+    }
+  }, [messages, loadSubSessions]);
+
+  // 存在运行中子任务时每 5s 轮询状态
+  useEffect(() => {
+    if (!subSessions.some((s) => s.status === 'running')) return;
+    const timer = window.setInterval(() => {
+      void loadSubSessions();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [subSessions, loadSubSessions]);
+
+  // 探测本会话后台任务
+  const memberNodeIds = useMemo(
+    () =>
+      [...new Set(memberBots.map((b) => b.nodeId).filter(Boolean))],
+    [memberBots]
+  );
+
+  const fetchBgJobs = useCallback(async () => {
+    if (memberNodeIds.length === 0) {
+      setBgJobs([]);
+      setHasRunningBgJobs(false);
+      return;
+    }
+    const results = await Promise.allSettled(
+      memberNodeIds.map((id) => api.listBgJobs(id, { sessionId: session.id }))
+    );
+    const collected: BgJobRecord[] = [];
+    results.forEach((r) => {
+      if (r.status === 'fulfilled') {
+        collected.push(...r.value);
+      }
+    });
+    setBgJobs(collected);
+    setHasRunningBgJobs(collected.some((j) => j.status === 'running'));
+  }, [memberNodeIds, session.id]);
+
+  // 切换会话时重置抽屉与状态标记
   useEffect(() => {
     setArtifactsUnseen(false);
     setHasRunningBgJobs(false);
+    setBgJobs([]);
+    setSelectedBgJobId(null);
   }, [session.id]);
 
-  // 全局 SSE：本会话 artifact_created 且抽屉未开时置红点；新回调消息（后台任务完成）到达时
-  // 重新探测 running 蓝点（callback 角色消息意味着任务状态可能已翻转）
+  useEffect(() => {
+    void fetchBgJobs();
+  }, [fetchBgJobs]);
+
+  // 每 5s 轮询一次后台任务状态
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void fetchBgJobs();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [fetchBgJobs]);
+
+  // 消息变化（包括 callback 消息到达）时拉取后台任务
+  useEffect(() => {
+    void fetchBgJobs();
+  }, [messages.length, fetchBgJobs]);
+
+  const runningBgJobs = useMemo(
+    () => bgJobs.filter((j) => j.status === 'running'),
+    [bgJobs]
+  );
+
+  // 计算最新上下文水位线百分比
+  const latestCtxPct = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (
+        msg.role === 'assistant' &&
+        msg.usage?.totalTokens &&
+        msg.usage?.contextWindow &&
+        msg.usage.contextWindow > 0
+      ) {
+        return Math.min(100, Math.round((msg.usage.totalTokens / msg.usage.contextWindow) * 100));
+      }
+    }
+    return 0;
+  }, [messages]);
+
+  // 全局 SSE：本会话 artifact_created 且抽屉未开时置红点；新回调消息（后台任务完成）到达时重新探测
   useEffect(() => {
     const unsubscribe = onGlobalEvent((e) => {
       if (e.type === 'artifact_created' && e.sessionId === session.id) {
@@ -235,40 +341,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
         e.message.sessionId === session.id &&
         e.message.role === 'callback'
       ) {
-        if (!bgJobsOpenRef.current) void probeRunningBgJobs();
+        if (!bgJobsOpenRef.current) void fetchBgJobs();
       }
     });
     return unsubscribe;
-  }, [session.id]);
+  }, [session.id, fetchBgJobs]);
 
   // 用 ref 避免订阅 effect 依赖抽屉开关导致反复重订阅
   const artifactsOpenRef = useRef(false);
   const bgJobsOpenRef = useRef(false);
   artifactsOpenRef.current = artifactsOpen;
   bgJobsOpenRef.current = bgJobsOpen;
-
-  // 探测本会话是否存在 running 后台任务（用于顶栏蓝点）
-  const memberNodeIds = useMemo(
-    () =>
-      [...new Set(memberBots.map((b) => b.nodeId).filter(Boolean))],
-    [memberBots]
-  );
-  const probeRunningBgJobs = async () => {
-    if (memberNodeIds.length === 0) return;
-    const results = await Promise.allSettled(
-      memberNodeIds.map((id) => api.listBgJobs(id, { sessionId: session.id }))
-    );
-    const running = results.some(
-      (r) => r.status === 'fulfilled' && r.value.some((j) => j.status === 'running')
-    );
-    setHasRunningBgJobs(running);
-  };
-
-  // 会话打开/成员变化时探一次 running（轻量，仅顶栏蓝点用途）
-  useEffect(() => {
-    void probeRunningBgJobs();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.id, memberNodeIds.join(',')]);
 
   // ===== 消息日期分隔线 =====
   // 相邻消息 createdAt 跨自然日时插入分隔条：今天/昨天/M月D日（同年省略年份，跨年带年份）
@@ -650,8 +733,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
           )}
         </div>
 
-        {/* 右侧操作：开启新话题 + 产物/后台任务抽屉入口 + 更多操作下拉菜单 */}
+        {/* 右侧操作：高水位一键压缩 + 开启新话题 + 产物/后台任务抽屉入口 + 更多操作下拉菜单 */}
         <div className="flex items-center gap-1 shrink-0">
+          {latestCtxPct >= 75 && (
+            <button
+              type="button"
+              onClick={() => void onSendMessage('/compact')}
+              className="hidden sm:inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/60 text-xs font-medium transition-colors cursor-pointer shrink-0 shadow-2xs mr-0.5"
+              title="当前上下文水位较高，点击自动发送 /compact 进行上下文压缩"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
+              <span>上下文水位 {latestCtxPct}% · 一键压缩 (/compact)</span>
+            </button>
+          )}
+
           <button
             onClick={() => void onNewTopic(session.id)}
             className="p-2 rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
@@ -686,6 +781,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <div className="relative">
             <button
               onClick={() => {
+                setSelectedBgJobId(null);
                 setBgJobsOpen(true);
                 setHasRunningBgJobs(false);
               }}
@@ -830,6 +926,52 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         </div>
       </header>
+
+      {/* 子任务委派状态条 */}
+      {subSessions.length > 0 && (
+        <div className="mx-3 sm:mx-4 mt-2.5 px-3 py-1.5 bg-zinc-50/80 dark:bg-zinc-900/60 border border-zinc-200/80 dark:border-zinc-800/80 rounded-lg flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300 shrink-0 overflow-x-auto">
+          <span className="font-medium shrink-0 text-zinc-600 dark:text-zinc-400">
+            子任务 ({subSessions.length})
+          </span>
+          <div className="flex items-center gap-1.5 min-w-0 flex-1 overflow-x-auto py-0.5">
+            {subSessions.map((sub) => {
+              let statusIndicator = (
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" title="已完成" />
+              );
+              if (sub.status === 'running') {
+                statusIndicator = (
+                  <span title="运行中" className="shrink-0 flex items-center">
+                    <Loader2 className="w-3 h-3 text-blue-500 animate-spin-fast" />
+                  </span>
+                );
+              } else if (sub.status === 'failed') {
+                statusIndicator = (
+                  <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0" title="失败" />
+                );
+              }
+              return (
+                <button
+                  key={sub.id}
+                  type="button"
+                  onClick={() => {
+                    window.location.hash = `#?s=${sub.id}`;
+                  }}
+                  className="inline-flex items-center gap-1.5 h-7 px-2.5 bg-white dark:bg-zinc-800 border border-zinc-200/90 dark:border-zinc-700/80 rounded-lg text-xs hover:border-blue-400 dark:hover:border-blue-500 hover:bg-blue-50/40 dark:hover:bg-blue-950/30 transition-colors shrink-0 cursor-pointer text-left max-w-[220px]"
+                  title={`${sub.title} (@${sub.leadBotId})`}
+                >
+                  {statusIndicator}
+                  <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400 shrink-0">
+                    @{sub.leadBotId}
+                  </span>
+                  <span className="truncate text-zinc-800 dark:text-zinc-200 text-xs">
+                    {sub.title.replace(/^\[子任务\]\s*/, '')}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* 子会话模式返回父会话横幅 */}
       {session.parentSessionId && (
@@ -998,6 +1140,69 @@ export const ChatView: React.FC<ChatViewProps> = ({
         )}
       </div>
 
+      {/* 上下文高水位线报警与一键压缩（小屏或输入框上方常驻） */}
+      {latestCtxPct >= 75 && (
+        <div className="px-3 sm:px-4 pt-1.5 max-w-4xl w-full mx-auto sm:hidden">
+          <div
+            onClick={() => void onSendMessage('/compact')}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                void onSendMessage('/compact');
+              }
+            }}
+            className="flex items-center justify-between gap-2 px-3 py-1.5 bg-amber-50/90 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 rounded-lg text-xs text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/60 transition-colors cursor-pointer shadow-2xs"
+            title="上下文水位较高，点击自动发送 /compact"
+          >
+            <div className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
+              <span className="font-medium">上下文水位 {latestCtxPct}%</span>
+            </div>
+            <span className="font-mono text-[11px] underline">一键压缩 (/compact)</span>
+          </div>
+        </div>
+      )}
+
+      {/* 后台任务运行中状态条 */}
+      {runningBgJobs.length > 0 && (
+        <div className="px-3 sm:px-4 pt-1.5 max-w-4xl w-full mx-auto">
+          <div
+            onClick={() => {
+              setSelectedBgJobId(runningBgJobs[0].id);
+              setBgJobsOpen(true);
+              setHasRunningBgJobs(false);
+            }}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                setSelectedBgJobId(runningBgJobs[0].id);
+                setBgJobsOpen(true);
+                setHasRunningBgJobs(false);
+              }
+            }}
+            className="flex items-center justify-between gap-2 px-3 py-1.5 bg-blue-50/80 dark:bg-blue-950/40 border border-blue-200/80 dark:border-blue-900/60 rounded-lg text-xs text-blue-800 dark:text-blue-300 hover:bg-blue-100/70 dark:hover:bg-blue-900/50 transition-colors cursor-pointer shadow-2xs"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="shrink-0">⚙️</span>
+              <span className="font-medium shrink-0">
+                {runningBgJobs.length} 个后台任务运行中
+              </span>
+              <span className="text-zinc-400 dark:text-zinc-500">·</span>
+              <span className="font-mono text-[11px] truncate text-blue-700/90 dark:text-blue-300/90">
+                {runningBgJobs[0].command}
+              </span>
+            </div>
+            <span className="text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:underline shrink-0 ml-1">
+              查看日志 / 管理 →
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* 人机协同交互卡片：BOT 通过 botd ask 发起的待响应请求，置于输入框上方 */}
       {pendingAsks.length > 0 && (
         <div className="px-3 sm:px-4 pt-2.5 space-y-2 shrink-0 max-w-4xl w-full mx-auto">
@@ -1095,7 +1300,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
         memberBotIds={session.memberBotIds || []}
         botMap={botMap}
         nodeMap={nodeMap}
-        onClose={() => setBgJobsOpen(false)}
+        initialJobId={selectedBgJobId}
+        onClose={() => {
+          setBgJobsOpen(false);
+          setSelectedBgJobId(null);
+        }}
         onToast={(type, message) => onAddToast?.(type, message)}
       />
     </div>

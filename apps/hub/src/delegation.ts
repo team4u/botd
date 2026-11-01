@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import type { Hono } from 'hono';
-import type { DelegateSessionInput, DelegateSessionResult, SessionMode, UserRecord } from '@botd/protocol';
+import type {
+  DelegateSessionInput,
+  DelegateSessionResult,
+  MessageAttachment,
+  SessionMode,
+  UserRecord,
+} from '@botd/protocol';
 import type { HubDatabase } from './db.js';
 import type { GroupRouter } from './group-router.js';
 import type { SseHub } from './sse.js';
@@ -102,18 +108,67 @@ export function registerDelegationRoutes(
       message: parentNoticeMsg.message,
     });
 
+    // 若请求中指定了 artifactIds，或父会话存在产物，则将对应产物复制/关联给子会话
+    const targetArtifacts = (Array.isArray(body.artifactIds) && body.artifactIds.length > 0)
+      ? body.artifactIds
+          .map((artId) => (typeof artId === 'string' ? db.getArtifactWithStoragePath(artId.trim()) : undefined))
+          .filter((art): art is NonNullable<typeof art> => Boolean(art && art.sessionId === id))
+      : db.listSessionArtifacts(id).map((a) => db.getArtifactWithStoragePath(a.id)).filter((art): art is NonNullable<typeof art> => Boolean(art));
+
+    const copiedAttachments: MessageAttachment[] = [];
+    for (const art of targetArtifacts) {
+      const childArtId = `art_${randomUUID()}`;
+      db.createArtifact({
+        id: childArtId,
+        sessionId: childSession.id,
+        filename: art.filename,
+        mimeType: art.mimeType,
+        sizeBytes: art.sizeBytes,
+        senderBotId: art.senderBotId,
+        storagePath: art.storagePath,
+      });
+      copiedAttachments.push({
+        id: childArtId,
+        filename: art.filename,
+        mimeType: art.mimeType,
+        sizeBytes: art.sizeBytes,
+        url: `/api/artifacts/${childArtId}`,
+      });
+    }
+
+    let initialPrompt = body.prompt.trim();
+    if (copiedAttachments.length > 0) {
+      const artifactLines = copiedAttachments.map((a) => `- ${a.filename} (${a.url})`).join('\n');
+      initialPrompt += `\n\n[关联产物文件]:\n${artifactLines}`;
+    }
+
     // 在子会话中插入初始用户消息并广播 SSE message_created
     const initialMsg = db.createMessage({
       id: `msg_${randomUUID()}`,
       sessionId: childSession.id,
       role: 'user',
-      content: body.prompt.trim(),
+      content: initialPrompt,
       mentions: [],
+      attachments: copiedAttachments.length > 0 ? copiedAttachments : undefined,
     });
     sseHub.broadcast(childSession.id, {
       type: 'message_created',
       message: initialMsg.message,
     });
+
+    // 唤醒父会话 Lead Bot 执行后续汇总或处理
+    const wakeParent = (triggerMsgId: string, summaryText: string) => {
+      const autoWake = (body as any).autoWakeParent !== false;
+      if (!autoWake) return;
+      const parentSession = db.getSession(id);
+      if (!parentSession?.leadBotId) return;
+      if (!router.canRunBot(id, parentSession.leadBotId)) return;
+      router.handleUserMessage(
+        id,
+        triggerMsgId,
+        `@${parentSession.leadBotId} ${summaryText}`
+      );
+    };
 
     // 监听子会话的首轮任务完成
     let unsubscribed = false;
@@ -146,8 +201,25 @@ export function registerDelegationRoutes(
           type: 'message_created',
           message: resultMsg.message,
         });
+        wakeParent(resultMsg.message.id, `子会话「${childSession.title}」已完成，请汇总处理。`);
       } else if (event.status === 'failed') {
         cleanup();
+        const messages = db.getMessages(childSession.id);
+        const lastSys = [...messages].reverse().find((m) => m.role === 'system');
+        const failContent = `❌ 子会话「[${childSession.title}](#?s=${childSession.id})」执行失败：\n\n${lastSys?.content?.trim() || '(未知错误)'}`;
+        const failMsg = db.createMessage({
+          id: `msg_${randomUUID()}`,
+          sessionId: id,
+          role: 'callback',
+          senderBotId: botId,
+          content: failContent,
+          mentions: [],
+        });
+        sseHub.broadcast(id, {
+          type: 'message_created',
+          message: failMsg.message,
+        });
+        wakeParent(failMsg.message.id, `子会话「${childSession.title}」执行失败，请处理异常。`);
       }
     });
 

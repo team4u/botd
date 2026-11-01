@@ -78,10 +78,19 @@ const BgJobRow: React.FC<{
   nodeId: string;
   botMap: Map<string, BotConfig>;
   nodeMap: Map<string, NodeRecord>;
+  defaultExpanded?: boolean;
   onKilled: () => void;
   onToast?: (type: 'success' | 'error' | 'info', message: string) => void;
-}> = ({ job, nodeId, botMap, nodeMap, onKilled, onToast }) => {
-  const [expanded, setExpanded] = useState(job.status === 'failed');
+}> = ({ job, nodeId, botMap, nodeMap, defaultExpanded = false, onKilled, onToast }) => {
+  const [expanded, setExpanded] = useState(defaultExpanded || job.status === 'failed');
+  const rowRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (defaultExpanded) {
+      setExpanded(true);
+      rowRef.current?.scrollIntoView({ block: 'nearest' });
+    }
+  }, [defaultExpanded]);
   const [logs, setLogs] = useState<string | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
   const [logsError, setLogsError] = useState<string | null>(null);
@@ -138,7 +147,7 @@ const BgJobRow: React.FC<{
   };
 
   return (
-    <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800/80 overflow-hidden">
+    <div ref={rowRef} className="rounded-lg border border-zinc-200/80 dark:border-zinc-800/80 overflow-hidden">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
@@ -246,6 +255,7 @@ interface BgJobsDrawerProps {
   memberBotIds: string[];
   botMap: Map<string, BotConfig>;
   nodeMap: Map<string, NodeRecord>;
+  initialJobId?: string | null;
   onClose: () => void;
   onToast?: (type: 'success' | 'error' | 'info', message: string) => void;
 }
@@ -260,6 +270,7 @@ export const BgJobsDrawer: React.FC<BgJobsDrawerProps> = ({
   memberBotIds,
   botMap,
   nodeMap,
+  initialJobId,
   onClose,
   onToast,
 }) => {
@@ -414,6 +425,7 @@ export const BgJobsDrawer: React.FC<BgJobsDrawerProps> = ({
                   nodeId={nodeId}
                   botMap={botMap}
                   nodeMap={nodeMap}
+                  defaultExpanded={Boolean(initialJobId && initialJobId === job.id)}
                   onKilled={() => void refresh()}
                   onToast={onToast}
                 />

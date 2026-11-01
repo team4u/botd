@@ -127,13 +127,18 @@ test('Sub-Session Delegation: 创建子会话、父会话通知、subsessions �
   const botWorker = 'bot_worker';
   registerNodeWithBots(adminUser.id, nodeId, [botLead, botWorker]);
 
-  let turnRan = false;
+  const turnsCalled: string[] = [];
   mockRpcs.set(nodeId, {
     runTurn: async (input: any) => {
-      turnRan = true;
-      assert.equal(input.botId, botWorker);
+      turnsCalled.push(input.botId);
+      if (input.botId === botWorker) {
+        return {
+          replyText: '子任务执行完毕：已成功处理 42 条数据。',
+          modelBadge: 'openai/gpt-4o',
+        };
+      }
       return {
-        replyText: '子任务执行完毕：已成功处理 42 条数据。',
+        replyText: '收到子任务汇报，已完成汇总。',
         modelBadge: 'openai/gpt-4o',
       };
     },
@@ -192,7 +197,14 @@ test('Sub-Session Delegation: 创建子会话、父会话通知、subsessions �
     return parentMessages.some((m) => m.role === 'callback' && m.content.includes('已完成'));
   });
 
-  assert.ok(turnRan, 'runTurn must have been called');
+  assert.ok(turnsCalled.includes(botWorker), 'botWorker runTurn must have been called');
+
+  // 等待父会话 leadBot 被唤醒执行汇总回合
+  await waitFor(() => {
+    const parentMessages = hub.db.getMessages(parentSession.id);
+    return parentMessages.some((m) => m.role === 'assistant' && m.senderBotId === botLead);
+  });
+  assert.ok(turnsCalled.includes(botLead), 'botLead must have been woken up');
 
   const parentMessagesAfter = hub.db.getMessages(parentSession.id);
   const completionMsg = parentMessagesAfter.find((m) => m.role === 'callback' && m.content.includes('已完成'));
@@ -493,4 +505,127 @@ test('CLI: botd sessions delegate 与 subsessions', async (t) => {
   assert.equal(subsessionsOut.length, 1);
   assert.equal(subsessionsOut[0].id, delegateOut.childSession.id);
   assert.equal(subsessionsOut[0].parentSessionId, parent.id);
+});
+
+test('Sub-Session Delegation: 子会话执行失败时向父会话回传失败通知并唤醒父会话', async (t) => {
+  const ctx = await createTestContext(t);
+  const { hub, adminUser, adminCookie, mockRpcs, registerNodeWithBots, jsonRequest } = ctx;
+
+  const nodeId = 'node_fail_test';
+  const botLead = 'bot_lead_f';
+  const botWorker = 'bot_worker_f';
+  registerNodeWithBots(adminUser.id, nodeId, [botLead, botWorker]);
+
+  const turnsCalled: string[] = [];
+  mockRpcs.set(nodeId, {
+    runTurn: async (input: any) => {
+      turnsCalled.push(input.botId);
+      if (input.botId === botWorker) {
+        throw new Error('模拟子任务执行崩溃');
+      }
+      return {
+        replyText: '已收到子任务执行失败通知，正在处理降级方案。',
+        modelBadge: 'openai/gpt-4o',
+      };
+    },
+    cancelTurn: async () => {},
+    resetSession: async () => {},
+  });
+
+  const parentRes = await jsonRequest('/api/sessions', 'POST', {
+    title: '失败测试群',
+    mode: 'lead',
+    leadBotId: botLead,
+    memberBotIds: [botLead, botWorker],
+  }, adminCookie);
+  const parentSession: SessionRecord = parentRes.json;
+
+  const delegateRes = await jsonRequest(`/api/sessions/${parentSession.id}/delegate`, 'POST', {
+    botId: botWorker,
+    prompt: '执行高危任务',
+  }, adminCookie);
+  assert.equal(delegateRes.status, 201);
+  const delegateResult: DelegateSessionResult = delegateRes.json;
+
+  // 等待父会话收到失败通知 callback 消息
+  await waitFor(() => {
+    const parentMessages = hub.db.getMessages(parentSession.id);
+    return parentMessages.some((m) => m.role === 'callback' && m.content.includes('执行失败'));
+  });
+
+  const parentMessages = hub.db.getMessages(parentSession.id);
+  const failCallback = parentMessages.find((m) => m.role === 'callback' && m.content.includes('执行失败'));
+  assert.ok(failCallback, '父会话中必须存在失败通知回调消息');
+  assert.equal(failCallback.senderBotId, botWorker);
+  assert.ok(
+    failCallback.content.includes(`❌ 子会话「[${delegateResult.childSession.title}](#?s=${delegateResult.childSession.id})」执行失败：`),
+    `失败通知格式不匹配: ${failCallback.content}`
+  );
+  assert.ok(
+    failCallback.content.includes('模拟子任务执行崩溃'),
+    `失败通知应包含 system 报错详情: ${failCallback.content}`
+  );
+
+  // 验证父会话 Lead Bot 收到唤醒并执行了异常处理回合
+  await waitFor(() => {
+    const msgs = hub.db.getMessages(parentSession.id);
+    return msgs.some((m) => m.role === 'assistant' && m.senderBotId === botLead);
+  });
+  assert.ok(turnsCalled.includes(botLead), '父会话 leadBot 应被自动唤醒');
+});
+
+test('Sub-Session Delegation: 产物文件关联/复制至子会话', async (t) => {
+  const ctx = await createTestContext(t);
+  const { hub, adminUser, adminCookie, mockRpcs, registerNodeWithBots, jsonRequest } = ctx;
+
+  const nodeId = 'node_art_test';
+  const botLead = 'bot_lead_art';
+  const botWorker = 'bot_worker_art';
+  registerNodeWithBots(adminUser.id, nodeId, [botLead, botWorker]);
+
+  mockRpcs.set(nodeId, {
+    runTurn: async () => ({ replyText: '已分析关联产物', modelBadge: 'test' }),
+    cancelTurn: async () => {},
+    resetSession: async () => {},
+  });
+
+  const parentRes = await jsonRequest('/api/sessions', 'POST', {
+    title: '产物传递测试群',
+    mode: 'lead',
+    leadBotId: botLead,
+    memberBotIds: [botLead, botWorker],
+  }, adminCookie);
+  const parentSession: SessionRecord = parentRes.json;
+
+  // 在父会话创建一条产物
+  const parentArt = hub.db.createArtifact({
+    id: 'art_parent_file_1',
+    sessionId: parentSession.id,
+    filename: 'data_report.csv',
+    mimeType: 'text/csv',
+    sizeBytes: 2048,
+    senderBotId: botLead,
+    storagePath: '/tmp/data_report.csv',
+  });
+
+  // 委派时指定 artifactIds
+  const delegateRes = await jsonRequest(`/api/sessions/${parentSession.id}/delegate`, 'POST', {
+    botId: botWorker,
+    prompt: '请分析该数据报表',
+    artifactIds: [parentArt.id],
+  }, adminCookie);
+  assert.equal(delegateRes.status, 201);
+  const delegateResult: DelegateSessionResult = delegateRes.json;
+
+  // 1. 验证子会话初始消息带有 attachments
+  assert.ok(delegateResult.initialMessage.attachments);
+  assert.equal(delegateResult.initialMessage.attachments.length, 1);
+  assert.equal(delegateResult.initialMessage.attachments[0].filename, 'data_report.csv');
+  assert.ok(delegateResult.initialMessage.content.includes('data_report.csv'));
+
+  // 2. 验证子会话 artifacts 列表中已记录此产物
+  const childArtifacts = hub.db.listSessionArtifacts(delegateResult.childSession.id);
+  assert.equal(childArtifacts.length, 1);
+  assert.equal(childArtifacts[0].filename, 'data_report.csv');
+  assert.equal(childArtifacts[0].sessionId, delegateResult.childSession.id);
 });
