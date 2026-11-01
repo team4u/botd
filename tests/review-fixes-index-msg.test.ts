@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createHub } from '../apps/hub/src/index.js';
-import type { BotConfig, MessageRecord, SessionRecord } from '@botd/protocol';
+import type { BotConfig, MessageRecord, SessionRecord } from '../packages/protocol/src/index.js';
 
 interface TestEnv {
   hub: ReturnType<typeof createHub>;

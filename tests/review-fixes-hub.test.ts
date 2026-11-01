@@ -166,9 +166,9 @@ test('Fix 4 — Delegation artifact copy shares storagePath and deletion does no
 
   // Mock RPC to handle delegation task
   hub.connections.getNodeRpc = () => ({
-    startTurn: async () => {},
+    runTurn: async () => ({ replyText: 'ok', modelBadge: 'test/model' }),
     resetSession: async () => {},
-  });
+  } as any);
 
   const parentSession = hub.db.createSession({
     id: 'sess_del_parent',

@@ -4,17 +4,40 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { register } from 'node:module';
 import { registerNodeCommands } from '../apps/node/src/cli/commands/node.js';
 import { createLocalIpcServer, MAX_ASK_BODY_BYTES } from '../apps/node/src/local-ipc.js';
 import type { BgJobManager } from '../apps/node/src/bg-jobs.js';
-import { pickCurrentDirectSession } from '../apps/web/src/components/Sidebar.tsx';
-import type { PendingAskRecord, BotConfig } from '@botd/protocol';
+import type { SessionRecord } from '../packages/protocol/src/index.js';
+import type { PendingAskRecord, BotConfig } from '../packages/protocol/src/index.js';
+
+// 拦截 CSS/TSX 导入（Sidebar.tsx 间接引入样式与 React 组件），复用 review-fixes-web 的加载策略
+register(
+  'data:text/javascript,' +
+    encodeURIComponent(`
+export async function load(url, context, nextLoad) {
+  if (url.endsWith('.css')) {
+    return { format: 'module', shortCircuit: true, source: 'export default {};' };
+  }
+  return nextLoad(url, context);
+}
+`)
+);
+
+/** 动态加载 Sidebar 组件模块，提取纯函数 */
+async function loadSidebarModule(): Promise<{
+  pickCurrentDirectSession: (sessions: SessionRecord[], botId: string) => SessionRecord | undefined;
+}> {
+  const sidebarModule = (await import('../apps/web/src/components/Sidebar.js' as any)) as any;
+  return sidebarModule;
+}
 
 // ---------------------------------------------------------------------------
 // pickCurrentDirectSession: delegated child sessions must not hijack the
 // bot's main direct-chat entry (Task 1.2)
 // ---------------------------------------------------------------------------
-test('pickCurrentDirectSession 排除带 parentSessionId 的子会话，防止篡位主单聊入口', () => {
+test('pickCurrentDirectSession 排除带 parentSessionId 的子会话，防止篡位主单聊入口', async () => {
+  const { pickCurrentDirectSession } = await loadSidebarModule();
   const now = new Date().toISOString();
   const main = {
     id: 'sess_main', mode: 'direct', archived: false, memberBotIds: ['bot_1'],
@@ -29,7 +52,8 @@ test('pickCurrentDirectSession 排除带 parentSessionId 的子会话，防止�
   assert.equal(picked?.id, 'sess_main', 'newest child session must be ignored');
 });
 
-test('pickCurrentDirectSession 无子会话时仍正常取最新主单聊', () => {
+test('pickCurrentDirectSession 无子会话时仍正常取最新主单聊', async () => {
+  const { pickCurrentDirectSession } = await loadSidebarModule();
   const a = { id: 'sess_a', mode: 'direct', archived: false, memberBotIds: ['bot_1'], updatedAt: new Date(Date.now() - 60_000).toISOString() } as any;
   const b = { id: 'sess_b', mode: 'direct', archived: false, memberBotIds: ['bot_1'], updatedAt: new Date().toISOString() } as any;
   assert.equal(pickCurrentDirectSession([a, b], 'bot_1')?.id, 'sess_b');
@@ -137,16 +161,18 @@ test('Local IPC /ask 超过 512KB 载荷被拒绝（413）', async () => {
 // botd ask CLI preview option wiring (command definitions)
 // ---------------------------------------------------------------------------
 test('botd ask 命令注册 --file/--diff/--stdin/--timeout 0 选项', async (t) => {
-  const { Command } = await import('../apps/node/node_modules/commander/index.js');
-  const program = new Command();
+  const { createRequire } = await import('node:module');
+  const requireFromNodeApp = createRequire(path.join(process.cwd(), 'apps/node', 'package.json'));
+  const commander = requireFromNodeApp('commander') as { Command: any };
+  const program = new commander.Command();
   registerNodeCommands(program);
-  const askCmd = program.commands.find((c) => c.name() === 'ask');
+  const askCmd = program.commands.find((c: { name: () => string }) => c.name() === 'ask');
   assert.ok(askCmd, 'ask command must be registered');
-  const opts = askCmd.options.map((o) => o.long);
+  const opts: string[] = askCmd.options.map((o: { long: string }) => o.long);
   assert.ok(opts.includes('--file'));
   assert.ok(opts.includes('--diff'));
   assert.ok(opts.includes('--stdin'));
-  const timeoutOpt = askCmd.options.find((o) => o.long === '--timeout');
+  const timeoutOpt = askCmd.options.find((o: { long: string }) => o.long === '--timeout');
   assert.match(timeoutOpt?.description ?? '', /0 for infinite/);
 });
 
