@@ -36,7 +36,6 @@ export interface IncrementalMessageResult {
 
 export const HUB_SCHEMA_VERSION = 2;
 
-export { isValidCommandName } from '@botd/protocol';
 const PREVIEW_MAX_LENGTH = 60;
 
 const buildPreview = (content: string): string | undefined => {
