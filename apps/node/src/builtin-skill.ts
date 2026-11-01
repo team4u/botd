@@ -6,7 +6,7 @@ import { readSkill, writeSkill } from './storage.js';
  * survive until the framework ships a newer version.
  */
 export const BUILTIN_SKILL_ID = 'botd-cli';
-export const BUILTIN_SKILL_VERSION = 5;
+export const BUILTIN_SKILL_VERSION = 6;
 const VERSION_MARKER = `<!-- botd-skill: ${BUILTIN_SKILL_ID} v${BUILTIN_SKILL_VERSION} -->`;
 
 export const BUILTIN_SKILL_MD = `${VERSION_MARKER}
@@ -36,7 +36,7 @@ everything: this machine's daemon and, after login, the Hub (nodes/bots/sessions
     and fires the message later (survives daemon restarts).
   - \`--no-turn\` — silent progress report: the message appears on the session screen without
     consuming an LLM inference turn.
-- \`botd ask "<prompt>" [--options "确认,取消"] [--timeout 300]\` — human-in-the-loop interactive card in Web chat; prints the user's selected option or text answer to stdout.
+- \`botd ask "<prompt>" [--options "确认,取消"] [--timeout 300] [--ui] [--file <path> | --stdin]\` — human-in-the-loop interactive card in Web chat; prints the user's selected option, text answer, or Generative UI form result JSON to stdout.
 - \`botd artifact put <filePath> [--message "<description>"]\` — upload a local file from this node to the session as a shared artifact (visible in Web UI and downloadable by bots on other nodes).
 - \`botd artifact pull <artifactId> [-o <outputPath>]\` — pull a shared artifact from the session into this node's workspace.
 - \`botd artifact list\` — list shared artifacts in the current session.
@@ -67,6 +67,28 @@ The raw detached-shell alternative (no management, no auto report):
 \`botd restart\` / \`botd stop\` kill the daemon AND every in-flight turn — including
 yours. Never run them mid-turn. If a restart is genuinely required, finish your reply
 and schedule it detached: \`(sleep 5 && botd restart -d & disown; exit 0)\`.
+
+## Generative UI (Dynamic Cards & Interactive Forms)
+
+botd supports dynamic UI components rendered natively via json-render:
+
+1. In-chat display UI: Output a \`\`\`ui (or \`\`\`json-render) code fence containing a valid JSON Spec.
+2. Interactive forms / approvals: \`botd ask "<prompt>" --ui --stdin << 'EOF' ... EOF\` (outputs \`{ decision, state }\` JSON to stdout) or inspect catalog via \`botd ask --ui-schema\`.
+3. Spec top-level: \`{ root: string, elements: Record<string, BotdUiElement>, state?: Record<string, unknown> }\`.
+4. Component catalog (10 components):
+   - Layout & Display:
+     - \`Stack\`: \`{ direction?: 'vertical' | 'horizontal', gap?: 'sm' | 'md' }\`
+     - \`Card\`: \`{ title: string, subtitle?: string, badge?: string }\`
+     - \`MetricGrid\`: \`{ columns?: 2 | 3 | 4 }\`
+     - \`MetricCard\`: \`{ label: string, value: string, hint?: string, status?: 'ok' | 'warn' | 'error', trend?: 'up' | 'down' | 'flat' }\`
+     - \`KeyValueList\`: \`{ items: Array<{ key: string, value: string, mono?: boolean, badge?: string }> }\`
+   - Form Inputs & Actions:
+     - \`TextInput\`: \`{ label: string, value?: string | { "$state": "/key" }, placeholder?: string, hint?: string }\`
+     - \`Select\`: \`{ label: string, value?: string | { "$state": "/key" }, options: Array<{ value: string, label: string }> }\`
+     - \`Switch\`: \`{ label: string, checked?: boolean | { "$state": "/key" }, hint?: string }\`
+     - \`ActionBar\`: \`{ align?: 'left' | 'right' | 'between' }\`
+     - \`Button\`: \`{ label: string, variant?: 'primary' | 'secondary' | 'danger' }, on.press: { action: 'submit', params?: { decision?: string } }\`
+   - State binding: Bind form values to store keys via \`{ "$state": "/key" }\`. On submit, form state and button params return as single-line JSON.
 
 ## Skill creator
 

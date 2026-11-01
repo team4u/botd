@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { HelpCircle, Loader2, Send, CheckCircle2, ChevronDown } from 'lucide-react';
-import type { PendingAskRecord, BotConfig } from '@botd/protocol';
+import { validateUiSpec, type PendingAskRecord, type BotConfig, type BotdUiSpec } from '@botd/protocol';
+import { BotdUiRenderer } from './generative-ui/BotdUiRenderer.js';
 
 export interface AskCardProps {
   ask: PendingAskRecord;
@@ -14,9 +15,21 @@ export const AskCard: React.FC<AskCardProps> = ({ ask, bot, onRespond }) => {
   const [chosenOption, setChosenOption] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const hasPreview = Boolean(ask.previewContent && ask.previewContent.trim().length > 0);
+  const isUiPreview = ask.previewType === 'ui' && Boolean(ask.previewContent);
+  const uiSpec = useMemo<BotdUiSpec | null>(() => {
+    if (!isUiPreview || !ask.previewContent) return null;
+    const res = validateUiSpec(ask.previewContent);
+    return res.ok ? res.spec : null;
+  }, [isUiPreview, ask.previewContent]);
+
+  const hasUiButtons = useMemo(() => {
+    if (!uiSpec) return false;
+    return Object.values(uiSpec.elements).some((el) => el.type === 'Button');
+  }, [uiSpec]);
+
+  const hasPreview = Boolean(ask.previewContent && ask.previewContent.trim().length > 0 && !isUiPreview);
   const [previewExpanded, setPreviewExpanded] = useState(() =>
-    Boolean(ask.previewContent && ask.previewContent.length <= 4000)
+    Boolean(ask.previewContent && ask.previewContent.length <= 4000),
   );
 
   const isAnswered = ask.status === 'answered' || Boolean(ask.answer);
@@ -47,8 +60,48 @@ export const AskCard: React.FC<AskCardProps> = ({ ask, bot, onRespond }) => {
 
   const previewBadge = (ask.previewType || 'text').toUpperCase();
 
+  const renderAnswerSummary = () => {
+    if (!ask.answer) return <span className="font-semibold text-blue-700 dark:text-blue-300">已提交</span>;
+    try {
+      const parsed = JSON.parse(ask.answer);
+      if (typeof parsed === 'object' && parsed !== null) {
+        const decision = parsed.decision ?? (parsed.params && parsed.params.decision);
+        const state = parsed.state;
+        const stateEntries = state && typeof state === 'object' ? Object.entries(state) : [];
+
+        if (decision !== undefined || stateEntries.length > 0) {
+          return (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {decision !== undefined && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-100 dark:bg-blue-900/60 text-blue-800 dark:text-blue-200">
+                  {String(decision)}
+                </span>
+              )}
+              {stateEntries.map(([k, v], idx) => (
+                <span
+                  key={idx}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border border-zinc-200/60 dark:border-zinc-700/60"
+                >
+                  <span className="text-zinc-400 dark:text-zinc-500">{k}:</span>
+                  <span className="font-mono">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</span>
+                </span>
+              ))}
+            </div>
+          );
+        }
+      }
+    } catch {
+      // not JSON, fallback to plain text
+    }
+    return (
+      <span className="font-semibold text-blue-700 dark:text-blue-300 truncate">
+        {ask.answer}
+      </span>
+    );
+  };
+
   return (
-    <div className="rounded-xl border border-blue-200 dark:border-blue-900/60 bg-blue-50/60 dark:bg-blue-950/30 p-3 text-xs space-y-2.5">
+    <div className="rounded-lg border border-blue-200 dark:border-blue-900/60 bg-blue-50/60 dark:bg-blue-950/30 p-3 text-xs space-y-2.5">
       {/* Header */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 font-semibold text-blue-950 dark:text-blue-100 min-w-0">
@@ -69,7 +122,19 @@ export const AskCard: React.FC<AskCardProps> = ({ ask, bot, onRespond }) => {
         {ask.prompt}
       </div>
 
-      {/* Collapsible preview section */}
+      {/* UI Spec interactive / display block */}
+      {isUiPreview && uiSpec && (
+        <div className="w-full">
+          <BotdUiRenderer
+            spec={uiSpec}
+            mode={isAnswered ? 'display' : 'ask'}
+            disabled={submitting || isAnswered}
+            onSubmit={(jsonStr) => handleRespond(jsonStr)}
+          />
+        </div>
+      )}
+
+      {/* Collapsible preview section for non-UI previews */}
       {hasPreview && (
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
@@ -131,9 +196,7 @@ export const AskCard: React.FC<AskCardProps> = ({ ask, bot, onRespond }) => {
       {isAnswered ? (
         <div className="flex items-center gap-2 p-2 rounded-lg bg-white/80 dark:bg-zinc-900/60 border border-blue-200/60 dark:border-blue-900/40 text-xs text-zinc-700 dark:text-zinc-300">
           <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 shrink-0">已回复:</span>
-          <span className="font-semibold text-blue-700 dark:text-blue-300 truncate">
-            {ask.answer || '已提交'}
-          </span>
+          {renderAnswerSummary()}
         </div>
       ) : (
         <div className="space-y-2">
@@ -156,32 +219,35 @@ export const AskCard: React.FC<AskCardProps> = ({ ask, bot, onRespond }) => {
             </div>
           )}
 
-          <form onSubmit={handleCustomSubmit} className="flex items-center gap-1.5">
-            <input
-              type="text"
-              value={customAnswer}
-              onChange={(e) => setCustomAnswer(e.target.value)}
-              disabled={submitting}
-              placeholder={
-                ask.options && ask.options.length > 0
-                  ? '或者输入其他回复...'
-                  : '请输入回复内容...'
-              }
-              className="flex-1 h-8 px-2.5 text-xs bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-            />
-            <button
-              type="submit"
-              disabled={submitting || !customAnswer.trim()}
-              className="h-8 px-3 text-xs font-medium rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 dark:disabled:bg-blue-900/50 dark:disabled:text-blue-400/50 text-white flex items-center gap-1 transition-colors shadow-2xs cursor-pointer shrink-0"
-            >
-              {submitting && chosenOption === null ? (
-                <Loader2 className="w-3 h-3 animate-spin-fast" />
-              ) : (
-                <Send className="w-3 h-3" />
-              )}
-              <span>回复</span>
-            </button>
-          </form>
+          {/* If the UI spec already has buttons and no external options are configured, hide the duplicate bottom text input */}
+          {(!isUiPreview || !hasUiButtons || (ask.options && ask.options.length > 0)) && (
+            <form onSubmit={handleCustomSubmit} className="flex items-center gap-1.5">
+              <input
+                type="text"
+                value={customAnswer}
+                onChange={(e) => setCustomAnswer(e.target.value)}
+                disabled={submitting}
+                placeholder={
+                  ask.options && ask.options.length > 0
+                    ? '或者输入其他回复...'
+                    : '请输入回复内容...'
+                }
+                className="flex-1 h-8 px-2.5 text-xs bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              />
+              <button
+                type="submit"
+                disabled={submitting || !customAnswer.trim()}
+                className="h-8 px-3 text-xs font-medium rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 dark:disabled:bg-blue-900/50 dark:disabled:text-blue-400/50 text-white flex items-center gap-1 transition-colors shadow-2xs cursor-pointer shrink-0"
+              >
+                {submitting && chosenOption === null ? (
+                  <Loader2 className="w-3 h-3 animate-spin-fast" />
+                ) : (
+                  <Send className="w-3 h-3" />
+                )}
+                <span>回复</span>
+              </button>
+            </form>
+          )}
         </div>
       )}
     </div>

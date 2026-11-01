@@ -3,7 +3,16 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { Command, Option } from 'commander';
-import { parseDelayDuration, type BgJobRecord, type NodeUpgradeResult, type AskPreviewType } from '@botd/protocol';
+import {
+  parseDelayDuration,
+  type BgJobRecord,
+  type NodeUpgradeResult,
+  type AskPreviewType,
+  BOTD_UI_CATALOG_VERSION,
+  BOTD_UI_COMPONENT_TYPES,
+  BOTD_UI_SCHEMA_DOC,
+  validateUiSpec,
+} from '@botd/protocol';
 import { cliAction, readGlobals } from '../context.js';
 import { CliError } from '../errors.js';
 import { writeNodeIdentity, getDaemonSocketPath } from '../../storage.js';
@@ -733,7 +742,7 @@ export function registerNodeCommands(program: Command): void {
     );
 
   program
-    .command('ask <prompt>')
+    .command('ask [prompt]')
     .description('Ask the user an interactive question in the active session and wait for their response')
     .option('--options <items>', 'Comma-separated choices (e.g. "确认,取消")')
     .option('--timeout <seconds>', 'Timeout in seconds (default 300, 0 for infinite)', '300')
@@ -741,11 +750,37 @@ export function registerNodeCommands(program: Command): void {
     .option('--bot <id>', 'Bot ID (or env BOTD_BOT_ID)')
     .option('--file <path>', 'File to attach as preview (diff, markdown, or text)')
     .option('--diff', 'Set preview type to diff (reads stdin if --file is omitted)')
+    .option('--ui', 'Render preview content (from --file or --stdin) as an interactive json-render UI card')
+    .option('--ui-schema', 'Print the botd.v1 Generative UI Spec schema & component catalog and exit')
     .option('--stdin', 'Read preview content from stdin')
     .action(
-      (prompt: string, options: Record<string, unknown>, command: Command) =>
+      (prompt: string | undefined, options: Record<string, unknown>, command: Command) =>
         cliAction(async () => {
           const { dataDir, json, timeoutMs } = readGlobals(command);
+
+          if (options.uiSchema) {
+            if (json) {
+              console.log(
+                JSON.stringify(
+                  {
+                    ok: true,
+                    version: BOTD_UI_CATALOG_VERSION,
+                    componentTypes: BOTD_UI_COMPONENT_TYPES,
+                    schemaDoc: BOTD_UI_SCHEMA_DOC,
+                  },
+                  null,
+                  2,
+                ),
+              );
+            } else {
+              console.log(BOTD_UI_SCHEMA_DOC);
+            }
+            return;
+          }
+
+          if (!prompt || prompt.trim().length === 0) {
+            throw new CliError('Missing prompt');
+          }
 
           const sessionId = (options.session as string | undefined) || process.env.BOTD_SESSION_ID;
           const botId = (options.bot as string | undefined) || process.env.BOTD_BOT_ID;
@@ -753,6 +788,7 @@ export function registerNodeCommands(program: Command): void {
           const rawTimeout = options.timeout as string | undefined;
           const timeoutSeconds = rawTimeout !== undefined ? Number(rawTimeout) : 300;
           const filePath = options.file as string | undefined;
+          const isUi = Boolean(options.ui);
           const isDiff = Boolean(options.diff);
           const isStdin = Boolean(options.stdin);
 
@@ -775,15 +811,17 @@ export function registerNodeCommands(program: Command): void {
             } catch (err: unknown) {
               throw new CliError(`Failed to read preview file: ${err instanceof Error ? err.message : String(err)}`);
             }
-            if (isDiff || /\.(diff|patch)$/i.test(filePath)) {
+            if (isUi || /\.ui\.json$/i.test(filePath)) {
+              previewType = 'ui';
+            } else if (isDiff || /\.(diff|patch)$/i.test(filePath)) {
               previewType = 'diff';
             } else if (/\.md$/i.test(filePath)) {
               previewType = 'markdown';
             } else {
               previewType = 'text';
             }
-          } else if (isDiff || isStdin) {
-            previewType = isDiff ? 'diff' : 'text';
+          } else if (isUi || isDiff || isStdin || !process.stdin.isTTY) {
+            previewType = isUi ? 'ui' : isDiff ? 'diff' : 'text';
             if (!process.stdin.isTTY) {
               try {
                 previewContent = await new Promise<string>((resolve, reject) => {
@@ -822,10 +860,24 @@ export function registerNodeCommands(program: Command): void {
             }
           }
 
-          if (!previewContent || previewContent.length === 0) {
-            previewContent = undefined;
-            if (!filePath && !isDiff) {
-              previewType = undefined;
+          if (isUi || previewType === 'ui') {
+            if (!previewContent || previewContent.trim().length === 0) {
+              throw new CliError(
+                'UI spec content is required when --ui is specified (provide via --file <path> or --stdin)',
+              );
+            }
+            const validation = validateUiSpec(previewContent);
+            if (!validation.ok) {
+              throw new CliError(`Invalid UI spec:\n  - ${validation.errors.join('\n  - ')}`);
+            }
+            previewType = 'ui';
+            previewContent = validation.normalizedJson;
+          } else {
+            if (!previewContent || previewContent.length === 0) {
+              previewContent = undefined;
+              if (!filePath && !isDiff) {
+                previewType = undefined;
+              }
             }
           }
 

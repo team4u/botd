@@ -1,0 +1,574 @@
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { test } from 'node:test';
+import { createRequire } from 'node:module';
+import {
+  BOTD_UI_CATALOG_VERSION,
+  BOTD_UI_COMPONENT_TYPES,
+  BOTD_UI_SCHEMA_DOC,
+  MAX_UI_SPEC_BYTES,
+  MAX_UI_TREE_DEPTH,
+  validateUiSpec,
+  type BotdUiSpec,
+} from '../packages/protocol/src/index.js';
+import { createLocalIpcServer } from '../apps/node/src/local-ipc.js';
+import { registerNodeCommands } from '../apps/node/src/cli/commands/node.js';
+import { BUILTIN_SKILL_MD, BUILTIN_SKILL_VERSION } from '../apps/node/src/builtin-skill.js';
+import { GroupRouter } from '../apps/hub/src/group-router.js';
+import { HubDatabase } from '../apps/hub/src/db.js';
+import { AuthManager } from '../apps/hub/src/auth.js';
+import { NodeConnectionManager } from '../apps/hub/src/ws-hub.js';
+import { SseHub } from '../apps/hub/src/sse.js';
+import type { BgJobManager } from '../apps/node/src/bg-jobs.js';
+
+// ---------------------------------------------------------------------------
+// 1. validateUiSpec: Valid Spec with all 10 components, $state, submit action
+// ---------------------------------------------------------------------------
+
+test('validateUiSpec: 合法 Spec（包含 10 种组件、$state 绑定与 submit action）通过校验', () => {
+  const validFullSpec: BotdUiSpec = {
+    root: 'stack_root',
+    elements: {
+      stack_root: {
+        type: 'Stack',
+        props: { direction: 'vertical', gap: 'md' },
+        children: ['card_1', 'grid_1', 'list_1', 'form_card'],
+      },
+      card_1: {
+        type: 'Card',
+        props: { title: 'Overview', subtitle: 'System Metrics', badge: 'PROD' },
+        children: [],
+      },
+      grid_1: {
+        type: 'MetricGrid',
+        props: { columns: 3 },
+        children: ['metric_cpu', 'metric_mem', 'metric_err'],
+      },
+      metric_cpu: {
+        type: 'MetricCard',
+        props: { label: 'CPU Usage', value: '42%', status: 'ok', trend: 'up' },
+      },
+      metric_mem: {
+        type: 'MetricCard',
+        props: { label: 'Memory', value: '68%', status: 'warn', trend: 'flat' },
+      },
+      metric_err: {
+        type: 'MetricCard',
+        props: { label: 'Error Rate', value: '0.01%', status: 'ok', trend: 'down' },
+      },
+      list_1: {
+        type: 'KeyValueList',
+        props: {
+          items: [
+            { key: 'Host', value: 'srv-01.botd.io', mono: true, badge: 'active' },
+            { key: 'Region', value: 'us-west-2' },
+          ],
+        },
+      },
+      form_card: {
+        type: 'Card',
+        props: { title: 'Configuration' },
+        children: ['input_name', 'select_env', 'switch_notif', 'action_bar'],
+      },
+      input_name: {
+        type: 'TextInput',
+        props: {
+          label: 'Cluster Name',
+          value: { $state: '/cluster/name' },
+          placeholder: 'e.g. prod-main',
+          hint: 'Unique cluster identifier',
+        },
+      },
+      select_env: {
+        type: 'Select',
+        props: {
+          label: 'Environment',
+          value: { $state: '/cluster/env' },
+          options: [
+            { value: 'staging', label: 'Staging' },
+            { value: 'production', label: 'Production' },
+          ],
+        },
+      },
+      switch_notif: {
+        type: 'Switch',
+        props: {
+          label: 'Enable Alerts',
+          checked: { $state: '/cluster/alerts' },
+          hint: 'Send notifications on failure',
+        },
+      },
+      action_bar: {
+        type: 'ActionBar',
+        props: { align: 'right' },
+        children: ['btn_cancel', 'btn_submit'],
+      },
+      btn_cancel: {
+        type: 'Button',
+        props: { label: 'Cancel', variant: 'secondary' },
+        on: { press: { action: 'submit', params: { decision: 'cancel' } } },
+      },
+      btn_submit: {
+        type: 'Button',
+        props: { label: 'Apply Changes', variant: 'primary' },
+        on: { press: { action: 'submit', params: { decision: 'apply' } } },
+      },
+    },
+    state: {
+      cluster: {
+        name: 'prod-main',
+        env: 'production',
+        alerts: true,
+      },
+    },
+  };
+
+  const result = validateUiSpec(validFullSpec);
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.spec.root, 'stack_root');
+    assert.equal(typeof result.normalizedJson, 'string');
+    const parsed = JSON.parse(result.normalizedJson);
+    assert.equal(parsed.root, 'stack_root');
+    assert.equal(Object.keys(parsed.elements).length, 14);
+  }
+
+  // Also verify parsing from JSON string
+  const strResult = validateUiSpec(JSON.stringify(validFullSpec));
+  assert.equal(strResult.ok, true);
+});
+
+// ---------------------------------------------------------------------------
+// 2. validateUiSpec: Rejection of invalid cases
+// ---------------------------------------------------------------------------
+
+test('validateUiSpec 拦截非法情况：未知组件类型（验证报错信息包含 Allowed types）', () => {
+  const invalidSpec = {
+    root: 'unsupported',
+    elements: {
+      unsupported: {
+        type: 'DatePicker',
+        props: { label: 'Select date' },
+      },
+    },
+  };
+
+  const res = validateUiSpec(invalidSpec);
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    const errorStr = res.errors.join(' ');
+    assert.match(errorStr, /Unknown component type "DatePicker"/);
+    assert.ok(
+      errorStr.includes(`Allowed types: ${BOTD_UI_COMPONENT_TYPES.join(', ')}`),
+      'Error message must list all allowed component types',
+    );
+  }
+});
+
+test('validateUiSpec 拦截非法情况：树存在环（Cycle）', () => {
+  const cyclicSpec = {
+    root: 'node_a',
+    elements: {
+      node_a: {
+        type: 'Stack',
+        children: ['node_b'],
+      },
+      node_b: {
+        type: 'Stack',
+        children: ['node_a'],
+      },
+    },
+  };
+
+  const res = validateUiSpec(cyclicSpec);
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    assert.ok(
+      res.errors.some((err) => err.includes('Cycle detected')),
+      `Expected cycle detection error, got: ${res.errors.join('; ')}`,
+    );
+  }
+});
+
+test('validateUiSpec 拦截非法情况：超过最大深度', () => {
+  // Build a linear chain deeper than MAX_UI_TREE_DEPTH (depth 7)
+  const elements: Record<string, any> = {};
+  for (let i = 1; i <= MAX_UI_TREE_DEPTH + 1; i++) {
+    elements[`node_${i}`] = {
+      type: 'Stack',
+      children: i <= MAX_UI_TREE_DEPTH ? [`node_${i + 1}`] : [],
+    };
+  }
+  const deepSpec = {
+    root: 'node_1',
+    elements,
+  };
+
+  const res = validateUiSpec(deepSpec);
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    assert.ok(
+      res.errors.some((err) => err.includes(`exceeds maximum depth of ${MAX_UI_TREE_DEPTH}`)),
+      `Expected max depth error, got: ${res.errors.join('; ')}`,
+    );
+  }
+});
+
+test('validateUiSpec 拦截非法情况：缺少 root 或孤儿 children 引用', () => {
+  // Missing root in elements
+  const missingRootSpec = {
+    root: 'missing_root',
+    elements: {
+      card_1: {
+        type: 'Card',
+        props: { title: 'Card 1' },
+      },
+    },
+  };
+  const res1 = validateUiSpec(missingRootSpec);
+  assert.equal(res1.ok, false);
+  if (!res1.ok) {
+    assert.ok(res1.errors.some((err) => err.includes('Root element "missing_root" not found in elements')));
+  }
+
+  // Orphan children reference
+  const orphanChildSpec = {
+    root: 'stack_1',
+    elements: {
+      stack_1: {
+        type: 'Stack',
+        children: ['ghost_element'],
+      },
+    },
+  };
+  const res2 = validateUiSpec(orphanChildSpec);
+  assert.equal(res2.ok, false);
+  if (!res2.ok) {
+    assert.ok(res2.errors.some((err) => err.includes('Child "ghost_element" referenced by "stack_1" does not exist')));
+  }
+});
+
+test('validateUiSpec 拦截非法情况：非法 action 名称', () => {
+  const illegalActionSpec = {
+    root: 'btn_1',
+    elements: {
+      btn_1: {
+        type: 'Button',
+        props: { label: 'Danger Button' },
+        on: { press: { action: 'deleteDatabase', params: { force: true } } },
+      },
+    },
+  };
+
+  const res = validateUiSpec(illegalActionSpec);
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    assert.ok(res.errors.some((err) => err.includes('Unknown action "deleteDatabase"')));
+  }
+});
+
+test('validateUiSpec 拦截非法情况：超长字节限制', () => {
+  // Spec larger than MAX_UI_SPEC_BYTES (64KB)
+  const hugePayload = 'A'.repeat(MAX_UI_SPEC_BYTES + 500);
+  const oversizedSpec = {
+    root: 'card_1',
+    elements: {
+      card_1: {
+        type: 'Card',
+        props: { title: hugePayload },
+      },
+    },
+  };
+
+  const res = validateUiSpec(JSON.stringify(oversizedSpec));
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    assert.ok(res.errors.some((err) => err.includes('exceeds maximum size of 65536 bytes')));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 3. Local IPC /ask: previewType: 'ui' support and validation
+// ---------------------------------------------------------------------------
+
+function listenPort0(server: http.Server): Promise<number> {
+  return new Promise((resolve) => {
+    // Port 0 automatically selects an available port, avoiding 3000
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address() as { port: number };
+      resolve(addr.port);
+    });
+  });
+}
+
+function postJson(port: number, url: string, body: unknown): Promise<{ status: number; body: string }> {
+  const data = JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        path: url,
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) },
+      },
+      (res) => {
+        let out = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => {
+          out += c;
+        });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: out }));
+      },
+    );
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+}
+
+const mockAskCalls: any[] = [];
+const mockBgManager = {
+  listJobs: async () => [],
+  getLogs: async () => '',
+  kill: async () => {
+    throw new Error('noop');
+  },
+} as unknown as BgJobManager;
+
+function makeTestIpcServer() {
+  return createLocalIpcServer({
+    identity: { nodeId: 'node_test', name: 'test', hubUrl: 'http://127.0.0.1:1' },
+    dataDir: '/tmp/botd-test-data',
+    socketPath: '/tmp/botd-test.sock',
+    startedAt: Date.now(),
+    isHubConnected: () => true,
+    getHubRpc: () =>
+      ({
+        requestHumanInput: async (input: any) => {
+          mockAskCalls.push(input);
+          return { answer: '{"decision":"approve"}' };
+        },
+        onSessionStream: { asEvent: () => {} },
+        requestWakeupTurn: async () => {},
+        uploadArtifact: async () => {
+          throw new Error('noop');
+        },
+        downloadArtifact: async () => {
+          throw new Error('noop');
+        },
+        listSessionArtifacts: async () => [],
+        registerNode: async () => {},
+        heartbeat: async () => {},
+      }) as any,
+    bgManager: mockBgManager,
+    syncRegistrationWithHub: async () => {},
+    handleShutdown: () => {},
+  } as any);
+}
+
+test('Local IPC /ask 支持 previewType: "ui" 且合法 Spec 正常转发 Hub (200)', async () => {
+  mockAskCalls.length = 0;
+  const server = makeTestIpcServer();
+  const port = await listenPort0(server);
+  try {
+    const validSpec = {
+      root: 'card_root',
+      elements: {
+        card_root: {
+          type: 'Card',
+          props: { title: 'Approval Card' },
+          children: ['btn_approve'],
+        },
+        btn_approve: {
+          type: 'Button',
+          props: { label: 'Approve', variant: 'primary' },
+          on: { press: { action: 'submit', params: { decision: 'approve' } } },
+        },
+      },
+    };
+
+    const res = await postJson(port, '/ask', {
+      sessionId: 'sess_ui_1',
+      botId: 'bot_ui_1',
+      prompt: 'Please review and approve',
+      previewType: 'ui',
+      previewContent: JSON.stringify(validSpec),
+    });
+
+    assert.equal(res.status, 200);
+    assert.equal(mockAskCalls.length, 1);
+    assert.equal(mockAskCalls[0].previewType, 'ui');
+    assert.equal(typeof mockAskCalls[0].previewContent, 'string');
+    assert.match(mockAskCalls[0].previewContent, /Approval Card/);
+  } finally {
+    server.close();
+  }
+});
+
+test('Local IPC /ask 拒绝非法 UI Spec 或缺失 previewContent (400)', async () => {
+  mockAskCalls.length = 0;
+  const server = makeTestIpcServer();
+  const port = await listenPort0(server);
+  try {
+    // 1. Missing previewContent with previewType: 'ui'
+    const res1 = await postJson(port, '/ask', {
+      sessionId: 'sess_ui_1',
+      botId: 'bot_ui_1',
+      prompt: 'Please review',
+      previewType: 'ui',
+    });
+    assert.equal(res1.status, 400);
+    assert.match(res1.body, /Missing or empty previewContent/);
+
+    // 2. Invalid UI Spec (unknown component type)
+    const invalidSpec = {
+      root: 'bad_root',
+      elements: {
+        bad_root: {
+          type: 'UnknownWidget',
+          props: {},
+        },
+      },
+    };
+    const res2 = await postJson(port, '/ask', {
+      sessionId: 'sess_ui_1',
+      botId: 'bot_ui_1',
+      prompt: 'Please review',
+      previewType: 'ui',
+      previewContent: JSON.stringify(invalidSpec),
+    });
+    assert.equal(res2.status, 400);
+    const bodyObj = JSON.parse(res2.body);
+    assert.match(bodyObj.error, /Invalid UI spec/);
+    assert.match(bodyObj.error, /Unknown component type "UnknownWidget"/);
+  } finally {
+    server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 4. Hub GroupRouter.requestHumanInput: previewType: 'ui' validation
+// ---------------------------------------------------------------------------
+
+test('Hub GroupRouter.requestHumanInput 校验 UI Spec：拒绝非法 Spec，放行合法 Spec', async () => {
+  const db = new HubDatabase({ dbPath: ':memory:' });
+  const auth = new AuthManager();
+  const sse = new SseHub();
+  const connections = new NodeConnectionManager(db, auth, sse);
+  const router = new GroupRouter(db, connections, sse);
+
+  // Seed a user and a session
+  db.createUser({ id: 'user_1', username: 'admin', passwordHash: 'hash', role: 'admin' });
+  db.createSession({
+    id: 'sess_hub_ui',
+    title: 'UI Test Session',
+    mode: 'direct',
+    leadBotId: 'bot_1',
+    memberBotIds: ['bot_1'],
+    ownerId: 'user_1',
+  });
+
+  // 1. Rejects when previewType: 'ui' but previewContent is missing
+  await assert.rejects(
+    () =>
+      router.requestHumanInput({
+        sessionId: 'sess_hub_ui',
+        botId: 'bot_1',
+        prompt: 'Confirm action',
+        previewType: 'ui',
+      }),
+    /Invalid UI spec: Missing UI previewContent/,
+  );
+
+  // 2. Rejects when previewType: 'ui' with invalid UI Spec
+  await assert.rejects(
+    () =>
+      router.requestHumanInput({
+        sessionId: 'sess_hub_ui',
+        botId: 'bot_1',
+        prompt: 'Confirm action',
+        previewType: 'ui',
+        previewContent: JSON.stringify({ root: 'r', elements: { r: { type: 'InvalidWidget' } } }),
+      }),
+    /Invalid UI spec: Unknown component type "InvalidWidget"/,
+  );
+
+  // 3. Resolves and normalizes valid UI Spec
+  const validSpec = {
+    root: 'card',
+    elements: {
+      card: {
+        type: 'Card',
+        props: { title: 'Hub Validated Card' },
+      },
+    },
+  };
+
+  const askPromise = router.requestHumanInput({
+    sessionId: 'sess_hub_ui',
+    botId: 'bot_1',
+    prompt: 'Confirm action',
+    previewType: 'ui',
+    previewContent: JSON.stringify(validSpec),
+    timeoutSeconds: 10,
+  });
+
+  // Verify pending ask was recorded in DB with normalized JSON
+  const pending = db.getPendingAsksForSession('sess_hub_ui');
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].previewType, 'ui');
+  assert.match(pending[0].previewContent!, /Hub Validated Card/);
+
+  // Resolve the ask
+  const answered = router.respondToAsk('sess_hub_ui', pending[0].id, JSON.stringify({ decision: 'ok' }));
+  assert.ok(answered);
+
+  const res = await askPromise;
+  assert.equal(res.answer, JSON.stringify({ decision: 'ok' }));
+});
+
+// ---------------------------------------------------------------------------
+// 5. botd ask CLI: Options registration and --ui-schema documentation
+// ---------------------------------------------------------------------------
+
+test('botd ask CLI: 验证 --ui 与 --ui-schema 选项已注册，--ui-schema 包含完整文档', async () => {
+  const requireFromNodeApp = createRequire(path.join(process.cwd(), 'apps/node', 'package.json'));
+  const commander = requireFromNodeApp('commander') as { Command: any };
+  const program = new commander.Command();
+  registerNodeCommands(program);
+
+  const askCmd = program.commands.find((c: { name: () => string }) => c.name() === 'ask');
+  assert.ok(askCmd, 'ask command must be registered');
+
+  const options: string[] = askCmd.options.map((o: { long: string }) => o.long);
+  assert.ok(options.includes('--ui'), 'must register --ui');
+  assert.ok(options.includes('--ui-schema'), 'must register --ui-schema');
+
+  // Verify schema doc content
+  assert.ok(BOTD_UI_SCHEMA_DOC.includes(BOTD_UI_CATALOG_VERSION));
+  for (const compType of BOTD_UI_COMPONENT_TYPES) {
+    assert.ok(BOTD_UI_SCHEMA_DOC.includes(compType), `Schema doc must include component ${compType}`);
+  }
+  assert.ok(BOTD_UI_SCHEMA_DOC.includes('$state'), 'Schema doc must describe state binding');
+});
+
+// ---------------------------------------------------------------------------
+// 6. BUILTIN_SKILL_MD: Documentation and version bump
+// ---------------------------------------------------------------------------
+
+test('BUILTIN_SKILL_MD: 版本升级为 6，包含 Generative UI 与 10 个组件说明', () => {
+  assert.ok(BUILTIN_SKILL_VERSION >= 6, 'BUILTIN_SKILL_VERSION must be at least 6');
+  assert.ok(BUILTIN_SKILL_MD.includes('Generative UI'), 'BUILTIN_SKILL_MD must include Generative UI section');
+  assert.ok(BUILTIN_SKILL_MD.includes('--ui'), 'BUILTIN_SKILL_MD must mention botd ask --ui');
+  assert.ok(BUILTIN_SKILL_MD.includes('botd ask --ui-schema'), 'BUILTIN_SKILL_MD must mention --ui-schema');
+
+  for (const compType of BOTD_UI_COMPONENT_TYPES) {
+    assert.ok(
+      BUILTIN_SKILL_MD.includes(compType),
+      `BUILTIN_SKILL_MD must document component ${compType}`,
+    );
+  }
+});

@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import type {
-  AskPreviewType,
-  IncomingArtifactRef,
-  MessageRecord,
-  PendingAskRecord,
-  SessionRecord,
-  ToolCallRecord,
-  TurnUsage,
+import {
+  validateUiSpec,
+  type AskPreviewType,
+  type IncomingArtifactRef,
+  type MessageRecord,
+  type PendingAskRecord,
+  type SessionRecord,
+  type ToolCallRecord,
+  type TurnUsage,
 } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
 import type { NodeConnectionManager } from './ws-hub.js';
@@ -328,6 +329,18 @@ export class GroupRouter {
     const session = this.db.getSession(input.sessionId);
     if (!session) throw new Error(`Session ${input.sessionId} not found`);
 
+    let previewContent = input.previewContent;
+    if (input.previewType === 'ui') {
+      if (!previewContent || !previewContent.trim()) {
+        throw new Error('Invalid UI spec: Missing UI previewContent');
+      }
+      const validation = validateUiSpec(previewContent);
+      if (!validation.ok) {
+        throw new Error(`Invalid UI spec: ${validation.errors.join('; ')}`);
+      }
+      previewContent = validation.normalizedJson;
+    }
+
     const askId = `ask_${randomUUID()}`;
     const now = new Date();
     const isIndefinite = input.timeoutSeconds === 0;
@@ -346,7 +359,7 @@ export class GroupRouter {
       createdAt: now.toISOString(),
       ...(expiresAt ? { expiresAt } : {}),
       ...(input.previewType ? { previewType: input.previewType } : {}),
-      ...(input.previewContent ? { previewContent: input.previewContent } : {}),
+      ...(previewContent ? { previewContent } : {}),
     };
     this.db.savePendingAsk(record);
 

@@ -2,7 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { BirpcReturn } from 'birpc';
-import type { HubRpcFunctions, NodeRpcFunctions } from '@botd/protocol';
+import { validateUiSpec, type HubRpcFunctions, type NodeRpcFunctions, type AskPreviewType } from '@botd/protocol';
 import { assertSafeId, ensureDir } from './storage.js';
 import type { BgJobManager } from './bg-jobs.js';
 import { getNodeVersion, checkNodeUpgrade, performNodeUpgrade } from './upgrader.js';
@@ -286,6 +286,20 @@ export function createLocalIpcServer(deps: LocalIpcDeps): http.Server {
         assertSafeId(sessionId, 'Session ID');
         assertSafeId(botId, 'Bot ID');
 
+        let normalizedPreviewContent = typeof previewContent === 'string' && previewContent ? previewContent : undefined;
+        if (previewType === 'ui') {
+          if (!normalizedPreviewContent || !normalizedPreviewContent.trim()) {
+            sendJson(res, 400, { error: 'Missing or empty previewContent for UI preview' });
+            return;
+          }
+          const validation = validateUiSpec(normalizedPreviewContent);
+          if (!validation.ok) {
+            sendJson(res, 400, { error: `Invalid UI spec: ${validation.errors.join('; ')}` });
+            return;
+          }
+          normalizedPreviewContent = validation.normalizedJson;
+        }
+
         const hubRpc = requireHubRpc(deps);
 
         const result = await hubRpc.requestHumanInput({
@@ -294,10 +308,10 @@ export function createLocalIpcServer(deps: LocalIpcDeps): http.Server {
           prompt: String(prompt),
           ...(Array.isArray(options) ? { options: options.map(String) } : {}),
           ...(typeof timeoutSeconds === 'number' && timeoutSeconds >= 0 ? { timeoutSeconds } : {}),
-          ...(previewType === 'diff' || previewType === 'markdown' || previewType === 'text'
-            ? { previewType }
+          ...(previewType === 'diff' || previewType === 'markdown' || previewType === 'text' || previewType === 'ui'
+            ? { previewType: previewType as AskPreviewType }
             : {}),
-          ...(typeof previewContent === 'string' && previewContent ? { previewContent } : {}),
+          ...(normalizedPreviewContent ? { previewContent: normalizedPreviewContent } : {}),
         });
 
         sendJson(res, 200, { ok: true, answer: result.answer });

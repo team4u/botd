@@ -10,7 +10,7 @@ importers:
     devDependencies:
       '@earendil-works/pi-ai':
         specifier: 1.4.0
-        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)
+        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)(zod@4.6.7)
       '@types/node':
         specifier: ^24.0.0
         version: 24.19.2
@@ -74,10 +74,10 @@ importers:
         version: link:../../packages/protocol
       '@earendil-works/pi-ai':
         specifier: 1.4.0
-        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)
+        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)(zod@4.6.7)
       '@earendil-works/pi-coding-agent':
         specifier: 1.4.0
-        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(ws@8.22.1)
+        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(ws@8.22.1)(zod@4.6.7)
       birpc:
         specifier: ^2.9.0
         version: 2.9.0
@@ -109,6 +109,12 @@ importers:
       '@botd/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@json-render/core':
+        specifier: ^0.21.4
+        version: 0.21.4(zod@4.6.7)
+      '@json-render/react':
+        specifier: ^0.21.4
+        version: 0.21.4(react@19.3.1)(zod@4.6.7)
       katex:
         specifier: ^0.19.1
         version: 0.19.1
@@ -142,6 +148,9 @@ importers:
       tailwindcss:
         specifier: ^4.0.0
         version: 4.3.3
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4.0.0
@@ -169,7 +178,7 @@ importers:
         version: link:../protocol
       '@earendil-works/pi-ai':
         specifier: 1.4.0
-        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)
+        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)(zod@4.6.7)
 
   packages/protocol: {}
 
@@ -750,6 +759,16 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@json-render/core@0.21.4':
+    resolution: {integrity: sha512-UqjpdDOmr7a9ISZisgQvgeKuBpiNQesS7PNgcstwTBlutMbgS/5fbNThvpEk4E35eMe2bpBVzwOPuaNY3xthNw==}
+    peerDependencies:
+      zod: ^4.0.0
+
+  '@json-render/react@0.21.4':
+    resolution: {integrity: sha512-pCOhhgpBQBZV8NDLx0TTMapeWqGzDGPDgaIcYg9xHm35XglqxkcG2QgzzhE/VUSz3uqkWW0s8mCYO/jGP/hZHQ==}
+    peerDependencies:
+      react: ^19.2.3
 
   '@mermaid-js/parser@2.0.1':
     resolution: {integrity: sha512-j37dj/h6p6pots1L7pLPPNuABEEu9WP4OYg9pW1g+nYG331j0+3canE9OagtYdytYvdSAMG+2fKU5cxep6LgjA==}
@@ -2439,6 +2458,9 @@ packages:
     engines: {node: '>= 14.6'}
     hasBin: true
 
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
+
   zwitch@2.0.4:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
 
@@ -2449,10 +2471,12 @@ snapshots:
       package-manager-detector: 1.9.0
       tinyexec: 1.3.1
 
-  '@anthropic-ai/sdk@0.129.0':
+  '@anthropic-ai/sdk@0.129.0(zod@4.6.7)':
     dependencies:
       json-schema-to-ts: 3.1.1
       standardwebhooks: 1.1.1
+    optionalDependencies:
+      zod: 4.6.7
 
   '@aws-sdk/client-bedrock-runtime@3.1127.0':
     dependencies:
@@ -2767,9 +2791,9 @@ snapshots:
 
   '@chevrotain/utils@13.2.0': {}
 
-  '@earendil-works/pi-agent-core@1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)':
+  '@earendil-works/pi-agent-core@1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)(zod@4.6.7)':
     dependencies:
-      '@earendil-works/pi-ai': 1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)
+      '@earendil-works/pi-ai': 1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)(zod@4.6.7)
       typebox: 1.3.27
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
@@ -2784,16 +2808,16 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-ai@1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)':
+  '@earendil-works/pi-ai@1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)(zod@4.6.7)':
     dependencies:
-      '@anthropic-ai/sdk': 0.129.0
+      '@anthropic-ai/sdk': 0.129.0(zod@4.6.7)
       '@aws-sdk/client-bedrock-runtime': 3.1127.0
       '@earendil-works/pi-telemetry': 1.4.0
       '@google/genai': 2.21.0
       '@smithy/node-http-handler': 4.12.1
       http-proxy-agent: 9.1.0
       https-proxy-agent: 9.1.0
-      openai: 7.19.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)
+      openai: 7.19.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)(zod@4.6.7)
       partial-json: 0.1.7
       typebox: 1.3.27
     transitivePeerDependencies:
@@ -2813,10 +2837,10 @@ snapshots:
     dependencies:
       quickjs-wasi: 3.6.2
 
-  '@earendil-works/pi-coding-agent@1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(ws@8.22.1)':
+  '@earendil-works/pi-coding-agent@1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(ws@8.22.1)(zod@4.6.7)':
     dependencies:
-      '@earendil-works/pi-agent-core': 1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)
-      '@earendil-works/pi-ai': 1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)
+      '@earendil-works/pi-agent-core': 1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)(zod@4.6.7)
+      '@earendil-works/pi-ai': 1.4.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)(zod@4.6.7)
       '@earendil-works/pi-codemode': 1.4.0
       '@earendil-works/pi-mcp': 1.4.0
       '@earendil-works/pi-tui': 1.4.0
@@ -3058,6 +3082,17 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
+
+  '@json-render/core@0.21.4(zod@4.6.7)':
+    dependencies:
+      zod: 4.6.7
+
+  '@json-render/react@0.21.4(react@19.3.1)(zod@4.6.7)':
+    dependencies:
+      '@json-render/core': 0.21.4(zod@4.6.7)
+      react: 19.3.1
+    transitivePeerDependencies:
+      - zod
 
   '@mermaid-js/parser@2.0.1':
     dependencies:
@@ -4609,12 +4644,13 @@ snapshots:
 
   node-releases@2.0.63: {}
 
-  openai@7.19.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1):
+  openai@7.19.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(undici@8.10.2)(ws@8.22.1)(zod@4.6.7):
     optionalDependencies:
       '@aws-sdk/credential-provider-node': 3.972.92
       '@smithy/signature-v4': 5.7.5
       undici: 8.10.2
       ws: 8.22.1
+      zod: 4.6.7
 
   p-retry@4.6.2:
     dependencies:
@@ -4991,5 +5027,7 @@ snapshots:
   yallist@3.1.1: {}
 
   yaml@2.9.0: {}
+
+  zod@4.6.7: {}
 
   zwitch@2.0.4: {}

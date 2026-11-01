@@ -6,6 +6,7 @@ import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
 import { Check, Copy } from 'lucide-react';
 import { MermaidBlock } from './MermaidBlock';
+import { UiSpecBlock } from './generative-ui/BotdUiRenderer.js';
 import 'katex/dist/katex.min.css';
 
 /** 递归提取 React 子节点中的纯文本（用于取出 mermaid 源码） */
@@ -30,14 +31,20 @@ export const PreBlock: React.FC<React.ComponentPropsWithoutRef<'pre'> & { node?:
   const [copied, setCopied] = useState(false);
   const preRef = useRef<HTMLPreElement>(null);
 
-  // mermaid 块：唯一子元素是 <code class="language-mermaid">
+  // mermaid / ui 块：子元素是 <code class="language-mermaid"> 或 <code class="language-ui"> / <code class="language-json-render">
   const child = Array.isArray(children) ? children[0] : children;
   const childProps = React.isValidElement(child)
     ? (child.props as { className?: unknown; children?: React.ReactNode })
     : null;
-  if (childProps && typeof childProps.className === 'string' && childProps.className.includes('language-mermaid')) {
-    const chart = extractText(childProps.children).replace(/\n$/, '');
-    return <MermaidBlock chart={chart} />;
+  if (childProps && typeof childProps.className === 'string') {
+    if (childProps.className.includes('language-mermaid')) {
+      const chart = extractText(childProps.children).replace(/\n$/, '');
+      return <MermaidBlock chart={chart} />;
+    }
+    if (childProps.className.includes('language-ui') || childProps.className.includes('language-json-render')) {
+      const raw = extractText(childProps.children).replace(/\n$/, '');
+      return <UiSpecBlock raw={raw} />;
+    }
   }
 
   const handleCopy = async () => {

@@ -1,4 +1,5 @@
 export * from './cron.js';
+export * from './ui-catalog.js';
 
 export type PlatformType = 'darwin' | 'linux' | 'win32';
 export type SessionMode = 'direct' | 'lead' | 'roundtable';
@@ -32,7 +33,7 @@ export interface IncomingArtifactRef {
   fromBotName?: string;
 }
 
-export type AskPreviewType = 'diff' | 'markdown' | 'text';
+export type AskPreviewType = 'diff' | 'markdown' | 'text' | 'ui';
 export type ResourceVisibility = 'private' | 'team';
 
 export type OutboundTaskStatus = 'queued_offline' | 'dispatched' | 'expired' | 'failed';
