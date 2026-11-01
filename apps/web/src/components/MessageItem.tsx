@@ -134,13 +134,52 @@ const MessageAttachments: React.FC<{ attachments: MessageAttachment[] }> = ({ at
  * 可折叠工具执行轨迹：收起时为轻量内联文字行（无框无底色，与元数据行自然留白），
  * 展开后为分栏对齐的终端风明细面板（名称/摘要/耗时各归其位）
  */
-const ToolCallsTrace: React.FC<{ toolCalls: ToolCallRecord[] }> = ({ toolCalls }) => {
-  const [expanded, setExpanded] = useState(false);
+export const ToolCallsTrace: React.FC<{ toolCalls: ToolCallRecord[]; initialExpanded?: boolean }> = ({
+  toolCalls,
+  initialExpanded = false,
+}) => {
+  const [expanded, setExpanded] = useState(initialExpanded);
+  const [openOutputIndices, setOpenOutputIndices] = useState<Set<number>>(() => {
+    const initial = new Set<number>();
+    toolCalls.forEach((tool, idx) => {
+      if ((tool.status === 'error' || tool.isError) && tool.outputPreview) {
+        initial.add(idx);
+      }
+    });
+    return initial;
+  });
+
+  React.useEffect(() => {
+    setOpenOutputIndices((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      toolCalls.forEach((tool, idx) => {
+        if ((tool.status === 'error' || tool.isError) && tool.outputPreview && !prev.has(idx)) {
+          next.add(idx);
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [toolCalls]);
+
   if (!toolCalls || toolCalls.length === 0) return null;
 
   const hasDuration = toolCalls.some((t) => typeof t.durationMs === 'number');
   const totalMs = toolCalls.reduce((sum, t) => sum + (t.durationMs || 0), 0);
-  const errorCount = toolCalls.filter((t) => t.status === 'error').length;
+  const errorCount = toolCalls.filter((t) => t.status === 'error' || t.isError).length;
+
+  const toggleOutput = (idx: number) => {
+    setOpenOutputIndices((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) {
+        next.delete(idx);
+      } else {
+        next.add(idx);
+      }
+      return next;
+    });
+  };
 
   return (
     <div className="mt-2 mb-1 max-w-xl">
@@ -171,38 +210,89 @@ const ToolCallsTrace: React.FC<{ toolCalls: ToolCallRecord[] }> = ({ toolCalls }
       {/* 展开态：细分隔线的终端风面板，单行内名称固定、摘要截断悬停看全文、耗时右对齐 */}
       {expanded && (
         <div className="mt-1.5 rounded-lg border border-zinc-200/70 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/60 overflow-hidden">
-          {toolCalls.map((tool, idx) => (
-            <div
-              key={`${tool.name}-${idx}`}
-              className="flex items-center gap-2 px-2.5 py-1.5 text-[11px] leading-relaxed border-zinc-100 dark:border-zinc-800/60 first:border-t-0 border-t"
-            >
-              {tool.status === 'running' ? (
-                <Loader2 className="w-3 h-3 shrink-0 text-amber-500 animate-spin-fast" />
-              ) : tool.status === 'error' ? (
-                <CircleAlert className="w-3 h-3 shrink-0 text-rose-500 dark:text-rose-400" />
-              ) : (
-                <CircleCheck className="w-3 h-3 shrink-0 text-emerald-500" />
-              )}
-              <span className="font-mono font-semibold text-zinc-700 dark:text-zinc-300 shrink-0">
-                {tool.name}
-              </span>
-              {tool.summary ? (
-                <span
-                  className="min-w-0 flex-1 truncate font-mono text-zinc-500 dark:text-zinc-400"
-                  title={tool.summary}
+          {toolCalls.map((tool, idx) => {
+            const isErrorItem = tool.status === 'error' || Boolean(tool.isError);
+            const hasPreview = Boolean(tool.outputPreview);
+            const isPreviewOpen = openOutputIndices.has(idx);
+
+            return (
+              <div
+                key={`${tool.name}-${idx}`}
+                className={`first:border-t-0 border-t border-zinc-100 dark:border-zinc-800/60 ${
+                  isErrorItem ? 'bg-rose-50/40 dark:bg-rose-950/20' : ''
+                }`}
+              >
+                <div
+                  onClick={hasPreview ? () => toggleOutput(idx) : undefined}
+                  role={hasPreview ? 'button' : undefined}
+                  tabIndex={hasPreview ? 0 : undefined}
+                  onKeyDown={
+                    hasPreview
+                      ? (e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            toggleOutput(idx);
+                          }
+                        }
+                      : undefined
+                  }
+                  title={hasPreview ? (isPreviewOpen ? '点击收起输出详情' : '点击查看输出详情') : undefined}
+                  className={`flex items-center gap-2 px-2.5 py-1.5 text-[11px] leading-relaxed ${
+                    hasPreview
+                      ? 'cursor-pointer hover:bg-zinc-100/70 dark:hover:bg-zinc-800/50 select-none'
+                      : ''
+                  }`}
                 >
-                  {tool.summary}
-                </span>
-              ) : (
-                <span className="flex-1" />
-              )}
-              {typeof tool.durationMs === 'number' && (
-                <span className="shrink-0 font-mono tabular-nums text-zinc-400 dark:text-zinc-500">
-                  {formatDuration(tool.durationMs)}
-                </span>
-              )}
-            </div>
-          ))}
+                  {tool.status === 'running' ? (
+                    <Loader2 className="w-3 h-3 shrink-0 text-amber-500 animate-spin-fast" />
+                  ) : isErrorItem ? (
+                    <CircleAlert className="w-3 h-3 shrink-0 text-rose-500 dark:text-rose-400" />
+                  ) : (
+                    <CircleCheck className="w-3 h-3 shrink-0 text-emerald-500" />
+                  )}
+                  <span className="font-mono font-semibold text-zinc-700 dark:text-zinc-300 shrink-0">
+                    {tool.name}
+                  </span>
+                  {tool.summary ? (
+                    <span
+                      className="min-w-0 flex-1 truncate font-mono text-zinc-500 dark:text-zinc-400"
+                      title={tool.summary}
+                    >
+                      {tool.summary}
+                    </span>
+                  ) : (
+                    <span className="flex-1" />
+                  )}
+                  {typeof tool.durationMs === 'number' && (
+                    <span className="shrink-0 font-mono tabular-nums text-zinc-400 dark:text-zinc-500">
+                      {formatDuration(tool.durationMs)}
+                    </span>
+                  )}
+                  {hasPreview && (
+                    <span className="shrink-0 text-zinc-400 dark:text-zinc-500">
+                      {isPreviewOpen ? (
+                        <ChevronDown className="w-3 h-3" />
+                      ) : (
+                        <ChevronRight className="w-3 h-3" />
+                      )}
+                    </span>
+                  )}
+                </div>
+
+                {hasPreview && isPreviewOpen && (
+                  <pre
+                    className={`px-2.5 py-2 text-[11px] font-mono whitespace-pre-wrap break-all border-t max-h-48 overflow-y-auto ${
+                      isErrorItem
+                        ? 'bg-rose-50/80 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border-rose-200/60 dark:border-rose-900/60'
+                        : 'bg-zinc-100/80 dark:bg-zinc-950/60 text-zinc-600 dark:text-zinc-300 border-zinc-200/60 dark:border-zinc-800/60'
+                    }`}
+                  >
+                    {tool.outputPreview}
+                  </pre>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -320,6 +410,12 @@ export const MessageItem: React.FC<MessageItemProps> = ({
         className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0"
         title={[
           `输入 ${message.usage.inputTokens.toLocaleString()} tokens`,
+          message.usage.cacheReadTokens && message.usage.cacheReadTokens > 0
+            ? `缓存读取 ${message.usage.cacheReadTokens.toLocaleString()} tokens`
+            : '',
+          message.usage.cacheWriteTokens && message.usage.cacheWriteTokens > 0
+            ? `缓存写入 ${message.usage.cacheWriteTokens.toLocaleString()} tokens`
+            : '',
           `输出 ${message.usage.outputTokens.toLocaleString()} tokens`,
           message.usage.contextWindow
             ? `上下文窗口 ${message.usage.contextWindow.toLocaleString()}`

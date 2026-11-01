@@ -172,6 +172,17 @@ export function extractToolSummary(toolName: string, args: any): string | undefi
   if (['read', 'write', 'edit'].includes(toolName) && typeof args.path === 'string') {
     return args.path;
   }
+  if (toolName === 'Agent') {
+    const subType = args.subagent_type ?? 'agent';
+    const desc = args.description ?? '';
+    return desc ? `${subType}: ${desc}`.trim().slice(0, 120) : `${subType}`;
+  }
+  if (toolName === 'SubagentWorkflow') {
+    const summary = args.description || args.name;
+    if (typeof summary === 'string') {
+      return summary.replace(/\s+/g, ' ').trim().slice(0, 120);
+    }
+  }
   for (const value of Object.values(args)) {
     if (typeof value === 'string') {
       const compact = value.replace(/\s+/g, ' ').trim().slice(0, 100);
@@ -179,6 +190,53 @@ export function extractToolSummary(toolName: string, args: any): string | undefi
     }
   }
   return undefined;
+}
+
+export function extractToolOutputPreview(result: any, isError?: boolean): string | undefined {
+  if (result === null || result === undefined) return undefined;
+
+  let rawText = '';
+  if (typeof result === 'string') {
+    rawText = result;
+  } else if (Array.isArray(result.content)) {
+    rawText = result.content
+      .map((part: any) => (typeof part === 'string' ? part : part?.text || ''))
+      .filter(Boolean)
+      .join('\n');
+  } else if (typeof result.error === 'string') {
+    rawText = result.error;
+  } else if (result.error && typeof result.error === 'object') {
+    rawText = result.error.message || JSON.stringify(result.error);
+  } else if (typeof result.errorMessage === 'string') {
+    rawText = result.errorMessage;
+  } else if (typeof result.message === 'string') {
+    rawText = result.message;
+  } else if (typeof result.output === 'string') {
+    rawText = result.output;
+  } else if (typeof result.stdout === 'string' || typeof result.stderr === 'string') {
+    rawText = [result.stderr, result.stdout].filter(Boolean).join('\n');
+  } else if (typeof result.details === 'string') {
+    rawText = result.details;
+  } else if (result instanceof Error) {
+    rawText = result.stack || result.message;
+  } else {
+    try {
+      rawText = JSON.stringify(result);
+    } catch {
+      rawText = String(result);
+    }
+  }
+
+  const trimmed = rawText.trim();
+  if (!trimmed) return undefined;
+
+  if (isError) {
+    if (trimmed.length <= 1200) return trimmed;
+    return `${trimmed.slice(0, 800)}\n...\n${trimmed.slice(-350)}`;
+  } else {
+    if (trimmed.length <= 600) return trimmed;
+    return trimmed.slice(-600);
+  }
 }
 
 export async function executeBotTurn(
@@ -232,12 +290,15 @@ export async function executeBotTurn(
     let attachmentNotice = '';
     const turnImages: { type: 'image'; data: string; mimeType: string }[] = [];
     const VISION_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+    const downloadedAttachmentIds = new Set<string>();
+
     if (input.attachments && input.attachments.length > 0) {
       const inboxDir = path.join(workspaceDir, 'inbox');
       await ensureDir(inboxDir);
       for (const att of input.attachments) {
         try {
           const downloaded = await hubRpc.downloadArtifact(att.id);
+          downloadedAttachmentIds.add(att.id);
           if (downloaded?.contentBase64) {
             const destPath = path.join(inboxDir, path.basename(att.filename));
             await fs.writeFile(destPath, Buffer.from(downloaded.contentBase64, 'base64'));
@@ -254,6 +315,47 @@ export async function executeBotTurn(
         .map((att) => `inbox/${path.basename(att.filename)} (id: ${att.id}, ${att.mimeType}, ${att.sizeBytes} bytes)`)
         .join('\n');
       attachmentNotice = `[本轮收到文件附件]\n已自动下载至工作区 inbox/ 目录：\n${fileList}`;
+    }
+
+    if (input.incomingArtifacts && input.incomingArtifacts.length > 0) {
+      const inboxDir = path.join(workspaceDir, 'inbox');
+      await ensureDir(inboxDir);
+      const incomingNotices: string[] = [];
+
+      for (const art of input.incomingArtifacts) {
+        if (downloadedAttachmentIds.has(art.id)) {
+          continue;
+        }
+        downloadedAttachmentIds.add(art.id);
+        try {
+          const downloaded = await hubRpc.downloadArtifact(art.id);
+          if (downloaded?.contentBase64) {
+            const baseName = path.basename(art.filename || 'artifact');
+            let actualFilename = baseName;
+            if (existsSync(path.join(inboxDir, baseName))) {
+              actualFilename = `${Date.now()}_${baseName}`;
+            }
+            const destPath = path.join(inboxDir, actualFilename);
+            await fs.writeFile(destPath, Buffer.from(downloaded.contentBase64, 'base64'));
+            const mime = (art.mimeType || downloaded.artifact?.mimeType || '').toLowerCase();
+            if (VISION_MIME_TYPES.has(mime)) {
+              turnImages.push({ type: 'image', data: downloaded.contentBase64, mimeType: mime });
+            }
+            incomingNotices.push(
+              `[系统提示：来自上游任务的产物文件已自动同步至本机工作区 ./inbox/${actualFilename}，可直接读取处理]`
+            );
+          }
+        } catch {
+          // If artifact download fails, don't crash the turn
+        }
+      }
+
+      if (incomingNotices.length > 0) {
+        const noticeBlock = incomingNotices.join('\n');
+        attachmentNotice = attachmentNotice
+          ? `${attachmentNotice}\n\n${noticeBlock}`
+          : noticeBlock;
+      }
     }
 
     if (cancelledRuns.has(runKey)) {
@@ -317,7 +419,7 @@ export async function executeBotTurn(
     const settingsManager = SettingsManager.inMemory({
       defaultProvider: bot.modelProvider,
       defaultModel: bot.modelId,
-      compaction: { enabled: process.env.BOTD_AUTO_COMPACT === '1' },
+      compaction: { enabled: process.env.BOTD_AUTO_COMPACT !== '0' },
     });
     const resourceLoader = await loadBotResources(dataDir, bot, settingsManager, () =>
       [
@@ -410,16 +512,51 @@ export async function executeBotTurn(
 
     const toolCalls: ToolCallRecord[] = [];
     const runningToolStarts = new Map<string, { index: number; startMs: number; summary?: string }>();
+    let currentAssistantMessage: any = null;
+    let hasPriorAssistantEmittedText = false;
+    let currentAssistantEmittedText = false;
 
     // 10. Subscribe to streaming events and report to Hub
     unsubscribe = session.subscribe((event: any) => {
-      if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
+      if (event.type === 'message_start') {
+        if (event.message?.role === 'assistant') {
+          if (currentAssistantEmittedText) {
+            hasPriorAssistantEmittedText = true;
+          }
+          currentAssistantMessage = event.message;
+          currentAssistantEmittedText = false;
+        }
+      } else if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
+        if (event.message && currentAssistantMessage && event.message !== currentAssistantMessage) {
+          if (currentAssistantEmittedText) {
+            hasPriorAssistantEmittedText = true;
+          }
+          currentAssistantMessage = event.message;
+          currentAssistantEmittedText = false;
+        }
+        let delta = event.assistantMessageEvent.delta;
+        if (hasPriorAssistantEmittedText && !currentAssistantEmittedText && delta) {
+          if (delta.startsWith('\n\n')) {
+            // Already starts with double newline
+          } else if (delta.startsWith('\n')) {
+            delta = `\n${delta}`;
+          } else {
+            delta = `\n\n${delta}`;
+          }
+        }
+        if (delta) {
+          currentAssistantEmittedText = true;
+        }
         hubRpc.onSessionStream.asEvent({
           sessionId: input.sessionId,
           botId: bot.id,
-          deltaText: event.assistantMessageEvent.delta,
+          deltaText: delta,
         });
       } else if (event.type === 'tool_execution_start') {
+        if (currentAssistantEmittedText) {
+          hasPriorAssistantEmittedText = true;
+          currentAssistantEmittedText = false;
+        }
         const summary = extractToolSummary(event.toolName, event.args ?? event.input);
         const key = event.toolCallId || event.toolName;
         const index = toolCalls.length;
@@ -440,13 +577,21 @@ export async function executeBotTurn(
         const key = event.toolCallId || event.toolName;
         const running = runningToolStarts.get(key);
         let summary: string | undefined;
+        const isError = Boolean(event.isError);
+        const rawOutput = event.result !== undefined ? event.result : event.output;
+        const outputPreview = extractToolOutputPreview(rawOutput, isError);
+
         if (running) {
           runningToolStarts.delete(key);
           summary = running.summary;
           const entry = toolCalls[running.index];
           if (entry) {
-            entry.status = event.isError ? 'error' : 'done';
+            entry.status = isError ? 'error' : 'done';
             entry.durationMs = Math.max(0, Date.now() - running.startMs);
+            entry.isError = isError;
+            if (outputPreview) {
+              entry.outputPreview = outputPreview;
+            }
           }
         }
         if (!summary) {
@@ -535,43 +680,72 @@ export async function executeBotTurn(
 
     // A handled extension command may not create an assistant message. Inspect only
     // this run's messages so previous replies/errors never become the command result.
-    const lastAssistant = session.messages.slice(messageCountBefore).filter(message => message.role === 'assistant').at(-1);
+    const turnAssistants = session.messages.slice(messageCountBefore).filter(message => message.role === 'assistant');
+    const lastAssistant = turnAssistants.at(-1);
     if (lastAssistant?.stopReason === 'error') throw new Error(lastAssistant.errorMessage || 'Model inference failed');
     if (lastAssistant?.stopReason === 'aborted') throw new Error(lastAssistant.errorMessage || 'Turn was cancelled');
-    const replyText = lastAssistant?.content.filter(part => part.type === 'text').map(part => part.text).join('\n')
+
+    const assistantTexts: string[] = [];
+    for (const msg of turnAssistants) {
+      const textParts = (msg.content || [])
+        .filter((part: any) => part.type === 'text' && typeof part.text === 'string' && part.text.length > 0)
+        .map((part: any) => part.text);
+      const msgText = textParts.join('\n').trim();
+      if (msgText.length > 0) {
+        assistantTexts.push(msgText);
+      }
+    }
+
+    const replyText = assistantTexts.join('\n\n')
       || (isCompactCommand
         ? (isCompactSmall ? '（无需压缩：当前会话上下文尚未达到压缩阈值）' : '（已完成会话上下文压缩）')
         : '（已完成执行，无文本输出）');
 
     let usage: TurnUsage | undefined;
-    const rawUsage = (lastAssistant as any)?.usage;
-    let inputTokens = Number(rawUsage?.input ?? rawUsage?.inputTokens ?? 0) || 0;
-    let outputTokens = Number(rawUsage?.output ?? rawUsage?.outputTokens ?? 0) || 0;
-    let totalTokens = Number(rawUsage?.totalTokens ?? rawUsage?.total ?? (inputTokens + outputTokens)) || 0;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheWriteTokens = 0;
+    let totalTokens = 0;
 
-    if (totalTokens === 0 && inputTokens === 0 && outputTokens === 0) {
-      const turnAssistants = session.messages.slice(messageCountBefore).filter(message => message.role === 'assistant');
+    if (turnAssistants.length > 1) {
       for (const msg of turnAssistants) {
         const u = (msg as any)?.usage;
         if (u) {
           const inp = Number(u.input ?? u.inputTokens ?? 0) || 0;
           const out = Number(u.output ?? u.outputTokens ?? 0) || 0;
-          const tot = Number(u.totalTokens ?? u.total ?? (inp + out)) || 0;
+          const cr = Number(u.cacheRead ?? u.cacheReadTokens ?? 0) || 0;
+          const cw = Number(u.cacheWrite ?? u.cacheWriteTokens ?? 0) || 0;
+          const rawTot = u.totalTokens ?? u.total;
+          const tot = Number(rawTot ?? (inp + out + cr + cw)) || 0;
           inputTokens += inp;
           outputTokens += out;
+          cacheReadTokens += cr;
+          cacheWriteTokens += cw;
           totalTokens += tot;
         }
       }
-    }
-    if (totalTokens === 0 && (inputTokens > 0 || outputTokens > 0)) {
-      totalTokens = inputTokens + outputTokens;
+    } else {
+      const rawUsage = (lastAssistant as any)?.usage;
+      inputTokens = Number(rawUsage?.input ?? rawUsage?.inputTokens ?? 0) || 0;
+      outputTokens = Number(rawUsage?.output ?? rawUsage?.outputTokens ?? 0) || 0;
+      cacheReadTokens = Number(rawUsage?.cacheRead ?? rawUsage?.cacheReadTokens ?? 0) || 0;
+      cacheWriteTokens = Number(rawUsage?.cacheWrite ?? rawUsage?.cacheWriteTokens ?? 0) || 0;
+      const rawTot = rawUsage?.totalTokens ?? rawUsage?.total;
+      totalTokens = Number(rawTot ?? (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens)) || 0;
     }
 
-    if (totalTokens > 0 || inputTokens > 0 || outputTokens > 0) {
+    if (totalTokens === 0 && (inputTokens > 0 || outputTokens > 0 || cacheReadTokens > 0 || cacheWriteTokens > 0)) {
+      totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+    }
+
+    if (totalTokens > 0 || inputTokens > 0 || outputTokens > 0 || cacheReadTokens > 0 || cacheWriteTokens > 0) {
       usage = {
         inputTokens,
         outputTokens,
         totalTokens,
+        ...(cacheReadTokens > 0 ? { cacheReadTokens } : {}),
+        ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
         ...(typeof model.contextWindow === 'number' ? { contextWindow: model.contextWindow } : {}),
       };
     }
