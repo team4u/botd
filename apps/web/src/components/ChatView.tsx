@@ -86,6 +86,10 @@ interface ChatViewProps {
   highlightMessageId?: string | null;
 }
 
+export function pickPollIntervalMs(hasActiveWork: boolean): number {
+  return hasActiveWork ? 5000 : 30000;
+}
+
 export const ChatView: React.FC<ChatViewProps> = ({
   session,
   messages,
@@ -250,15 +254,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   }, [messages, loadSubSessions]);
 
-  // 存在运行中子任务时每 5s 轮询状态
-  useEffect(() => {
-    if (!subSessions.some((s) => s.status === 'running')) return;
-    const timer = window.setInterval(() => {
-      void loadSubSessions();
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [subSessions, loadSubSessions]);
-
   // 探测本会话后台任务
   const memberNodeIds = useMemo(
     () =>
@@ -286,29 +281,38 @@ export const ChatView: React.FC<ChatViewProps> = ({
   }, [memberNodeIds, session.id]);
 
   // 切换会话时重置抽屉与状态标记
+  const prevMessagesLengthRef = useRef(messages.length);
   useEffect(() => {
     setArtifactsUnseen(false);
     setHasRunningBgJobs(false);
     setBgJobs([]);
     setSelectedBgJobId(null);
+    prevMessagesLengthRef.current = messages.length;
   }, [session.id]);
 
   useEffect(() => {
     void fetchBgJobs();
   }, [fetchBgJobs]);
 
-  // 每 5s 轮询一次后台任务状态
+  // 消息条数实际发生变化（包括 callback 消息到达）时拉取后台任务，避免仅引用变化引起的无效请求
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      void fetchBgJobs();
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [fetchBgJobs]);
-
-  // 消息变化（包括 callback 消息到达）时拉取后台任务
-  useEffect(() => {
+    if (messages.length === prevMessagesLengthRef.current) return;
+    prevMessagesLengthRef.current = messages.length;
     void fetchBgJobs();
   }, [messages.length, fetchBgJobs]);
+
+  const hasActiveWork =
+    subSessions.some((s) => s.status === 'running') ||
+    bgJobs.some((j) => j.status === 'running');
+
+  // 统一轮询：存在运行中子任务或后台任务时 5s 轮询，闲置时降频至 30s
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void loadSubSessions();
+      void fetchBgJobs();
+    }, pickPollIntervalMs(hasActiveWork));
+    return () => window.clearInterval(interval);
+  }, [hasActiveWork, loadSubSessions, fetchBgJobs]);
 
   const runningBgJobs = useMemo(
     () => bgJobs.filter((j) => j.status === 'running'),

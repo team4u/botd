@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { X, Users, Sparkles, Loader2, Save, UserPlus, Trash2 } from 'lucide-react';
 import type { SessionRecord, SessionMode, BotConfig, CreateSessionInput, SessionParticipantRecord } from '@botd/protocol';
 import { CheckList } from './CheckList.js';
+import { api } from '../api.js';
 
 export interface GroupSettingsDraft {
   title: string;
@@ -199,10 +200,8 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
   useEffect(() => {
     if (!isOpen || !session.id) return;
     let active = true;
-    fetch(`/api/sessions/${encodeURIComponent(session.id)}/participants`, {
-      headers: { 'content-type': 'application/json' },
-    })
-      .then((res) => (res.ok ? res.json() : []))
+    api
+      .listSessionParticipants(session.id)
       .then((data) => {
         if (active && Array.isArray(data)) setParticipants(data);
       })
@@ -218,20 +217,10 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
     setInviting(true);
     setParticipantError(null);
     try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/participants`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ username: cleanUsername }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setParticipantError(data.error || '邀请失败');
-        return;
-      }
+      await api.addSessionParticipant(session.id, cleanUsername);
       setInviteUsername('');
-      if (data.participant) {
-        setParticipants((prev) => [...prev.filter((p) => p.userId !== data.participant.userId), data.participant]);
-      }
+      const updated = await api.listSessionParticipants(session.id);
+      setParticipants(updated);
     } catch (err: any) {
       setParticipantError(err?.message || '邀请失败');
     } finally {
@@ -241,12 +230,8 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
 
   const handleRemoveParticipant = async (userId: string) => {
     try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/participants/${encodeURIComponent(userId)}`, {
-        method: 'DELETE',
-      });
-      if (res.ok) {
-        setParticipants((prev) => prev.filter((p) => p.userId !== userId));
-      }
+      await api.removeSessionParticipant(session.id, userId);
+      setParticipants((prev) => prev.filter((p) => p.userId !== userId));
     } catch {}
   };
 

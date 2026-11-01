@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   MessageSquare,
   Users,
@@ -24,12 +24,12 @@ import {
   BellRing,
 } from 'lucide-react';
 import type { SessionRecord, BotConfig, NodeRecord, PendingAskRecord } from '@botd/protocol';
-import type { MessageSearchHit } from '../api';
-import type { UserInfo } from '../types';
-import { ConfirmDialog } from './ConfirmDialog';
-import ThemeToggle from './ThemeToggle';
-import { AskCard } from './AskCard';
-import { api } from '../api';
+import type { MessageSearchHit } from '../api.js';
+import type { UserInfo } from '../types.js';
+import { ConfirmDialog } from './ConfirmDialog.js';
+import ThemeToggle from './ThemeToggle.js';
+import { AskCard } from './AskCard.js';
+import { api } from '../api.js';
 
 interface SidebarProps {
   sessions: SessionRecord[];
@@ -312,20 +312,30 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const botMap = useMemo(() => new Map(bots.map((b) => [b.id, b])), [bots]);
 
-  const refreshApprovals = async () => {
+  const refreshApprovals = useCallback(async () => {
     try {
       const list = await api.listPendingApprovals();
       setPendingApprovals(Array.isArray(list) ? list : []);
     } catch {
       setPendingApprovals([]);
     }
-  };
+  }, []);
 
+  // 审批轮询：以 sessions.length 作为稳定依赖（避免 unreadCounts 高频变更引起轮询频繁重建）；10s 定时轮询
   useEffect(() => {
-    refreshApprovals();
-    const interval = setInterval(refreshApprovals, 5000);
+    void refreshApprovals();
+    const interval = setInterval(() => {
+      void refreshApprovals();
+    }, 10000);
     return () => clearInterval(interval);
-  }, [sessions, unreadCounts]);
+  }, [sessions.length, refreshApprovals]);
+
+  // 侧边栏开启（如移动端抽屉打开）时立即刷新一次最新待办审批
+  useEffect(() => {
+    if (isOpen) {
+      void refreshApprovals();
+    }
+  }, [isOpen, refreshApprovals]);
 
   // 新消息提示音开关（localStorage 持久化，默认关闭）
   const [soundOn, setSoundOn] = useState(() => {
@@ -366,7 +376,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     const timer = setTimeout(() => {
       api
         .searchMessages(trimmed, { limit: 20 })
-        .then((hits) => {
+        .then((hits: MessageSearchHit[]) => {
           if (!active) return;
           setSearchHits(hits);
           setSearchDone(true);
@@ -589,7 +599,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       <AskCard
                         ask={ask}
                         bot={bot}
-                        onRespond={async (askId, answer) => {
+                        onRespond={async (askId: string, answer: string) => {
                           await api.respondToAsk(ask.sessionId, askId, answer);
                           await refreshApprovals();
                         }}
