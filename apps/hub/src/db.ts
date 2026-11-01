@@ -1521,6 +1521,15 @@ export class HubDatabase {
     `).run(id);
   }
 
+  /** Cancel all still-queued store-and-forward tasks of a session (clear/edit/cancel paths). */
+  invalidateOutboundTasksForSession(sessionId: string): void {
+    this.db.prepare(`
+      UPDATE outbound_task_queue
+      SET status = 'failed'
+      WHERE session_id = ? AND status = 'queued_offline'
+    `).run(sessionId);
+  }
+
   clearSessionMessages(id: string): boolean {
     return this.inTransaction(() => {
       const session = this.getSession(id);

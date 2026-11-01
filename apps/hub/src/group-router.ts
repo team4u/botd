@@ -575,6 +575,9 @@ export class GroupRouter {
   }
 
   async cancelSession(sessionId: string): Promise<void> {
+    // Invalidate any store-and-forward tasks for this session first: they
+    // belong to the discarded generation and must not replay on node online.
+    this.db.invalidateOutboundTasksForSession(sessionId);
     const state = this.getOrCreateState(sessionId);
     const activeBotsToCancel = new Set<string>();
     if (state.activeBotId) activeBotsToCancel.add(state.activeBotId);
