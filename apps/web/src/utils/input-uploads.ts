@@ -33,6 +33,23 @@ export function canSubmitMessage({
   return hasText || hasAttachments;
 }
 
+/** 附件客户端预检体积上限：与服务端 MAX_ARTIFACT_BYTES（15MB）对齐，超限免整只 Base64 进内存即被 413 拒 */
+export const MAX_UPLOAD_FILE_BYTES = 15 * 1024 * 1024;
+
+/**
+ * 上传前客户端大小预检：超限直接返回错误文案（不发起读取/上传），未超限返回 null。
+ */
+export function validateUploadFile(
+  file: { name: string; size: number },
+  maxBytes: number = MAX_UPLOAD_FILE_BYTES,
+): string | null {
+  if (file.size > maxBytes) {
+    const maxMb = Math.floor(maxBytes / 1024 / 1024);
+    return `附件「${file.name}」超过 ${maxMb}MB 上限（当前 ${file.size} 字节），已跳过上传`;
+  }
+  return null;
+}
+
 /**
  * 校验异步上传结果是否有效。
  * 用于防范：

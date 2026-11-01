@@ -316,7 +316,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <select
                 value={selectedNodeId}
                 onChange={(e) => handleNodeChange(e.target.value)}
-                className="px-2 py-1 text-xs bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-medium text-zinc-800 dark:text-zinc-200 max-w-[200px] sm:max-w-none truncate"
+                className="h-8 px-2.5 text-xs bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-medium text-zinc-800 dark:text-zinc-200 max-w-[200px] sm:max-w-none truncate"
                 aria-label="选择关联节点"
               >
                 <option value="" className="dark:bg-zinc-900 dark:text-zinc-100">全部（内置目录）</option>
@@ -383,7 +383,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="搜索服务商名称或标识..."
-                    className="w-full pl-8 pr-7 py-1.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                    className="w-full h-8 pl-8 pr-7 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
                   />
                   {searchQuery && (
                     <button

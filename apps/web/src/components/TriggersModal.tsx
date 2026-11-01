@@ -358,7 +358,6 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
     try {
       const updated = await api.updateTrigger(trigger.id, { enabled: !trigger.enabled });
       setTriggers((prev) => prev.map((t) => (t.id === trigger.id ? updated : t)));
-      onAddToast('success', `已${updated.enabled ? '启用' : '停用'}触发器「${trigger.name}」`);
     } catch (err: any) {
       onAddToast('error', err?.message || '更新触发器状态失败');
     } finally {
@@ -422,7 +421,6 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
     try {
       const updated = await api.updateChannel(channel.id, { enabled: !channel.enabled });
       setChannels((prev) => prev.map((c) => (c.id === channel.id ? updated : c)));
-      onAddToast('success', `已${updated.enabled ? '启用' : '停用'}通道「${channel.name}」`);
     } catch (err: any) {
       onAddToast('error', err?.message || '更新通道状态失败');
     } finally {

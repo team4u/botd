@@ -345,7 +345,7 @@ export const ProviderAuthModal: React.FC<ProviderAuthModalProps> = ({
                   href={event.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center justify-center gap-1.5 w-full py-2 px-3 bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white rounded-xl text-xs font-semibold shadow-xs transition-colors"
+                  className="inline-flex items-center justify-center gap-1.5 w-full py-2 px-3 bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white rounded-lg text-xs font-semibold shadow-xs transition-colors"
                 >
                   <span>在浏览器中打开授权页面</span>
                   <ExternalLink className="w-3.5 h-3.5" />
@@ -540,7 +540,7 @@ export const ProviderAuthModal: React.FC<ProviderAuthModalProps> = ({
           <button
             type="submit"
             disabled={submittingPrompt}
-            className="px-4 py-2 bg-zinc-900 hover:bg-zinc-800 disabled:bg-zinc-300 text-white dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white dark:disabled:bg-zinc-800 dark:disabled:text-zinc-600 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors"
+            className="px-4 py-2 bg-zinc-900 hover:bg-zinc-800 disabled:bg-zinc-300 text-white dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white dark:disabled:bg-zinc-800 dark:disabled:text-zinc-600 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors"
           >
             {submittingPrompt ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -675,7 +675,7 @@ export const ProviderAuthModal: React.FC<ProviderAuthModalProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-600 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors"
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-600 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors"
               >
                 完成
               </button>
@@ -684,7 +684,7 @@ export const ProviderAuthModal: React.FC<ProviderAuthModalProps> = ({
                 type="button"
                 onClick={handleCancel}
                 disabled={cancelling}
-                className="px-4 py-2 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-xl transition-colors"
+                className="px-4 py-2 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors"
               >
                 {isPending ? '取消认证' : '关闭'}
               </button>

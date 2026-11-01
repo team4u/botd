@@ -22,7 +22,6 @@ import { GroupSettingsModal } from './components/GroupSettingsModal';
 import { NodesBotsView } from './components/NodesBotsView';
 import { SettingsModal } from './components/SettingsModal';
 import { UsersModal } from './components/UsersModal';
-import { SharedSessionView } from './components/SharedSessionView';
 import { ToastContainer } from './components/Toast';
 import { Loader2, Menu, Bot } from 'lucide-react';
 import {
@@ -96,33 +95,6 @@ const playNotificationBeep = () => {
 };
 
 export const App: React.FC = () => {
-  // 检测公开分享链接参数（?share=token 或 #?share=token）
-  const [shareToken, setShareToken] = useState<string | null>(() => {
-    return (
-      new URLSearchParams(window.location.search).get('share') ||
-      new URLSearchParams(window.location.hash.replace(/^#[?]?/, '')).get('share')
-    );
-  });
-
-  useEffect(() => {
-    const handleUrlChange = () => {
-      const token =
-        new URLSearchParams(window.location.search).get('share') ||
-        new URLSearchParams(window.location.hash.replace(/^#[?]?/, '')).get('share');
-      setShareToken(token);
-    };
-    window.addEventListener('popstate', handleUrlChange);
-    window.addEventListener('hashchange', handleUrlChange);
-    return () => {
-      window.removeEventListener('popstate', handleUrlChange);
-      window.removeEventListener('hashchange', handleUrlChange);
-    };
-  }, []);
-
-  if (shareToken) {
-    return <SharedSessionView token={shareToken} />;
-  }
-
   // Auth state
   const [authChecking, setAuthChecking] = useState(true);
   const [authenticated, setAuthenticated] = useState(false);
@@ -513,6 +485,8 @@ export const App: React.FC = () => {
   // 会话切换：立即清空消息/流式/待响应状态防鬼影，bump epoch 使旧快照失效，并加载新会话首屏。
   // 注意：全局 SSE 订阅不随会话切换重建（见下方 effect），切换本身只做状态清理与历史加载。
   useEffect(() => {
+    // 切换会话即复位取消状态：取消动作只针对原会话，切走后停止按钮不得永久卡在「正在停止...」
+    setCancelling(false);
     if (!authenticated || !activeSessionId) {
       setStreamingStatesMap(clearStreamingMap());
       setPendingAsks([]);
@@ -682,6 +656,7 @@ export const App: React.FC = () => {
 
           if (event.status === 'idle' || event.status === 'failed') {
             setStreamingStatesMap(clearStreamingMap());
+            // 不区分当前/其他会话：全局同一时刻只有一个取消动作在飞行中，任一会话结束即复位
             setCancelling(false);
           } else if (event.status === 'running' && event.activeBotIds && event.activeBotIds.length > 1) {
             setStreamingStatesMap((prevMap) => {
@@ -771,9 +746,16 @@ export const App: React.FC = () => {
                 : s
             )
           );
+          // 其他会话的 idle/failed 同样复位取消标志（取消请求跨会话唯一，切走后仍能解除卡死）
+          if (event.status === 'idle' || event.status === 'failed') {
+            setCancelling(false);
+          }
         }
       },
       onOpen: () => {
+        // 重连建立后先清空流式状态：断线期间回合完成时 message_created/idle 已永久丢失，
+        // 半截 streaming 气泡不清理会残留；若回合仍在进行，后续 text_delta 会自然重建
+        setStreamingStatesMap(clearStreamingMap());
         // 连接（含断线重连）建立后重拉当前会话最新快照，补齐断线期间丢失的事件
         const sid = activeSessionIdRef.current;
         if (sid) loadMessagesForSession(sid, sessionEpochRef.current);
@@ -801,7 +783,6 @@ export const App: React.FC = () => {
       });
     setAuthenticated(true);
     authenticatedRef.current = true;
-    addToast('success', '验证成功，欢迎使用 botd 控制台');
   };
 
   const handleLogout = async () => {
@@ -826,7 +807,8 @@ export const App: React.FC = () => {
     setNodes([]);
     setStreamingStatesMap(clearStreamingMap());
     setPendingAsks([]);
-    addToast('info', '已成功退出登录');
+    // 登出同样复位取消状态，防止残留的 cancelling 卡住下一次会话的停止按钮
+    setCancelling(false);
   };
 
   const handleSendMessage = async (content: string, attachments?: MessageAttachment[]) => {
@@ -934,7 +916,6 @@ export const App: React.FC = () => {
     setCancelling(true);
     try {
       await api.cancelSession(activeSessionId);
-      addToast('info', '已发送中止请求，正在停止当前轮次...');
     } catch (err: any) {
       addToast('error', err?.message || '中止执行失败');
       setCancelling(false);
@@ -1007,8 +988,6 @@ export const App: React.FC = () => {
       } catch (archiveErr: any) {
         addToast('error', archiveErr?.message || '旧话题归档失败，仍可在历史话题中查看');
       }
-
-      addToast('success', '已开启新话题');
     } catch (err: any) {
       if (err instanceof AuthRequiredError || err?.status === 401) {
         setAuthenticated(false);
@@ -1045,7 +1024,7 @@ export const App: React.FC = () => {
       const newSession = await api.createSession(input);
       setSessions((prev) => [newSession, ...prev]);
       navigate({ sessionId: newSession.id, view: 'chat', modal: null });
-      addToast('success', `会话 "${newSession.title}" 创建成功`);
+      // 创建成功后直接导航进新会话，界面反馈已足够，不再弹 toast
     } catch (err: any) {
       addToast('error', err?.message || '创建会话失败');
       throw err;
@@ -1061,7 +1040,6 @@ export const App: React.FC = () => {
       setSessions((prev) =>
         prev.map((s) => (s.id === sessionId ? { ...s, ...updated } : s))
       );
-      addToast('success', '群聊配置已成功更新');
     } catch (err: any) {
       addToast('error', err?.message || '更新群配置失败');
       throw err;
@@ -1076,7 +1054,6 @@ export const App: React.FC = () => {
       setSessions((prev) =>
         prev.map((s) => (s.id === sessionId ? { ...s, ...updated } : s))
       );
-      addToast('success', '会话名称已更新');
     } catch (err: any) {
       addToast('error', err?.message || '重命名会话失败');
       throw err;
@@ -1089,6 +1066,13 @@ export const App: React.FC = () => {
       const idx = sessions.findIndex((s) => s.id === sessionId);
       const remaining = sessions.filter((s) => s.id !== sessionId);
       setSessions(remaining);
+      // 同步移除被删会话的未读计数，避免 document.title 角标永久虚高
+      setUnreadCounts((prev) => {
+        if (!(sessionId in prev)) return prev;
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
       if (sessionId === activeSessionIdRef.current) {
         // 删除的是当前会话：优先选同位置的后一个，删的是末尾则选前一个，无则 null
         const fallback = remaining[Math.min(Math.max(idx, 0), remaining.length - 1)];
@@ -1145,7 +1129,6 @@ export const App: React.FC = () => {
     try {
       const updated = await api.updateSessionPinned(sessionId, pinned);
       setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, ...updated } : s)));
-      addToast('success', pinned ? '已置顶' : '已取消置顶');
     } catch (err: any) {
       if (err instanceof AuthRequiredError || err?.status === 401) {
         setAuthenticated(false);
@@ -1161,7 +1144,6 @@ export const App: React.FC = () => {
     try {
       const updated = await api.setSessionArchived(sessionId, archived);
       setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, ...updated } : s)));
-      addToast('success', archived ? '已归档' : '已恢复');
     } catch (err: any) {
       if (err instanceof AuthRequiredError || err?.status === 401) {
         setAuthenticated(false);

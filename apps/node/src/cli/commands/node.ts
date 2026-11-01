@@ -30,21 +30,45 @@ interface SocketResponse {
   body: string;
 }
 
+const IPC_TOKEN_FILE = 'ipc-token';
+const IPC_TOKEN_HEADER = 'x-botd-ipc-token';
+const IPC_VERSION_MISMATCH =
+  'Local daemon rejected the IPC request (HTTP 401): daemon and CLI versions do not match. ' +
+  'Restart the daemon (botd restart) or upgrade botd to a matching version.';
+
+/** 新版 daemon 会在 <dataDir>/ipc-token (0600) 写入随机令牌；缺失（老版本 daemon）时不带该头。 */
+function ipcAuthHeaders(dataDir: string | undefined): Record<string, string> {
+  if (!dataDir) return {};
+  try {
+    const token = fs.readFileSync(path.join(dataDir, IPC_TOKEN_FILE), 'utf8').trim();
+    return token ? { [IPC_TOKEN_HEADER]: token } : {};
+  } catch {
+    return {};
+  }
+}
+
 /** GET/POST a bodyless request over the local daemon socket (raw response). */
 export function requestOverSocket(
   socketPath: string,
   method: 'GET' | 'POST',
   url: string,
   timeoutMs: number,
+  dataDir?: string,
 ): Promise<SocketResponse> {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { socketPath, path: url, method, headers: { 'content-length': '0' } },
+      { socketPath, path: url, method, headers: { 'content-length': '0', ...ipcAuthHeaders(dataDir) } },
       (res) => {
         res.setEncoding('utf8');
         let body = '';
         res.on('data', (chunk) => { body += chunk; });
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+        res.on('end', () => {
+          if (res.statusCode === 401) {
+            reject(new CliError(IPC_VERSION_MISMATCH, 401));
+            return;
+          }
+          resolve({ status: res.statusCode ?? 0, body });
+        });
       },
     );
     req.setTimeout(timeoutMs, () => req.destroy(new Error('Daemon request timed out')));
@@ -60,6 +84,7 @@ export async function postJsonOverSocket<T>(
   url: string,
   payload: unknown,
   timeoutMs: number,
+  dataDir?: string,
 ): Promise<T> {
   const data = JSON.stringify(payload);
   return new Promise<T>((resolve, reject) => {
@@ -68,13 +93,21 @@ export async function postJsonOverSocket<T>(
         socketPath,
         path: url,
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) },
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(data),
+          ...ipcAuthHeaders(dataDir),
+        },
       },
       (res) => {
         res.setEncoding('utf8');
         let responseBody = '';
         res.on('data', (chunk) => { responseBody += chunk; });
         res.on('end', () => {
+          if (res.statusCode === 401) {
+            reject(new CliError(IPC_VERSION_MISMATCH, 401));
+            return;
+          }
           if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
             if (!responseBody) {
               resolve(undefined as T);
@@ -122,8 +155,9 @@ async function sendWakeRequest(
     noTurn?: boolean;
     delaySeconds?: number;
   },
+  dataDir?: string,
 ): Promise<WakeResponse | undefined> {
-  return await postJsonOverSocket<WakeResponse>(socketPath, '/wake', payload, 15_000);
+  return await postJsonOverSocket<WakeResponse>(socketPath, '/wake', payload, 15_000, dataDir);
 }
 
 // ---------------------------------------------------------------------------
@@ -145,9 +179,9 @@ interface DaemonStatus {
 
 const waitMs = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function getDaemonStatus(socketPath: string): Promise<DaemonStatus | null> {
+async function getDaemonStatus(socketPath: string, dataDir?: string): Promise<DaemonStatus | null> {
   try {
-    const { status, body } = await requestOverSocket(socketPath, 'GET', '/status', 2_000);
+    const { status, body } = await requestOverSocket(socketPath, 'GET', '/status', 2_000, dataDir);
     if (status !== 200) return null;
     return JSON.parse(body) as DaemonStatus;
   } catch {
@@ -177,11 +211,11 @@ function isPidAlive(pid: number): boolean {
 async function stopDaemon(dataDir: string): Promise<'stopped' | 'not-running'> {
   const socketPath = getDaemonSocketPath(dataDir);
   const pidFile = path.join(dataDir, 'daemon.pid');
-  const status = await getDaemonStatus(socketPath);
+  const status = await getDaemonStatus(socketPath, dataDir);
 
   if (status) {
     try {
-      await requestOverSocket(socketPath, 'POST', '/shutdown', 5_000);
+      await requestOverSocket(socketPath, 'POST', '/shutdown', 5_000, dataDir);
     } catch (err) {
       throw new CliError(`Failed to stop daemon: ${(err as Error).message}`);
     }
@@ -299,7 +333,7 @@ export function registerNodeCommands(program: Command): void {
       cliAction(async (options, command) => {
         const { dataDir, json } = readGlobals(command);
         const result = await stopDaemon(dataDir);
-        if (json) console.error(JSON.stringify({ stopped: result === 'stopped' }));
+        if (json) console.log(JSON.stringify({ stopped: result === 'stopped' }));
         else if (result === 'stopped') console.log('Stopped running daemon.');
         await runStart(options, command);
       }),
@@ -313,8 +347,19 @@ export function registerNodeCommands(program: Command): void {
         const { dataDir, json } = readGlobals(command);
         const socketPath = getDaemonSocketPath(dataDir);
         try {
-          await requestOverSocket(socketPath, 'POST', '/reload', 15_000);
+          const { status, body } = await requestOverSocket(socketPath, 'POST', '/reload', 15_000, dataDir);
+          if (status !== 200) {
+            let detail = body;
+            try {
+              const parsed = JSON.parse(body) as { error?: string };
+              if (parsed && typeof parsed.error === 'string') detail = parsed.error;
+            } catch {
+              // keep raw text
+            }
+            throw new CliError(detail || `Daemon returned status ${status}`);
+          }
         } catch (err: unknown) {
+          if (err instanceof CliError) throw err;
           throw new CliError('botd daemon is not running');
         }
         if (json) console.log(JSON.stringify({ ok: true }));
@@ -340,7 +385,7 @@ export function registerNodeCommands(program: Command): void {
     .action(
       cliAction(async (_options, command) => {
         const { dataDir, json } = readGlobals(command);
-        const status = await getDaemonStatus(getDaemonSocketPath(dataDir));
+        const status = await getDaemonStatus(getDaemonSocketPath(dataDir), dataDir);
         if (status) {
           if (json) {
             console.log(JSON.stringify({ running: true, ...status }, null, 2));
@@ -391,7 +436,7 @@ export function registerNodeCommands(program: Command): void {
         }
 
         const socketPath = getDaemonSocketPath(dataDir);
-        const status = await getDaemonStatus(socketPath);
+        const status = await getDaemonStatus(socketPath, dataDir);
         let result: NodeUpgradeResult;
 
         if (status) {
@@ -399,7 +444,8 @@ export function registerNodeCommands(program: Command): void {
             socketPath,
             '/upgrade',
             { targetVersion, registryUrl, force },
-            60_000,
+            600_000,
+            dataDir,
           );
         } else {
           result = await performNodeUpgrade(dataDir, { targetVersion, registryUrl, force });
@@ -547,7 +593,7 @@ export function registerNodeCommands(program: Command): void {
             ...(replyToBotId ? { replyToBotId } : {}),
             ...(noTurn ? { noTurn: true } : {}),
             ...(delaySeconds !== undefined ? { delaySeconds } : {}),
-          });
+          }, dataDir);
         } catch (err: unknown) {
           throw new CliError(`Wake failed: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -608,6 +654,7 @@ export function registerNodeCommands(program: Command): void {
                 noTurnOnComplete: options.turn === false,
               },
               15_000,
+              dataDir,
             );
             job = result?.job;
           } catch (err: unknown) {
@@ -645,6 +692,7 @@ export function registerNodeCommands(program: Command): void {
             'GET',
             `/bg/list${query.size ? `?${query.toString()}` : ''}`,
             10_000,
+            dataDir,
           );
           if (status !== 200) {
             const parsed = JSON.parse(body) as { error?: string };
@@ -692,6 +740,7 @@ export function registerNodeCommands(program: Command): void {
               'GET',
               `/bg/logs?${query.toString()}`,
               10_000,
+              dataDir,
             );
             if (status !== 200) {
               const parsed = JSON.parse(body) as { error?: string };
@@ -727,6 +776,7 @@ export function registerNodeCommands(program: Command): void {
               '/bg/kill',
               { jobId },
               10_000,
+              dataDir,
             );
             job = result?.job;
           } catch (err: unknown) {
@@ -904,6 +954,7 @@ export function registerNodeCommands(program: Command): void {
                 ...(previewContent ? { previewContent } : {}),
               },
               timeoutMsForAsk,
+              dataDir,
             );
             answer = typeof result?.answer === 'string' ? result.answer : '';
           } catch (err: unknown) {
@@ -948,10 +999,10 @@ export function registerNodeCommands(program: Command): void {
           const socketPath = getDaemonSocketPath(dataDir);
           // Named pipes never exist on disk; probe liveness instead.
           const socketAlive = process.platform === 'win32'
-            ? await getDaemonStatus(socketPath).then((s) => Boolean(s)).catch(() => false)
+            ? await getDaemonStatus(socketPath, dataDir).then((s) => Boolean(s)).catch(() => false)
             : fs.existsSync(socketPath);
           if (socketAlive) {
-            await requestOverSocket(socketPath, 'POST', '/reload', 10_000).catch(() => {});
+            await requestOverSocket(socketPath, 'POST', '/reload', 10_000, dataDir).catch(() => {});
           }
 
           if (json) {

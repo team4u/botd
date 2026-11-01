@@ -239,7 +239,7 @@ export const AttachmentPreviewModal: React.FC<AttachmentPreviewModalProps> = ({
                   <Markdown>{text}</Markdown>
                 </div>
               ) : (
-                <pre className="prose-botd !my-0 w-full h-full text-left rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 p-4 overflow-auto text-xs font-mono leading-relaxed text-zinc-800 dark:text-zinc-200 shadow-lg">
+                <pre className="prose-botd prose-botd--xs !my-0 w-full h-full text-left rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 p-4 overflow-auto font-mono leading-relaxed text-zinc-800 dark:text-zinc-200 shadow-lg">
                   {text}
                 </pre>
               ))}

@@ -123,6 +123,17 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
   const [upgradeCheckInfo, setUpgradeCheckInfo] = useState<NodeUpgradeCheckResult | null>(null);
   const [checkingUpgradeNodeId, setCheckingUpgradeNodeId] = useState<string | null>(null);
   const [upgradingNodeIds, setUpgradingNodeIds] = useState<Set<string>>(new Set());
+  // 升级检查的节点守卫 ref：慢响应迟到时校验捕获的节点仍是当前弹窗目标，防止 A 的结果覆盖 B 的弹窗
+  const nodeToUpgradeIdRef = useRef<string | null>(null);
+  const openUpgradeModalFor = (node: NodeWithBots) => {
+    nodeToUpgradeIdRef.current = node.id;
+    setNodeToUpgrade(node);
+  };
+  const closeUpgradeModal = () => {
+    nodeToUpgradeIdRef.current = null;
+    setNodeToUpgrade(null);
+    setUpgradeCheckInfo(null);
+  };
 
   // Refs for tracking active restart pollers and timers for cleanup
   const pollTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
@@ -372,11 +383,14 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
   };
 
   const handleOpenUpgradeModal = (node: NodeWithBots) => {
-    setNodeToUpgrade(node);
+    openUpgradeModalFor(node);
     setUpgradeCheckInfo(null);
     setCheckingUpgradeNodeId(node.id);
     api.checkNodeUpgrade(node.id)
       .then((info) => {
+        // 节点守卫：慢响应迟到时弹窗可能已切换到其他节点（或已关闭），
+        // 旧节点的检查结果不能覆盖新弹窗，否则确认后会把 B 节点升到 A 的目标版本
+        if (nodeToUpgradeIdRef.current !== node.id) return;
         setUpgradeCheckInfo(info);
       })
       .catch((err: any) => {
@@ -397,7 +411,7 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
     const prevStartedAt = node.startedAt;
     const targetVersion = upgradeCheckInfo?.latestVersion;
 
-    setNodeToUpgrade(null);
+    closeUpgradeModal();
     setUpgradingNodeIds((prev) => {
       const next = new Set(prev);
       next.add(nodeId);
@@ -1117,8 +1131,7 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
         onConfirm={handleConfirmUpgrade}
         onClose={() => {
           if (!nodeToUpgrade || !upgradingNodeIds.has(nodeToUpgrade.id)) {
-            setNodeToUpgrade(null);
-            setUpgradeCheckInfo(null);
+            closeUpgradeModal();
           }
         }}
         message={

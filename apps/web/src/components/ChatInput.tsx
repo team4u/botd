@@ -27,6 +27,7 @@ import {
   finishUploadTask,
   resetUploadTasksOnSessionChange,
   isUploadResultValid,
+  validateUploadFile,
 } from '../utils/input-uploads';
 
 interface ChatInputProps {
@@ -570,6 +571,13 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
       try {
         for (const file of list) {
+          // 客户端大小预检：超限跳过该文件并提示，不读取进内存也不上传
+          const sizeError = validateUploadFile(file);
+          if (sizeError) {
+            setValidationNotice(sizeError);
+            continue;
+          }
+
           const contentBase64 = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => {

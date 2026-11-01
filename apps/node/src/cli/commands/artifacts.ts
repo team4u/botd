@@ -64,6 +64,7 @@ export function registerArtifactsCommands(program: Command): void {
                 message,
               },
               60_000,
+              dataDir,
             );
           } catch (err: unknown) {
             throw new CliError(
@@ -112,16 +113,21 @@ export function registerArtifactsCommands(program: Command): void {
                   outputPath: path.resolve(output),
                 },
                 60_000,
+                dataDir,
               );
               savedPath = path.resolve(output);
             } else {
               const result = await postJsonOverSocket<{
                 artifact: ArtifactRecord;
                 contentBase64?: string;
-              }>(socketPath, '/artifact/pull', { artifactId }, 60_000);
+              }>(socketPath, '/artifact/pull', { artifactId }, 60_000, dataDir);
               artifact = result?.artifact;
-              const filename = artifact?.filename || `artifact-${artifactId}`;
-              const target = path.resolve(filename);
+              // 默认输出名必须净化：只取最后的路径成分，防止 hub 返回的 filename 穿越 cwd（如 ../../.ssh/authorized_keys）
+              const lastSegment = (artifact?.filename || '').split(/[\\/]/).pop()?.trim() || '';
+              const sanitized = lastSegment && lastSegment !== '.' && lastSegment !== '..'
+                ? lastSegment
+                : `artifact-${artifactId}`;
+              const target = path.resolve(sanitized);
               if (typeof result?.contentBase64 === 'string') {
                 fs.mkdirSync(path.dirname(target), { recursive: true });
                 fs.writeFileSync(
@@ -175,6 +181,7 @@ export function registerArtifactsCommands(program: Command): void {
             'GET',
             `/artifact/list?sessionId=${encodeURIComponent(sessionId)}`,
             30_000,
+            dataDir,
           );
           if (status !== 200) {
             throw new Error(`Daemon returned status ${status}: ${body}`);

@@ -566,3 +566,36 @@ export const MessageItem: React.FC<MessageItemProps> = ({
     </div>
   );
 };
+
+/**
+ * MessageItem 的 memo 比较：botMap/nodeMap 是上层每次渲染重建的 Map 引用，直接浅比较会让 memo 失效；
+ * 这里仅对当前消息用到的 bot/node（senderBotId -> bot -> nodeId -> node）比较条目内容等价性，
+ * 其余 props 浅比较。流式期间（SSE 高频重渲染）历史消息不再整页重解析 Markdown/KaTeX。
+ */
+function areMessageItemPropsEqual(prev: MessageItemProps, next: MessageItemProps): boolean {
+  if (
+    prev.message !== next.message ||
+    prev.canEdit !== next.canEdit ||
+    prev.isEditing !== next.isEditing ||
+    prev.onStartEdit !== next.onStartEdit ||
+    prev.onForkMessage !== next.onForkMessage
+  ) {
+    return false;
+  }
+  if (prev.botMap === next.botMap && prev.nodeMap === next.nodeMap) return true;
+  // Map 引用变化时，仅比较本条消息实际读取的条目（引用相等即内容未变）
+  const senderBotId = next.message.senderBotId;
+  if (senderBotId) {
+    if (prev.botMap.get(senderBotId) !== next.botMap.get(senderBotId)) return false;
+    const nextBot = next.botMap.get(senderBotId);
+    if (nextBot && prev.nodeMap.get(nextBot.nodeId) !== next.nodeMap.get(nextBot.nodeId)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * 供消息列表逐条渲染的 memo 版 MessageItem（ChatView 使用；直接调用组件本体的场景仍用 MessageItem）
+ */
+export const MemoizedMessageItem = React.memo(MessageItem, areMessageItemPropsEqual);

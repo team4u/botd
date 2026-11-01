@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { writeSecureFile } from '../storage.js';
+import { CliError } from './errors.js';
 
 /**
  * Persisted CLI session state, stored at `<dataDir>/cli.json` with 0600 permissions.
@@ -20,8 +21,9 @@ export function cliConfigPath(dataDir: string): string {
 }
 
 export async function readCliConfig(dataDir: string): Promise<CliConfig> {
+  const filePath = cliConfigPath(dataDir);
   try {
-    const raw = await fs.readFile(cliConfigPath(dataDir), 'utf8');
+    const raw = await fs.readFile(filePath, 'utf8');
     const parsed = JSON.parse(raw) as Partial<CliConfig>;
     return {
       hubUrl: typeof parsed.hubUrl === 'string' ? parsed.hubUrl : undefined,
@@ -29,8 +31,14 @@ export async function readCliConfig(dataDir: string): Promise<CliConfig> {
       username: typeof parsed.username === 'string' ? parsed.username : undefined,
       password: typeof parsed.password === 'string' ? parsed.password : undefined,
     };
-  } catch {
-    return {};
+  } catch (err: unknown) {
+    // 未配置（文件不存在）与配置损坏必须可区分：后者直接报错而非静默当作未配置
+    if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return {};
+    }
+    throw new CliError(
+      `Failed to read CLI config at ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 

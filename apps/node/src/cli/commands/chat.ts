@@ -81,6 +81,10 @@ export function registerChatCommands(program: Command): void {
           let posted = false;
           const collected: MessageRecord[] = [];
 
+          // SSE 服务器建流时总会先推一帧当前状态快照（通常是 idle），不能作为本轮终止依据
+          let sawInitialSnapshot = false;
+          let roundFailed = false;
+
           const eventsPromise = client
             .events(sessionId, {
               signal: abortController.signal,
@@ -90,18 +94,29 @@ export function registerChatCommands(program: Command): void {
                   streamReady.resolve();
                 }
 
-                if (!posted) return;
+                if (!sawInitialSnapshot) {
+                  sawInitialSnapshot = true;
+                  return;
+                }
 
-                if (event.type === 'message_created' && event.message.role !== 'user') {
-                  collected.push(event.message);
-                } else if (
+                // 终止判定不依赖 posted：hub 可能在 POST 返回前同步广播 failed（如 lead bot 已删），
+                // 若被 posted 门闩拦下，CLI 会挂满整个 --wait 超时。
+                if (
                   event.type === 'session_status' &&
                   (event.status === 'idle' || event.status === 'failed')
                 ) {
+                  if (event.status === 'failed') roundFailed = true;
                   if (!roundFinishedSettled) {
                     roundFinishedSettled = true;
                     roundFinished.resolve();
                   }
+                }
+
+                // posted 仅用于消息收集：避免重复收集 POST 响应之前的消息
+                if (!posted) return;
+
+                if (event.type === 'message_created' && event.message.role !== 'user') {
+                  collected.push(event.message);
                 }
               },
             })
@@ -171,6 +186,10 @@ export function registerChatCommands(program: Command): void {
               console.log(formatted);
             }
           }
+          if (roundFailed) {
+            process.exitCode = 1;
+            console.error('error: session round ended in failed state');
+          }
         })(options, command),
     );
 
@@ -189,6 +208,9 @@ export function registerChatCommands(program: Command): void {
         const client = await HubClient.connect(g);
 
         const durationOption = Number(options.duration);
+        if (options.duration !== undefined && (!Number.isFinite(durationOption) || durationOption < 0)) {
+          throw new CliError(`Invalid --duration value: ${String(options.duration)}`);
+        }
         const timeoutSeconds =
           Number.isFinite(durationOption) && durationOption > 0 ? durationOption : 0;
         const signal = timeoutSeconds > 0 ? AbortSignal.timeout(timeoutSeconds * 1000) : undefined;

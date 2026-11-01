@@ -34,7 +34,7 @@ import type {
   BgJobRecord,
 } from '@botd/protocol';
 import type { StreamingAssistantState } from '../types';
-import { MessageItem, formatShortModel } from './MessageItem';
+import { MemoizedMessageItem, formatShortModel } from './MessageItem';
 import { Markdown } from './Markdown';
 import { ChatInput } from './ChatInput';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -123,9 +123,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const keyboardInset = useKeyboardInset();
 
   // 本会话参会成员（提前声明：蓝点探测/SSE/群设置等多处使用）
-  const memberBots: BotConfig[] = (session.memberBotIds || [])
-    .map((id) => botMap.get(id))
-    .filter((b): b is BotConfig => Boolean(b));
+  // useMemo 稳定引用：下游 memberNodeIds/fetchBgJobs 等依赖链才不会每次 render 失稳
+  const memberBots = useMemo<BotConfig[]>(
+    () =>
+      (session.memberBotIds || [])
+        .map((id) => botMap.get(id))
+        .filter((b): b is BotConfig => Boolean(b)),
+    [session.memberBotIds, botMap]
+  );
 
   // 头部更多操作菜单 / 行内重命名 / 清空与删除确认
   const [menuOpen, setMenuOpen] = useState(false);
@@ -225,14 +230,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [bgJobs, setBgJobs] = useState<BgJobRecord[]>([]);
   const [selectedBgJobId, setSelectedBgJobId] = useState<string | null>(null);
 
+  // ===== 会话切换守卫 =====
+  // 异步响应提交前校验会话未变，防止 A 会话的在途响应覆盖 B 会话的界面
+  const sessionIdRef = useRef(session.id);
+  sessionIdRef.current = session.id;
+
   // ===== 子会话委派任务列表 =====
   const [subSessions, setSubSessions] = useState<SessionRecord[]>([]);
 
   const loadSubSessions = useCallback(async () => {
+    const capturedSessionId = session.id;
     try {
-      const subs = await api.listSubSessions(session.id);
+      const subs = await api.listSubSessions(capturedSessionId);
+      if (sessionIdRef.current !== capturedSessionId) return;
       setSubSessions(subs);
     } catch {
+      if (sessionIdRef.current !== capturedSessionId) return;
       setSubSessions([]);
     }
   }, [session.id]);
@@ -254,22 +267,26 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   }, [messages, loadSubSessions]);
 
-  // 探测本会话后台任务
+  // 探测本会话后台任务：成员节点集合派生 join 字符串作稳定依赖，成员不变时 fetchBgJobs 引用不换新
   const memberNodeIds = useMemo(
     () =>
       [...new Set(memberBots.map((b) => b.nodeId).filter(Boolean))],
     [memberBots]
   );
+  const memberNodeIdsKey = memberNodeIds.join(',');
 
   const fetchBgJobs = useCallback(async () => {
-    if (memberNodeIds.length === 0) {
+    const capturedSessionId = sessionIdRef.current;
+    const nodeIds = memberNodeIdsKey ? memberNodeIdsKey.split(',') : [];
+    if (nodeIds.length === 0) {
       setBgJobs([]);
       setHasRunningBgJobs(false);
       return;
     }
     const results = await Promise.allSettled(
-      memberNodeIds.map((id) => api.listBgJobs(id, { sessionId: session.id }))
+      nodeIds.map((id) => api.listBgJobs(id, { sessionId: capturedSessionId }))
     );
+    if (sessionIdRef.current !== capturedSessionId) return;
     const collected: BgJobRecord[] = [];
     results.forEach((r) => {
       if (r.status === 'fulfilled') {
@@ -278,7 +295,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
     });
     setBgJobs(collected);
     setHasRunningBgJobs(collected.some((j) => j.status === 'running'));
-  }, [memberNodeIds, session.id]);
+  }, [memberNodeIdsKey]);
+
+  // 最新回调引用：轮询 interval 与 SSE 订阅经 ref 调用，避免依赖函数引用导致订阅被反复拆建
+  const loadSubSessionsRef = useRef(loadSubSessions);
+  loadSubSessionsRef.current = loadSubSessions;
+  const fetchBgJobsRef = useRef(fetchBgJobs);
+  fetchBgJobsRef.current = fetchBgJobs;
 
   // 切换会话时重置抽屉与状态标记
   const prevMessagesLengthRef = useRef(messages.length);
@@ -287,32 +310,36 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setHasRunningBgJobs(false);
     setBgJobs([]);
     setSelectedBgJobId(null);
+    setSubSessions([]);
+    lastSubCallbackMsgRef.current = '';
     prevMessagesLengthRef.current = messages.length;
   }, [session.id]);
 
+  // 会话或成员节点集合变化时立即探测一次后台任务
   useEffect(() => {
-    void fetchBgJobs();
-  }, [fetchBgJobs]);
+    void fetchBgJobsRef.current();
+  }, [session.id, memberNodeIdsKey]);
 
   // 消息条数实际发生变化（包括 callback 消息到达）时拉取后台任务，避免仅引用变化引起的无效请求
   useEffect(() => {
     if (messages.length === prevMessagesLengthRef.current) return;
     prevMessagesLengthRef.current = messages.length;
-    void fetchBgJobs();
-  }, [messages.length, fetchBgJobs]);
+    void fetchBgJobsRef.current();
+  }, [messages.length]);
 
   const hasActiveWork =
     subSessions.some((s) => s.status === 'running') ||
     bgJobs.some((j) => j.status === 'running');
 
-  // 统一轮询：存在运行中子任务或后台任务时 5s 轮询，闲置时降频至 30s
+  // 统一轮询：存在运行中子任务或后台任务时 5s 轮询，闲置时降频至 30s；
+  // interval 仅依赖 hasActiveWork 布尔值并经 ref 调用最新加载函数，避免被高频重渲染拆建导致降频计时不断重置
   useEffect(() => {
     const interval = window.setInterval(() => {
-      void loadSubSessions();
-      void fetchBgJobs();
+      void loadSubSessionsRef.current();
+      void fetchBgJobsRef.current();
     }, pickPollIntervalMs(hasActiveWork));
     return () => window.clearInterval(interval);
-  }, [hasActiveWork, loadSubSessions, fetchBgJobs]);
+  }, [hasActiveWork]);
 
   const runningBgJobs = useMemo(
     () => bgJobs.filter((j) => j.status === 'running'),
@@ -335,7 +362,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return 0;
   }, [messages]);
 
+  // 用 ref 避免订阅 effect 依赖抽屉开关导致反复重订阅
+  const artifactsOpenRef = useRef(false);
+  const bgJobsOpenRef = useRef(false);
+  artifactsOpenRef.current = artifactsOpen;
+  bgJobsOpenRef.current = bgJobsOpen;
+
   // 全局 SSE：本会话 artifact_created 且抽屉未开时置红点；新回调消息（后台任务完成）到达时重新探测
+  // 订阅仅依赖 session.id，经 ref 调用最新 fetchBgJobs，不再每 render 退订重订
   useEffect(() => {
     const unsubscribe = onGlobalEvent((e) => {
       if (e.type === 'artifact_created' && e.sessionId === session.id) {
@@ -345,17 +379,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
         e.message.sessionId === session.id &&
         e.message.role === 'callback'
       ) {
-        if (!bgJobsOpenRef.current) void fetchBgJobs();
+        if (!bgJobsOpenRef.current) void fetchBgJobsRef.current();
       }
     });
     return unsubscribe;
-  }, [session.id, fetchBgJobs]);
-
-  // 用 ref 避免订阅 effect 依赖抽屉开关导致反复重订阅
-  const artifactsOpenRef = useRef(false);
-  const bgJobsOpenRef = useRef(false);
-  artifactsOpenRef.current = artifactsOpen;
-  bgJobsOpenRef.current = bgJobsOpen;
+  }, [session.id]);
 
   // ===== 消息日期分隔线 =====
   // 相邻消息 createdAt 跨自然日时插入分隔条：今天/昨天/M月D日（同年省略年份，跨年带年份）
@@ -530,10 +558,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [editingMessage, setEditingMessage] = useState<MessageRecord | null>(null);
 
   // 点击铅笔进入/切换编辑目标；运行中的会话忽略
-  const startEdit = (msg: MessageRecord) => {
-    if (session.status === 'running') return;
-    setEditingMessage(msg);
-  };
+  // useCallback 稳定引用：配合 MemoizedMessageItem 的自定义比较，流式期间历史消息不因回调换新而重渲染
+  const startEdit = useCallback(
+    (msg: MessageRecord) => {
+      if (session.status === 'running') return;
+      setEditingMessage(msg);
+    },
+    [session.status]
+  );
+
+  // 分叉回调：useCallback 稳定化，避免逐条消息内联闭包使 MemoizedMessageItem 的 memo 比较失效
+  const handleForkMessage = useCallback(
+    (messageId: string) => onForkMessage(session.id, messageId),
+    [onForkMessage, session.id]
+  );
 
   // 防御：被编辑的消息已不在当前消息列表（如提交后被截断、清空消息）时自动退出编辑态
   useEffect(() => {
@@ -1100,14 +1138,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
                       : 'transition-colors duration-500'
                   }
                 >
-                  <MessageItem
+                  <MemoizedMessageItem
                     message={msg}
                     botMap={botMap}
                     nodeMap={nodeMap}
                     canEdit={canEdit}
                     isEditing={editingMessage?.id === msg.id}
                     onStartEdit={startEdit}
-                    onForkMessage={(mid) => onForkMessage(session.id, mid)}
+                    onForkMessage={handleForkMessage}
                   />
                 </div>
               </React.Fragment>

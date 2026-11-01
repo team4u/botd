@@ -1,6 +1,7 @@
 import { type Command, Option } from 'commander';
 import type { ProviderAuthType, ProviderLoginState } from '@botd/protocol';
 import { cliAction, readGlobals } from '../context.js';
+import { CliError } from '../errors.js';
 import { HubClient } from '../hub-client.js';
 import { readInput } from '../input.js';
 import { printResult } from '../render.js';
@@ -75,11 +76,17 @@ export function registerProvidersCommands(program: Command): void {
         let wait: number | undefined;
         if (options.wait === true) {
           wait = 120;
-        } else if (typeof options.wait === 'number' && !Number.isNaN(options.wait)) {
+        } else if (typeof options.wait === 'number') {
+          if (!Number.isFinite(options.wait) || options.wait < 0) {
+            throw new CliError(`Invalid --wait value: ${String(options.wait)}`);
+          }
           wait = options.wait;
         } else if (typeof options.wait === 'string') {
           const parsed = Number(options.wait);
-          wait = Number.isNaN(parsed) ? 120 : parsed;
+          if (!Number.isFinite(parsed) || parsed < 0) {
+            throw new CliError(`Invalid --wait value: ${options.wait}`);
+          }
+          wait = parsed;
         }
 
         let state = await client.post<ProviderLoginState>(

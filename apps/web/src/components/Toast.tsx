@@ -12,7 +12,7 @@ export const ToastContainer: React.FC<ToastProps> = ({ toasts, onDismiss }) => {
 
   return (
     <div
-      className="fixed bottom-4 sm:bottom-6 right-4 sm:right-6 z-50 flex flex-col gap-2 max-w-sm w-[calc(100vw-2rem)] sm:w-full pointer-events-none pb-safe"
+      className="fixed top-4 sm:top-6 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 w-[calc(100vw-2rem)] sm:max-w-md pointer-events-none"
       role="region"
       aria-label="系统通知"
     >
@@ -28,7 +28,7 @@ export const ToastContainer: React.FC<ToastProps> = ({ toasts, onDismiss }) => {
         return (
           <div
             key={toast.id}
-            className="pointer-events-auto flex items-center gap-3 px-3.5 py-2.5 bg-zinc-900 text-zinc-50 border border-zinc-800 rounded-xl shadow-lg text-xs font-medium transition-all duration-200 dark:bg-zinc-800 dark:text-zinc-100 dark:border-zinc-700"
+            className="pointer-events-auto flex items-center gap-3 px-3.5 py-2.5 bg-zinc-900 text-zinc-50 border border-zinc-800 rounded-lg shadow-lg text-xs font-medium toast-in"
           >
             {icon}
             <div className="flex-1 break-words leading-relaxed">{toast.message}</div>
