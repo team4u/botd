@@ -250,6 +250,18 @@ body {
   max-width: 100%;
   height: auto;
 }
+/* 大图预览弹窗（适屏）：覆盖 mermaid 写入 svg 的内联 max-width，矢量拉伸铺满容器 */
+.mermaid-preview-fit svg {
+  max-width: 100% !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+/* 大图预览弹窗（缩放模式）：解除内联 max-width 限制，按自然尺寸 × zoom 变换展示 */
+.prose-botd .mermaid-preview svg,
+.mermaid-preview svg {
+  max-width: none !important;
+  height: auto !important;
+}
 .dark .prose-botd hr {
   border-top-color: #27272a;
 }

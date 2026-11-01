@@ -475,45 +475,12 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
         <div className="w-10 h-1 bg-zinc-300 dark:bg-zinc-700 rounded-full mx-auto my-2 sm:hidden shrink-0" />
 
         {/* Header */}
-        <div className="px-5 py-3 sm:px-6 sm:py-3.5 border-b border-zinc-100 dark:border-zinc-800/60 flex items-center justify-between shrink-0 flex-wrap gap-2">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2">
-              <Zap className="w-4 h-4 text-amber-500 shrink-0" />
-              <h2 id="triggers-modal-title" className="text-sm sm:text-base font-semibold text-zinc-900 dark:text-zinc-100">
-                自动化与消息桥接
-              </h2>
-            </div>
-
-            {/* Tabs */}
-            <div className="flex items-center bg-zinc-100 dark:bg-zinc-800/70 p-0.5 rounded-lg text-xs font-medium">
-              <button
-                type="button"
-                onClick={() => setActiveTab('inbound')}
-                className={`h-7 px-2.5 rounded-md transition-colors cursor-pointer flex items-center gap-1.5 ${
-                  activeTab === 'inbound'
-                    ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-xs'
-                    : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
-                }`}
-              >
-                <Radio className="w-3 h-3" />
-                <span>入站触发器 (Webhook / 定时)</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('outbound');
-                  fetchChannels();
-                }}
-                className={`h-7 px-2.5 rounded-md transition-colors cursor-pointer flex items-center gap-1.5 ${
-                  activeTab === 'outbound'
-                    ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-xs'
-                    : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
-                }`}
-              >
-                <Share2 className="w-3 h-3" />
-                <span>出站消息桥接 (飞书 / Slack / TG / Webhook)</span>
-              </button>
-            </div>
+        <div className="px-5 py-3 sm:px-6 sm:py-3.5 border-b border-zinc-100 dark:border-zinc-800/60 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-2">
+            <Zap className="w-4 h-4 text-amber-500 shrink-0" />
+            <h2 id="triggers-modal-title" className="text-sm sm:text-base font-semibold text-zinc-900 dark:text-zinc-100">
+              自动化与消息桥接
+            </h2>
           </div>
 
           <button
@@ -522,6 +489,37 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
             aria-label="关闭对话框"
           >
             <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex border-b border-zinc-200/80 dark:border-zinc-800/80 bg-zinc-50/40 dark:bg-zinc-900/40 shrink-0">
+          <button
+            type="button"
+            onClick={() => setActiveTab('inbound')}
+            className={`flex-1 py-2.5 text-xs font-medium flex items-center justify-center gap-1.5 border-b-2 transition-colors cursor-pointer ${
+              activeTab === 'inbound'
+                ? 'border-zinc-900 dark:border-zinc-100 text-zinc-900 dark:text-zinc-100 bg-white dark:bg-zinc-950 font-semibold'
+                : 'border-transparent text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200'
+            }`}
+          >
+            <Radio className="w-3.5 h-3.5" />
+            <span>触发器</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab('outbound');
+              fetchChannels();
+            }}
+            className={`flex-1 py-2.5 text-xs font-medium flex items-center justify-center gap-1.5 border-b-2 transition-colors cursor-pointer ${
+              activeTab === 'outbound'
+                ? 'border-zinc-900 dark:border-zinc-100 text-zinc-900 dark:text-zinc-100 bg-white dark:bg-zinc-950 font-semibold'
+                : 'border-transparent text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200'
+            }`}
+          >
+            <Share2 className="w-3.5 h-3.5" />
+            <span>通知通道</span>
           </button>
         </div>
 

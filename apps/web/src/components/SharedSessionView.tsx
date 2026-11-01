@@ -161,9 +161,9 @@ export const SharedSessionView: React.FC<SharedSessionViewProps> = ({ token }) =
   const { session, bots, messages } = snapshot;
 
   return (
-    <div className="min-h-screen bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 flex flex-col">
+    <div className="h-dvh bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 flex flex-col overflow-hidden">
       {/* 顶部展示栏 */}
-      <header className="sticky top-0 z-20 border-b border-zinc-200/80 dark:border-zinc-800/80 bg-white/95 dark:bg-zinc-950/95 backdrop-blur-md px-3 sm:px-6 py-2.5">
+      <header className="shrink-0 z-20 border-b border-zinc-200/80 dark:border-zinc-800/80 bg-white/95 dark:bg-zinc-950/95 px-3 sm:px-6 py-2.5">
         <div className="max-w-4xl mx-auto flex flex-col gap-2">
           {/* 第一行：标题 + 模式标签 + 只读回放标识 + ThemeToggle */}
           <div className="flex items-center justify-between gap-3 min-w-0">
@@ -243,34 +243,36 @@ export const SharedSessionView: React.FC<SharedSessionViewProps> = ({ token }) =
         </div>
       </header>
 
-      {/* 主体对话回放画布 */}
-      <main className="flex-1 max-w-4xl w-full mx-auto py-4">
-        {messages.length === 0 ? (
-          <div className="text-center py-16 text-zinc-400 text-xs">
-            暂无消息记录
-          </div>
-        ) : (
-          messages.map((msg, idx) => (
-            <React.Fragment key={msg.id}>
-              {/* 日期分隔线：相邻消息跨自然日时插入 */}
-              {(idx === 0 || !sameDay(messages[idx - 1].createdAt, msg.createdAt)) && (
-                <div className="sticky top-14 z-[5] mx-auto my-2 w-fit px-2.5 py-0.5 rounded-full bg-zinc-100/90 dark:bg-zinc-800/90 text-[11px] text-zinc-500 backdrop-blur-sm">
-                  {dayLabel(msg.createdAt)}
-                </div>
-              )}
-              <MessageItem
-                message={msg}
-                botMap={botMap}
-                nodeMap={emptyNodeMap}
-                canEdit={false}
-              />
-            </React.Fragment>
-          ))
-        )}
+      {/* 主体对话回放画布：页面级滚动容器（body 被 overflow:hidden 锁定，滚动由这里承载） */}
+      <main className="flex-1 min-h-0 overflow-y-auto">
+        <div className="max-w-4xl w-full mx-auto py-4">
+          {messages.length === 0 ? (
+            <div className="text-center py-16 text-zinc-400 text-xs">
+              暂无消息记录
+            </div>
+          ) : (
+            messages.map((msg, idx) => (
+              <React.Fragment key={msg.id}>
+                {/* 日期分隔线：相邻消息跨自然日时插入 */}
+                {(idx === 0 || !sameDay(messages[idx - 1].createdAt, msg.createdAt)) && (
+                  <div className="sticky top-1 z-[5] mx-auto my-2 w-fit px-2.5 py-0.5 rounded-full bg-zinc-100/90 dark:bg-zinc-800/90 text-[11px] text-zinc-500 backdrop-blur-sm">
+                    {dayLabel(msg.createdAt)}
+                  </div>
+                )}
+                <MessageItem
+                  message={msg}
+                  botMap={botMap}
+                  nodeMap={emptyNodeMap}
+                  canEdit={false}
+                />
+              </React.Fragment>
+            ))
+          )}
+        </div>
       </main>
 
       {/* 底部极简归属标记 */}
-      <footer className="border-t border-zinc-100 dark:border-zinc-900 py-4 text-center text-[11px] text-zinc-400 dark:text-zinc-600">
+      <footer className="shrink-0 border-t border-zinc-100 dark:border-zinc-900 py-4 text-center text-[11px] text-zinc-400 dark:text-zinc-600">
         由 botd 强力驱动 · 只读分享回放
       </footer>
     </div>

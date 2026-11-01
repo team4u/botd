@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Loader2, TriangleAlert } from 'lucide-react';
+import { Loader2, TriangleAlert, Maximize2 } from 'lucide-react';
+import { MermaidPreviewModal } from './MermaidPreviewModal';
 
 type Mermaid = (typeof import('mermaid'))['default'];
 
@@ -30,6 +31,7 @@ interface MermaidBlockProps {
 export const MermaidBlock: React.FC<MermaidBlockProps> = ({ chart }) => {
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const lastDarkRef = useRef<boolean>(isDarkTheme());
 
   useEffect(() => {
@@ -93,14 +95,33 @@ export const MermaidBlock: React.FC<MermaidBlockProps> = ({ chart }) => {
   }
 
   return (
-    <div className="mermaid-box my-3 not-prose overflow-x-auto rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 flex justify-center">
-      {svg ? (
-        <div className="min-w-0" dangerouslySetInnerHTML={{ __html: svg }} />
-      ) : (
-        <div className="flex items-center gap-2 py-6 text-xs text-zinc-400 dark:text-zinc-500">
-          <Loader2 className="w-3.5 h-3.5 animate-spin-fast" />
-          <span>正在渲染图表...</span>
-        </div>
+    <div className="relative group/mermaid my-3 not-prose">
+      {/* 悬浮预览按钮：位于容器右上角，不随内容横向滚动；桌面悬停显示，移动端常显 */}
+      <button
+        type="button"
+        onClick={() => setPreviewOpen(true)}
+        className="absolute top-2 right-2 z-10 flex items-center gap-1 h-7 px-2 rounded-lg text-[11px] font-medium bg-white/90 dark:bg-zinc-800/90 border border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 shadow-xs backdrop-blur-xs transition-opacity opacity-100 sm:opacity-0 sm:group-hover/mermaid:opacity-100 focus:opacity-100 cursor-pointer"
+        title="放大预览"
+        aria-label="放大预览 Mermaid 图表"
+      >
+        <Maximize2 className="w-3.5 h-3.5" />
+        <span className="hidden sm:inline">预览</span>
+      </button>
+
+      <div className="mermaid-box overflow-x-auto rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 flex justify-center">
+        {svg ? (
+          <div className="min-w-0" dangerouslySetInnerHTML={{ __html: svg }} />
+        ) : (
+          <div className="flex items-center gap-2 py-6 text-xs text-zinc-400 dark:text-zinc-500">
+            <Loader2 className="w-3.5 h-3.5 animate-spin-fast" />
+            <span>正在渲染图表...</span>
+          </div>
+        )}
+      </div>
+
+      {/* 大图预览弹窗：复用已渲染的 SVG，避免二次渲染开销 */}
+      {previewOpen && svg && (
+        <MermaidPreviewModal chart={chart} svg={svg} onClose={() => setPreviewOpen(false)} />
       )}
     </div>
   );
