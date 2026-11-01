@@ -84,6 +84,9 @@ export function countNonZombieInGroupLinux(targetPgrp: number): number | null {
  * On POSIX, uses process group signaling (-pid, 0) and scans Linux /proc to
  * distinguish active processes from dead zombies.
  * On Windows, checks process existence.
+ *
+ * Known limitation: on Windows only the direct PID is checked; deep descendant
+ * enumeration (e.g. via toolhelp snapshots) is not implemented (no test env).
  */
 export function isProcessTreeAlive(pid?: number): boolean {
   if (!isSafePid(pid)) return false;
@@ -92,13 +95,20 @@ export function isProcessTreeAlive(pid?: number): boolean {
     return isProcessRunning(pid);
   }
 
-  // POSIX: check process group
+  // POSIX: check process group. EPERM here typically means the group contains
+  // processes owned by another user (e.g. sudo) and the group leader is gone;
+  // treat as "signal already delivered as best effort" rather than alive so
+  // callers don't get stuck waiting on a tree they cannot even inspect.
   let groupHasProcesses = false;
   try {
     process.kill(-pid, 0);
     groupHasProcesses = true;
   } catch (err: any) {
-    if (err.code === 'EPERM') return true; // Permission error: conservatively assume alive
+    if (err.code === 'EPERM') {
+      // We cannot signal/inspect the group at all: assume signals were sent
+      // best-effort and stop treating this PID as alive.
+      return false;
+    }
   }
 
   if (groupHasProcesses) {
@@ -128,8 +138,15 @@ function killPosixGroup(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pid, signal);
     groupSent = true;
-  } catch {
-    // Process group signal failed; fall back to individual pid
+  } catch (err: any) {
+    if (err?.code === 'EPERM') {
+      // EPERM means the group exists but is owned by another user (e.g. sudo):
+      // the signal was NOT delivered. Nothing more we can do — treat the
+      // signal as sent best-effort; isProcessTreeAlive reports such PIDs as
+      // not alive so termination doesn't loop forever.
+      return;
+    }
+    // Process group signal failed for another reason; fall back to individual pid
   }
   if (!groupSent) {
     try {

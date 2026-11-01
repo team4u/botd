@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isSafeId, isValidBotEnvKey, type BotConfig, type NodeIdentity } from '@botd/protocol';
 
 export { isValidBotEnvKey } from '@botd/protocol';
@@ -84,6 +84,49 @@ export async function writeSecureFile(filePath: string, content: string): Promis
   }
 }
 
+/** Atomic write (tmp + rename) that keeps the file's default permission
+ *  semantics instead of forcing 0600 — for non-secret data files such as
+ *  bot.json / SKILL.md. A crash mid-write never leaves a truncated file. */
+export async function writeAtomicFile(filePath: string, content: string): Promise<void> {
+  await ensureDir(path.dirname(filePath));
+  const temporary = `${filePath}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporary, content, 'utf8');
+    await fs.rename(temporary, filePath);
+  } finally {
+    await fs.rm(temporary, { force: true });
+  }
+}
+
+/** Path of the local IPC auth token file (<dataDir>/ipc-token). */
+export function getIpcTokenFilePath(dataDir: string): string {
+  return path.join(dataDir, 'ipc-token');
+}
+
+/** Reads the local IPC token, or null when absent/unreadable. */
+export async function readIpcToken(dataDir: string): Promise<string | null> {
+  try {
+    const raw = await fs.readFile(getIpcTokenFilePath(dataDir), 'utf8');
+    const token = raw.trim();
+    return token || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Ensures <dataDir>/ipc-token exists (0600, atomic write): 64-hex random
+ *  token generated once; subsequent calls keep the existing token so CLI
+ *  clients on the same machine stay valid across daemon restarts. */
+export async function ensureIpcToken(dataDir: string): Promise<void> {
+  const tokenPath = getIpcTokenFilePath(dataDir);
+  if (existsSync(tokenPath)) {
+    const existing = await readIpcToken(dataDir);
+    if (existing) return;
+  }
+  const token = randomBytes(32).toString('hex'); // 64 hex chars
+  await writeSecureFile(tokenPath, token + '\n');
+}
+
 export async function readNodeIdentity(dataDir: string): Promise<NodeIdentity | null> {
   const file = path.join(dataDir, 'node.json');
   try {
@@ -130,8 +173,10 @@ export async function listBots(dataDir: string): Promise<BotConfig[]> {
       bot.enabledSkills = Array.isArray(bot.enabledSkills) ? bot.enabledSkills : [];
       bot.enabledExtensions = Array.isArray(bot.enabledExtensions) ? bot.enabledExtensions : [];
       bots.push(bot);
-    } catch {
-      // Ignore unconfigured or partial directories
+    } catch (err) {
+      // Directory exists but bot.json is missing/corrupt: log it instead of
+      // silently dropping, so operators can repair the data dir.
+      console.error(`listBots: failed to read ${botJsonPath}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return bots;
@@ -173,15 +218,15 @@ export async function saveBot(dataDir: string, bot: BotConfig, systemMd?: string
     updatedAt: new Date().toISOString(),
   };
 
-  await fs.writeFile(path.join(botDir, 'bot.json'), JSON.stringify(botWithTimestamp, null, 2), 'utf8');
+  await writeAtomicFile(path.join(botDir, 'bot.json'), JSON.stringify(botWithTimestamp, null, 2));
 
   if (systemMd !== undefined) {
-    await fs.writeFile(path.join(botDir, 'SYSTEM.md'), systemMd, 'utf8');
+    await writeAtomicFile(path.join(botDir, 'SYSTEM.md'), systemMd);
   }
 
   const memoryPath = path.join(botDir, 'MEMORY.md');
   if (!existsSync(memoryPath)) {
-    await fs.writeFile(memoryPath, '', 'utf8');
+    await writeAtomicFile(memoryPath, '');
   }
 }
 
@@ -216,7 +261,7 @@ export async function writeSkill(dataDir: string, skillId: string, content: stri
   assertSafeId(skillId, 'Skill ID');
   const skillDir = getSkillDir(dataDir, skillId);
   await ensureDir(skillDir);
-  await fs.writeFile(path.join(skillDir, 'SKILL.md'), content, 'utf8');
+  await writeAtomicFile(path.join(skillDir, 'SKILL.md'), content);
 }
 
 export async function listExtensions(dataDir: string): Promise<string[]> {
@@ -254,7 +299,7 @@ export async function writeExtension(dataDir: string, extId: string, content: st
   assertSafeId(extId, 'Extension ID');
   const extDir = getExtensionDir(dataDir, extId);
   await ensureDir(extDir);
-  await fs.writeFile(path.join(extDir, 'index.ts'), content, 'utf8');
+  await writeAtomicFile(path.join(extDir, 'index.ts'), content);
 }
 
 export async function deleteResource(
@@ -343,11 +388,11 @@ export async function writeFileTarget(
   await ensureDir(botDir);
 
   if (target.kind === 'system') {
-    await fs.writeFile(path.join(botDir, 'SYSTEM.md'), content, 'utf8');
+    await writeAtomicFile(path.join(botDir, 'SYSTEM.md'), content);
     return;
   }
   if (target.kind === 'memory') {
-    await fs.writeFile(path.join(botDir, 'MEMORY.md'), content, 'utf8');
+    await writeAtomicFile(path.join(botDir, 'MEMORY.md'), content);
     return;
   }
 
