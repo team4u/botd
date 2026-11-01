@@ -29,6 +29,8 @@ function mapShareRow(row: ShareRow): SessionShareRecord {
   };
 }
 
+const MAX_SHARE_EXPIRES_IN_HOURS = 720;
+
 export function registerShareRoutes(
   app: Hono<{ Variables: { user: UserRecord } }>,
   db: HubDatabase,
@@ -87,7 +89,17 @@ export function registerShareRoutes(
       return c.json({ error: 'Forbidden' }, 403);
     }
 
-    const body = await c.req.json<{ regenerate?: boolean }>().catch(() => ({ regenerate: false }));
+    const body = await c.req.json<{ regenerate?: boolean; expiresInHours?: unknown }>().catch(() => ({} as { regenerate?: boolean; expiresInHours?: unknown }));
+
+    // 可选 expiresInHours：正整数、上限 720 小时；不提供时保持 NULL（永久）
+    let expiresAt: string | undefined;
+    if (body?.expiresInHours !== undefined) {
+      const hours = body.expiresInHours;
+      if (typeof hours !== 'number' || !Number.isInteger(hours) || hours <= 0 || hours > MAX_SHARE_EXPIRES_IN_HOURS) {
+        return c.json({ error: `Invalid expiresInHours: must be an integer between 1 and ${MAX_SHARE_EXPIRES_IN_HOURS}` }, 400);
+      }
+      expiresAt = new Date(Date.now() + hours * 3600_000).toISOString();
+    }
 
     const queryStmt = db.db.prepare(
       'SELECT id, session_id, owner_id, token, created_at, expires_at FROM session_shares WHERE session_id = ?'
@@ -104,11 +116,12 @@ export function registerShareRoutes(
       sessionId: id,
       token: randomBytes(18).toString('hex'),
       createdAt: new Date().toISOString(),
+      ...(expiresAt ? { expiresAt } : {}),
     };
 
     const upsertStmt = db.db.prepare(`
       INSERT INTO session_shares (id, session_id, owner_id, token, created_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, NULL)
+      VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(session_id) DO UPDATE SET
         id = excluded.id,
         owner_id = excluded.owner_id,
@@ -116,7 +129,14 @@ export function registerShareRoutes(
         created_at = excluded.created_at,
         expires_at = excluded.expires_at
     `);
-    upsertStmt.run(newRecord.id, newRecord.sessionId, user.id, newRecord.token, newRecord.createdAt);
+    upsertStmt.run(
+      newRecord.id,
+      newRecord.sessionId,
+      user.id,
+      newRecord.token,
+      newRecord.createdAt,
+      expiresAt ?? null
+    );
 
     return c.json(newRecord, 201);
   });

@@ -2,11 +2,43 @@ import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { NodeUpgradeCheckResult, NodeUpgradeResult } from '@botd/protocol';
 import { writeSecureFile } from './storage.js';
 import { getActiveSessionCount } from './runtime.js';
 import { spawnReplacementDaemon } from './daemon-launch.js';
+
+const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
+
+/** Error with an HTTP-ish 4xx semantic for callers that map it to status
+ *  codes (local-ipc maps this to 400). */
+export class UpgradeRejectedError extends Error {}
+
+/** Registry allow-list: only the official default registry or an explicitly
+ *  configured BOTD_NPM_REGISTRY environment variable are trusted. This is
+ *  enforced at the Hub-RPC ingress (daemon.ts) so a compromised/misconfigured
+ *  Hub cannot point nodes at attacker registries; local CLI requests over the
+ *  token-authed socket may still pass --registry explicitly. Returns the url
+ *  unchanged when allowed, otherwise undefined (caller falls back to
+ *  env/default resolution). */
+export function filterRpcRegistryUrl(registryUrl?: string): string | undefined {
+  const normalize = (url: string | undefined) => (url || '').trim().replace(/\/+$/, '');
+  const envRegistry = normalize(process.env.BOTD_NPM_REGISTRY);
+  const requested = normalize(registryUrl);
+  if (requested && (requested === DEFAULT_REGISTRY || (envRegistry && requested === envRegistry))) {
+    return requested;
+  }
+  return undefined;
+}
+
+/** A canary-failed version is quarantined for this long; afterwards a retry
+ *  is allowed (the block record still surfaces in check results). Overridable
+ *  via BOTD_UPGRADE_BLOCK_COOLDOWN_MS. */
+const UPGRADE_BLOCK_COOLDOWN_MS = () => {
+  const raw = Number(process.env.BOTD_UPGRADE_BLOCK_COOLDOWN_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 30 * 60 * 1000;
+};
 
 let cachedPackageVersion: string | undefined;
 
@@ -163,7 +195,7 @@ export async function checkNodeUpgrade(
   const rawRegistry =
     options?.registryUrl ||
     process.env.BOTD_NPM_REGISTRY ||
-    'https://registry.npmjs.org';
+    DEFAULT_REGISTRY;
   const registryUrl = rawRegistry.trim().replace(/\/+$/, '');
   const pkgName = process.env.BOTD_NPM_PACKAGE || 'botd';
 
@@ -204,9 +236,91 @@ export async function checkNodeUpgrade(
 export interface StageReleaseOptions {
   registryUrl?: string;
   stageExtractor?: (stagingDir: string, targetVersion: string) => Promise<string>;
+  fetchFn?: typeof fetch;
 }
 
 const SEMVER_REGEX = /^[0-9]+\.[0-9]+\.[0-9]+([0-9A-Za-z.-]*)$/;
+
+/** Fetches `${registry}/${pkg}/${version}` metadata and returns the npm
+ *  dist.integrity field ("sha512-<base64>") for the exact target version. */
+async function fetchDistIntegrity(
+  registryUrl: string,
+  pkgName: string,
+  version: string,
+  fetchImpl: typeof fetch,
+): Promise<string> {
+  const url = `${registryUrl}/${encodeURIComponent(pkgName)}/${encodeURIComponent(version)}`;
+  const res = await fetchImpl(url, { headers: { Accept: 'application/json' } });
+  if (!res.ok) {
+    throw new Error(`Registry metadata request failed with HTTP ${res.status}: ${res.statusText}`);
+  }
+  const data = (await res.json()) as { dist?: { integrity?: string; tarball?: string } };
+  const integrity = data?.dist?.integrity;
+  if (typeof integrity !== 'string' || !/^sha512-/.test(integrity)) {
+    throw new Error(`Registry metadata for ${pkgName}@${version} is missing a sha512 dist.integrity value`);
+  }
+  return integrity;
+}
+
+/** Computes the SRI string ("sha512-<base64>") of a file's contents. */
+function computeSriHash(filePath: string): string {
+  const content = fs.readFileSync(filePath);
+  const digest = createHash('sha512').update(content).digest('base64');
+  return `sha512-${digest}`;
+}
+
+/** Downloads the exact tarball via `npm pack <pkg>@<version> --registry <url>`
+ *  into stagingDir and verifies its sha512 against the registry's published
+ *  dist.integrity. Throws on mismatch; caller cleans up staging.
+ *
+ *  NOTE (known residual): only the top-level botd tarball is verified. The
+ *  supply-chain trust of dependency tarballs installed by `npm install`
+ *  (resolved by semver ranges) is inherited from the registry/npm policies
+ *  and is NOT individually pinned or verified here. */
+async function verifyReleaseTarball(
+  stagingDir: string,
+  registryUrl: string,
+  pkgName: string,
+  targetVersion: string,
+  expectedIntegrity: string,
+): Promise<void> {
+  const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const packDir = path.join(stagingDir, '.integrity-check');
+  await fsPromises.mkdir(packDir, { recursive: true });
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      npmCmd,
+      [
+        'pack',
+        `${pkgName}@${targetVersion}`,
+        '--registry',
+        registryUrl,
+        '--pack-destination',
+        packDir,
+      ],
+      { cwd: packDir, stdio: ['ignore', 'ignore', 'inherit'], windowsHide: true },
+    );
+    child.on('error', reject);
+    child.on('exit', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`npm pack failed with exit code ${code}`));
+    });
+  });
+
+  const files = await fsPromises.readdir(packDir);
+  const tarball = files.find((f) => f.endsWith('.tgz'));
+  if (!tarball) {
+    throw new Error(`npm pack did not produce a tarball for ${pkgName}@${targetVersion}`);
+  }
+
+  const actualIntegrity = computeSriHash(path.join(packDir, tarball));
+  if (actualIntegrity !== expectedIntegrity) {
+    throw new Error(
+      `Integrity mismatch for ${pkgName}@${targetVersion}: expected ${expectedIntegrity}, got ${actualIntegrity}`,
+    );
+  }
+}
 
 export async function stageReleaseFromNpm(
   dataDir: string,
@@ -282,8 +396,9 @@ export async function stageReleaseFromNpm(
       const rawRegistry =
         options?.registryUrl ||
         process.env.BOTD_NPM_REGISTRY ||
-        'https://registry.npmjs.org';
+        DEFAULT_REGISTRY;
       const registryUrl = rawRegistry.trim().replace(/\/+$/, '');
+      const fetchImpl = options?.fetchFn ?? fetch;
 
       await fsPromises.writeFile(
         path.join(stagingDir, 'package.json'),
@@ -314,6 +429,13 @@ export async function stageReleaseFromNpm(
           else reject(new Error(`npm install failed with exit code ${code}`));
         });
       });
+
+      // Supply-chain integrity check: compare the tarball bytes published at
+      // this exact version against the registry's signed dist.integrity. A
+      // mismatch aborts the upgrade and the staging dir is cleaned up by the
+      // catch handler below. (Dependencies are not pinned — known residual.)
+      const expectedIntegrity = await fetchDistIntegrity(registryUrl, pkgName, targetVersion, fetchImpl);
+      await verifyReleaseTarball(stagingDir, registryUrl, pkgName, targetVersion, expectedIntegrity);
 
       const candidate1 = path.join(stagingDir, 'node_modules', pkgName, 'dist', 'cli.js');
       const candidate2 = path.join(stagingDir, 'node_modules', '@botd/node', 'dist', 'cli.js');
@@ -384,6 +506,30 @@ export async function performNodeUpgrade(
       targetVersion,
       upgraded: false,
     };
+  }
+
+  // Anti-downgrade: without --force, refuse to move to an older version.
+  // (Equality is already short-circuited above.)
+  if (!options?.force && compareSemver(targetVersion, previousVersion) < 0) {
+    throw new UpgradeRejectedError(
+      `Refusing to upgrade from ${previousVersion} to older version ${targetVersion} (downgrade rejected; use force to override)`,
+    );
+  }
+
+  // Blacklist enforcement: a version whose canary recently failed is blocked
+  // for a cooldown window (the record itself never expires from check
+  // results). force overrides; a stale block (older than the cooldown)
+  // allows a retry.
+  const blocked = await readBlockedRelease(dataDir);
+  if (blocked && blocked.version === targetVersion && !options?.force) {
+    const blockedAtMs = Date.parse(blocked.at);
+    const withinCooldown =
+      Number.isFinite(blockedAtMs) && Date.now() - blockedAtMs < UPGRADE_BLOCK_COOLDOWN_MS();
+    if (withinCooldown) {
+      throw new UpgradeRejectedError(
+        `Upgrade to ${targetVersion} is blocked: ${blocked.reason} (at ${blocked.at})`,
+      );
+    }
   }
 
   const staged = await stageReleaseFromNpm(dataDir, targetVersion, {

@@ -14,6 +14,11 @@ export const BOTD_UI_COMPONENT_TYPES = [
   'Switch',
   'ActionBar',
   'Button',
+  'Callout',
+  'Tabs',
+  'Steps',
+  'Accordion',
+  'BarList',
 ] as const;
 
 export type BotdUiComponentType = (typeof BOTD_UI_COMPONENT_TYPES)[number];
@@ -29,6 +34,7 @@ export interface CardElementProps {
   title: string;
   subtitle?: string;
   badge?: string;
+  icon?: string;
 }
 
 export interface MetricGridElementProps {
@@ -41,6 +47,7 @@ export interface MetricCardElementProps {
   hint?: string;
   status?: 'ok' | 'warn' | 'error';
   trend?: 'up' | 'down' | 'flat';
+  icon?: string;
 }
 
 export interface KeyValueListItem {
@@ -87,6 +94,61 @@ export interface ButtonElementProps {
   variant?: 'primary' | 'secondary' | 'danger';
 }
 
+export interface CalloutElementProps {
+  title?: string;
+  content: string;
+  variant?: 'info' | 'tip' | 'warn' | 'error';
+  icon?: string;
+}
+
+export interface TabItem {
+  id: string;
+  label: string;
+  icon?: string;
+}
+
+export interface TabsElementProps {
+  tabs: TabItem[];
+  defaultTab?: string;
+}
+
+export interface StepItem {
+  title: string;
+  description?: string;
+  status?: 'done' | 'current' | 'pending';
+  icon?: string;
+  badge?: string;
+}
+
+export interface StepsElementProps {
+  items: StepItem[];
+}
+
+export interface AccordionItem {
+  title: string;
+  content?: string;
+  defaultOpen?: boolean;
+  icon?: string;
+  badge?: string;
+}
+
+export interface AccordionElementProps {
+  items: AccordionItem[];
+}
+
+export interface BarListItem {
+  label: string;
+  value: number;
+  max?: number;
+  displayValue?: string;
+  color?: 'blue' | 'emerald' | 'amber' | 'rose' | 'purple';
+}
+
+export interface BarListElementProps {
+  items: BarListItem[];
+  title?: string;
+}
+
 export interface ButtonActionPress {
   action: 'submit';
   params?: {
@@ -99,6 +161,7 @@ export interface BotdUiElement<P = Record<string, unknown>> {
   type: BotdUiComponentType | string;
   props?: P;
   children?: string[];
+  slots?: Record<string, string[]>;
   on?: {
     press?: ButtonActionPress | { action: string; params?: Record<string, unknown> };
     [key: string]: unknown;
@@ -243,6 +306,26 @@ export function validateUiSpec(input: string | unknown): UiValidationResult {
       }
     }
 
+    if (el.slots !== undefined) {
+      if (typeof el.slots !== 'object' || el.slots === null || Array.isArray(el.slots)) {
+        errors.push(`Element "${id}".slots must be an object`);
+      } else {
+        for (const [slotName, slotChildren] of Object.entries(el.slots)) {
+          if (!Array.isArray(slotChildren)) {
+            errors.push(`Element "${id}".slots.${slotName} must be an array of strings`);
+          } else {
+            for (const childId of slotChildren) {
+              if (typeof childId !== 'string') {
+                errors.push(`Element "${id}".slots.${slotName} contains non-string child ID`);
+              } else if (!(childId in raw.elements)) {
+                errors.push(`Child "${childId}" in slot "${slotName}" of "${id}" does not exist in elements`);
+              }
+            }
+          }
+        }
+      }
+    }
+
     if (el.on !== undefined) {
       if (typeof el.on !== 'object' || el.on === null || Array.isArray(el.on)) {
         errors.push(`Element "${id}".on must be an object`);
@@ -294,6 +377,9 @@ export function validateUiSpec(input: string | unknown): UiValidationResult {
         if (props.badge !== undefined && typeof props.badge !== 'string') {
           errors.push(`Element "${id}" (Card) props.badge must be a string`);
         }
+        if (props.icon !== undefined && typeof props.icon !== 'string') {
+          errors.push(`Element "${id}" (Card) props.icon must be a string`);
+        }
         break;
       }
       case 'MetricGrid': {
@@ -317,6 +403,9 @@ export function validateUiSpec(input: string | unknown): UiValidationResult {
         }
         if (props.trend !== undefined && !['up', 'down', 'flat'].includes(props.trend)) {
           errors.push(`Element "${id}" (MetricCard) props.trend must be "up", "down", or "flat"`);
+        }
+        if (props.icon !== undefined && typeof props.icon !== 'string') {
+          errors.push(`Element "${id}" (MetricCard) props.icon must be a string`);
         }
         break;
       }
@@ -400,6 +489,115 @@ export function validateUiSpec(input: string | unknown): UiValidationResult {
         }
         break;
       }
+      case 'Callout': {
+        if (typeof props.content !== 'string' || !props.content.trim()) {
+          errors.push(`Element "${id}" (Callout) requires a non-empty string "content" prop`);
+        }
+        if (props.title !== undefined && typeof props.title !== 'string') {
+          errors.push(`Element "${id}" (Callout) props.title must be a string`);
+        }
+        if (props.variant !== undefined && !['info', 'tip', 'warn', 'error'].includes(props.variant)) {
+          errors.push(`Element "${id}" (Callout) props.variant must be "info", "tip", "warn", or "error"`);
+        }
+        if (props.icon !== undefined && typeof props.icon !== 'string') {
+          errors.push(`Element "${id}" (Callout) props.icon must be a string`);
+        }
+        break;
+      }
+      case 'Tabs': {
+        if (!Array.isArray(props.tabs) || props.tabs.length === 0) {
+          errors.push(`Element "${id}" (Tabs) requires a non-empty array "tabs" prop`);
+        } else {
+          for (let i = 0; i < props.tabs.length; i++) {
+            const tab = props.tabs[i];
+            if (!tab || typeof tab !== 'object' || typeof tab.id !== 'string' || typeof tab.label !== 'string') {
+              errors.push(`Element "${id}" (Tabs) tab at index ${i} must have string "id" and "label"`);
+            }
+            if (tab && tab.icon !== undefined && typeof tab.icon !== 'string') {
+              errors.push(`Element "${id}" (Tabs) tab at index ${i} "icon" must be a string`);
+            }
+          }
+        }
+        if (props.defaultTab !== undefined && typeof props.defaultTab !== 'string') {
+          errors.push(`Element "${id}" (Tabs) props.defaultTab must be a string`);
+        }
+        break;
+      }
+      case 'Steps': {
+        if (!Array.isArray(props.items) || props.items.length === 0) {
+          errors.push(`Element "${id}" (Steps) requires a non-empty array "items" prop`);
+        } else {
+          for (let i = 0; i < props.items.length; i++) {
+            const step = props.items[i];
+            if (!step || typeof step !== 'object' || typeof step.title !== 'string' || !step.title.trim()) {
+              errors.push(`Element "${id}" (Steps) step at index ${i} must have non-empty string "title"`);
+            }
+            if (step && step.description !== undefined && typeof step.description !== 'string') {
+              errors.push(`Element "${id}" (Steps) step at index ${i} "description" must be a string`);
+            }
+            if (step && step.status !== undefined && !['done', 'current', 'pending'].includes(step.status)) {
+              errors.push(`Element "${id}" (Steps) step at index ${i} "status" must be "done", "current", or "pending"`);
+            }
+            if (step && step.icon !== undefined && typeof step.icon !== 'string') {
+              errors.push(`Element "${id}" (Steps) step at index ${i} "icon" must be a string`);
+            }
+            if (step && step.badge !== undefined && typeof step.badge !== 'string') {
+              errors.push(`Element "${id}" (Steps) step at index ${i} "badge" must be a string`);
+            }
+          }
+        }
+        break;
+      }
+      case 'Accordion': {
+        if (!Array.isArray(props.items) || props.items.length === 0) {
+          errors.push(`Element "${id}" (Accordion) requires a non-empty array "items" prop`);
+        } else {
+          for (let i = 0; i < props.items.length; i++) {
+            const acc = props.items[i];
+            if (!acc || typeof acc !== 'object' || typeof acc.title !== 'string' || !acc.title.trim()) {
+              errors.push(`Element "${id}" (Accordion) item at index ${i} must have non-empty string "title"`);
+            }
+            if (acc && acc.content !== undefined && typeof acc.content !== 'string') {
+              errors.push(`Element "${id}" (Accordion) item at index ${i} "content" must be a string`);
+            }
+            if (acc && acc.defaultOpen !== undefined && typeof acc.defaultOpen !== 'boolean') {
+              errors.push(`Element "${id}" (Accordion) item at index ${i} "defaultOpen" must be a boolean`);
+            }
+            if (acc && acc.icon !== undefined && typeof acc.icon !== 'string') {
+              errors.push(`Element "${id}" (Accordion) item at index ${i} "icon" must be a string`);
+            }
+            if (acc && acc.badge !== undefined && typeof acc.badge !== 'string') {
+              errors.push(`Element "${id}" (Accordion) item at index ${i} "badge" must be a string`);
+            }
+          }
+        }
+        break;
+      }
+      case 'BarList': {
+        if (!Array.isArray(props.items) || props.items.length === 0) {
+          errors.push(`Element "${id}" (BarList) requires a non-empty array "items" prop`);
+        } else {
+          for (let i = 0; i < props.items.length; i++) {
+            const bar = props.items[i];
+            if (!bar || typeof bar !== 'object' || typeof bar.label !== 'string' || typeof bar.value !== 'number' || !Number.isFinite(bar.value)) {
+              errors.push(`Element "${id}" (BarList) item at index ${i} must have string "label" and finite number "value"`);
+            }
+            if (bar && bar.max !== undefined && (typeof bar.max !== 'number' || !Number.isFinite(bar.max) || bar.max <= 0)) {
+              errors.push(`Element "${id}" (BarList) item at index ${i} "max" must be a positive number`);
+            }
+            if (bar && bar.displayValue !== undefined && typeof bar.displayValue !== 'string') {
+              errors.push(`Element "${id}" (BarList) item at index ${i} "displayValue" must be a string`);
+            }
+            if (bar && bar.color !== undefined && !['blue', 'emerald', 'amber', 'rose', 'purple'].includes(bar.color)) {
+              errors.push(`Element "${id}" (BarList) item at index ${i} "color" must be "blue", "emerald", "amber", "rose", or "purple"`);
+            }
+          }
+        }
+        if (props.title !== undefined && typeof props.title !== 'string') {
+          errors.push(`Element "${id}" (BarList) props.title must be a string`);
+        }
+        break;
+      }
     }
   }
 
@@ -419,10 +617,23 @@ export function validateUiSpec(input: string | unknown): UiValidationResult {
       }
       visitedPath.add(nodeId);
       const elem = raw.elements[nodeId];
-      if (elem && Array.isArray(elem.children)) {
-        for (const childId of elem.children) {
-          if (typeof childId === 'string' && childId in raw.elements) {
-            checkTree(childId, depth + 1);
+      if (elem) {
+        if (Array.isArray(elem.children)) {
+          for (const childId of elem.children) {
+            if (typeof childId === 'string' && childId in raw.elements) {
+              checkTree(childId, depth + 1);
+            }
+          }
+        }
+        if (elem.slots && typeof elem.slots === 'object') {
+          for (const slotChildren of Object.values(elem.slots)) {
+            if (Array.isArray(slotChildren)) {
+              for (const childId of slotChildren) {
+                if (typeof childId === 'string' && childId in raw.elements) {
+                  checkTree(childId, depth + 1);
+                }
+              }
+            }
           }
         }
       }
@@ -457,9 +668,10 @@ Max Bytes: ${MAX_UI_SPEC_BYTES} (64KB) | Max Elements: ${MAX_UI_ELEMENTS} | Max 
   "root": "root-element-id",
   "elements": {
     "root-element-id": {
-      "type": "Stack | Card | MetricGrid | MetricCard | KeyValueList | TextInput | Select | Switch | ActionBar | Button",
+      "type": "Stack | Card | MetricGrid | MetricCard | KeyValueList | TextInput | Select | Switch | ActionBar | Button | Callout | Tabs | Steps | Accordion | BarList",
       "props": { ... },
       "children": ["child-id-1", "child-id-2"],
+      "slots": { "tab1": ["child-id-1"] },
       "on": {
         "press": {
           "action": "submit",
@@ -474,45 +686,64 @@ Max Bytes: ${MAX_UI_SPEC_BYTES} (64KB) | Max Elements: ${MAX_UI_ELEMENTS} | Max 
 }
 \`\`\`
 
-## Component Catalog (10 Components)
+## Component Catalog (15 Components)
 
-1. Stack (Layout container)
+### 1. Layout & Groups
+1. Stack (Flex layout container)
    - props: { direction?: "vertical" | "horizontal", gap?: "sm" | "md" }
    - children: string[]
 
-2. Card (Visual grouping card)
-   - props: { title: string, subtitle?: string, badge?: string }
+2. Card (Visual grouping card with optional icon and badge)
+   - props: { title: string, subtitle?: string, badge?: string, icon?: string }
    - children: string[]
 
-3. MetricGrid (Responsive metric card container)
+3. Tabs (Segmented switchable view for multi-angle concept explanation)
+   - props: { tabs: Array<{ id: string, label: string, icon?: string }>, defaultTab?: string }
+   - children: string[] (mapped to tabs 1:1) or slots: { [tabId]: string[] }
+
+4. Accordion (Progressive disclosure collapsible list for FAQs and deep-dives)
+   - props: { items: Array<{ title: string, content?: string, defaultOpen?: boolean, icon?: string, badge?: string }> }
+
+### 2. Metrics & Comparison
+5. MetricGrid (Responsive metric cards grid)
    - props: { columns?: 2 | 3 | 4 }
    - children: string[]
 
-4. MetricCard (Key metric display)
-   - props: { label: string, value: string, hint?: string, status?: "ok" | "warn" | "error", trend?: "up" | "down" | "flat" }
+6. MetricCard (Key metric display with status and trend)
+   - props: { label: string, value: string, hint?: string, status?: "ok" | "warn" | "error", trend?: "up" | "down" | "flat", icon?: string }
 
-5. KeyValueList (Compact property-value table)
+7. BarList (Horizontal comparison / proportion bars for benchmarks and ratios)
+   - props: { items: Array<{ label: string, value: number, max?: number, displayValue?: string, color?: "blue"|"emerald"|"amber"|"rose"|"purple" }>, title?: string }
+
+8. KeyValueList (Compact property-value table)
    - props: { items: Array<{ key: string, value: string, mono?: boolean, badge?: string }> }
 
-6. TextInput (Single-line input)
-   - props: { label: string, value?: string | { "$state": "/key" }, placeholder?: string, hint?: string }
+### 3. Explanation & Process
+9. Callout (Highlighted note/tip/warning box for key definitions)
+   - props: { title?: string, content: string, variant?: "info" | "tip" | "warn" | "error", icon?: string }
 
-7. Select (Dropdown selector)
-   - props: { label: string, value?: string | { "$state": "/key" }, options: Array<{ value: string, label: string }> }
+10. Steps (Vertical timeline / lifecycle flow for algorithms and execution steps)
+    - props: { items: Array<{ title: string, description?: string, status?: "done" | "current" | "pending", icon?: string, badge?: string }> }
 
-8. Switch (Toggle switch)
-   - props: { label: string, checked?: boolean | { "$state": "/key" }, hint?: string }
+### 4. Interactive Forms & Actions
+11. TextInput (Single-line input)
+    - props: { label: string, value?: string | { "$state": "/key" }, placeholder?: string, hint?: string }
 
-9. ActionBar (Horizontal action button bar)
-   - props: { align?: "left" | "right" | "between" }
-   - children: string[]
+12. Select (Dropdown selector)
+    - props: { label: string, value?: string | { "$state": "/key" }, options: Array<{ value: string, label: string }> }
 
-10. Button (Action trigger)
+13. Switch (Toggle switch)
+    - props: { label: string, checked?: boolean | { "$state": "/key" }, hint?: string }
+
+14. ActionBar (Horizontal action button bar)
+    - props: { align?: "left" | "right" | "between" }
+    - children: string[]
+
+15. Button (Action trigger)
     - props: { label: string, variant?: "primary" | "secondary" | "danger" }
     - on.press: { action: "submit", params?: { decision?: string, [k: string]: unknown } }
 
-## State Binding Syntax
-- Bind a form input to the spec store using \`{ "$state": "/key" }\` (or \`{ "$bindState": "/key" }\`).
-- When a Button with action "submit" is pressed, the output will be serialized to JSON:
-  \`{ decision: params.decision, params, state: currentStoreState }\`
+## Semantic Icons
+Available semantic icon names:
+lightbulb, info, alert-triangle, alert-circle, check-circle, cpu, database, server, hard-drive, activity, layers, terminal, code, git-branch, workflow, shield, lock, key, globe, zap, clock, sparkles, book-open, file-text, box, help-circle, trending-up, trending-down, bar-chart, refresh.
 `;

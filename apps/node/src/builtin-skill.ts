@@ -6,7 +6,7 @@ import { readSkill, writeSkill } from './storage.js';
  * survive until the framework ships a newer version.
  */
 export const BUILTIN_SKILL_ID = 'botd-cli';
-export const BUILTIN_SKILL_VERSION = 6;
+export const BUILTIN_SKILL_VERSION = 7;
 const VERSION_MARKER = `<!-- botd-skill: ${BUILTIN_SKILL_ID} v${BUILTIN_SKILL_VERSION} -->`;
 
 export const BUILTIN_SKILL_MD = `${VERSION_MARKER}
@@ -68,20 +68,27 @@ The raw detached-shell alternative (no management, no auto report):
 yours. Never run them mid-turn. If a restart is genuinely required, finish your reply
 and schedule it detached: \`(sleep 5 && botd restart -d & disown; exit 0)\`.
 
-## Generative UI (Dynamic Cards & Interactive Forms)
+## Generative UI (Dynamic Cards, Interactive Forms & Concept Deep-Dives)
 
 botd supports dynamic UI components rendered natively via json-render:
 
 1. In-chat display UI: Output a \`\`\`ui (or \`\`\`json-render) code fence containing a valid JSON Spec.
 2. Interactive forms / approvals: \`botd ask "<prompt>" --ui --stdin << 'EOF' ... EOF\` (outputs \`{ decision, state }\` JSON to stdout) or inspect catalog via \`botd ask --ui-schema\`.
 3. Spec top-level: \`{ root: string, elements: Record<string, BotdUiElement>, state?: Record<string, unknown> }\`.
-4. Component catalog (10 components):
+4. Component catalog (15 components):
    - Layout & Display:
      - \`Stack\`: \`{ direction?: 'vertical' | 'horizontal', gap?: 'sm' | 'md' }\`
-     - \`Card\`: \`{ title: string, subtitle?: string, badge?: string }\`
+     - \`Card\`: \`{ title: string, subtitle?: string, badge?: string, icon?: string }\`
+     - \`Tabs\`: \`{ tabs: Array<{ id: string, label: string, icon?: string }>, defaultTab?: string }\` (children mapped 1:1 or via slots: { [id]: [childKey] })
+     - \`Accordion\`: \`{ items: Array<{ title: string, content?: string, defaultOpen?: boolean, icon?: string, badge?: string }> }\`
+   - Metrics & Comparison:
      - \`MetricGrid\`: \`{ columns?: 2 | 3 | 4 }\`
-     - \`MetricCard\`: \`{ label: string, value: string, hint?: string, status?: 'ok' | 'warn' | 'error', trend?: 'up' | 'down' | 'flat' }\`
+     - \`MetricCard\`: \`{ label: string, value: string, hint?: string, status?: 'ok' | 'warn' | 'error', trend?: 'up' | 'down' | 'flat', icon?: string }\`
+     - \`BarList\`: \`{ items: Array<{ label: string, value: number, max?: number, displayValue?: string, color?: 'blue'|'emerald'|'amber'|'rose'|'purple' }>, title?: string }\`
      - \`KeyValueList\`: \`{ items: Array<{ key: string, value: string, mono?: boolean, badge?: string }> }\`
+   - Explanation & Flows:
+     - \`Callout\`: \`{ title?: string, content: string, variant?: 'info' | 'tip' | 'warn' | 'error', icon?: string }\`
+     - \`Steps\`: \`{ items: Array<{ title: string, description?: string, status?: 'done' | 'current' | 'pending', icon?: string, badge?: string }> }\`
    - Form Inputs & Actions:
      - \`TextInput\`: \`{ label: string, value?: string | { "$state": "/key" }, placeholder?: string, hint?: string }\`
      - \`Select\`: \`{ label: string, value?: string | { "$state": "/key" }, options: Array<{ value: string, label: string }> }\`
@@ -89,6 +96,7 @@ botd supports dynamic UI components rendered natively via json-render:
      - \`ActionBar\`: \`{ align?: 'left' | 'right' | 'between' }\`
      - \`Button\`: \`{ label: string, variant?: 'primary' | 'secondary' | 'danger' }, on.press: { action: 'submit', params?: { decision?: string } }\`
    - State binding: Bind form values to store keys via \`{ "$state": "/key" }\`. On submit, form state and button params return as single-line JSON.
+   - Semantic icons: lightbulb, info, alert-triangle, check-circle, cpu, database, server, hard-drive, activity, layers, terminal, code, git-branch, workflow, shield, lock, globe, zap, clock, sparkles, book-open, file-text, box, help-circle, etc.
 
 ## Skill creator
 

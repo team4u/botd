@@ -16,11 +16,13 @@ import {
   deleteBot,
   deleteResource,
   ensureDir,
+  ensureIpcToken,
   getDataDir,
   getDaemonSocketPath,
   listBots,
   listExtensions,
   listSkills,
+  readIpcToken,
   readFileTarget,
   readBot,
   readNodeIdentity,
@@ -44,7 +46,7 @@ import { BgJobManager } from './bg-jobs.js';
 import { ensureBuiltinSkill } from './builtin-skill.js';
 import { ensureWindowsShell, isWindows } from './windows-shell.js';
 import { notifyDaemonReady, spawnReplacementDaemon } from './daemon-launch.js';
-import { getNodeVersion, checkNodeUpgrade, performNodeUpgrade } from './upgrader.js';
+import { getNodeVersion, checkNodeUpgrade, performNodeUpgrade, filterRpcRegistryUrl } from './upgrader.js';
 
 export interface DaemonHandle {
   nodeId: string;
@@ -115,12 +117,28 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
     await ensureWindowsShell(dataDir);
   }
 
-  notifyDaemonReady();
+  // Local IPC auth token (<dataDir>/ipc-token, 0600): generated once, read
+  // once per start (no hot reload).
+  await ensureIpcToken(dataDir).catch((err) => {
+    console.error('Failed to ensure IPC token:', err);
+  });
+  const ipcToken = await readIpcToken(dataDir);
 
   const socketPath = getDaemonSocketPath(dataDir);
   const pidFilePath = path.join(dataDir, 'daemon.pid');
 
   const bindRetryMs = Number(process.env.BOTD_DAEMON_BIND_RETRY_MS || '0');
+  const isReplacementDaemon = Number.isFinite(bindRetryMs) && bindRetryMs > 0;
+
+  if (isReplacementDaemon) {
+    // Replacement-daemon handshake: the outgoing parent still holds the
+    // socket and only releases it after receiving our ready signal, so a
+    // replacement can never bind before signaling (signaling here, before the
+    // bind-retry loop, avoids that deadlock). The bind itself is still
+    // verified by the loop below — if binding ultimately fails, this child
+    // exits non-zero and the upgrade canary treats it as a failure.
+    notifyDaemonReady();
+  }
   let deadline = Date.now() + (Number.isFinite(bindRetryMs) ? bindRetryMs : 0);
   for (;;) {
     try {
@@ -149,8 +167,13 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
   let rpcInstance: BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null = null;
   let rws: ReconnectingWebSocket;
 
-  const syncRegistrationWithHub = async (targetRpc = hubRpc) => {
-    if (isStopping || !targetRpc || !rws || rws.readyState !== ReconnectingWebSocket.OPEN) return;
+  const syncRegistrationWithHub = async (targetRpc = hubRpc): Promise<void> => {
+    if (isStopping) throw new Error('Daemon is shutting down');
+    if (!targetRpc || !rws || rws.readyState !== ReconnectingWebSocket.OPEN) {
+      // Surface the failure to callers (e.g. local-ipc /reload returns 503)
+      // instead of silently returning success.
+      throw new Error('hub not connected');
+    }
     const bots = await listBots(dataDir);
     const skills = await listSkills(dataDir);
     const extensions = await listExtensions(dataDir);
@@ -174,6 +197,7 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
     dataDir,
     socketPath,
     startedAt,
+    ipcToken,
     isHubConnected: () => Boolean(rws && rws.readyState === ReconnectingWebSocket.OPEN),
     getHubRpc: () => hubRpc,
     bgManager,
@@ -188,6 +212,12 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
         fs.chmod(socketPath, 0o600).catch(() => {});
       }
       fs.writeFile(pidFilePath, `${process.pid}\n`, { mode: 0o600 }).catch(() => {});
+      // First start (no bind-retry window): the socket is now bound, so only
+      // now tell the parent we are ready — a bind failure rejects the canary
+      // instead of killing both daemons. (Replacements signaled earlier.)
+      if (!isReplacementDaemon) {
+        notifyDaemonReady();
+      }
       resolve();
     });
   });
@@ -233,11 +263,17 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
         return { ok: true as const, pid: childPid };
       },
       checkUpgrade: async (opts) => {
-        return await checkNodeUpgrade(dataDir, opts);
+        // Hub-RPC ingress: registry must be the official default or match
+        // BOTD_NPM_REGISTRY; anything else the Hub sends is dropped.
+        return await checkNodeUpgrade(dataDir, {
+          ...opts,
+          registryUrl: filterRpcRegistryUrl(opts?.registryUrl),
+        });
       },
       upgradeDaemon: async (opts) => {
         return await performNodeUpgrade(dataDir, {
           ...opts,
+          registryUrl: filterRpcRegistryUrl(opts?.registryUrl),
           onScheduleShutdown: () => {
             setTimeout(() => {
               void handleShutdown();

@@ -17,9 +17,10 @@ export const botdUiCatalog = defineCatalog(schema, {
         title: z.string(),
         subtitle: z.string().optional(),
         badge: z.string().optional(),
+        icon: z.string().optional(),
       }),
       slots: ['default'],
-      description: 'Bordered card container with header, subtitle, and badge',
+      description: 'Bordered card container with header, subtitle, badge, and icon',
     },
     MetricGrid: {
       props: z.object({
@@ -35,9 +36,10 @@ export const botdUiCatalog = defineCatalog(schema, {
         hint: z.string().optional(),
         status: z.enum(['ok', 'warn', 'error']).optional(),
         trend: z.enum(['up', 'down', 'flat']).optional(),
+        icon: z.string().optional(),
       }),
       slots: [],
-      description: 'Key metric display card with optional status dot and trend indicator',
+      description: 'Key metric display card with optional status dot, trend indicator, and icon',
     },
     KeyValueList: {
       props: z.object({
@@ -100,6 +102,76 @@ export const botdUiCatalog = defineCatalog(schema, {
       }),
       slots: [],
       description: 'Action button that triggers submission or decisions',
+    },
+    Callout: {
+      props: z.object({
+        title: z.string().optional(),
+        content: z.string(),
+        variant: z.enum(['info', 'tip', 'warn', 'error']).optional(),
+        icon: z.string().optional(),
+      }),
+      slots: [],
+      description: 'Highlighted note or warning box for key definitions and insights',
+    },
+    Tabs: {
+      props: z.object({
+        tabs: z.array(
+          z.object({
+            id: z.string(),
+            label: z.string(),
+            icon: z.string().optional(),
+          }),
+        ),
+        defaultTab: z.string().optional(),
+      }),
+      slots: ['default'],
+      description: 'Segmented switchable view for multi-angle concept explanation',
+    },
+    Steps: {
+      props: z.object({
+        items: z.array(
+          z.object({
+            title: z.string(),
+            description: z.string().optional(),
+            status: z.enum(['done', 'current', 'pending']).optional(),
+            icon: z.string().optional(),
+            badge: z.string().optional(),
+          }),
+        ),
+      }),
+      slots: [],
+      description: 'Vertical timeline or lifecycle flow for algorithms and execution steps',
+    },
+    Accordion: {
+      props: z.object({
+        items: z.array(
+          z.object({
+            title: z.string(),
+            content: z.string().optional(),
+            defaultOpen: z.boolean().optional(),
+            icon: z.string().optional(),
+            badge: z.string().optional(),
+          }),
+        ),
+      }),
+      slots: [],
+      description: 'Progressive disclosure collapsible list for FAQs and deep-dives',
+    },
+    BarList: {
+      props: z.object({
+        items: z.array(
+          z.object({
+            label: z.string(),
+            value: z.number(),
+            max: z.number().optional(),
+            displayValue: z.string().optional(),
+            color: z.enum(['blue', 'emerald', 'amber', 'rose', 'purple']).optional(),
+          }),
+        ),
+        title: z.string().optional(),
+      }),
+      slots: [],
+      description: 'Horizontal comparison or proportion bars for benchmarks and ratios',
     },
   },
   actions: {

@@ -10,6 +10,50 @@ const VALID_KINDS = new Set<TriggerKind>(['webhook', 'cron', 'once']);
 const isObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
+// Webhook 重放去重 + 频率限制（内存实现，Map 插入序即时间序，惰性淘汰防膨胀）
+const WEBHOOK_DEDUP_WINDOW_MS = 5 * 60 * 1000;
+const WEBHOOK_DEDUP_MAX_ENTRIES = 10_000;
+const WEBHOOK_MIN_INTERVAL_MS = 10_000;
+const WEBHOOK_RATE_LIMIT_MAX_TOKENS = 10_000;
+
+function createWebhookGuard() {
+  // key: `${triggerId}:${dedupHash}` -> 最近一次见到的时间
+  const dedupSeenAt = new Map<string, number>();
+  // triggerId -> 最近一次实际执行的时间
+  const lastFiredAt = new Map<string, number>();
+
+  const evictOldest = (map: Map<string, number>, max: number): void => {
+    if (map.size <= max) return;
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  };
+
+  return {
+    /** 短窗口内重复出现相同 (triggerId, dedupHash) 返回 true（应吞掉不执行） */
+    isDuplicate(triggerId: string, dedupHash: string, now: number): boolean {
+      const at = dedupSeenAt.get(`${triggerId}:${dedupHash}`);
+      return at !== undefined && now - at < WEBHOOK_DEDUP_WINDOW_MS;
+    },
+    /** 仅在通过频率检查、确定执行时才登记，避免被 429 拒绝的请求污染去重窗口 */
+    recordDedup(triggerId: string, dedupHash: string, now: number): void {
+      dedupSeenAt.set(`${triggerId}:${dedupHash}`, now);
+      evictOldest(dedupSeenAt, WEBHOOK_DEDUP_MAX_ENTRIES);
+    },
+    /** 同一 token 最小触发间隔；窗口内重复返回 false（应回 429） */
+    tryAcquire(triggerId: string, now: number): boolean {
+      const last = lastFiredAt.get(triggerId);
+      if (last !== undefined && now - last < WEBHOOK_MIN_INTERVAL_MS) return false;
+      lastFiredAt.set(triggerId, now);
+      evictOldest(lastFiredAt, WEBHOOK_RATE_LIMIT_MAX_TOKENS);
+      return true;
+    },
+    /** 所有者 PATCH 更新触发器时重置限流窗口（配置变更视为操作者明确意图） */
+    resetRateLimit(triggerId: string): void {
+      lastFiredAt.delete(triggerId);
+    },
+  };
+}
+
 export interface TriggerSchedulerHandle {
   stop: () => void;
 }
@@ -30,6 +74,7 @@ export function registerTriggerRoutes(
   };
 
   // --- 公共 Webhook 入口（鉴权靠 :token，在 index.ts 的认证中间件白名单中放行） ---
+  const webhookGuard = createWebhookGuard();
   app.post('/api/webhooks/:token', async (c) => {
     const token = c.req.param('token');
     const trigger = db.getTriggerByToken(token);
@@ -44,6 +89,23 @@ export function registerTriggerRoutes(
     }
 
     const raw = await c.req.text().catch(() => '');
+
+    // (a) 重放去重：可选 X-Botd-Dedup 头（约定为 sha256(body)），
+    // 短窗口内相同 (triggerId, dedupHash) 直接返回 200 但不唤醒机器人
+    const dedupHash = c.req.header('x-botd-dedup');
+    const now = Date.now();
+    if (dedupHash && webhookGuard.isDuplicate(trigger.id, dedupHash, now)) {
+      return c.json({ ok: true, deduplicated: true, triggerId: trigger.id, sessionId: trigger.sessionId });
+    }
+
+    // (b) 频率限制：同一 token 最小触发间隔，窗口内重复返回 429
+    if (!webhookGuard.tryAcquire(trigger.id, now)) {
+      return c.json({ error: 'Webhook rate limit exceeded, retry later' }, 429);
+    }
+    if (dedupHash) {
+      webhookGuard.recordDedup(trigger.id, dedupHash, now);
+    }
+
     let incomingText = raw.trim();
     // JSON body 优先取 message/text/payload 字段，其余整体作为 payload 附加
     try {
@@ -218,6 +280,8 @@ export function registerTriggerRoutes(
     if (!updated) {
       return c.json({ error: 'Trigger not found' }, 404);
     }
+    // 所有者显式更新触发器：重置该触发器的 webhook 限流窗口
+    webhookGuard.resetRateLimit(triggerId);
     return c.json(updated);
   });
 

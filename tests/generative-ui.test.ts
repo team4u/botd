@@ -24,21 +24,21 @@ import { SseHub } from '../apps/hub/src/sse.js';
 import type { BgJobManager } from '../apps/node/src/bg-jobs.js';
 
 // ---------------------------------------------------------------------------
-// 1. validateUiSpec: Valid Spec with all 10 components, $state, submit action
+// 1. validateUiSpec: Valid Spec with all 15 components, $state, submit action
 // ---------------------------------------------------------------------------
 
-test('validateUiSpec: 合法 Spec（包含 10 种组件、$state 绑定与 submit action）通过校验', () => {
+test('validateUiSpec: 合法 Spec（包含 15 种组件、$state 绑定与 submit action）通过校验', () => {
   const validFullSpec: BotdUiSpec = {
     root: 'stack_root',
     elements: {
       stack_root: {
         type: 'Stack',
         props: { direction: 'vertical', gap: 'md' },
-        children: ['card_1', 'grid_1', 'list_1', 'form_card'],
+        children: ['card_1', 'grid_1', 'list_1', 'form_card', 'explain_callout', 'tabs_section', 'steps_flow', 'faq_accordion', 'bar_comparison'],
       },
       card_1: {
         type: 'Card',
-        props: { title: 'Overview', subtitle: 'System Metrics', badge: 'PROD' },
+        props: { title: 'Overview', subtitle: 'System Metrics', badge: 'PROD', icon: 'server' },
         children: [],
       },
       grid_1: {
@@ -48,15 +48,15 @@ test('validateUiSpec: 合法 Spec（包含 10 种组件、$state 绑定与 submi
       },
       metric_cpu: {
         type: 'MetricCard',
-        props: { label: 'CPU Usage', value: '42%', status: 'ok', trend: 'up' },
+        props: { label: 'CPU Usage', value: '42%', status: 'ok', trend: 'up', icon: 'cpu' },
       },
       metric_mem: {
         type: 'MetricCard',
-        props: { label: 'Memory', value: '68%', status: 'warn', trend: 'flat' },
+        props: { label: 'Memory', value: '68%', status: 'warn', trend: 'flat', icon: 'hard-drive' },
       },
       metric_err: {
         type: 'MetricCard',
-        props: { label: 'Error Rate', value: '0.01%', status: 'ok', trend: 'down' },
+        props: { label: 'Error Rate', value: '0.01%', status: 'ok', trend: 'down', icon: 'activity' },
       },
       list_1: {
         type: 'KeyValueList',
@@ -64,6 +64,64 @@ test('validateUiSpec: 合法 Spec（包含 10 种组件、$state 绑定与 submi
           items: [
             { key: 'Host', value: 'srv-01.botd.io', mono: true, badge: 'active' },
             { key: 'Region', value: 'us-west-2' },
+          ],
+        },
+      },
+      explain_callout: {
+        type: 'Callout',
+        props: {
+          title: '核心原理',
+          content: '零拷贝通过避免上下文切换与 CPU 内存拷贝，大幅提高网络 I/O 效率。',
+          variant: 'tip',
+          icon: 'lightbulb',
+        },
+      },
+      tabs_section: {
+        type: 'Tabs',
+        props: {
+          tabs: [
+            { id: 'tab_concept', label: '通俗类比', icon: 'book-open' },
+            { id: 'tab_arch', label: '系统架构', icon: 'layers' },
+          ],
+          defaultTab: 'tab_concept',
+        },
+        children: ['tab_content_1', 'tab_content_2'],
+      },
+      tab_content_1: {
+        type: 'Card',
+        props: { title: '类比解释' },
+      },
+      tab_content_2: {
+        type: 'Card',
+        props: { title: '架构细节' },
+      },
+      steps_flow: {
+        type: 'Steps',
+        props: {
+          items: [
+            { title: '发起调用', description: '客户端组装参数并序列化', status: 'done', icon: 'send' },
+            { title: '路由派发', description: 'Hub 查找目标节点与在线连接', status: 'current', icon: 'workflow' },
+            { title: '节点执行', description: 'Node daemon 启动 Pi 会话', status: 'pending', icon: 'terminal' },
+          ],
+        },
+      },
+      faq_accordion: {
+        type: 'Accordion',
+        props: {
+          items: [
+            { title: '什么是 DMA 拷贝？', content: 'DMA 允许硬件直接与内存交互，无需 CPU 参与。', defaultOpen: true, icon: 'help-circle' },
+            { title: 'mmap 与 sendfile 区别？', content: 'sendfile 专为网络文件传输优化，适合高并发静态服务。' },
+          ],
+        },
+      },
+      bar_comparison: {
+        type: 'BarList',
+        props: {
+          title: '性能损耗对比 (越低越好)',
+          items: [
+            { label: '传统 I/O', value: 4, max: 4, displayValue: '4 次拷贝', color: 'rose' },
+            { label: 'mmap', value: 3, max: 4, displayValue: '3 次拷贝', color: 'amber' },
+            { label: 'sendfile (零拷贝)', value: 2, max: 4, displayValue: '2 次拷贝', color: 'emerald' },
           ],
         },
       },
@@ -132,7 +190,7 @@ test('validateUiSpec: 合法 Spec（包含 10 种组件、$state 绑定与 submi
     assert.equal(typeof result.normalizedJson, 'string');
     const parsed = JSON.parse(result.normalizedJson);
     assert.equal(parsed.root, 'stack_root');
-    assert.equal(Object.keys(parsed.elements).length, 14);
+    assert.equal(Object.keys(parsed.elements).length, 21);
   }
 
   // Also verify parsing from JSON string
@@ -559,8 +617,8 @@ test('botd ask CLI: 验证 --ui 与 --ui-schema 选项已注册，--ui-schema �
 // 6. BUILTIN_SKILL_MD: Documentation and version bump
 // ---------------------------------------------------------------------------
 
-test('BUILTIN_SKILL_MD: 版本升级为 6，包含 Generative UI 与 10 个组件说明', () => {
-  assert.ok(BUILTIN_SKILL_VERSION >= 6, 'BUILTIN_SKILL_VERSION must be at least 6');
+test('BUILTIN_SKILL_MD: 版本升级为 7，包含 Generative UI 与 15 个组件说明', () => {
+  assert.ok(BUILTIN_SKILL_VERSION >= 7, 'BUILTIN_SKILL_VERSION must be at least 7');
   assert.ok(BUILTIN_SKILL_MD.includes('Generative UI'), 'BUILTIN_SKILL_MD must include Generative UI section');
   assert.ok(BUILTIN_SKILL_MD.includes('--ui'), 'BUILTIN_SKILL_MD must mention botd ask --ui');
   assert.ok(BUILTIN_SKILL_MD.includes('botd ask --ui-schema'), 'BUILTIN_SKILL_MD must mention --ui-schema');

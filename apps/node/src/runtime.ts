@@ -1,7 +1,8 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { ToolDefinition, AgentSession } from '@earendil-works/pi-coding-agent';
 import type { BirpcReturn } from 'birpc';
@@ -53,9 +54,19 @@ const runKeyToDataDir = new Map<string, string>();
 
 let tsxLoaderUrl: string | undefined;
 try {
-  tsxLoaderUrl = import.meta.resolve('tsx');
+  if (typeof import.meta.resolve === 'function') {
+    tsxLoaderUrl = import.meta.resolve('tsx');
+  }
 } catch {
   // Ignore fallback if resolve is unavailable
+}
+if (!tsxLoaderUrl) {
+  try {
+    const req = createRequire(import.meta.url);
+    tsxLoaderUrl = pathToFileURL(req.resolve('tsx')).href;
+  } catch {
+    // Ignore fallback if resolve is unavailable
+  }
 }
 
 export function getTsxLoaderUrl(): string | undefined {

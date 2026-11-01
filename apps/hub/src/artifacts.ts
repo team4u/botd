@@ -4,7 +4,36 @@ import {
   ArtifactError,
   type ArtifactHttpStatus,
   type ArtifactService,
+  MAX_ARTIFACT_BYTES,
+  artifactTooLargeMessage,
 } from './artifact-service.js';
+
+// base64 膨胀余量（×4/3）+ 少量 JSON 包装开销
+const MAX_ARTIFACT_REQUEST_BYTES = Math.ceil(MAX_ARTIFACT_BYTES * 4 / 3) + 4096;
+
+// 流式读取请求体：累计字节数，越限立即中断（适用于无 Content-Length 的 chunked 请求）
+async function readBodyWithLimit(
+  stream: ReadableStream<Uint8Array>,
+  limit: number
+): Promise<Buffer> {
+  const reader = stream.getReader();
+  const chunks: Buffer[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      received += value.byteLength;
+      if (received > limit) {
+        await reader.cancel().catch(() => {});
+        throw new ArtifactError(artifactTooLargeMessage(), 413);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  }
+  reader.releaseLock();
+  return Buffer.concat(chunks);
+}
 
 export function registerArtifactRoutes(
   app: Hono<{ Variables: { user: UserRecord } }>,
@@ -53,7 +82,20 @@ export function registerArtifactRoutes(
       }
 
       try {
-        const raw = Buffer.from(await c.req.arrayBuffer());
+        // 先看 Content-Length：超限直接拒绝，不做无界内存缓冲
+        const contentLengthHeader = c.req.header('content-length');
+        if (contentLengthHeader !== undefined && contentLengthHeader !== '') {
+          const contentLength = Number(contentLengthHeader);
+          if (!Number.isFinite(contentLength)) {
+            return c.json({ error: 'Invalid Content-Length header' }, 400);
+          }
+          if (contentLength > MAX_ARTIFACT_REQUEST_BYTES) {
+            return c.json({ error: artifactTooLargeMessage() }, 413);
+          }
+        }
+        const raw = c.req.raw.body instanceof ReadableStream
+          ? await readBodyWithLimit(c.req.raw.body, MAX_ARTIFACT_REQUEST_BYTES)
+          : Buffer.from(await c.req.arrayBuffer());
         const artifact = artifactService.uploadArtifactBuffer(
           { type: 'user', userId: user.id },
           {

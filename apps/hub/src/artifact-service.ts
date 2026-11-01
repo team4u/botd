@@ -8,6 +8,21 @@ import type { SseHub } from './sse.js';
 
 export const MAX_ARTIFACT_BYTES = 15 * 1024 * 1024;
 
+export function artifactTooLargeMessage(): string {
+  return `Artifact too large (max ${Math.floor(MAX_ARTIFACT_BYTES / 1024 / 1024)}MB)`;
+}
+
+// 净化上传文件名：禁止任何路径成分（Unix / Windows 分隔符、".."、NUL），
+// 防止恶意 artifact 在 CLI pull 下载时于 cwd 外任意写文件
+function sanitizeUploadFilename(raw: string): string | null {
+  const filename = raw.trim();
+  if (!filename || filename === '.') return null;
+  if (filename.includes('/') || filename.includes('\\') || filename.includes('..') || filename.includes('\0')) {
+    return null;
+  }
+  return path.posix.basename(filename) === filename ? filename : null;
+}
+
 function getArtifactsDir(): string {
   return path.join(process.env.BOTD_HUB_DATA_DIR || path.join(os.homedir(), '.botd'), 'artifacts');
 }
@@ -106,6 +121,10 @@ export class ArtifactService {
     if (typeof input.filename !== 'string' || !input.filename.trim()) {
       throw new ArtifactError('Invalid artifact upload: filename is required', 400);
     }
+    const filename = sanitizeUploadFilename(input.filename);
+    if (!filename) {
+      throw new ArtifactError('Invalid artifact upload: filename must not contain path separators or ".."', 400);
+    }
     if (!input.content || !(Buffer.isBuffer(input.content) || input.content instanceof Uint8Array)) {
       throw new ArtifactError('Invalid artifact upload: content is required', 400);
     }
@@ -118,7 +137,7 @@ export class ArtifactService {
       throw new ArtifactError('Artifact content is empty', 400);
     }
     if (buffer.length > MAX_ARTIFACT_BYTES) {
-      throw new ArtifactError(`Artifact too large (max ${Math.floor(MAX_ARTIFACT_BYTES / 1024 / 1024)}MB)`, 413);
+      throw new ArtifactError(artifactTooLargeMessage(), 413);
     }
 
     const artifactId = `art_${randomUUID()}`;
@@ -133,7 +152,7 @@ export class ArtifactService {
       artifact = this.db.createArtifact({
         id: artifactId,
         sessionId: input.sessionId,
-        filename: input.filename.trim(),
+        filename,
         mimeType,
         sizeBytes: buffer.length,
         ...(botId ? { senderBotId: botId } : {}),

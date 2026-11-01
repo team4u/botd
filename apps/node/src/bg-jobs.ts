@@ -8,6 +8,46 @@ import { buildBotShellEnv, ensureBotdBinWrapper } from './runtime.js';
 import { isWindows, resolveWindowsBash } from './windows-shell.js';
 import { isSafePid, terminateProcessTree, type TerminateTreeOptions } from './process-tree.js';
 
+/** Maximum bytes read from the tail of a log file. GB-scale logs must never
+ *  be fully loaded into memory; we open the file and read the last 64KB. */
+const MAX_LOG_TAIL_BYTES = 64 * 1024;
+
+/** Reads the last `tailLines` lines of a log file without loading the whole
+ *  file into memory: opens the file, reads at most the trailing 64KB, then
+ *  slices lines. Files smaller than 64KB are read whole. */
+export async function readLogTail(
+  logPath: string,
+  tailLines: number,
+): Promise<string> {
+  if (tailLines <= 0) return '';
+  let handle: fs.FileHandle | null = null;
+  try {
+    handle = await fs.open(logPath, 'r');
+    const { size } = await handle.stat();
+    const readLen = size > MAX_LOG_TAIL_BYTES ? MAX_LOG_TAIL_BYTES : size;
+    const readStart = size - readLen;
+    const buffer = Buffer.alloc(readLen);
+    await handle.read(buffer, 0, readLen, readStart);
+    const content = buffer.toString('utf8');
+    const lines = content.split(/\r?\n/);
+    // When we sliced into the middle of the file, drop the partial first line.
+    const firstPartial = readStart > 0 && lines.length > 0;
+    const effective = firstPartial ? lines.slice(1) : lines;
+    if (effective.length > tailLines) {
+      return effective.slice(-tailLines).join('\n');
+    }
+    return effective.join('\n');
+  } catch {
+    return '';
+  } finally {
+    if (handle) {
+      try {
+        await handle.close();
+      } catch {}
+    }
+  }
+}
+
 export interface BgJobWakeInput {
   sessionId: string;
   botId: string;
@@ -31,8 +71,15 @@ interface JobEntry {
   writeChain: Promise<unknown>;
   killRequested: boolean;
   settled: boolean;
+  /** Termination attempts that ended in a confirm error (process possibly still alive). */
+  terminateFailures: number;
   terminationPromise?: Promise<BgJobRecord>;
 }
+
+/** After this many failed termination confirmations the job is marked as
+ *  failed instead of staying "running" forever (e.g. EPERM-protected trees
+ *  we can neither signal nor inspect). */
+const MAX_TERMINATE_FAILURES = 3;
 
 /** Managed background jobs (UNIX jobs/nohup philosophy): spawn a command in
  *  the bot workspace, tee its output to <workspace>/.bg/<jobId>.log, and wake
@@ -80,8 +127,22 @@ export class BgJobManager {
 
       try {
         await terminateProcessTree(entry.child, entry.record.pid, this.terminateOptions);
-      } catch (err) {
-        // Termination confirmation failed: processes still alive after force timeout!
+      } catch (err: any) {
+        // Termination confirmation failed: processes (possibly) still alive.
+        entry.terminateFailures += 1;
+        if (entry.terminateFailures >= MAX_TERMINATE_FAILURES) {
+          // Repeatedly unable to confirm termination (e.g. EPERM-protected
+          // sudo tree). Stop the infinite retry loop: record a terminal error
+          // state with the reason so the job no longer reports "running".
+          entry.record.status = 'failed';
+          entry.record.finishedAt = new Date().toISOString();
+          entry.settled = true;
+          await this.cleanupEntryResources(entry);
+          entry.terminationPromise = undefined;
+          throw new Error(
+            `Failed to terminate process tree for job ${entry.record.id} after ${entry.terminateFailures} attempts: ${err?.message || String(err)}`,
+          );
+        }
         // Clear cached promise to allow subsequent retries.
         // Do NOT set record.status = 'killed'.
         entry.terminationPromise = undefined;
@@ -153,6 +214,7 @@ export class BgJobManager {
       writeChain: Promise.resolve(),
       killRequested: false,
       settled: false,
+      terminateFailures: 0,
     };
 
     this.jobs.set(jobId, entry);
@@ -264,10 +326,8 @@ export class BgJobManager {
 
       let tail = '';
       try {
-        const content = await fs.readFile(logPath, 'utf8');
-        tail = content.length > 2000 ? content.slice(-2000) : content;
-        const lines = tail.split(/\r?\n/).filter((line) => line.length > 0);
-        tail = lines.slice(-20).join('\n');
+        const lastLines = await readLogTail(logPath, 20);
+        tail = lastLines.split(/\r?\n/).filter((line) => line.length > 0).slice(-20).join('\n');
       } catch {
         tail = '';
       }
@@ -304,12 +364,8 @@ export class BgJobManager {
     const entry = this.jobs.get(jobId);
     if (!entry) throw new Error(`Background job "${jobId}" not found`);
     await entry.writeChain.catch(() => {});
-    const content = await fs.readFile(entry.record.logPath, 'utf8').catch(() => '');
-    const lines = content.split(/\r?\n/);
-    if (lines.length > tailLines) {
-      return { job: entry.record, logs: lines.slice(-tailLines).join('\n') };
-    }
-    return { job: entry.record, logs: lines.join('\n') };
+    const logs = await readLogTail(entry.record.logPath, tailLines);
+    return { job: entry.record, logs };
   }
 
   async killJob(jobId: string): Promise<BgJobRecord> {

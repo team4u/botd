@@ -1,15 +1,20 @@
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { timingSafeEqual } from 'node:crypto';
 import type { BirpcReturn } from 'birpc';
 import { validateUiSpec, type HubRpcFunctions, type NodeRpcFunctions, type AskPreviewType } from '@botd/protocol';
-import { assertSafeId, ensureDir } from './storage.js';
+import { assertSafeId, ensureDir, getIpcTokenFilePath } from './storage.js';
 import type { BgJobManager } from './bg-jobs.js';
-import { getNodeVersion, checkNodeUpgrade, performNodeUpgrade } from './upgrader.js';
+import { getNodeVersion, checkNodeUpgrade, performNodeUpgrade, UpgradeRejectedError } from './upgrader.js';
 
 export const MAX_WAKE_BODY_BYTES = 64 * 1024;
 export const MAX_ARTIFACT_BODY_BYTES = 15 * 1024 * 1024;
 export const MAX_ASK_BODY_BYTES = 512 * 1024;
+
+/** HTTP header carrying the local IPC auth token (the CLI reads the same
+ *  token from <dataDir>/ipc-token). Contract fixed with the CLI side. */
+export const IPC_TOKEN_HEADER = 'x-botd-ipc-token';
 
 export interface LocalIpcDeps {
   identity: {
@@ -26,11 +31,29 @@ export interface LocalIpcDeps {
   bgManager: BgJobManager;
   syncRegistrationWithHub: () => Promise<void>;
   handleShutdown: () => void | Promise<void>;
+  /** Local IPC auth token; read once at daemon startup (not hot-reloaded).
+   *  When omitted, the server reads <dataDir>/ipc-token lazily on first
+   *  request and caches it. When resolved to null (no token file exists),
+   *  requests are still allowed: the transport (0600 Unix socket / per-user
+   *  named pipe) remains machine-local and same-user. */
+  ipcToken?: string | null;
 }
 
 export function sendJson(res: http.ServerResponse, statusCode: number, payload: unknown): void {
   res.writeHead(statusCode, { 'content-type': 'application/json' });
   res.end(JSON.stringify(payload));
+}
+
+/** Constant-time comparison of the presented token against the daemon's
+ *  token. Length mismatch fails fast (timingSafeEqual requires equal-length
+ *  buffers). */
+export function isValidIpcToken(presented: string | undefined, expected: string | null): boolean {
+  if (!expected) return false;
+  if (typeof presented !== 'string' || presented.length === 0) return false;
+  const a = Buffer.from(presented, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 export function parseJsonBody<T = any>(
@@ -81,10 +104,34 @@ export function requireHubRpc(deps: LocalIpcDeps): BirpcReturn<HubRpcFunctions, 
 }
 
 export function createLocalIpcServer(deps: LocalIpcDeps): http.Server {
+  // Token is read once (startup or first request) and cached; the token file
+  // is NOT hot-reloaded.
+  let cachedToken: string | null | undefined = deps.ipcToken;
+
+  const resolveToken = async (): Promise<string | null> => {
+    if (cachedToken !== undefined) return cachedToken;
+    try {
+      const raw = await fs.readFile(getIpcTokenFilePath(deps.dataDir), 'utf8');
+      cachedToken = raw.trim() || null;
+    } catch {
+      cachedToken = null;
+    }
+    return cachedToken;
+  };
+
   return http.createServer(async (req, res) => {
     try {
       const method = req.method;
       const reqUrl = req.url || '/';
+
+      // Local IPC auth: when a token exists, every request must present it in
+      // the x-botd-ipc-token header (constant-time compare), else 401.
+      const expectedToken = await resolveToken();
+      if (expectedToken && !isValidIpcToken(req.headers[IPC_TOKEN_HEADER] as string | undefined, expectedToken)) {
+        req.resume();
+        sendJson(res, 401, { error: 'unauthorized' });
+        return;
+      }
 
       if (method === 'GET' && reqUrl === '/status') {
         req.resume();
@@ -137,7 +184,10 @@ export function createLocalIpcServer(deps: LocalIpcDeps): http.Server {
           });
           sendJson(res, 200, result);
         } catch (err: any) {
-          sendJson(res, 500, { error: err?.message || String(err) });
+          // Rejected requests (downgrade/blocked) are client errors (400),
+          // everything else is an upgrade failure (500).
+          const statusCode = err instanceof UpgradeRejectedError ? 400 : 500;
+          sendJson(res, statusCode, { error: err?.message || String(err) });
         }
         return;
       }
@@ -151,7 +201,15 @@ export function createLocalIpcServer(deps: LocalIpcDeps): http.Server {
 
       if (method === 'POST' && reqUrl === '/reload') {
         req.resume();
-        await deps.syncRegistrationWithHub();
+        try {
+          await deps.syncRegistrationWithHub();
+        } catch (err: any) {
+          // Contract with the CLI: hub not connected -> 503 with the reason.
+          const message = err?.message || String(err);
+          const statusCode = message.includes('hub not connected') || message.includes('Hub connection') ? 503 : 500;
+          sendJson(res, statusCode, { error: message });
+          return;
+        }
         sendJson(res, 200, { ok: true });
         return;
       }
