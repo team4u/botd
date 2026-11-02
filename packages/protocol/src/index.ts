@@ -139,6 +139,8 @@ export interface TriggerRecord {
   kind: TriggerKind;
   /** For webhook triggers: secret token used in POST /api/webhooks/:token */
   token?: string;
+  /** For webhook triggers: optional HMAC-SHA256 secret; when set, requests must carry a matching x-hub-signature-256 / x-botd-signature header */
+  secret?: string;
   /** Standard 5-field cron expression (server local time), required for kind='cron' */
   cronExpr?: string;
   /** ISO timestamp when a one-shot trigger (kind='once') should fire */
@@ -159,6 +161,8 @@ export interface CreateTriggerInput {
   name: string;
   botId: string;
   kind: TriggerKind;
+  /** HMAC secret for webhook signature verification (kind='webhook') */
+  secret?: string;
   cronExpr?: string;
   /** ISO timestamp or delaySeconds for kind='once' */
   runAt?: string;

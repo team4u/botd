@@ -6,8 +6,12 @@
  *  4. 载荷文件化：event_<id>.json 落盘为 Artifact，子会话可读取
  *  5. GET /api/sessions/:id/events：事件列表与所有权校验
  *  6. 向后兼容：append 模式行为与响应体保持不变
+ *  7. subsession 交付物闭环：子会话新产物完成时零拷贝回传父会话
+ *  8. Webhook HMAC 签名校验：配置 secret 后缺失/错误签名 401，正确签名放行
+ *  9. markSessionParentNotified 幂等防重：父子会话完成回调绝不重复发送
  */
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -92,6 +96,7 @@ function createWebhookTrigger(
     enabled: true,
     ...(extra?.dispatchMode ? { dispatchMode: extra.dispatchMode } : {}),
     ...(extra?.skillId ? { skillId: extra.skillId } : {}),
+    ...(extra?.secret ? { secret: extra.secret } : {}),
     ...(extra?.eventFilter ? { eventFilter: extra.eventFilter } : {}),
   });
   return trigger as TriggerRecord & { token: string };
@@ -444,14 +449,19 @@ test('dispatchMode=subsession：Webhook 触发自动派生子会话、父会话�
   });
 
   // 子会话消息：初始 user 消息 + assistant 回复
+  // 不可信载荷隔离：初始消息不拼接完整 payload，只引用 inbox/event_<id>.json
+  const events = hub.db.listSessionAutomationEvents('sess_sub');
   const childMsgs = hub.db.getMessages(childSessionId);
   assert.equal(childMsgs[0].role, 'user');
-  assert.match(childMsgs[0].content, /\[Webhook: nightly report\] process event/);
-  assert.match(childMsgs[0].content, /build finished/);
+  assert.match(
+    childMsgs[0].content,
+    new RegExp(`^\\[Webhook: nightly report\\] 收到事件 ${events[0].id} \\(webhook: webhook\\.received\\)，原始载荷已存入工作区 \\.\\/inbox\\/event_${events[0].id}\\.json`)
+  );
+  assert.match(childMsgs[0].content, /\n\nprocess event/, '元数据头之后拼接触发器 prompt');
+  assert.doesNotMatch(childMsgs[0].content, /build finished/, '不可信 payload 不得拼入初始消息');
   assert.ok(childMsgs.some((m) => m.role === 'assistant' && m.content.includes('报告已生成')));
 
   // 事件记录包含 childSessionId 与载荷 Artifact
-  const events = hub.db.listSessionAutomationEvents('sess_sub');
   assert.equal(events.length, 1);
   assert.equal(events[0].childSessionId, childSessionId);
   assert.ok(events[0].payloadArtifactId, '载荷应落盘为 Artifact');
@@ -812,4 +822,226 @@ test('db 层：automation_events 唯一索引拦截同 (trigger_id, dedup_key) �
   // 删除 trigger 级联清理事件
   db.deleteTrigger('trg_x');
   assert.equal(db.listSessionAutomationEvents('sess_x').length, 1, '删除 trigger 级联删除其事件');
+});
+
+// ---------------------------------------------------------------------------
+// 7. 子会话新产物自动回传父会话（对齐 delegation.ts 交付物闭环）
+// ---------------------------------------------------------------------------
+
+test('dispatchMode=subsession：子会话执行期间新上传的 Artifact 完成时自动零拷贝回传父会话', async (t) => {
+  const { hub, admin } = await setupHub(t);
+  createSessionFixture(hub, admin.id, 'sess_return', 'bot_return');
+
+  // mock 节点 RPC：子会话回合内新产出一个交付物（模拟 botd artifact put 路径）
+  hub.connections.getNodeRpc = () =>
+    ({
+      runTurn: async (input: any) => {
+        hub.db.createArtifact({
+          id: 'art_child_new_output',
+          sessionId: input.sessionId,
+          filename: 'analysis_report.md',
+          mimeType: 'text/markdown',
+          sizeBytes: 512,
+          senderBotId: 'bot_return',
+          storagePath: '/tmp/botd-test-child-output.md',
+        });
+        return { replyText: '报告已生成', modelBadge: 'test' };
+      },
+      cancelTurn: async () => {},
+      resetSession: async () => {},
+    }) as any;
+
+  const trigger = createWebhookTrigger(hub, admin.id, 'sess_return', 'bot_return', {
+    dispatchMode: 'subsession',
+    name: 'report task',
+  });
+
+  const fire = await fireWebhook(hub, trigger.token, { message: 'run report' }, { 'x-botd-dedup': 'return-1' });
+  assert.equal(fire.status, 200);
+  const { childSessionId, eventId } = await fire.json();
+
+  // 等待父会话收到完成 callback（含 📦 产出交付物清单）
+  await waitFor(() => {
+    const msgs = hub.db.getMessages('sess_return');
+    return msgs.some((m) => m.role === 'callback' && m.content.includes('📦 产出交付物'));
+  });
+
+  const parentMsgs = hub.db.getMessages('sess_return');
+  const completionMsg = parentMsgs.find(
+    (m) => m.role === 'callback' && m.content.includes('✅ 子会话') && m.content.includes('📦 产出交付物')
+  );
+  assert.ok(completionMsg, '父会话完成 callback 必须存在');
+  assert.ok(completionMsg.content.includes('analysis_report.md'), 'callback 消息列出交付物');
+
+  // callback 消息带 attachments
+  assert.ok(completionMsg.attachments, '完成 callback 消息必须带 attachments');
+  assert.equal(completionMsg.attachments!.length, 1);
+  const att = completionMsg.attachments![0];
+  assert.equal(att.filename, 'analysis_report.md');
+  assert.notEqual(att.id, 'art_child_new_output', '回传产物应为父会话中的新引用记录');
+
+  // 父会话产物栏可见回传产物，且为同 storagePath 零拷贝引用
+  const parentArt = hub.db.getArtifactWithStoragePath(att.id)!;
+  assert.equal(parentArt.sessionId, 'sess_return');
+  const childArt = hub.db.getArtifactWithStoragePath('art_child_new_output')!;
+  assert.equal(parentArt.storagePath, childArt.storagePath, '回传必须是同 storagePath 零拷贝引用');
+
+  // 启动时挂载的事件载荷 event_<eventId>.json 不应被回传为父会话新产物
+  const parentArtifacts = hub.db.listSessionArtifacts('sess_return');
+  assert.ok(!parentArtifacts.some((a) => a.filename === `event_${eventId}.json`), '事件载荷不回传');
+});
+
+// ---------------------------------------------------------------------------
+// 8. Webhook HMAC 签名校验（secret）
+// ---------------------------------------------------------------------------
+
+test('webhook secret：正确 X-Hub-Signature-256 放行，错误或缺失签名返回 401', async (t) => {
+  const { hub, admin } = await setupHub(t);
+  createSessionFixture(hub, admin.id, 'sess_hmac', 'bot_hmac');
+
+  hub.connections.getNodeRpc = () =>
+    ({
+      runTurn: async () => ({ replyText: 'ok', modelBadge: 'test' }),
+      cancelTurn: async () => {},
+      resetSession: async () => {},
+    }) as any;
+
+  const secret = 'top-secret-hmac-key';
+  const trigger = hub.db.createTrigger({
+    id: 'trg_hmac_test',
+    sessionId: 'sess_hmac',
+    ownerId: admin.id,
+    name: 'signed hook',
+    botId: 'bot_hmac',
+    kind: 'webhook',
+    token: 'h'.repeat(36),
+    secret,
+    prompt: 'process',
+    enabled: true,
+  });
+  assert.equal(trigger.secret, secret, 'createTrigger 支持读写 secret');
+  assert.equal(hub.db.getTrigger(trigger.id)!.secret, secret, 'getTrigger 回读 secret');
+
+  const body = JSON.stringify({ message: 'signed ping' });
+  const sign = (raw: string) => 'sha256=' + createHmac('sha256', secret).update(raw, 'utf8').digest('hex');
+
+  // 缺失签名头：401
+  const missing = await fireWebhook(hub, trigger.token!, body, { 'x-botd-dedup': 'hmac-1' });
+  assert.equal(missing.status, 401);
+  assert.deepEqual(await missing.json(), { error: 'Invalid webhook signature' });
+
+  // 错误签名：401
+  const wrong = await fireWebhook(hub, trigger.token!, body, {
+    'x-hub-signature-256': 'sha256=' + '0'.repeat(64),
+    'x-botd-dedup': 'hmac-2',
+  });
+  assert.equal(wrong.status, 401);
+
+  // 签名与 body 不匹配：401
+  const otherBodySig = await fireWebhook(hub, trigger.token!, body, {
+    'x-hub-signature-256': sign(JSON.stringify({ message: 'other' })),
+    'x-botd-dedup': 'hmac-3',
+  });
+  assert.equal(otherBodySig.status, 401);
+
+  // 被拒请求不产生事件
+  assert.equal(hub.db.listSessionAutomationEvents('sess_hmac').length, 0);
+
+  // 正确签名（x-hub-signature-256）：放行
+  const ok = await fireWebhook(hub, trigger.token!, body, {
+    'x-hub-signature-256': sign(body),
+    'x-botd-dedup': 'hmac-4',
+  });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).ok, true);
+  assert.equal(hub.db.listSessionAutomationEvents('sess_hmac').length, 1);
+  await waitFor(() => hub.db.getMessages('sess_hmac').some((m) => m.role === 'assistant'));
+
+  // PATCH 更新 secret 后旧签名失效
+  await hub.app.request(`/api/triggers/${trigger.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', cookie: await loginCookie(hub) },
+    body: JSON.stringify({ secret: 'rotated-key' }),
+  });
+  const rotated = await fireWebhook(hub, trigger.token!, body, {
+    'x-hub-signature-256': sign(body),
+    'x-botd-dedup': 'hmac-5',
+  });
+  assert.equal(rotated.status, 401, '旧 secret 签名应被拒绝');
+});
+
+test('webhook secret：x-botd-signature 头亦可作为签名来源；未配置 secret 的触发器不需签名', async (t) => {
+  const { hub, admin } = await setupHub(t);
+  createSessionFixture(hub, admin.id, 'sess_hmac2', 'bot_hmac2');
+
+  hub.connections.getNodeRpc = () =>
+    ({
+      runTurn: async () => ({ replyText: 'ok', modelBadge: 'test' }),
+      cancelTurn: async () => {},
+      resetSession: async () => {},
+    }) as any;
+
+  const secret = 'botd-sig-key';
+  const signed = hub.db.createTrigger({
+    id: 'trg_hmac_botd_sig',
+    sessionId: 'sess_hmac2',
+    ownerId: admin.id,
+    name: 'botd sig hook',
+    botId: 'bot_hmac2',
+    kind: 'webhook',
+    token: 's'.repeat(36),
+    secret,
+    prompt: 'process',
+    enabled: true,
+  });
+  const body = JSON.stringify({ message: 'alt header' });
+  const sig = 'sha256=' + createHmac('sha256', secret).update(body, 'utf8').digest('hex');
+  const okRes = await fireWebhook(hub, signed.token!, body, {
+    'x-botd-signature': sig,
+    'x-botd-dedup': 'hmac2-1',
+  });
+  assert.equal(okRes.status, 200, 'x-botd-signature 头可替代 x-hub-signature-256');
+  await waitFor(() => hub.db.getMessages('sess_hmac2').some((m) => m.role === 'assistant'));
+
+  // 未配置 secret：无签名头直接放行
+  const unsigned = createWebhookTrigger(hub, admin.id, 'sess_hmac2', 'bot_hmac2', { name: 'unsigned hook' });
+  const plain = await fireWebhook(hub, unsigned.token, { message: 'no sig needed' }, { 'x-botd-dedup': 'hmac2-2' });
+  assert.equal(plain.status, 200);
+  await waitFor(() => hub.db.getMessages('sess_hmac2').filter((m) => m.role === 'assistant').length >= 2);
+});
+
+// ---------------------------------------------------------------------------
+// 9. 父子会话完成回调幂等防重
+// ---------------------------------------------------------------------------
+
+test('markSessionParentNotified 幂等防重：首次返回 true，重复调用返回 false', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'botd-notified-db-'));
+  const db = new HubDatabase({ dbPath: path.join(dir, 'hub.sqlite') });
+  t.after(async () => {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  db.createSession({
+    id: 'sess_notify',
+    title: 'notify test',
+    mode: 'direct',
+    leadBotId: 'bot_x',
+    memberBotIds: ['bot_x'],
+    ownerId: 'user_admin',
+  });
+
+  assert.equal(db.markSessionParentNotified('sess_notify'), true, '首次标记返回 true');
+  assert.equal(db.markSessionParentNotified('sess_notify'), false, '重复标记返回 false');
+  assert.equal(db.markSessionParentNotified('sess_notify'), false, '多次重复仍返回 false');
+
+  // 不存在的会话返回 false（不产生副作用）
+  assert.equal(db.markSessionParentNotified('sess_ghost'), false);
+
+  // 跨重启（同一 dbPath 新实例）依然幂等
+  const dbPath = db.dbPath;
+  db.close();
+  const reopened = new HubDatabase({ dbPath });
+  t.after(() => reopened.close());
+  assert.equal(reopened.markSessionParentNotified('sess_notify'), false, '重启后标记状态持久生效');
 });

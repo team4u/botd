@@ -49,6 +49,7 @@ export function registerTriggersCommands(program: Command): void {
         .default('append'),
     )
     .option('--skill <skillId>', 'Skill ID to invoke via /skill:<id> prefix when the trigger fires')
+    .option('--secret <secret>', 'HMAC secret for webhook signature verification (X-Hub-Signature-256)')
     .option('--event-types <csv>', 'Comma-separated webhook event types to accept (e.g. pull_request.opened,push)', '')
     .action(
       (sessionId: string, options: Record<string, unknown>, command: Command) =>
@@ -106,6 +107,14 @@ export function registerTriggersCommands(program: Command): void {
           const skill = typeof options.skill === 'string' ? options.skill.trim() : '';
           if (skill) {
             body.skillId = skill;
+          }
+
+          const secret = typeof options.secret === 'string' ? options.secret.trim() : '';
+          if (secret) {
+            if (kind !== 'webhook') {
+              throw new Error('--secret is only valid for --kind webhook');
+            }
+            body.secret = secret;
           }
 
           const eventTypesCsv =
