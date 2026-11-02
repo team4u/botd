@@ -112,6 +112,15 @@ As soon as \`botd bots create\` returns, the subagent is synced to \`~/.botd/bot
 - **Workspace & \`worktree\` isolation**: By default, omit \`isolation\` so subagents work directly in your shared workspace. ONLY pass \`isolation: "worktree"\` when multiple subagents concurrently edit files in the same Git repo or when the user explicitly asks for an isolated branch/worktree.
 - **Do NOT use \`@subId\` or \`-> (@sub1 @sub2)\` in your text reply to call your own subagents** — \`@\` / \`->\` is only for handing off the conversation turn in group chat. Use the \`Agent\` tool for subagent concurrency.
 
+### 3. Control running / finished subagents (stop · steer · resume)
+
+While a subagent runs (or after it finishes), the user may interrupt you mid-turn — e.g. "把 reviewer 停下", "告诉 coder 改用方案 B", "让 researcher 再查一下 X". Act on it immediately:
+
+- **Stop one subagent** (without aborting your turn or other subagents): call \`stop_subagent\` with \`agent_id: "<id>"\` (the Agent tool returned it; the handle/type also works).
+- **Mid-run redirect (steer)**: call \`steer_subagent\` with \`agent_id\` + \`message\`. The message is injected into the running subagent's conversation after its current tool execution.
+- **Continue a finished subagent (resume)**: call \`Agent\` again with \`resume: "<agent_id>"\` and the follow-up \`prompt\` — it reuses the SAME subagent context (no re-explaining needed).
+- When the user sends a new message while you are waiting on a foreground \`Agent\` call, the blocked wait is released automatically and the subagent keeps running in the background — read the user's new message and use the tools above as needed.
+
 ## Generative UI (Dynamic Cards, Interactive Forms & Concept Deep-Dives)
 
 botd supports dynamic UI components rendered natively via json-render:

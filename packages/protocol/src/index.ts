@@ -261,6 +261,12 @@ export type SubagentColor = 'blue' | 'purple' | 'red' | 'emerald' | 'amber' | 'c
 export type SubagentToolScope = 'all' | 'readonly' | 'custom';
 export type SubagentIsolation = 'off' | 'worktree';
 
+export interface SubagentSteerRecord {
+  message: string;
+  timestamp: string;
+  mode?: 'steer' | 'resume';
+}
+
 export interface SubagentRunRecord {
   id: string;
   subagentId: string;
@@ -268,13 +274,17 @@ export interface SubagentRunRecord {
   color?: SubagentColor;
   task: string;
   phase?: string;
-  status: 'running' | 'done' | 'error' | 'skipped';
+  status: 'running' | 'done' | 'error' | 'stopped' | 'skipped';
   toolCount?: number;
   currentTool?: string;
   durationMs?: number;
   replyPreview?: string;
-  /** 对应的分身独立会话 ID（点击可直接跳转到该分身会话查看完整实时记录） */
-  childSessionId?: string;
+  /** 分身完整回复或错误输出（不截断，供详情抽屉查看） */
+  replyFull?: string;
+  /** 分身执行过程中的工具调用记录列表 */
+  toolCalls?: ToolCallRecord[];
+  /** 运行过程中收到的 steer / resume 追加指令历史 */
+  steers?: SubagentSteerRecord[];
 }
 
 export interface QueueStageSummary {
@@ -551,11 +561,14 @@ export interface HubRpcFunctions {
       id: string;
       subagentId: string;
       task: string;
-      status: 'running' | 'done' | 'error';
+      status: 'running' | 'done' | 'error' | 'stopped';
       result?: string;
       error?: string;
       durationMs?: number;
       toolUses?: number;
+      currentTool?: string;
+      toolCalls?: ToolCallRecord[];
+      steers?: SubagentSteerRecord[];
     };
   }): void;
   requestWakeupTurn(input: {
@@ -641,6 +654,19 @@ export interface NodeRpcFunctions {
     aborted?: boolean;
   }>;
   cancelTurn(sessionId: string, botId: string): Promise<void>;
+  /** 当主会话正在运行（特别是等待分身执行）时，注入用户新消息并将正在阻塞等待的分身切为后台，让主 Bot 立即接管响应 */
+  steerBotTurn?(sessionId: string, botId: string, message: string): Promise<{ accepted: boolean }>;
+  /** 单独停止某一个正在运行的子代理（按 runId） */
+  stopSubagent?(sessionId: string, botId: string, runId: string): Promise<{ ok: boolean; error?: string }>;
+  /** 直接向某个子代理发送 steer（运行中插话）或 resume（结束后继续追问） */
+  interactSubagent?(input: {
+    sessionId: string;
+    botId: string;
+    runId: string;
+    subagentId?: string;
+    message: string;
+    mode: 'steer' | 'resume';
+  }): Promise<{ ok: boolean; run?: SubagentRunRecord; error?: string }>;
   /** 删除该 BOT 在指定会话的本地 Pi 会话文件（.jsonl），下一回合将从 Hub 历史全量重建上下文 */
   resetSession(sessionId: string, botId: string): Promise<void>;
   listBgJobs?(filter?: { sessionId?: string; botId?: string }): Promise<BgJobRecord[]>;

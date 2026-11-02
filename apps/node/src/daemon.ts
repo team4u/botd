@@ -36,7 +36,11 @@ import {
   ensureBotdBinWrapper,
   executeBotTurn,
   getBotCommands,
+  interactSubagent,
   resetBotSession,
+  setRuntimeHubRpc,
+  steerBotTurn,
+  stopSubagent,
 } from './runtime.js';
 import { createLocalIpcServer } from './local-ipc.js';
 import { getNodeModelCatalog } from './models.js';
@@ -166,7 +170,6 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
   let heartbeatTimer: NodeJS.Timeout | null = null;
   let rpcInstance: BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null = null;
   let rws: ReconnectingWebSocket;
-
   const syncRegistrationWithHub = async (targetRpc = hubRpc): Promise<void> => {
     if (isStopping) throw new Error('Daemon is shutting down');
     if (!targetRpc || !rws || rws.readyState !== ReconnectingWebSocket.OPEN) {
@@ -338,6 +341,15 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       cancelTurn: async (sessionId, botId) => {
         await cancelBotTurn(sessionId, botId);
       },
+      steerBotTurn: async (sessionId, botId, message) => {
+        return await steerBotTurn(sessionId, botId, message);
+      },
+      stopSubagent: async (sessionId, botId, runId) => {
+        return await stopSubagent(sessionId, botId, runId);
+      },
+      interactSubagent: async (input) => {
+        return await interactSubagent(input);
+      },
       resetSession: async (sessionId, botId) => {
         const bots = await listBots(dataDir);
         const bot = bots.find((b) => b.id === botId);
@@ -384,6 +396,7 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
     const connectedRpc = createNodeRpc();
     rpcInstance = connectedRpc;
     hubRpc = connectedRpc;
+    setRuntimeHubRpc(connectedRpc);
 
     try {
       await syncRegistrationWithHub(connectedRpc);
@@ -412,6 +425,7 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       heartbeatTimer = null;
     }
     hubRpc = null;
+    setRuntimeHubRpc(null);
     rpcInstance?.$close();
     rpcInstance = null;
     onRpcMessage = undefined;
@@ -438,6 +452,7 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
 
     restartRequested = false;
     await authManager.close();
+    setRuntimeHubRpc(null);
 
     if (rpcInstance) {
       try {

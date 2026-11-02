@@ -30,6 +30,7 @@ import type {
   CreateNotificationChannelInput,
   NotificationChannelKind,
   NotificationEventKind,
+  SubagentRunRecord,
 } from '@botd/protocol';
 import type { UserInfo } from './types.js';
 
@@ -534,6 +535,33 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({}),
     });
+  },
+
+  // 单独停掉某个运行中的分身（按 runId），不中断主回合与其他并发分身
+  async stopSubagent(sessionId: string, runId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(runId)}/stop`,
+      { method: 'POST', body: JSON.stringify({}) }
+    );
+  },
+
+  // 向某个分身发送 steer（运行中插话）或 resume（结束后追问，同一 runId 上下文继续）
+  async interactSubagent(
+    sessionId: string,
+    runId: string,
+    input: { message: string; mode: 'steer' | 'resume'; subagentId?: string }
+  ): Promise<{ ok: boolean; run?: SubagentRunRecord }> {
+    return request<{ ok: boolean; run?: SubagentRunRecord }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(runId)}/interact`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          message: input.message,
+          mode: input.mode,
+          ...(input.subagentId ? { subagentId: input.subagentId } : {}),
+        }),
+      }
+    );
   },
 
   // 从指定消息（含）分叉出新会话：只读源会话并复制出新会话，原会话不受影响

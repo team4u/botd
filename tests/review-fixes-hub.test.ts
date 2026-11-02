@@ -173,7 +173,7 @@ test('Fix 4 — Delegation artifact copy shares storagePath and deletion does no
   const parentSession = hub.db.createSession({
     id: 'sess_del_parent',
     title: 'Parent Session for Delegation',
-    mode: 'lead',
+    mode: 'direct',
     leadBotId: botLead,
     memberBotIds: [botLead, botWorker],
     ownerId: adminUser.id,

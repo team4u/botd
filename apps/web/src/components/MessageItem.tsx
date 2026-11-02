@@ -17,6 +17,7 @@ import {
   FilePen,
   Wrench,
   Search,
+  Square,
   X,
   Users,
 } from 'lucide-react';
@@ -246,14 +247,14 @@ export const TypingDots: React.FC<{ className?: string }> = ({ className = '' })
 
 /**
  * 分身协同执行面板（Web 时间轴步骤流风格）
+ * 点击任意分身行（running / done / error / stopped）打开右侧「分身运行详情抽屉」
  */
 export const SubagentRunsPanel: React.FC<{
   runs: SubagentRunRecord[];
-  onSelectSession?: (sessionId: string) => void;
-}> = ({ runs, onSelectSession }) => {
+  onInspectSubagentRun?: (run: SubagentRunRecord) => void;
+}> = ({ runs, onInspectSubagentRun }) => {
   const hasRunning = runs.some((r) => r.status === 'running');
   const [expanded, setExpanded] = useState(hasRunning);
-  const [expandedRunIds, setExpandedRunIds] = useState<Record<string, boolean>>({});
 
   React.useEffect(() => {
     if (hasRunning) {
@@ -264,13 +265,6 @@ export const SubagentRunsPanel: React.FC<{
   if (!runs || runs.length === 0) return null;
 
   const names = runs.map((r) => r.subagentName || `@${r.subagentId}`).join('、');
-
-  const toggleRun = (runId: string) => {
-    setExpandedRunIds((prev) => ({
-      ...prev,
-      [runId]: !prev[runId],
-    }));
-  };
 
   return (
     <div className="my-2 max-w-2xl">
@@ -308,37 +302,33 @@ export const SubagentRunsPanel: React.FC<{
           )}
           <div className="space-y-2">
             {runs.map((run) => {
-              const isCompleted = run.status !== 'running';
-              const isPreviewOpen = Boolean(expandedRunIds[run.id]);
-
               return (
                 <div key={run.id} className="relative flex gap-2">
-                  {/* 状态节点：运行中旋转 / 失败叉 / 完成勾 */}
+                  {/* 状态节点：运行中旋转 / 失败叉 / 停止点 / 完成勾 */}
                   <span className="z-10 w-6 h-6 rounded-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 flex items-center justify-center shrink-0">
                     {run.status === 'running' ? (
                       <Loader2 className="w-3 h-3 text-blue-500 animate-spin-fast" />
                     ) : run.status === 'error' ? (
                       <X className="w-3 h-3 text-rose-500" />
+                    ) : run.status === 'stopped' ? (
+                      <Square className="w-3 h-3 text-zinc-400 dark:text-zinc-500" />
                     ) : (
                       <Check className="w-3 h-3 text-emerald-500" />
                     )}
                   </span>
 
                   <div
-                    role={isCompleted ? 'button' : undefined}
-                    tabIndex={isCompleted ? 0 : undefined}
-                    onClick={isCompleted ? () => toggleRun(run.id) : undefined}
-                    onKeyDown={
-                      isCompleted
-                        ? (e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault();
-                              toggleRun(run.id);
-                            }
-                          }
-                        : undefined
-                    }
-                    className={`flex-1 min-w-0 ${isCompleted ? 'cursor-pointer' : ''}`}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => onInspectSubagentRun?.(run)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        onInspectSubagentRun?.(run);
+                      }
+                    }}
+                    title="点击查看运行详情与控制（Steer / Resume / 停止）"
+                    className="flex-1 min-w-0 cursor-pointer"
                   >
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="font-medium text-zinc-800 dark:text-zinc-200 text-xs">
@@ -355,49 +345,22 @@ export const SubagentRunsPanel: React.FC<{
                         </span>
                       )}
                       {run.status === 'running' && (
-                        <span className="text-[11px] text-blue-500 dark:text-blue-400">运行中</span>
+                        <span className="text-[11px] text-blue-500 dark:text-blue-400">
+                          运行中{run.currentTool ? ` · ${run.currentTool}` : ''}
+                        </span>
                       )}
                       {run.status === 'error' && (
                         <span className="text-[11px] text-rose-500 dark:text-rose-400">失败</span>
                       )}
-                      {run.childSessionId && onSelectSession && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onSelectSession(run.childSessionId!);
-                          }}
-                          className="ml-auto text-[11px] text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 underline underline-offset-2 cursor-pointer shrink-0"
-                        >
-                          查看会话
-                        </button>
+                      {run.status === 'stopped' && (
+                        <span className="text-[11px] text-zinc-400 dark:text-zinc-500">已停止</span>
                       )}
+                      <span className="ml-auto text-[11px] text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 shrink-0">
+                        详情 / 控制 ▸
+                      </span>
                     </div>
 
-                    {!isPreviewOpen ? (
-                      <div className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400 truncate">{run.task}</div>
-                    ) : (
-                      <div className="mt-1.5 rounded-lg border border-zinc-200/60 dark:border-zinc-800/70 bg-zinc-50/70 dark:bg-zinc-900/40 px-3 py-2 space-y-1.5">
-                        <div>
-                          <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wide">
-                            任务
-                          </span>
-                          <div className="text-xs text-zinc-600 dark:text-zinc-300 whitespace-pre-wrap break-words">
-                            {run.task}
-                          </div>
-                        </div>
-                        {run.replyPreview && (
-                          <div>
-                            <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wide">
-                              回复
-                            </span>
-                            <div className="text-xs text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap break-words max-h-60 overflow-y-auto">
-                              {run.replyPreview}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
+                    <div className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400 truncate">{run.task}</div>
                   </div>
                 </div>
               );
@@ -1358,8 +1321,8 @@ interface MessageItemProps {
   onStartEdit?: (message: MessageRecord) => void;
   /** 从该消息（含）分叉出新会话并自动切换（MessageItem 不感知 sessionId，由上层闭包绑定） */
   onForkMessage?: (messageId: string) => Promise<void>;
-  /** 外部会话切换回调 */
-  onSelectSession?: (sessionId: string) => void;
+  /** 点击分身运行记录打开右侧详情抽屉（Steer / Resume / 停止控制） */
+  onInspectSubagentRun?: (run: SubagentRunRecord) => void;
 }
 
 export const MessageItem: React.FC<MessageItemProps> = ({
@@ -1370,7 +1333,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   isEditing = false,
   onStartEdit,
   onForkMessage,
-  onSelectSession,
+  onInspectSubagentRun,
 }) => {
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
@@ -1562,7 +1525,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
 
       {/* 分身协同面板 */}
       {message.subagentRuns && message.subagentRuns.length > 0 && (
-        <SubagentRunsPanel runs={message.subagentRuns} onSelectSession={onSelectSession} />
+        <SubagentRunsPanel runs={message.subagentRuns} onInspectSubagentRun={onInspectSubagentRun} />
       )}
 
       {/* 统一交错时间线渲染器 */}
@@ -1602,7 +1565,7 @@ function areMessageItemPropsEqual(prev: MessageItemProps, next: MessageItemProps
     prev.isEditing !== next.isEditing ||
     prev.onStartEdit !== next.onStartEdit ||
     prev.onForkMessage !== next.onForkMessage ||
-    prev.onSelectSession !== next.onSelectSession
+    prev.onInspectSubagentRun !== next.onInspectSubagentRun
   ) {
     return false;
   }

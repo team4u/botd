@@ -482,6 +482,11 @@ test('builtin skill documents the skill creator and botd reload', () => {
   assert.match(BUILTIN_SKILL_MD, /botd bots create reviewer/);
   assert.match(BUILTIN_SKILL_MD, /subagent_type/);
   assert.match(BUILTIN_SKILL_MD, /isolation: "worktree"/);
+  // v9：主会话内分身控制（stop_subagent / steer_subagent / Agent resume）
+  assert.match(BUILTIN_SKILL_MD, /### 3\. Control running \/ finished subagents/);
+  assert.match(BUILTIN_SKILL_MD, /stop_subagent/);
+  assert.match(BUILTIN_SKILL_MD, /steer_subagent/);
+  assert.match(BUILTIN_SKILL_MD, /resume: "<agent_id>"/);
   assert.match(BUILTIN_SKILL_MD, /## Skill creator/);
   assert.match(BUILTIN_SKILL_MD, /botd reload/);
   assert.match(BUILTIN_SKILL_MD, /botd bg run/);

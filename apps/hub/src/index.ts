@@ -1154,6 +1154,50 @@ export function createHub(options?: HubOptions): HubInstance {
     return c.json({ ok: true });
   });
 
+  // 单独停掉某个运行中的分身（按 runId），不中断主回合与其他并发分身
+  app.post('/api/sessions/:id/subagents/:runId/stop', async (c) => {
+    const id = c.req.param('id');
+    const runId = c.req.param('runId');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+
+    try {
+      const result = await router.stopSubagent(id, runId);
+      if (!result.ok) {
+        return c.json({ error: result.error || 'Failed to stop subagent' }, 400);
+      }
+      return c.json({ ok: true });
+    } catch (err: any) {
+      return c.json({ error: err?.message || 'Failed to stop subagent' }, 500);
+    }
+  });
+
+  // 向某个分身发送 steer（运行中插话）或 resume（结束后追问，同一 runId 上下文继续）
+  app.post('/api/sessions/:id/subagents/:runId/interact', async (c) => {
+    const id = c.req.param('id');
+    const runId = c.req.param('runId');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+
+    const body = await c.req
+      .json<{ message?: string; mode?: 'steer' | 'resume'; subagentId?: string }>()
+      .catch(() => null);
+    if (!body || typeof body.message !== 'string' || !body.message.trim()) {
+      return c.json({ error: 'message is required' }, 400);
+    }
+    const mode = body.mode === 'resume' ? 'resume' : 'steer';
+
+    try {
+      const result = await router.interactSubagent(id, runId, body.message, mode, body.subagentId);
+      if (!result.ok) {
+        return c.json({ error: result.error || 'Failed to interact with subagent', ...(result.run ? { run: result.run } : {}) }, 400);
+      }
+      return c.json({ ok: true, run: result.run });
+    } catch (err: any) {
+      return c.json({ error: err?.message || 'Failed to interact with subagent' }, 500);
+    }
+  });
+
   app.post('/api/sessions/:id/queue/skip', async (c) => {
     const id = c.req.param('id');
     const sRes = resolveOwnedSession(c, db, id);

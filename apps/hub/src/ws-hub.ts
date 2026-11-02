@@ -10,6 +10,8 @@ import {
   isSafeId,
   serializeRpcMessage,
   type SubagentRunRecord,
+  type SubagentSteerRecord,
+  type ToolCallRecord,
 } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
 import type { AuthManager } from './auth.js';
@@ -34,11 +36,14 @@ export interface GroupRouterDelegate {
       id: string;
       subagentId: string;
       task: string;
-      status: 'running' | 'done' | 'error';
+      status: 'running' | 'done' | 'error' | 'stopped';
       result?: string;
       error?: string;
       durationMs?: number;
       toolUses?: number;
+      currentTool?: string;
+      toolCalls?: ToolCallRecord[];
+      steers?: SubagentSteerRecord[];
     }
   ): SubagentRunRecord | undefined;
   onNodeOnline?(nodeId: string): void;
@@ -231,11 +236,13 @@ export class NodeConnectionManager {
           return;
         }
 
-        // Enforce that this session is currently running and this bot is an active bot
+        // Enforce that this session is currently running and this bot is an active bot.
+        // 例外：分身事件（subagentEvent）允许回合结束后继续透传——后台分身完成、抽屉内
+        // resume / stop 的状态更新都发生在主回合结束之后，不能当作杂散流丢弃。
         const isActive = this.router?.isBotActiveInSession
           ? this.router.isBotActiveInSession(event.sessionId, event.botId)
           : this.router?.getActiveBotId(event.sessionId) === event.botId;
-        if (!isActive) {
+        if (!isActive && !event.subagentEvent) {
           // Suppress stray or cancelled streams
           return;
         }
