@@ -179,6 +179,55 @@ export function buildBotShellEnv(
   };
 }
 
+/** 自动化事件环境变量：标识本轮由何种自动化来源触发（cron / webhook / 一次性定时 / 手动触发 / 后台任务）。 */
+export interface AutomationEventEnv {
+  BOTD_TURN_TRIGGER: 'automation' | 'manual';
+  BOTD_TURN_EVENT_KIND: string;
+  BOTD_TURN_EVENT_NAME: string;
+  BOTD_TURN_EVENT_AT: string;
+}
+
+/**
+ * 自动化唤醒标记格式（Hub 唤醒消息实际落地形态）：
+ *   `[Wake-up] [定时任务: 每日巡检] ...`（tag 带冒号）
+ *   `[Wake-up] [Background Job bg_1] 命令 ... 执行完成`（tag 无冒号，名称内嵌）
+ */
+const AUTOMATION_EVENT_TAGS: Array<{ tag: string; kind: string }> = [
+  { tag: '定时任务', kind: 'cron' },
+  { tag: 'Timer', kind: 'once' },
+  { tag: 'Webhook', kind: 'webhook' },
+  { tag: '手动触发', kind: 'manual-trigger' },
+  { tag: '延时唤醒', kind: 'delayed-wake' },
+  { tag: 'Background Job', kind: 'bg-job' },
+];
+
+/**
+ * 从唤醒消息中解析自动化事件标记。用户手动发起（无自动化标记）时返回 undefined。
+ */
+export function detectAutomationEvent(incrementalMessages: string): { kind: string; name: string } | undefined {
+  for (const { tag, kind } of AUTOMATION_EVENT_TAGS) {
+    // `[<tag>: <名称>]`（冒号分隔）或 `[<tag> <名称>]`（空格分隔，如 Background Job / 延时唤醒）
+    const match = incrementalMessages.match(
+      new RegExp(`\\[Wake-up\\]\\s*\\[${tag}(?::\\s*|\\s+)([^\\]]*)\\]`),
+    );
+    if (match) {
+      return { kind, name: (match[1] ?? '').trim() };
+    }
+  }
+  return undefined;
+}
+
+/** 构建本轮自动化事件环境变量；用户发起（非自动化唤醒）时返回 manual 基准集。 */
+export function buildAutomationEventEnv(incrementalMessages: string, now = new Date()): AutomationEventEnv {
+  const event = detectAutomationEvent(incrementalMessages);
+  return {
+    BOTD_TURN_TRIGGER: event ? 'automation' : 'manual',
+    BOTD_TURN_EVENT_KIND: event?.kind ?? 'chat',
+    BOTD_TURN_EVENT_NAME: event?.name ?? '',
+    BOTD_TURN_EVENT_AT: now.toISOString(),
+  };
+}
+
 export function extractToolSummary(toolName: string, args: any): string | undefined {
   if (!args || typeof args !== 'object') return undefined;
   if (toolName === 'bash' && typeof args.command === 'string') {
@@ -524,6 +573,8 @@ export async function executeBotTurn(
       BOTD_NODE_ID: bot.nodeId || nodeIdentity?.nodeId || '',
       ...(nodeIdentity?.hubUrl ? { BOTD_HUB_URL: nodeIdentity.hubUrl } : {}),
       PI_CODING_AGENT_DIR: bot.parentBotId ? getBotDir(dataDir, bot.parentBotId) : botDir,
+      // 自动化事件上下文：让脚本/扩展能区分本轮是 cron/webhook/定时/后台任务还是用户手动发起
+      ...buildAutomationEventEnv(input.incrementalMessages ?? ''),
     };
 
     const rawBashDef = createBashToolDefinition(workspaceDir, {
