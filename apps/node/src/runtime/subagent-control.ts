@@ -6,9 +6,10 @@ import { createHubStreamSink, toSubagentPayload } from './hub-stream.js';
 import { TurnEventRecorder } from './turn-events.js';
 import { runRegistry, subagentSessionFiles } from './run-registry.js';
 import { getDataDirSafe } from './shell-env.js';
-import { getBotDir, getBotWorkspaceDir, readBot } from '../storage.js';
+import { getBotDir, getBotWorkspaceDir, listBotMemoryTopics, readBot, readNodeMemory } from '../storage.js';
 import { createRuntimeForProvider, configureProviderAuth } from '../models.js';
 import { loadTurnDeps } from './turn-deps.js';
+import { buildMemoryPromptSection, canBotWriteMemory } from './memory-prompt.js';
 import { getGlobalSubagentManager } from '../commands.js';
 
 /**
@@ -201,6 +202,18 @@ export async function interactSubagent(input: {
     const subBotDir = getBotDir(dataDir, botConfig.parentBotId || botConfig.id);
     const workspaceDir = getBotWorkspaceDir(dataDir, botConfig.parentBotId || botConfig.id);
 
+    // 跨回合 resume 也要携带角色设定与长期记忆（与主回合 execute-turn 保持一致）
+    const parentBotData = botConfig.parentBotId ? await readBot(dataDir, botConfig.parentBotId) : null;
+    const nodeMemoryMd = await readNodeMemory(dataDir);
+    const mainBotId = botConfig.parentBotId || botConfig.id;
+    const memoryTopics = Array.from(
+      new Set([
+        ...(await listBotMemoryTopics(dataDir, mainBotId)),
+        ...(botConfig.parentBotId ? await listBotMemoryTopics(dataDir, botConfig.id) : []),
+      ]),
+    );
+    const resumeSystemMd = botData?.systemMd || '';
+
     const modelRuntime = await createRuntimeForProvider(dataDir, botConfig.modelProvider);
     await configureProviderAuth(modelRuntime, botConfig.modelProvider);
     const model =
@@ -222,7 +235,17 @@ export async function interactSubagent(input: {
       dataDir,
       botConfig,
       settingsManager,
-      () => [],
+      () =>
+        [
+          resumeSystemMd ? `[角色设定]\n${resumeSystemMd}` : '',
+          buildMemoryPromptSection({
+            memoryMd: botData?.memoryMd || '',
+            parentMemoryMd: parentBotData?.memoryMd,
+            nodeMemoryMd,
+            memoryTopics,
+            canWrite: canBotWriteMemory(botConfig),
+          }),
+        ].filter(Boolean),
       { enableSubagents: false }, // 子代理不能再派子代理
     );
     const created = await createAgentSession({
