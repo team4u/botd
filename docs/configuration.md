@@ -2,146 +2,196 @@
 
 [文档目录](README.md)
 
+本文列出 botd 的全部环境变量、数据目录布局和配置优先级。配置按读取进程分为 Hub 侧、Node Agent 侧、CLI 与工具环境侧三份。
+
+## 读取规则
+
 先确定配置由哪个进程读取。Hub、Node Agent 和 CLI 可以运行在不同机器上。
 
-源码命令不会自动加载仓库根目录的 `.env`。请在启动进程的终端中设置环境变量。
+源码命令不自动加载 `.env`。请在启动进程的终端中设置环境变量。
 
-Docker Compose 的 `--env-file .env` 提供变量替换值。只有 Compose `environment` 或 `env_file` 引用的值才会进入容器。
+Docker Compose 的 `--env-file .env` 只提供变量替换值。只有 Compose `environment` 或 `env_file` 引用的值才进入容器。
 
-## Hub
+优先级总则：命令行参数 > 环境变量 > 代码默认值。
 
-| 环境变量 | 默认值 | 用途 |
-| --- | --- | --- |
-| `BOTD_HOST` | `0.0.0.0` | HTTP 和 WebSocket 监听地址 |
-| `BOTD_PORT` | `PORT`，否则 `3000` | 服务端口，本机开发指定 `3002` |
-| `BOTD_HUB_DATA_DIR` | `~/.botd` | 默认数据库目录和产物根目录 |
-| `BOTD_DB_PATH` | `<Hub 数据目录>/hub.sqlite` | 指定 SQLite 文件，优先于默认目录 |
-| `BOTD_WEB_DIR` | 相对于 Hub 模块定位的 `apps/web/dist` | 构建后的前端目录 |
-| `BOTD_ADMIN_PASSWORD` | `admin` | 首次初始化管理员的密码 |
-| `BOTD_TRIGGER_POLL_MS` | `2000` | Cron 检查间隔，单位毫秒，最低 `200` |
-| `BOTD_PUBLIC_URL` | 见下文 | 外部通道通知中的会话链接前缀 |
-| `BOTD_BASE_URL` | 无 | `BOTD_PUBLIC_URL` 未设置时的后备地址 |
-| `BOTD_ASK_SECRET` | `botd-ask-secret-default-key` | 外部通道确认回调的签名密钥 |
-
-`BOTD_PUBLIC_URL` 和 `BOTD_BASE_URL` 均未设置时，通知链接使用 `http://localhost:<BOTD_PORT 或 3000>`。公开部署时请填写用户可访问的 HTTPS 地址。
-
-管理员初始化仅在 `users` 表为空时生效。后续更改 `BOTD_ADMIN_PASSWORD` 不会修改已有密码。
-
-数据库路径与产物目录分别计算。例如：
-
-```bash
-BOTD_PORT=3002 \
-BOTD_HUB_DATA_DIR="$HOME/.local/share/botd-hub" \
-BOTD_DB_PATH="$HOME/.local/share/botd-hub/hub.sqlite" \
-pnpm dev:hub
-```
-
-产物写入 `$BOTD_HUB_DATA_DIR/artifacts/`。单独设置 `BOTD_DB_PATH` 不会移动产物。
-
-Web 开发服务固定监听 `3001`，代理到 Hub 的 `3002`。它不读取 `BOTD_PORT` 来调整代理目标。
-
-## Node Agent
+## Hub 侧环境变量
 
 | 环境变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `BOTD_DATA_DIR` | `~/.botd` | 节点数据目录，CLI 的 `--data-dir` 优先 |
-| `BOTD_API_KEY_<PROVIDER>` | 无 | 指定供应商的 API Key，优先于节点保存的凭据 |
-| `BOTD_AUTO_COMPACT` | 启用 | 仅设为 `0` 时关闭自动上下文压缩 |
-| `BOTD_DAEMON_LOG` | `<数据目录>/daemon.log` | 后台进程日志，启动时可用 `--log-file` 指定 |
-| `BOTD_BASH_PATH` | 自动查找 | Windows 上的 Bash 路径 |
-| `BOTD_MINGIT_URL` | 代码中的下载地址 | Windows 托管 MinGit 的下载地址 |
-| `BOTD_SHELL_PATH` | 平台默认 shell | 非 Windows 后台任务使用的 shell |
+| `BOTD_HOST` | `0.0.0.0` | HTTP 与 WebSocket 监听地址 |
+| `BOTD_PORT` | 回退 `PORT`，再回退 `3000` | 服务端口；本机开发设为 `3002` |
+| `BOTD_HUB_DATA_DIR` | `~/.botd` | Hub 数据目录：默认数据库位置与产物根目录 |
+| `BOTD_DB_PATH` | `<Hub 数据目录>/hub.sqlite` | SQLite 数据库文件路径 |
+| `BOTD_WEB_DIR` | Hub 模块旁的 `apps/web/dist` | 构建后的前端静态文件目录 |
+| `BOTD_ADMIN_PASSWORD` | 无（见下文） | 首次启动的自举管理员密码 |
+| `BOTD_PUBLIC_URL` | 无（见回退链） | 外部通道通知中会话链接的前缀 |
+| `BOTD_BASE_URL` | 无 | `BOTD_PUBLIC_URL` 未设置时的后备前缀 |
+| `BOTD_ASK_SECRET` | 无（见解析顺序） | 外部通道确认回调的签名密钥 |
+| `BOTD_TRIGGER_POLL_MS` | `2000`，下限 `200` | cron 与一次性触发器的巡检间隔，单位毫秒 |
+| `BOTD_OUTBOX_MAX_ATTEMPTS` | `5`，下限 `1` | 单条通知的最大投递尝试次数 |
+| `BOTD_OUTBOX_RETRY_MS` | `5000`，下限 `100` | 通知重试的基础退避间隔，单位毫秒 |
+| `BOTD_OUTBOX_POLL_MS` | `2000`，下限 `100` | 通知出站队列的轮询间隔，单位毫秒 |
 
-供应商标识转成大写后，非字母数字字符替换为下划线。例如 `zai-coding-cn` 对应 `BOTD_API_KEY_ZAI_CODING_CN`。
+要点：
 
-环境变量必须设置在 Node Agent 的进程环境中。仅设置在 Hub 上不会为远程节点提供模型凭据。
+- 端口约定：生产默认 `3000`。本机开发启动 Hub 时带上 `BOTD_PORT=3002`。Vite 固定监听 `3001` 并代理到 `3002`，不读取 `BOTD_PORT`。
+- 数据库路径优先级：编程参数 > `BOTD_DB_PATH` > `<BOTD_HUB_DATA_DIR>/hub.sqlite`。值 `:memory:` 表示内存库，仅供测试。
+- 产物目录独立计算，固定为 `<BOTD_HUB_DATA_DIR>/artifacts/`。单独设置 `BOTD_DB_PATH` 不会移动产物。
+- `BOTD_ADMIN_PASSWORD` 仅在 `users` 表为空时自举管理员（用户名 `admin`）。未设置时 Hub 生成一次性随机密码并打印到启动日志。此后修改该变量不会更改已有密码。
+- 通知链接前缀回退链：`BOTD_PUBLIC_URL` > `BOTD_BASE_URL` > `http://localhost:<BOTD_PORT 或 3000>`。公开部署时填写用户可访问的 HTTPS 地址。
+- `BOTD_ASK_SECRET` 解析顺序：环境变量 > 数据库 `settings` 表的 `ask_secret` > 首次生成 64 位 hex 随机密钥并落库。改设环境变量会覆盖历史密钥，历史推送链接随之失效。
+- 通知重试按指数退避：`BOTD_OUTBOX_RETRY_MS × 2^(n-1)`，上限 300000 毫秒。尝试次数达到 `BOTD_OUTBOX_MAX_ATTEMPTS` 后记录置为 dead。
 
-```bash
-export BOTD_API_KEY_ANTHROPIC='replace-with-your-api-key'
-pnpm node start
-```
+读取位置：`apps/hub/src/index.ts`（`BOTD_HOST`、`BOTD_PORT`、`BOTD_ADMIN_PASSWORD`）、`apps/hub/src/db.ts`（`BOTD_HUB_DATA_DIR`、`BOTD_DB_PATH`）、`apps/hub/src/static.ts`（`BOTD_WEB_DIR`）、`apps/hub/src/artifact-service.ts`（产物目录）、`apps/hub/src/triggers.ts`（`BOTD_TRIGGER_POLL_MS`）、`apps/hub/src/channels.ts`（其余）。
 
-已经运行的 Node Agent 不会读取另一个终端后来设置的值。需要在带有新配置的环境中重新启动。Web 登录保存的凭据无需通过此方式配置。
-
-Windows 优先使用 `BOTD_BASH_PATH`。随后查找托管 MinGit、Git for Windows 和 `PATH`。找不到 Bash 时，节点会尝试下载托管 MinGit。
-
-以下变量供连接与进程接替调优，通常不需要设置：
+## Node Agent 侧环境变量
 
 | 环境变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `BOTD_DAEMON_BIND_RETRY_MS` | `0` | 本地 IPC 地址绑定冲突的重试窗口 |
-| `BOTD_WS_MIN_RECONNECT_DELAY_MS` | `200` | WebSocket 最小重连间隔，单位毫秒 |
-| `BOTD_NPM_REGISTRY` | npm 官方 registry | 节点升级查询和下载使用的 registry |
-| `BOTD_NPM_PACKAGE` | `botd` | 节点升级查询使用的包名 |
+| `BOTD_DATA_DIR` | `~/.botd` | 节点数据目录；CLI 的 `--data-dir` 优先 |
+| `BOTD_API_KEY_<PROVIDER>` | 无 | 指定供应商的 API Key，优先于节点已保存的凭据 |
+| `BOTD_AUTO_COMPACT` | 启用 | 仅设为 `0` 时关闭回合的自动上下文压缩 |
+| `BOTD_DAEMON_LOG` | `<数据目录>/daemon.log` | 守护进程日志；`botd start -d --log-file` 优先 |
+| `BOTD_SHELL_PATH` | 系统默认 shell | 非 Windows 后台任务使用的 shell 路径 |
+| `BOTD_BASH_PATH` | 自动查找（见下文） | Windows 上 Bash 的显式路径 |
+| `BOTD_MINGIT_URL` | Git for Windows v2.47.1 的 release 地址 | Windows 托管 MinGit 的下载地址 |
+| `BOTD_WS_MIN_RECONNECT_DELAY_MS` | `200` | 连接 Hub 的 WebSocket 最小重连间隔，单位毫秒 |
+| `BOTD_NPM_PACKAGE` | `botd` | 节点升级查询的 npm 包名 |
+| `BOTD_NPM_REGISTRY` | `https://registry.npmjs.org` | 节点升级查询与下载使用的 registry |
+| `BOTD_UPGRADE_BLOCK_COOLDOWN_MS` | `1800000`（30 分钟） | 金丝雀失败版本的封禁时长，单位毫秒 |
 
-升级变量不代表仓库已发布对应 npm 包。源码和容器升级见[部署指南](deployment.md)。
+要点：
 
-## CLI
+- API Key 变量名规则：供应商标识转大写，非字母数字字符替换为下划线。例如 `zai-coding-cn` 对应 `BOTD_API_KEY_ZAI_CODING_CN`。
+- 凭据优先级：`BOTD_API_KEY_<PROVIDER>` > Web 端供应商登录保存在 `.agent/auth.json` 的凭据。仅支持 OAuth 登录的供应商设置 API Key 会直接报错。
+- 这些变量必须设置在 Node Agent 的进程环境中。已在运行的 Node Agent 不读取后续修改，需重启生效。仅设置在 Hub 上不会为远程节点提供凭据。
+- Windows 的 Bash 查找顺序：`BOTD_BASH_PATH`（路径必须存在）→ 托管 MinGit → Git for Windows 常见安装位置 → `PATH` 中的 `bash.exe`（跳过旧版 WSL 空壳）。全部失败时节点自动下载托管 MinGit 到 `<数据目录>/runtime/mingit`。
+- registry 白名单：Hub 经 RPC 下发的 registry 必须等于官方默认值或 `BOTD_NPM_REGISTRY`，否则被丢弃。本机 CLI 请求可显式传 `--registry`。
+- `BOTD_SHELL_PATH` 只影响非 Windows 的 `botd bg run` 后台任务。未设置时交给 Node 使用系统默认 shell。回合内的 Bash 工具在 Windows 上固定使用上表的 Bash 解析结果。
 
-| 选项或变量 | 规则 |
+框架内部变量（自动设置，通常无需配置）：
+
+| 环境变量 | 值 | 用途 |
+| --- | --- | --- |
+| `BOTD_DAEMON_DETACHED` | `1` | 标记后台守护进程，防止 `--detach` 递归分叉 |
+| `BOTD_DAEMON_BIND_RETRY_MS` | `0`；替代进程 `20000` | 本地 IPC 地址绑定冲突的重试窗口，单位毫秒 |
+| `BOTD_VERSION_OVERRIDE` | 无 | 覆盖节点上报的版本号，供升级机制使用 |
+
+读取位置：`apps/node/src/storage.ts`、`apps/node/src/daemon.ts`、`apps/node/src/models.ts`、`apps/node/src/windows-shell.ts`、`apps/node/src/bg-jobs.ts`、`apps/node/src/runtime/execute-turn.ts`、`apps/node/src/upgrader.ts`、`apps/node/src/daemon-launch.ts`。
+
+## CLI 与工具环境侧
+
+| 项 | 规则 |
 | --- | --- |
-| `--data-dir` | 优先于 `BOTD_DATA_DIR`，决定身份和 CLI 配置所在目录 |
-| `--hub` | 覆盖管理请求使用的 Hub URL |
+| `--data-dir` | 优先于 `BOTD_DATA_DIR`，决定节点身份与 CLI 配置所在目录 |
+| `--hub` | 覆盖管理请求使用的 Hub URL；默认用 `login` 保存的地址 |
 | `--password` | 优先于 `BOTD_ADMIN_PASSWORD` |
-| `BOTD_USERNAME` | `login` 未指定 `--username` 时使用，默认 `admin` |
+| `BOTD_USERNAME` | `login` 未指定 `--username` 时使用，再回退 `admin` |
 | `--timeout` | HTTP 超时秒数，默认 `30` |
-| `--json` | 输出机器可读结果 |
+| `--json` | 输出机器可读的 JSON |
+| `BOTD_SESSION_ID` / `BOTD_BOT_ID` | `wake`、`ask` 与产物命令未传 `--session` / `--bot` 时的回退 |
 
-`login` 将会话配置保存在 `<数据目录>/cli.json`。只有显式使用 `--save-credentials` 才保存明文密码。
+要点：
 
-Hub 初始化密码与 CLI 登录密码恰好使用同一个环境变量名。两者的作用取决于读取它的进程。
+- `login` 把会话配置保存到 `<数据目录>/cli.json`（0600 权限）。仅显式传 `--save-credentials` 才保存明文密码。
+- `BOTD_ADMIN_PASSWORD` 一名两用：Hub 用它自举管理员，CLI 用它作登录密码。作用取决于读取它的进程。
+- `botd ask --ui-schema` 打印生成式 UI 目录。内容来自代码常量 `BOTD_UI_CATALOG_VERSION`（`botd.v1`）、`BOTD_UI_COMPONENT_TYPES`（15 种组件）和 `BOTD_UI_SCHEMA_DOC`。它们是代码标识符，不是环境变量。
 
-完整命令与认证恢复规则见 [CLI 参考](cli.md)。
-
-## 节点文件布局
-
-```text
-~/.botd/
-├── node.json                 # 节点身份与配对令牌
-├── cli.json                  # CLI 的 Hub 登录配置
-├── daemon.pid
-├── daemon.log
-├── agent.sock                # macOS / Linux 本地控制通道
-├── .agent/
-│   ├── auth.json             # 模型供应商凭据
-│   └── models.json           # 自定义模型目录
-├── bin/                      # Bot 使用的 botd 命令入口
-├── skills/<id>/SKILL.md
-├── extensions/
-└── bots/<botId>/
-    ├── bot.json
-    ├── SYSTEM.md
-    ├── MEMORY.md
-    ├── env.json
-    ├── prompts/
-    ├── workspace/
-    │   └── inbox/
-    └── sessions/             # Pi 模型会话 JSONL 文件
-```
-
-Windows 使用基于数据目录生成的命名管道，不创建 Unix socket。
-
-`node.json`、`cli.json` 和 Bot 的 `env.json` 包含敏感信息。程序写入时使用受限文件权限。Windows 的访问限制还取决于文件系统 ACL。
-
-模型凭据保存在 `.agent/auth.json`。文件内容不加密。Hub 会转发 Web 登录过程中的凭据输入，不将其保存为模型凭据库。
-
-## Bot 环境变量
-
-在 Bot 编辑器或 `bots env` 命令中配置私有变量。Node Agent 将它们保存在该 Bot 的 `env.json`。
-
-这些变量提供给工具子进程。它们不是 Node Agent 的模型鉴权配置。
-
-框架保留部分变量名称，拒绝通过 Bot 配置覆盖。完整规则见 [isValidBotEnvKey](../packages/protocol/src/index.ts)。
+读取位置：`apps/node/src/cli/context.ts`、`apps/node/src/cli/commands/auth.ts`、`apps/node/src/cli/commands/node.ts`。
 
 ## 工具运行时注入的变量
+
+Node Agent 为每个回合的工具子进程注入以下变量：
 
 | 变量 | 内容 |
 | --- | --- |
 | `BOTD_SESSION_ID` | 当前会话 ID |
 | `BOTD_BOT_ID` | 当前 Bot ID |
+| `BOTD_NODE_ID` | 当前节点 ID |
+| `BOTD_HUB_URL` | 节点配对时保存的 Hub 地址 |
 | `BOTD_DATA_DIR` | 当前节点数据目录 |
-| `PATH` | 加入节点 `bin` 目录的命令搜索路径 |
+| `BOTD_TURN_TRIGGER` | `automation` 或 `manual` |
+| `BOTD_TURN_EVENT_KIND` | `cron`、`once`、`webhook`、`manual-trigger`、`delayed-wake`、`bg-job`；手动发起为 `chat` |
+| `BOTD_TURN_EVENT_NAME` | 触发器或任务名称；手动发起为空字符串 |
+| `BOTD_TURN_EVENT_AT` | 回合构建时刻的 ISO 时间戳 |
+| `PATH` | 头部插入节点 `bin` 目录；Windows 再插入 MinGit 工具目录 |
+| `PI_CODING_AGENT_DIR` | 主控 Bot 的 agent 目录 |
 
-`botd wake`、`botd ask` 和后台任务使用这些变量定位会话。Node Agent 为工具子进程构造环境，不依靠修改全局 `process.env` 切换会话。
+要点：
 
-更多内容：[模型指南](models.md) · [部署指南](deployment.md) · [安全边界](security.md)。
+- `botd wake`、`botd ask` 和后台任务用这些变量定位会话。
+- Node Agent 为工具子进程单独构造环境，不修改全局 `process.env`。
+- Bot 专属变量在 Bot 编辑器或 `bots env` 命令中配置，保存在该 Bot 的 `env.json`。框架拒绝保留名 `PATH`、`PWD`、`HOME`、`USER`、`SHELL` 和 `BOTD_` 前缀，校验函数为 `isValidBotEnvKey`。
+- 子代理回合先继承主控 Bot 的 `env.json`，同名变量以自身的值为准。
+
+## 数据目录布局
+
+Hub 侧（`BOTD_HUB_DATA_DIR`，默认 `~/.botd`）：
+
+```text
+~/.botd/
+├── hub.sqlite              # Hub 数据库（POSIX 下 0600）
+├── hub.sqlite.bak-v<n>     # schema 升级前的自动备份
+└── artifacts/              # 产物存储根目录
+```
+
+节点侧（`BOTD_DATA_DIR`，默认 `~/.botd`）：
+
+```text
+~/.botd/
+├── node.json               # 节点身份与配对令牌（0600）
+├── cli.json                # CLI 的 Hub 登录配置（0600）
+├── daemon.pid              # 守护进程 PID（0600）
+├── daemon.log              # 守护进程日志
+├── ipc-token               # 本地 IPC 认证令牌（0600，64 位 hex）
+├── agent.sock              # macOS / Linux 本地控制通道（0600）
+├── current.json            # 当前升级版本记录
+├── previous.json           # 回退版本记录
+├── update-blocked.json     # 金丝雀失败封禁记录
+├── .agent/                 # 模型运行时目录（0700）
+│   ├── auth.json           # 供应商凭据
+│   ├── models.json         # 自定义模型目录
+│   ├── models-store.json   # 模型目录缓存
+│   └── device-id
+├── bin/                    # botd 命令包装器（Windows 另有 botd.cmd）
+├── skills/<id>/SKILL.md
+├── extensions/<id>/
+├── releases/<version>/     # 升级暂存与已发布版本
+├── runtime/mingit/         # Windows 托管 MinGit
+├── service/                # 系统服务配置（launchd / systemd / Windows）
+└── bots/<botId>/
+    ├── bot.json
+    ├── SYSTEM.md
+    ├── MEMORY.md
+    ├── env.json            # Bot 专属变量（0600）
+    ├── prompts/
+    ├── agents/<childId>.md # 子代理声明，写在主控 Bot 目录下
+    ├── subagents.json
+    ├── sessions/<sessionId>.jsonl
+    └── workspace/          # 子代理共享主控 Bot 的工作区
+        ├── inbox/          # 回合附件与上游产物落盘处
+        └── .bg/<jobId>.log # 后台任务日志
+```
+
+要点：
+
+- Hub 与节点默认同用 `~/.botd`，文件名不冲突。Compose 内 Hub 数据库固定 `/data/hub.sqlite`，节点目录固定 `/data/node`。
+- Windows 不创建 Unix socket，改用命名管道 `\\.\pipe\botd-agent-<hash>`。hash 由数据目录路径计算。
+- 敏感文件以 0600 权限原子写入，内容不加密。Windows 上的实际访问限制取决于文件系统 ACL。
+
+## 配置优先级汇总
+
+- 数据库路径：编程参数 > `BOTD_DB_PATH` > `<BOTD_HUB_DATA_DIR>/hub.sqlite`
+- 节点数据目录：`--data-dir` > `BOTD_DATA_DIR` > `~/.botd`
+- Hub 端口：编程参数 > `BOTD_PORT` > `PORT` > `3000`
+- CLI 密码：`--password` > `BOTD_ADMIN_PASSWORD`
+- CLI 用户名：`--username` > `BOTD_USERNAME` > `admin`
+- 模型凭据：`BOTD_API_KEY_<PROVIDER>` > `.agent/auth.json` 保存的登录凭据
+- 通知链接前缀：`BOTD_PUBLIC_URL` > `BOTD_BASE_URL` > `http://localhost:<端口>`
+- 升级 registry：请求参数 > `BOTD_NPM_REGISTRY` > `https://registry.npmjs.org`
+
+## 渠道通知凭据
+
+会话通道（webhook、飞书、Slack、Telegram）的签名 secret 与推送策略在 Web 会话设置中配置，不使用环境变量。见[渠道通知](channels.md)。
+
+更多内容：[模型与供应商](models.md) · [部署指南](deployment.md) · [安全边界](security.md) · [CLI 参考](cli.md)。
