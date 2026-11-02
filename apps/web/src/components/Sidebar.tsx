@@ -30,7 +30,28 @@ import type { UserInfo } from '../types.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import ThemeToggle from './ThemeToggle.js';
 import { AskCard } from './AskCard.js';
+import { BotAvatarBadge } from './MessageItem.js';
 import { api } from '../api.js';
+
+/**
+ * 分身徽章：小号彩色首字母块（用分身自身 color，与聊天区取色一致），
+ * 替代树状缩进表达归属关系。
+ */
+const SubAvatarBadge: React.FC<{ botId: string; name: string; color?: string; active?: boolean }> = ({
+  botId,
+  name,
+  color,
+  active,
+}) => (
+  <span
+    className={`w-[18px] h-[18px] shrink-0 select-none transition-transform ${
+      active ? 'scale-105' : 'group-hover:scale-105'
+    }`}
+    aria-hidden="true"
+  >
+    <BotAvatarBadge botId={botId} name={name} color={color as any} />
+  </span>
+);
 
 interface SidebarProps {
   sessions: SessionRecord[];
@@ -887,12 +908,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                     onClose();
                                   }
                                 }}
-                                className={`group w-full text-left py-1.5 px-2 rounded-lg text-xs transition-all flex items-center gap-2 border cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
+                                className={`group w-full text-left py-1.5 pl-[18px] pr-2 rounded-lg text-xs transition-all flex items-center gap-2 border cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
                                   isSubActive
                                     ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs'
                                     : 'hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 border-transparent'
                                 }`}
                               >
+                                <SubAvatarBadge botId={sub.id} name={sub.name} color={sub.color} active={isSubActive} />
                                 <div className="flex-1 min-w-0">
                                   <div className="flex items-center gap-1.5">
                                     <span className="truncate font-medium text-zinc-900 dark:text-zinc-100">
@@ -905,6 +927,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                     >
                                       @{sub.id}
                                     </span>
+                                    <span className="shrink-0 text-[10px] text-zinc-400 dark:text-zinc-500">· 分身</span>
                                   </div>
                                 </div>
 
