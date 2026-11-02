@@ -5,6 +5,8 @@ import type {
   NotificationChannelKind,
   NotificationChannelRecord,
   NotificationEventKind,
+  NotificationOutboxRecord,
+  NotificationTellPolicy,
   SessionSseEvent,
   UserRecord,
 } from '@botd/protocol';
@@ -53,6 +55,35 @@ function escapeHtml(str: string): string {
 
 const VALID_CHANNEL_KINDS = new Set<NotificationChannelKind>(['webhook', 'feishu', 'slack', 'telegram']);
 const VALID_EVENT_KINDS = new Set<NotificationEventKind>(['assistant_reply', 'ask_request', 'wakeup']);
+const VALID_TELL_POLICIES = new Set<NotificationTellPolicy>(['always', 'needed', 'never']);
+
+function parseTellPolicy(val: unknown): NotificationTellPolicy {
+  return typeof val === 'string' && VALID_TELL_POLICIES.has(val as NotificationTellPolicy)
+    ? (val as NotificationTellPolicy)
+    : 'always';
+}
+
+/** needed 策略下判定 wakeup（callback 消息）是否属于失败/错误回调 */
+function isFailureCallbackMessage(content: string): boolean {
+  const lower = content.toLowerCase();
+  return lower.includes('❌') || lower.includes('失败') || lower.includes('failed') || lower.includes('error');
+}
+
+/** 按通道 tellPolicy 过滤事件：never 全静默；needed 仅放行 ask_request、失败回调与 failed 会话回复 */
+function shouldTellChannel(
+  channel: { tellPolicy?: NotificationTellPolicy },
+  eventKind: NotificationEventKind,
+  ctx: { isFailureCallback: boolean; sessionFailed: boolean }
+): boolean {
+  const policy = channel.tellPolicy && VALID_TELL_POLICIES.has(channel.tellPolicy) ? channel.tellPolicy : 'always';
+  if (policy === 'never') return false;
+  if (policy === 'always') return true;
+  // needed：异常与审批才打扰
+  if (eventKind === 'ask_request') return true;
+  if (eventKind === 'wakeup') return ctx.isFailureCallback;
+  if (eventKind === 'assistant_reply') return ctx.sessionFailed;
+  return false;
+}
 
 function isValidHttpUrl(val: unknown): val is string {
   if (typeof val !== 'string' || !val.trim()) return false;
@@ -73,6 +104,7 @@ interface ChannelRow {
   target_url: string;
   secret: string | null;
   events_json: string;
+  tell_policy: string;
   enabled: number;
   last_triggered_at: string | null;
   created_at: string;
@@ -98,9 +130,39 @@ function mapChannelRow(row: ChannelRow): NotificationChannelRecord {
     targetUrl: row.target_url,
     ...(row.secret ? { secret: row.secret } : {}),
     events: parseEvents(row.events_json),
+    ...(row.tell_policy ? { tellPolicy: parseTellPolicy(row.tell_policy) } : {}),
     enabled: Boolean(row.enabled),
     ...(row.last_triggered_at ? { lastTriggeredAt: row.last_triggered_at } : {}),
     createdAt: row.created_at,
+  };
+}
+
+interface OutboxRow {
+  id: string;
+  channel_id: string;
+  session_id: string;
+  event_kind: string;
+  payload_json: string;
+  status: string;
+  attempt_count: number;
+  next_retry_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapOutboxRow(row: OutboxRow): NotificationOutboxRecord {
+  return {
+    id: row.id,
+    channelId: row.channel_id,
+    sessionId: row.session_id,
+    eventKind: row.event_kind as NotificationEventKind,
+    status: row.status as 'pending' | 'sent' | 'dead',
+    attemptCount: row.attempt_count,
+    ...(row.next_retry_at ? { nextRetryAt: row.next_retry_at } : {}),
+    ...(row.last_error ? { lastError: row.last_error } : {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -189,12 +251,16 @@ function buildEventPayload(
   sessionId: string,
   sessionTitle: string,
   baseUrl: string,
-  askSecret: string
+  askSecret: string,
+  channelSessionId?: string
 ): unknown {
   const timestamp = new Date().toISOString();
+  // 继承通知时（子会话事件命中父会话通道）附带 channelSessionId，便于消费方区分事件源与通道归属
+  const inherited = channelSessionId && channelSessionId !== sessionId;
 
   if (eventKind === 'ask_request' && event.type === 'interaction_request') {
     const ask = event.ask;
+    // 签名必须使用 ask 实际所在的会话（事件源会话），否则免登录回调无法命中
     const token = signAskToken(sessionId, ask.id, askSecret);
     const respondUrls: Record<string, string> = {};
     for (const opt of ask.options) {
@@ -205,6 +271,7 @@ function buildEventPayload(
       return {
         event: 'ask_request',
         sessionId,
+        ...(inherited ? { channelSessionId: channelSessionId! } : {}),
         sessionTitle,
         timestamp,
         ask: {
@@ -255,13 +322,15 @@ function buildEventPayload(
   const message = event.type === 'message_created' ? event.message : undefined;
   const content = message?.content ?? '';
   const senderBotId = message?.senderBotId;
+  const originSuffix = inherited ? `（子会话 ${sessionId}）` : '';
   const prefix = eventKind === 'wakeup' ? '[botd 唤醒]' : '[botd]';
-  const formattedText = `${prefix} ${senderBotId ? `@${senderBotId}: ` : ''}${content}`.trim();
+  const formattedText = `${prefix} ${senderBotId ? `@${senderBotId}: ` : ''}${content}${originSuffix}`.trim();
 
   if (kind === 'webhook') {
     return {
       event: eventKind,
       sessionId,
+      ...(inherited ? { channelSessionId: channelSessionId! } : {}),
       sessionTitle,
       timestamp,
       message,
@@ -479,6 +548,170 @@ export function registerChannelRoutes(
     CREATE INDEX IF NOT EXISTS idx_notification_channels_session ON notification_channels(session_id);
   `);
 
+  // 1.1 老库迁移：补齐 tell_policy 列（默认 'always'）
+  try {
+    const channelColumns = db.db.prepare('PRAGMA table_info(notification_channels)').all() as Array<{ name: string }>;
+    if (channelColumns.length > 0 && !channelColumns.some((col) => col.name === 'tell_policy')) {
+      db.db.exec("ALTER TABLE notification_channels ADD COLUMN tell_policy TEXT NOT NULL DEFAULT 'always'");
+    }
+  } catch (err) {
+    console.error('[channels] Failed to migrate notification_channels.tell_policy:', err);
+  }
+
+  // 1.2 通知出站队列（Outbox）：持久化发送队列与退避重试
+  db.db.exec(`
+    CREATE TABLE IF NOT EXISTS notification_outbox (
+      id TEXT PRIMARY KEY,
+      channel_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      event_kind TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      next_retry_at TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_notification_outbox_status_retry ON notification_outbox(status, next_retry_at);
+    CREATE INDEX IF NOT EXISTS idx_notification_outbox_session ON notification_outbox(session_id, created_at);
+  `);
+
+  // Outbox 重试配置：最大尝试次数 / 基础退避间隔 / 后台轮询间隔
+  const maxAttempts = Math.max(1, Number(process.env.BOTD_OUTBOX_MAX_ATTEMPTS || '5') || 5);
+  const baseRetryMs = Math.max(100, Number(process.env.BOTD_OUTBOX_RETRY_MS || '5000') || 5000);
+  const retryCapMs = 300_000;
+
+  const outboxDelivering = new Set<string>();
+
+  const getOutboxStmt = () =>
+    db.db.prepare(
+      'SELECT id, channel_id, session_id, event_kind, payload_json, status, attempt_count, next_retry_at, last_error, created_at, updated_at FROM notification_outbox WHERE id = ?'
+    );
+
+  /** 投递单条 outbox 记录：成功置 sent；失败计数+1，超过上限置 dead，否则按指数退避安排下次重试 */
+  const deliverOutboxItem = async (outboxId: string): Promise<void> => {
+    if (outboxDelivering.has(outboxId)) return;
+    outboxDelivering.add(outboxId);
+    try {
+      const row = getOutboxStmt().get(outboxId) as unknown as OutboxRow | undefined;
+      if (!row || row.status !== 'pending') return;
+
+      const channelRow = db.db
+        .prepare(
+          'SELECT id, session_id, owner_id, name, kind, target_url, secret, events_json, tell_policy, enabled, last_triggered_at, created_at FROM notification_channels WHERE id = ?'
+        )
+        .get(row.channel_id) as unknown as ChannelRow | undefined;
+      if (!channelRow) {
+        db.db
+          .prepare(
+            "UPDATE notification_outbox SET status = 'dead', last_error = 'Channel deleted', updated_at = ? WHERE id = ?"
+          )
+          .run(new Date().toISOString(), outboxId);
+        return;
+      }
+
+      let payload: unknown;
+      try {
+        payload = JSON.parse(row.payload_json);
+      } catch {
+        db.db
+          .prepare(
+            "UPDATE notification_outbox SET status = 'dead', last_error = 'Corrupted payload JSON', updated_at = ? WHERE id = ?"
+          )
+          .run(new Date().toISOString(), outboxId);
+        return;
+      }
+
+      const result = await sendNotificationToChannel(
+        {
+          kind: channelRow.kind as NotificationChannelKind,
+          targetUrl: channelRow.target_url,
+          secret: channelRow.secret ?? undefined,
+        },
+        payload
+      );
+
+      const nowIso = new Date().toISOString();
+      const attemptCount = row.attempt_count + 1;
+      if (result.ok) {
+        db.db
+          .prepare(
+            "UPDATE notification_outbox SET status = 'sent', attempt_count = ?, next_retry_at = NULL, last_error = NULL, updated_at = ? WHERE id = ?"
+          )
+          .run(attemptCount, nowIso, outboxId);
+        touchChannelTriggeredAt(db, row.channel_id, nowIso);
+        return;
+      }
+
+      if (attemptCount >= maxAttempts) {
+        db.db
+          .prepare(
+            "UPDATE notification_outbox SET status = 'dead', attempt_count = ?, next_retry_at = NULL, last_error = ?, updated_at = ? WHERE id = ?"
+          )
+          .run(attemptCount, result.error || 'Delivery failed', nowIso, outboxId);
+        console.warn(
+          `[channels] Outbox ${outboxId} marked dead after ${attemptCount} attempts:`,
+          result.error
+        );
+        return;
+      }
+
+      const delayMs = Math.min(retryCapMs, baseRetryMs * Math.pow(2, attemptCount - 1));
+      const nextRetryAt = new Date(Date.now() + delayMs).toISOString();
+      db.db
+        .prepare(
+          "UPDATE notification_outbox SET attempt_count = ?, next_retry_at = ?, last_error = ?, updated_at = ? WHERE id = ?"
+        )
+        .run(attemptCount, nextRetryAt, result.error || 'Delivery failed', nowIso, outboxId);
+    } catch (err) {
+      console.error(`[channels] Outbox delivery error for ${outboxId}:`, err);
+    } finally {
+      outboxDelivering.delete(outboxId);
+    }
+  };
+
+  /** 将一次待发推送落入 outbox 并立即异步首投 */
+  const enqueueOutboxDelivery = (
+    channel: NotificationChannelRecord,
+    sessionId: string,
+    eventKind: NotificationEventKind,
+    payload: unknown
+  ): void => {
+    try {
+      const outboxId = `outbox_${randomUUID()}`;
+      const nowIso = new Date().toISOString();
+      db.db
+        .prepare(
+          `INSERT INTO notification_outbox (id, channel_id, session_id, event_kind, payload_json, status, attempt_count, next_retry_at, last_error, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, ?, ?)`
+        )
+        .run(outboxId, channel.id, sessionId, eventKind, JSON.stringify(payload), nowIso, nowIso);
+      void deliverOutboxItem(outboxId);
+    } catch (err) {
+      console.error('[channels] Failed to enqueue outbox delivery:', err);
+    }
+  };
+
+  // 后台轮询：扫描到期的 pending 记录并重试投递
+  const pollMs = Math.max(100, Number(process.env.BOTD_OUTBOX_POLL_MS || '2000') || 2000);
+  const outboxTimer = setInterval(() => {
+    try {
+      const nowIso = new Date().toISOString();
+      const dueRows = db.db
+        .prepare(
+          "SELECT id FROM notification_outbox WHERE status = 'pending' AND next_retry_at IS NOT NULL AND next_retry_at <= ? ORDER BY next_retry_at ASC LIMIT 20"
+        )
+        .all(nowIso) as Array<{ id: string }>;
+      for (const row of dueRows) {
+        void deliverOutboxItem(row.id);
+      }
+    } catch (err) {
+      // db 可能已关闭（进程退出），静默忽略
+    }
+  }, pollMs);
+  outboxTimer.unref?.();
+
   // ask 回调签名密钥：初始化时解析并持久化（见 resolveAskSecret）
   const askSecret = resolveAskSecret(db);
 
@@ -557,10 +790,29 @@ export function registerChannelRoutes(
     if (!sRes.ok) return sRes.response;
 
     const stmt = db.db.prepare(
-      'SELECT id, session_id, owner_id, name, kind, target_url, secret, events_json, enabled, last_triggered_at, created_at FROM notification_channels WHERE session_id = ? ORDER BY created_at ASC'
+      'SELECT id, session_id, owner_id, name, kind, target_url, secret, events_json, tell_policy, enabled, last_triggered_at, created_at FROM notification_channels WHERE session_id = ? ORDER BY created_at ASC'
     );
     const rows = stmt.all(id) as unknown as ChannelRow[];
     return c.json(rows.map(mapChannelRow));
+  });
+
+  // GET /api/sessions/:id/outbox —— 查询该会话关联通道的出站通知队列近期记录
+  app.get('/api/sessions/:id/outbox', (c) => {
+    const id = c.req.param('id');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+
+    const rows = db.db
+      .prepare(
+        `SELECT o.id, o.channel_id, o.session_id, o.event_kind, o.payload_json, o.status, o.attempt_count, o.next_retry_at, o.last_error, o.created_at, o.updated_at
+         FROM notification_outbox o
+         JOIN notification_channels ch ON ch.id = o.channel_id
+         WHERE o.session_id = ? OR ch.session_id = ?
+         ORDER BY o.created_at DESC
+         LIMIT 100`
+      )
+      .all(id, id) as unknown as OutboxRow[];
+    return c.json(rows.map(mapOutboxRow));
   });
 
   // POST /api/sessions/:id/channels
@@ -575,7 +827,7 @@ export function registerChannelRoutes(
       return c.json({ error: 'Invalid JSON body' }, 400);
     }
 
-    const { name, kind, targetUrl, secret, events, enabled } = body;
+    const { name, kind, targetUrl, secret, events, tellPolicy, enabled } = body;
     if (typeof name !== 'string' || !name.trim()) {
       return c.json({ error: 'Channel name is required' }, 400);
     }
@@ -585,6 +837,10 @@ export function registerChannelRoutes(
     if (!isValidHttpUrl(targetUrl)) {
       return c.json({ error: 'Invalid targetUrl. Must be a valid http:// or https:// URL' }, 400);
     }
+    if (tellPolicy !== undefined && !VALID_TELL_POLICIES.has(tellPolicy)) {
+      return c.json({ error: "Invalid tellPolicy. Allowed: 'always', 'needed', 'never'" }, 400);
+    }
+    const tellPolicyValue: NotificationTellPolicy = tellPolicy ?? 'always';
 
     let parsedEvents: NotificationEventKind[] = ['assistant_reply', 'ask_request', 'wakeup'];
     if (Array.isArray(events) && events.length > 0) {
@@ -600,8 +856,8 @@ export function registerChannelRoutes(
 
     const stmt = db.db.prepare(`
       INSERT INTO notification_channels (
-        id, session_id, owner_id, name, kind, target_url, secret, events_json, enabled, last_triggered_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+        id, session_id, owner_id, name, kind, target_url, secret, events_json, tell_policy, enabled, last_triggered_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
     `);
 
     stmt.run(
@@ -613,6 +869,7 @@ export function registerChannelRoutes(
       targetUrl.trim(),
       typeof secret === 'string' && secret.trim() ? secret.trim() : null,
       JSON.stringify(parsedEvents),
+      tellPolicyValue,
       isEnabled,
       now
     );
@@ -625,6 +882,7 @@ export function registerChannelRoutes(
       targetUrl: targetUrl.trim(),
       ...(secret && secret.trim() ? { secret: secret.trim() } : {}),
       events: parsedEvents,
+      tellPolicy: tellPolicyValue,
       enabled: Boolean(isEnabled),
       createdAt: now,
     };
@@ -638,7 +896,7 @@ export function registerChannelRoutes(
     const user = c.get('user');
 
     const selectStmt = db.db.prepare(
-      'SELECT id, session_id, owner_id, name, kind, target_url, secret, events_json, enabled, last_triggered_at, created_at FROM notification_channels WHERE id = ?'
+      'SELECT id, session_id, owner_id, name, kind, target_url, secret, events_json, tell_policy, enabled, last_triggered_at, created_at FROM notification_channels WHERE id = ?'
     );
     const existing = selectStmt.get(channelId) as unknown as ChannelRow | undefined;
     if (!existing) {
@@ -682,6 +940,14 @@ export function registerChannelRoutes(
       }
     }
 
+    let nextTellPolicy = parseTellPolicy(existing.tell_policy);
+    if (body.tellPolicy !== undefined) {
+      if (!VALID_TELL_POLICIES.has(body.tellPolicy)) {
+        return c.json({ error: "Invalid tellPolicy. Allowed: 'always', 'needed', 'never'" }, 400);
+      }
+      nextTellPolicy = body.tellPolicy;
+    }
+
     let nextEnabled = existing.enabled;
     if (body.enabled !== undefined) {
       nextEnabled = body.enabled ? 1 : 0;
@@ -689,10 +955,10 @@ export function registerChannelRoutes(
 
     const updateStmt = db.db.prepare(`
       UPDATE notification_channels
-      SET name = ?, target_url = ?, secret = ?, events_json = ?, enabled = ?
+      SET name = ?, target_url = ?, secret = ?, events_json = ?, tell_policy = ?, enabled = ?
       WHERE id = ?
     `);
-    updateStmt.run(nextName, nextTargetUrl, nextSecret, nextEventsJson, nextEnabled, channelId);
+    updateStmt.run(nextName, nextTargetUrl, nextSecret, nextEventsJson, nextTellPolicy, nextEnabled, channelId);
 
     const updatedRow = selectStmt.get(channelId) as unknown as ChannelRow;
     return c.json(mapChannelRow(updatedRow));
@@ -722,7 +988,7 @@ export function registerChannelRoutes(
     const user = c.get('user');
 
     const selectStmt = db.db.prepare(
-      'SELECT id, session_id, owner_id, name, kind, target_url, secret, events_json, enabled, last_triggered_at, created_at FROM notification_channels WHERE id = ?'
+      'SELECT id, session_id, owner_id, name, kind, target_url, secret, events_json, tell_policy, enabled, last_triggered_at, created_at FROM notification_channels WHERE id = ?'
     );
     const existing = selectStmt.get(channelId) as unknown as ChannelRow | undefined;
     if (!existing) {
@@ -751,6 +1017,7 @@ export function registerChannelRoutes(
   });
 
   // 4. 全局内部监听器注册：监听会话事件并异步非阻塞推送到外部通道
+  //    支持子会话向上继承：子会话事件同时命中其父会话配置的启用通道（按通道 id 去重）
   const unsubscribe = sseHub.onBroadcast((sessionId, event) => {
     void (async () => {
       try {
@@ -767,25 +1034,49 @@ export function registerChannelRoutes(
 
         if (!eventKind) return;
 
-        const stmt = db.db.prepare(
-          'SELECT id, session_id, owner_id, name, kind, target_url, secret, events_json, enabled, last_triggered_at, created_at FROM notification_channels WHERE session_id = ? AND enabled = 1'
+        // 收集事件会话及其父会话（若存在）上的启用通道，按 id 去重
+        const session = db.getSession(sessionId);
+        const sessionIds = [sessionId];
+        if (session?.parentSessionId) {
+          sessionIds.push(session.parentSessionId);
+        }
+
+        const selectStmt = db.db.prepare(
+          'SELECT id, session_id, owner_id, name, kind, target_url, secret, events_json, tell_policy, enabled, last_triggered_at, created_at FROM notification_channels WHERE session_id = ? AND enabled = 1'
         );
-        const rows = stmt.all(sessionId) as unknown as ChannelRow[];
+        const seenChannelIds = new Set<string>();
+        const rows: ChannelRow[] = [];
+        for (const sid of sessionIds) {
+          for (const row of selectStmt.all(sid) as unknown as ChannelRow[]) {
+            if (seenChannelIds.has(row.id)) continue;
+            seenChannelIds.add(row.id);
+            rows.push(row);
+          }
+        }
         if (rows.length === 0) return;
 
-        const channels = rows.map(mapChannelRow).filter((ch) => ch.events.includes(eventKind!));
+        // tellPolicy 过滤上下文：wakeup 仅失败回调放行；assistant_reply 仅 failed 会话放行
+        const messageContent = event.type === 'message_created' ? event.message.content : '';
+        const isFailureCallback = eventKind === 'wakeup' && isFailureCallbackMessage(messageContent);
+        const sessionFailed = session?.status === 'failed';
+
+        const channels = rows
+          .map(mapChannelRow)
+          .filter(
+            (ch) => ch.events.includes(eventKind!) && shouldTellChannel(ch, eventKind!, { isFailureCallback, sessionFailed })
+          );
         if (channels.length === 0) return;
 
-        const session = db.getSession(sessionId);
-        const sessionTitle = session?.title || sessionId;
         const baseUrl =
           process.env.BOTD_PUBLIC_URL ||
           process.env.BOTD_BASE_URL ||
           `http://localhost:${process.env.BOTD_PORT || 3000}`;
 
-        const nowIso = new Date().toISOString();
-
         for (const channel of channels) {
+          // payload 主体使用事件源会话（ask 签名 / respondUrls 必须指向事件会话）；
+          // 通道归属会话（可能是父会话）作为 channelSessionId 附带，供消费方区分。
+          const notifySession = channel.sessionId === sessionId ? session : db.getSession(channel.sessionId);
+          const sessionTitle = notifySession?.title || channel.sessionId;
           const payload = buildEventPayload(
             channel.kind,
             eventKind,
@@ -793,26 +1084,10 @@ export function registerChannelRoutes(
             sessionId,
             sessionTitle,
             baseUrl,
-            askSecret
+            askSecret,
+            channel.sessionId
           );
-          sendNotificationToChannel(
-            {
-              kind: channel.kind,
-              targetUrl: channel.targetUrl,
-              secret: channel.secret,
-            },
-            payload
-          )
-            .then((res) => {
-              if (res.ok) {
-                touchChannelTriggeredAt(db, channel.id, nowIso);
-              } else {
-                console.warn(`[channels] Push to ${channel.kind} (${channel.id}) failed:`, res.error);
-              }
-            })
-            .catch((err) => {
-              console.warn(`[channels] Push to channel ${channel.id} error:`, err);
-            });
+          enqueueOutboxDelivery(channel, sessionId, eventKind, payload);
         }
       } catch (err) {
         console.error('[channels] Broadcast listener error:', err);
@@ -820,5 +1095,8 @@ export function registerChannelRoutes(
     })();
   });
 
-  return unsubscribe;
+  return () => {
+    clearInterval(outboxTimer);
+    unsubscribe();
+  };
 }
