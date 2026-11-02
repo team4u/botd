@@ -6,6 +6,7 @@ import os from 'node:os';
 import type {
   ArtifactRecord,
   AskPreviewType,
+  AutomationEventRecord,
   BotConfig,
   MessageAttachment,
   MessageRecord,
@@ -154,7 +155,7 @@ const mapArtifactRow = (row: ArtifactRow): ArtifactRecord => ({
 });
 
 const TRIGGER_COLUMNS =
-  'id, session_id, bot_id, owner_id, name, kind, token, cron_expr, run_at, prompt, enabled, last_triggered_at, created_at';
+  'id, session_id, bot_id, owner_id, name, kind, token, cron_expr, run_at, prompt, enabled, dispatch_mode, skill_id, event_filter_json, last_triggered_at, created_at';
 
 type NodeRow = {
   id: string;
@@ -268,22 +269,60 @@ type TriggerRow = {
   run_at: string | null;
   prompt: string;
   enabled: number;
+  dispatch_mode: string | null;
+  skill_id: string | null;
+  event_filter_json: string | null;
   last_triggered_at: string | null;
   created_at: string;
 };
 
-const mapTriggerRow = (row: TriggerRow): TriggerRecord => ({
+const mapTriggerRow = (row: TriggerRow): TriggerRecord => {
+  const eventFilter = parseOptionalJson<NonNullable<TriggerRecord['eventFilter']>>(row.event_filter_json);
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    botId: row.bot_id,
+    name: row.name,
+    kind: row.kind as TriggerKind,
+    ...(row.token ? { token: row.token } : {}),
+    ...(row.cron_expr ? { cronExpr: row.cron_expr } : {}),
+    ...(row.run_at ? { runAt: row.run_at } : {}),
+    prompt: row.prompt,
+    enabled: Boolean(row.enabled),
+    ...(row.dispatch_mode && row.dispatch_mode !== 'append' ? { dispatchMode: row.dispatch_mode as TriggerRecord['dispatchMode'] } : {}),
+    ...(row.skill_id ? { skillId: row.skill_id } : {}),
+    ...(eventFilter ? { eventFilter } : {}),
+    ...(row.last_triggered_at ? { lastTriggeredAt: row.last_triggered_at } : {}),
+    createdAt: row.created_at,
+  };
+};
+
+const AUTOMATION_EVENT_COLUMNS =
+  'id, trigger_id, session_id, child_session_id, source, event_type, dedup_key, summary, payload_artifact_id, created_at';
+
+type AutomationEventRow = {
+  id: string;
+  trigger_id: string;
+  session_id: string;
+  child_session_id: string | null;
+  source: string;
+  event_type: string;
+  dedup_key: string | null;
+  summary: string;
+  payload_artifact_id: string | null;
+  created_at: string;
+};
+
+const mapAutomationEventRow = (row: AutomationEventRow): AutomationEventRecord => ({
   id: row.id,
+  triggerId: row.trigger_id,
   sessionId: row.session_id,
-  botId: row.bot_id,
-  name: row.name,
-  kind: row.kind as TriggerKind,
-  ...(row.token ? { token: row.token } : {}),
-  ...(row.cron_expr ? { cronExpr: row.cron_expr } : {}),
-  ...(row.run_at ? { runAt: row.run_at } : {}),
-  prompt: row.prompt,
-  enabled: Boolean(row.enabled),
-  ...(row.last_triggered_at ? { lastTriggeredAt: row.last_triggered_at } : {}),
+  ...(row.child_session_id ? { childSessionId: row.child_session_id } : {}),
+  source: row.source,
+  eventType: row.event_type,
+  ...(row.dedup_key ? { dedupKey: row.dedup_key } : {}),
+  summary: row.summary,
+  ...(row.payload_artifact_id ? { payloadArtifactId: row.payload_artifact_id } : {}),
   createdAt: row.created_at,
 });
 
@@ -460,6 +499,21 @@ export class HubDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_triggers_session ON triggers(session_id);
 
+      CREATE TABLE IF NOT EXISTS automation_events (
+        id TEXT PRIMARY KEY,
+        trigger_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        child_session_id TEXT,
+        source TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        dedup_key TEXT,
+        summary TEXT NOT NULL,
+        payload_artifact_id TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_automation_events_session ON automation_events(session_id, created_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_events_dedup ON automation_events(trigger_id, dedup_key) WHERE dedup_key IS NOT NULL;
+
       CREATE TABLE IF NOT EXISTS session_resets_pending (
         session_id TEXT NOT NULL,
         bot_id TEXT NOT NULL,
@@ -554,6 +608,9 @@ export class HubDatabase {
       `ALTER TABLE messages ADD COLUMN subagent_runs_json TEXT`,
       `ALTER TABLE messages ADD COLUMN blocks_json TEXT`,
       `ALTER TABLE messages ADD COLUMN aborted INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE triggers ADD COLUMN dispatch_mode TEXT NOT NULL DEFAULT 'append'`,
+      `ALTER TABLE triggers ADD COLUMN skill_id TEXT`,
+      `ALTER TABLE triggers ADD COLUMN event_filter_json TEXT`,
     ];
 
     for (const sql of migrations) {
@@ -907,6 +964,7 @@ export class HubDatabase {
         this.db.prepare(`DELETE FROM session_resets_pending WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM triggers WHERE session_id IN (${placeholders})`).run(...sessionIds);
+        this.db.prepare(`DELETE FROM automation_events WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM artifacts WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM pending_asks WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM session_participants WHERE session_id IN (${placeholders})`).run(...sessionIds);
@@ -1434,6 +1492,8 @@ export class HubDatabase {
       deleteMessages.run(id);
       const deleteTriggers = this.db.prepare('DELETE FROM triggers WHERE session_id = ?');
       deleteTriggers.run(id);
+      const deleteAutomationEvents = this.db.prepare('DELETE FROM automation_events WHERE session_id = ?');
+      deleteAutomationEvents.run(id);
       const deleteArtifacts = this.db.prepare('DELETE FROM artifacts WHERE session_id = ?');
       deleteArtifacts.run(id);
       const deletePendingAsks = this.db.prepare('DELETE FROM pending_asks WHERE session_id = ?');
@@ -2243,11 +2303,14 @@ export class HubDatabase {
     runAt?: string;
     prompt: string;
     enabled?: boolean;
+    dispatchMode?: TriggerRecord['dispatchMode'];
+    skillId?: string;
+    eventFilter?: TriggerRecord['eventFilter'];
   }): TriggerRecord {
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
-      INSERT INTO triggers (id, session_id, bot_id, owner_id, name, kind, token, cron_expr, run_at, prompt, enabled, last_triggered_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+      INSERT INTO triggers (id, session_id, bot_id, owner_id, name, kind, token, cron_expr, run_at, prompt, enabled, dispatch_mode, skill_id, event_filter_json, last_triggered_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
     `);
     const enabled = input.enabled ?? true;
     stmt.run(
@@ -2262,6 +2325,9 @@ export class HubDatabase {
       input.runAt ?? null,
       input.prompt,
       enabled ? 1 : 0,
+      input.dispatchMode ?? 'append',
+      input.skillId ?? null,
+      input.eventFilter ? JSON.stringify(input.eventFilter) : null,
       now
     );
     return {
@@ -2275,6 +2341,9 @@ export class HubDatabase {
       ...(input.runAt !== undefined ? { runAt: input.runAt } : {}),
       prompt: input.prompt,
       enabled,
+      ...(input.dispatchMode ? { dispatchMode: input.dispatchMode } : {}),
+      ...(input.skillId ? { skillId: input.skillId } : {}),
+      ...(input.eventFilter ? { eventFilter: input.eventFilter } : {}),
       createdAt: now,
     };
   }
@@ -2328,6 +2397,10 @@ export class HubDatabase {
       prompt?: string;
       cronExpr?: string;
       runAt?: string;
+      dispatchMode?: TriggerRecord['dispatchMode'];
+      /** 传 null 显式清除 */
+      skillId?: string | null;
+      eventFilter?: TriggerRecord['eventFilter'];
     }
   ): TriggerRecord | undefined {
     const existing = this.getTrigger(id);
@@ -2339,10 +2412,13 @@ export class HubDatabase {
       ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
       ...(patch.cronExpr !== undefined ? { cronExpr: patch.cronExpr } : {}),
       ...(patch.runAt !== undefined ? { runAt: patch.runAt } : {}),
+      ...(patch.dispatchMode !== undefined ? { dispatchMode: patch.dispatchMode } : {}),
+      ...(patch.skillId !== undefined ? { skillId: patch.skillId ?? undefined } : {}),
+      ...(patch.eventFilter !== undefined ? { eventFilter: patch.eventFilter } : {}),
     };
     const stmt = this.db.prepare(`
       UPDATE triggers
-      SET enabled = ?, name = ?, prompt = ?, cron_expr = ?, run_at = ?
+      SET enabled = ?, name = ?, prompt = ?, cron_expr = ?, run_at = ?, dispatch_mode = ?, skill_id = ?, event_filter_json = ?
       WHERE id = ?
     `);
     stmt.run(
@@ -2351,6 +2427,9 @@ export class HubDatabase {
       next.prompt,
       next.cronExpr ?? null,
       next.runAt ?? null,
+      next.dispatchMode ?? 'append',
+      next.skillId ?? null,
+      next.eventFilter ? JSON.stringify(next.eventFilter) : null,
       id
     );
     return next;
@@ -2363,9 +2442,111 @@ export class HubDatabase {
   }
 
   deleteTrigger(id: string): boolean {
-    const stmt = this.db.prepare('DELETE FROM triggers WHERE id = ?');
-    const result = stmt.run(id);
-    return Number(result.changes) > 0;
+    return this.inTransaction(() => {
+      this.db.prepare('DELETE FROM automation_events WHERE trigger_id = ?').run(id);
+      const stmt = this.db.prepare('DELETE FROM triggers WHERE id = ?');
+      const result = stmt.run(id);
+      return Number(result.changes) > 0;
+    });
+  }
+
+  // --- Automation Events (Event Inbox) ---
+  /** 插入自动化事件；命中 (trigger_id, dedup_key) 唯一索引时返回 undefined（已去重） */
+  createAutomationEvent(input: {
+    id: string;
+    triggerId: string;
+    sessionId: string;
+    childSessionId?: string;
+    source: string;
+    eventType: string;
+    dedupKey?: string;
+    summary: string;
+    payloadArtifactId?: string;
+    createdAt?: string;
+  }): AutomationEventRecord | undefined {
+    const now = input.createdAt ?? new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT INTO automation_events (${AUTOMATION_EVENT_COLUMNS})
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    try {
+      stmt.run(
+        input.id,
+        input.triggerId,
+        input.sessionId,
+        input.childSessionId ?? null,
+        input.source,
+        input.eventType,
+        input.dedupKey ?? null,
+        input.summary,
+        input.payloadArtifactId ?? null,
+        now
+      );
+    } catch (err: any) {
+      // 唯一索引冲突 = 重复事件，交给调用方去重处理
+      if (String(err?.message || '').includes('UNIQUE constraint failed')) return undefined;
+      throw err;
+    }
+    return {
+      id: input.id,
+      triggerId: input.triggerId,
+      sessionId: input.sessionId,
+      ...(input.childSessionId ? { childSessionId: input.childSessionId } : {}),
+      source: input.source,
+      eventType: input.eventType,
+      ...(input.dedupKey ? { dedupKey: input.dedupKey } : {}),
+      summary: input.summary,
+      ...(input.payloadArtifactId ? { payloadArtifactId: input.payloadArtifactId } : {}),
+      createdAt: now,
+    };
+  }
+
+  getAutomationEvent(id: string): AutomationEventRecord | undefined {
+    const stmt = this.db.prepare(`
+      SELECT ${AUTOMATION_EVENT_COLUMNS}
+      FROM automation_events
+      WHERE id = ?
+    `);
+    const row = stmt.get(id) as AutomationEventRow | undefined;
+    return row ? mapAutomationEventRow(row) : undefined;
+  }
+
+  /** 检查 (trigger_id, dedup_key) 是否已存在（跨重启持久化去重） */
+  hasAutomationEventWithDedupKey(triggerId: string, dedupKey: string): boolean {
+    const stmt = this.db.prepare(`
+      SELECT 1 FROM automation_events WHERE trigger_id = ? AND dedup_key = ? LIMIT 1
+    `);
+    return stmt.get(triggerId, dedupKey) !== undefined;
+  }
+
+  /** 回填事件的子会话 id 与载荷 Artifact id（创建时可能尚未生成） */
+  updateAutomationEvent(id: string, patch: { childSessionId?: string; payloadArtifactId?: string }): void {
+    const sets: string[] = [];
+    const params: (string | null)[] = [];
+    if (patch.childSessionId !== undefined) {
+      sets.push('child_session_id = ?');
+      params.push(patch.childSessionId);
+    }
+    if (patch.payloadArtifactId !== undefined) {
+      sets.push('payload_artifact_id = ?');
+      params.push(patch.payloadArtifactId);
+    }
+    if (sets.length === 0) return;
+    this.db.prepare(`UPDATE automation_events SET ${sets.join(', ')} WHERE id = ?`).run(...params, id);
+  }
+
+  /** 会话关联事件列表（按 created_at 倒序，默认 100 条）：含该会话派生子会话的事件 */
+  listSessionAutomationEvents(sessionId: string, limit = 100): AutomationEventRecord[] {
+    const capped = Math.max(1, Math.min(Math.floor(limit) || 100, 500));
+    const stmt = this.db.prepare(`
+      SELECT ${AUTOMATION_EVENT_COLUMNS}
+      FROM automation_events
+      WHERE session_id = ?
+      ORDER BY created_at DESC, rowid DESC
+      LIMIT ?
+    `);
+    const rows = stmt.all(sessionId, capped) as AutomationEventRow[];
+    return rows.map(mapAutomationEventRow);
   }
 
   close(): void {

@@ -118,6 +118,19 @@ export interface PendingAskRecord {
 
 export type TriggerKind = 'webhook' | 'cron' | 'once';
 
+/** 触发器分发模式：append 追加唤醒到目标会话；subsession 自动派生独立子会话执行 */
+export type TriggerDispatchMode = 'append' | 'subsession';
+
+/** Webhook 事件过滤条件：三项均指定时需全部匹配才触发 */
+export interface TriggerEventFilter {
+  /** 事件来源，如 'github'、'webhook' */
+  source?: string;
+  /** 允许的事件类型列表（如 ['pull_request.opened', 'push']） */
+  types?: string[];
+  /** JSON body 顶层键值精确匹配 */
+  payloadMatch?: Record<string, string | number | boolean>;
+}
+
 export interface TriggerRecord {
   id: string;
   sessionId: string;
@@ -132,6 +145,12 @@ export interface TriggerRecord {
   runAt?: string;
   prompt: string;
   enabled: boolean;
+  /** 分发模式：默认 'append'（唤醒目标会话），'subsession' 时自动派生子会话执行 */
+  dispatchMode?: TriggerDispatchMode;
+  /** 可选 skill id：触发时在 prompt 前加 `/skill:<skillId> ` 前缀 */
+  skillId?: string;
+  /** Webhook 事件过滤条件（仅 kind='webhook' 生效） */
+  eventFilter?: TriggerEventFilter;
   lastTriggeredAt?: string;
   createdAt: string;
 }
@@ -146,6 +165,29 @@ export interface CreateTriggerInput {
   delaySeconds?: number;
   prompt: string;
   enabled?: boolean;
+  dispatchMode?: TriggerDispatchMode;
+  skillId?: string;
+  eventFilter?: TriggerEventFilter;
+}
+
+/** 自动化事件记录：Webhook 收到的每次触发（Event Inbox，持久化去重与载荷文件化） */
+export interface AutomationEventRecord {
+  id: string;
+  triggerId: string;
+  sessionId: string;
+  /** 派生出的子会话 id（dispatchMode='subsession' 时存在） */
+  childSessionId?: string;
+  /** 事件来源：'github' / body.source / 默认 'webhook' */
+  source: string;
+  /** 事件类型：github 拼接 action（如 pull_request.opened）/ body.type / 默认 'webhook.received' */
+  eventType: string;
+  /** 去重键：x-botd-dedup 或 x-github-delivery 头 */
+  dedupKey?: string;
+  /** 摘要：payload message/text 或事件类型描述 */
+  summary: string;
+  /** 事件载荷落盘的 Artifact id（event_<id>.json） */
+  payloadArtifactId?: string;
+  createdAt: string;
 }
 
 export type BgJobStatus = 'running' | 'done' | 'failed' | 'killed';
