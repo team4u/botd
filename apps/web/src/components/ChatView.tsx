@@ -159,6 +159,40 @@ export const ChatView: React.FC<ChatViewProps> = ({
     [session.memberBotIds, botMap]
   );
 
+  // 输入框 @ 可提及的智能体列表：
+  // - 单聊 (direct)：不展示当前单聊对象自己（不能 @ 自己）；若当前是主 BOT，则仅展示其麾下的所有角色分身
+  // - 群聊 (lead)：展示群内所有成员 BOT，并紧随每个主 BOT 之后纳入其麾下的角色分身
+  const mentionableBots = useMemo<BotConfig[]>(() => {
+    const allBots = Array.from(botMap.values());
+    if (session.mode === 'direct') {
+      const leadBot = botMap.get(session.leadBotId);
+      if (!leadBot || leadBot.parentBotId) {
+        return [];
+      }
+      return allBots.filter((b) => b.parentBotId === leadBot.id);
+    }
+
+    const result: BotConfig[] = [];
+    const seen = new Set<string>();
+    const pushBot = (b: BotConfig) => {
+      if (seen.has(b.id)) return;
+      seen.add(b.id);
+      result.push(b);
+    };
+
+    for (const member of memberBots) {
+      pushBot(member);
+      if (!member.parentBotId) {
+        for (const sub of allBots) {
+          if (sub.parentBotId === member.id) {
+            pushBot(sub);
+          }
+        }
+      }
+    }
+    return result;
+  }, [session.mode, session.leadBotId, memberBots, botMap]);
+
   // 头部更多操作菜单 / 行内重命名 / 清空与删除确认
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -1489,7 +1523,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <div className="px-2 py-1 text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
                     点名成员追加接力
                   </div>
-                  {memberBots.map((bot) => (
+                  {(mentionableBots.length > 0 ? mentionableBots : memberBots).map((bot) => (
                     <button
                       key={bot.id}
                       type="button"
@@ -1516,7 +1550,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         isSubagentSession={Boolean(session.mode === 'direct' && botMap.get(session.leadBotId)?.parentBotId)}
         botMap={botMap}
         onSendMessage={onSendMessage}
-        memberBots={memberBots}
+        memberBots={mentionableBots}
         nodeMap={nodeMap}
         isRunning={isRunning}
         cancelling={cancelling}
