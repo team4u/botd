@@ -6,28 +6,33 @@ import { extractToolSummary, extractToolOutputPreview, sanitizeToolArgs } from '
  * 会话事件记录器：订阅 AgentSession 事件流，把思考 / 文本 / 工具调用整理成
  * 交错时间线 blocks 与 toolCalls 列表，并通过回调实时外发。
  *
- * 同一套记录器服务三条路径——主会话回合、分身（subagent）时间线、跨回合 resume 追问——
+ * 同一套记录器服务三条路径——主会话回合、子代理（subagent）时间线、跨回合 resume 追问——
  * 记录器只往传入的目标数组写入，输出位置由调用方决定。
  */
 
-/** 记录输出目标：主会话用独立数组，分身用 run 记录上的 blocks / toolCalls */
+/** 记录输出目标：主会话用独立数组，子代理用 run 记录上的 blocks / toolCalls */
 export interface RecorderTarget {
   blocks: TurnBlock[];
   toolCalls: ToolCallRecord[];
 }
 
 export interface TurnEventRecorderOptions {
-  /** 思考事件回调（供主会话推流；分身路径不需要） */
+  /** 思考事件回调（供主会话推流；子代理路径不需要） */
   onThinking?: (payload: { delta?: string; status: 'running' | 'done'; durationMs?: number }) => void;
   /** 文本增量回调（仅主会话推流使用） */
   onText?: (delta: string) => void;
-  /** 工具事件回调（主会话推流 / 分身记录刷新） */
+  /** 工具事件回调（主会话推流 / 子代理记录刷新） */
   onTool?: (payload: { status: 'running' | 'done' | 'error'; toolCall: ToolCallRecord; outputPreview?: string; durationMs?: number }) => void;
   /**
    * 跨 assistant 消息的文本是否补段落分隔（\n\n）。
-   * 主会话直连公屏需要；分身时间线按块原样拼接，不需要。
+   * 主会话直连公屏需要；子代理时间线按块原样拼接，不需要。
    */
   paragraphBetweenMessages?: boolean;
+  /**
+   * 文本块是否在 assistant 消息结束时封口（下一条消息另起一块）。
+   * 子代理时间线用（原始行为：message_end 打 closed 标记）；主会话不用。
+   */
+  splitTextBlocksOnMessageEnd?: boolean;
 }
 
 interface RunningToolEntry {
@@ -45,6 +50,8 @@ export class TurnEventRecorder {
   private readonly runningBlocks = new Map<string, Extract<TurnBlock, { type: 'tool' }>>();
   private thinkingStartMs: number | null = null;
   private thinkingBlock: Extract<TurnBlock, { type: 'thinking' }> | null = null;
+  /** 文本块封口标记（splitTextBlocksOnMessageEnd 用） */
+  private textBlockClosed = false;
 
   // 跨 assistant 消息的文本补段落分隔只能依赖 message_start 事件标记边界。
   // 严禁用 event.message 引用比较判定“新消息”——pi 每次 message_update 都会传
@@ -55,7 +62,7 @@ export class TurnEventRecorder {
 
   constructor(target: RecorderTarget, opts: TurnEventRecorderOptions = {}) {
     this.target = target;
-    this.opts = { paragraphBetweenMessages: false, ...opts };
+    this.opts = { paragraphBetweenMessages: false, splitTextBlocksOnMessageEnd: false, ...opts };
   }
 
   /** 订阅会话；返回取消函数 */
@@ -63,7 +70,7 @@ export class TurnEventRecorder {
     return session.subscribe((event: any) => this.handle(event));
   }
 
-  /** 直接处理单个事件（分身路径按事件逐个投递） */
+  /** 直接处理单个事件（子代理路径按事件逐个投递） */
   handle(event: unknown): void {
     const e = event as any;
     if (e.type === 'message_start') {
@@ -72,6 +79,13 @@ export class TurnEventRecorder {
           this.hasPriorAssistantText = true;
         }
         this.currentAssistantHasText = false;
+      }
+      return;
+    }
+    if (e.type === 'message_end') {
+      if (e.message?.role === 'assistant' && this.opts.splitTextBlocksOnMessageEnd) {
+        this.markThinkingDone();
+        this.textBlockClosed = true;
       }
       return;
     }
@@ -168,10 +182,11 @@ export class TurnEventRecorder {
     if (!effective) return;
     this.currentAssistantHasText = true;
     const last = this.target.blocks[this.target.blocks.length - 1];
-    if (last && last.type === 'text') {
+    if (last && last.type === 'text' && !(this.opts.splitTextBlocksOnMessageEnd && this.textBlockClosed)) {
       last.text += effective;
     } else {
       this.target.blocks.push({ type: 'text', text: effective });
+      this.textBlockClosed = false;
     }
     this.opts.onText?.(effective);
   }
@@ -234,6 +249,12 @@ export class TurnEventRecorder {
       if (durationMs !== undefined) entry.durationMs = durationMs;
       entry.isError = isError;
       if (outputPreview) entry.outputPreview = outputPreview;
+      // 无 start 记录时重新提取摘要/参数（与原实现一致：兜底路径补齐展示字段）
+      if (!running && entry) {
+        const rawArgs = event.args ?? event.input;
+        if (!entry.summary) entry.summary = extractToolSummary(toolName, rawArgs);
+        if (!entry.args) entry.args = sanitizeToolArgs(rawArgs);
+      }
     }
 
     const block = running

@@ -11,7 +11,6 @@ import type {
 import {
   assertSafeId,
   ensureDir,
-  getBotDir,
   readBot,
   readBotEnv,
   readNodeIdentity,
@@ -19,7 +18,6 @@ import {
 } from '../storage.js';
 import { createRuntimeForProvider, configureProviderAuth } from '../models.js';
 import { BUILTIN_SKILL_ID } from '../builtin-skill.js';
-import { resolveWindowsBash } from '../windows-shell.js';
 import {
   beginSubagentHandoffScope,
   endSubagentHandoffScope,
@@ -27,7 +25,7 @@ import {
 } from '../commands.js';
 import { loadTurnDeps } from './turn-deps.js';
 import { createHubStreamSink, type HubStream } from './hub-stream.js';
-import { runRegistry, purgeStaleSubagentManager } from './run-registry.js';
+import { runRegistry, purgeStaleSubagentManager, subagentSessionFiles } from './run-registry.js';
 import { resolveEffectiveBot, resolveBotPaths } from './bot-context.js';
 import { ensureBotdBinWrapper } from './bin-wrapper.js';
 import { buildAutomationEventEnv } from './automation-event.js';
@@ -74,11 +72,10 @@ export async function executeBotTurn(
   }
 
   // 生命周期修复：上一轮异常退出可能残留全局 manager 注册表
-  purgeStaleSubagentManager(runRegistry.getActiveSessionCount() === 1);
+  // （与原始语义一致：activeTurns 为空时清理；pending 中的回合不算已注册）
+  purgeStaleSubagentManager(!runRegistry.hasRegisteredTurns());
 
   const handoffScope = beginSubagentHandoffScope();
-  /** runId → 分身会话文件与身份（跨回合 resume 追问时重开同一上下文） */
-  const subagentSessionFiles = new Map<string, { sessionFile: string; subagentId: string; task: string }>();
   const sink = createHubStreamSink(hubRpc);
 
   let session: AgentSession | null = null;
@@ -99,7 +96,7 @@ export async function executeBotTurn(
     }
     const parentBotConfig = (parentBotData as any)?.config ?? parentBotData?.bot;
     const effectiveBot = resolveEffectiveBot(bot, parentBotConfig ?? null);
-    const { botDir, workspaceDir, sessionDir, agentDir, mainAgentDir } = resolveBotPaths(dataDir, bot);
+    const { botDir, workspaceDir, sessionDir, mainAgentDir } = resolveBotPaths(dataDir, bot);
     const sessionFile = path.join(sessionDir, `${input.sessionId}.jsonl`);
     await ensureDir(workspaceDir);
     await ensureDir(sessionDir);
@@ -118,7 +115,8 @@ export async function executeBotTurn(
     const modelRuntime = await createRuntimeForProvider(dataDir, effectiveBot.modelProvider);
     await configureProviderAuth(modelRuntime, effectiveBot.modelProvider);
 
-    let model = modelRuntime.getModel(effectiveBot.modelProvider, effectiveBot.modelId) ??
+    let model: ReturnType<typeof getModel> | undefined =
+      modelRuntime.getModel(effectiveBot.modelProvider, effectiveBot.modelId) ??
       getModel(effectiveBot.modelProvider as any, effectiveBot.modelId as any);
     // Extension-provider models may never have been catalogued (fresh install,
     // never opened the catalog page): fetch that provider's catalog once and retry.
@@ -167,8 +165,8 @@ export async function executeBotTurn(
       defaultModel: effectiveBot.modelId,
       compaction: { enabled: process.env.BOTD_AUTO_COMPACT !== '0' },
     });
-    // 主 BOT 挂载 pi-subagents 底座：获得 Agent / SubagentWorkflow 工具，可调度 .pi/agents/ 下的角色分身。
-    // 分身（parentBotId 已设置）不挂载，防套娃；扩展内部另有 inChildSessionContext 防重入双保险。
+    // 主 BOT 挂载 pi-subagents 底座：获得 Agent / SubagentWorkflow 工具，可调度 .pi/agents/ 下的子代理。
+    // 子代理（parentBotId 已设置）不挂载，防套娃；扩展内部另有 inChildSessionContext 防重入双保险。
     const resourceLoader = await loadBotResources(
       dataDir,
       effectiveBot,
@@ -278,7 +276,9 @@ export async function executeBotTurn(
     });
 
     // --- 9. 扩展绑定（print 模式 + 网页不支持的会话动作显式拒绝） ---
+    // messageCountBefore 在 bindExtensions 之前拍快照：只看本回合消息，扩展命令可能不产生 assistant 消息
     const extensionErrors: string[] = [];
+    const messageCountBefore = session.messages.length;
     const boundSession = session;
     const unsupportedSessionAction = async (): Promise<never> => {
       throw new Error('此扩展命令的会话操作暂不支持在网页中运行');
@@ -344,16 +344,15 @@ export async function executeBotTurn(
         await session.prompt(promptText);
       }
     }
-    const messageCountBefore = session.messages.length - 0; // captured before bindExtensions above? no: keep original semantics below
     await session.waitForIdle();
 
-    // --- 12. 后台分身排空（CompletionOutbox 会在主回合后补投递） ---
+    // --- 12. 后台子代理排空（CompletionOutbox 会在主回合后补投递） ---
     const drainDeadline = Date.now() + 120_000;
     let drainedBackground = false;
     while (
       !runRegistry.isCancelled(runKey) &&
       Date.now() < drainDeadline &&
-      (bridge ? bridgeHasRunning(bridge) : false || Boolean(getGlobalSubagentManager()?.hasRunning?.()))
+      ((bridge ? bridgeHasRunning(bridge) : false) || Boolean(getGlobalSubagentManager()?.hasRunning?.()))
     ) {
       drainedBackground = true;
       await new Promise((r) => setTimeout(r, 100));
@@ -415,7 +414,7 @@ export async function executeBotTurn(
   }
 }
 
-/** 本回合分身仍有运行记录（bridge 记录状态）或全局 manager 仍在跑（其他回合遗留） */
+/** 本回合子代理仍有运行记录（bridge 记录状态）或全局 manager 仍在跑（其他回合遗留） */
 function bridgeHasRunning(bridge: NonNullable<ReturnType<typeof createSubagentBridge>>): boolean {
   for (const run of bridge.runs.values()) {
     if (run.status === 'running') return true;

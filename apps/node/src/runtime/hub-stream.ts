@@ -2,7 +2,7 @@ import type { BirpcReturn } from 'birpc';
 import type { HubRpcFunctions, NodeRpcFunctions, SubagentRunRecord } from '@botd/protocol';
 
 /**
- * Hub 推流 sink：把回合内产生的文本 / 思考 / 工具 / 分身事件统一发往 Hub 的 onSessionStream。
+ * Hub 推流 sink：把回合内产生的文本 / 思考 / 工具 / 子代理事件统一发往 Hub 的 onSessionStream。
  * 推流失败一律静默——实时展示丢失不应影响回合本身的结果。
  */
 
@@ -48,7 +48,7 @@ export interface HubStreamSink {
       toolIsError?: boolean;
     },
   ): void;
-  /** 分身生命周期 / 进度事件 */
+  /** 子代理生命周期 / 进度事件 */
   subagent(sessionId: string, botId: string, payload: SubagentStreamPayload): void;
 }
 

@@ -2,7 +2,7 @@ import type { ToolCallRecord, TurnBlock } from '@botd/protocol';
 
 /**
  * 工具调用记录的摘要提取与脱敏：从工具参数 / 输出中提炼出适合落库与流式展示的短文本。
- * 全部为纯函数，供主会话、分身时间线与 resume 追问三条路径共用。
+ * 全部为纯函数，供主会话、子代理时间线与 resume 追问三条路径共用。
  */
 
 const SUMMARY_MAX_CHARS = 120;

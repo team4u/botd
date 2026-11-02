@@ -6,13 +6,13 @@ import { TurnEventRecorder } from './turn-events.js';
 import { getGlobalSubagentManager } from '../commands.js';
 
 /**
- * pi-subagents 事件桥接：把分身生命周期事件（created/started/completed/failed/steered）
- * 与分身会话的工具/思考/文本流实时转发到 Hub，并维护本回合的 SubagentRunRecord 映射。
+ * pi-subagents 事件桥接：把子代理生命周期事件（created/started/completed/failed/steered）
+ * 与子代理会话的工具/思考/文本流实时转发到 Hub，并维护本回合的 SubagentRunRecord 映射。
  *
- * 主 BOT 未挂载分身扩展时 createSubagentBridge 静默返回 undefined。
+ * 主 BOT 未挂载子代理扩展时 createSubagentBridge 静默返回 undefined。
  */
 
-/** 生命周期事件携带的分身基础字段（来自 pi-subagents 扩展） */
+/** 生命周期事件携带的子代理基础字段（来自 pi-subagents 扩展） */
 interface LifecycleEvent {
   id?: string;
   type?: string;
@@ -24,7 +24,7 @@ interface LifecycleEvent {
   toolUses?: number;
 }
 
-/** 全局 manager 里的一条分身记录（含会话与文件，供实时订阅与跨回合 resume） */
+/** 全局 manager 里的一条子代理记录（含会话与文件，供实时订阅与跨回合 resume） */
 interface ManagerRecord {
   id: string;
   type: string;
@@ -48,9 +48,9 @@ function peekManagerRecord(id: string): ManagerRecord | undefined {
 }
 
 export interface SubagentBridge {
-  /** 本回合全部分身运行记录（runId → record） */
+  /** 本回合全部子代理运行记录（runId → record） */
   readonly runs: Map<string, SubagentRunRecord>;
-  /** 推送 / 更新一条分身记录并转发到 Hub */
+  /** 推送 / 更新一条子代理记录并转发到 Hub */
   emit(run: SubagentRunRecord, patch?: Partial<SubagentRunRecord>): void;
   /** 撤销全部事件订阅 */
   dispose(): void;
@@ -60,7 +60,7 @@ export interface SubagentBridgeOptions {
   sessionId: string;
   botId: string;
   sink: HubStreamSink;
-  /** runId → 分身会话文件与身份（跨回合 resume 追问时重开同一上下文） */
+  /** runId → 子代理会话文件与身份（跨回合 resume 追问时重开同一上下文） */
   sessionFiles: Map<string, { sessionFile: string; subagentId: string; task: string }>;
 }
 
@@ -70,7 +70,7 @@ export function createSubagentBridge(
 ): SubagentBridge | undefined {
   const { sessionId, botId, sink, sessionFiles } = opts;
   const runs = new Map<string, SubagentRunRecord>();
-  /** 已订阅分身 session 工具事件的取消函数（runId → unsub） */
+  /** 已订阅子代理 session 工具事件的取消函数（runId → unsub） */
   const toolListeners = new Map<string, { unsub: () => void; recorder: TurnEventRecorder }>();
 
   const emit = (run: SubagentRunRecord, patch?: Partial<SubagentRunRecord>) => {
@@ -101,7 +101,7 @@ export function createSubagentBridge(
     return record;
   };
 
-  /** 订阅分身 session 的事件，实时收集交错 blocks（思考/文本流）与 toolCalls / currentTool */
+  /** 订阅子代理 session 的事件，实时收集交错 blocks（思考/文本流）与 toolCalls / currentTool */
   const attachToolListener = (runId: string, subSession: AgentSession) => {
     if (toolListeners.has(runId)) return;
     const record = runs.get(runId);
@@ -111,6 +111,7 @@ export function createSubagentBridge(
     const recorder = new TurnEventRecorder(
       { blocks: record.blocks, toolCalls: record.toolCalls },
       {
+        splitTextBlocksOnMessageEnd: true,
         onTool: () => {
           const current = runs.get(runId);
           if (!current) return;
@@ -150,7 +151,7 @@ export function createSubagentBridge(
       attachToolListener(d.id, managerRecord.session);
     }
 
-    // stopped/aborted 均映射为 'stopped'（用户主动停止单个分身）
+    // stopped/aborted 均映射为 'stopped'（用户主动停止单个子代理）
     const status: SubagentRunRecord['status'] = isDone
       ? channel === 'subagents:failed'
         ? d.status === 'stopped' || d.status === 'aborted' ? 'stopped' : 'error'

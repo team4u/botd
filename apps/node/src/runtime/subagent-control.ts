@@ -4,7 +4,7 @@ import type { SubagentRunRecord } from '@botd/protocol';
 import type { HubStream } from './hub-stream.js';
 import { createHubStreamSink, toSubagentPayload } from './hub-stream.js';
 import { TurnEventRecorder } from './turn-events.js';
-import { runRegistry } from './run-registry.js';
+import { runRegistry, subagentSessionFiles } from './run-registry.js';
 import { getDataDirSafe } from './shell-env.js';
 import { getBotDir, getBotWorkspaceDir, readBot } from '../storage.js';
 import { createRuntimeForProvider, configureProviderAuth } from '../models.js';
@@ -12,8 +12,8 @@ import { loadTurnDeps } from './turn-deps.js';
 import { getGlobalSubagentManager } from '../commands.js';
 
 /**
- * 回合外的分身直接控制：steer（运行中插话）、stop（单独停止）、resume（结束后追问）。
- * 由 daemon 暴露为 NodeRpcFunctions，供 Hub 在回合外部定位并操控分身。
+ * 回合外的子代理直接控制：steer（运行中插话）、stop（单独停止）、resume（结束后追问）。
+ * 由 daemon 暴露为 NodeRpcFunctions，供 Hub 在回合外部定位并操控子代理。
  */
 
 /** 最近一次活跃回合的 hubRpc 引用：后台/resume 推流用（turn 结束后仍可能收到完成事件） */
@@ -35,9 +35,9 @@ function emitOrphanSubagentEvent(sessionId: string, botId: string, run: Subagent
 }
 
 /**
- * 主会话运行中收到用户新消息：将正在阻塞等待的前台分身切为后台继续运行，
+ * 主会话运行中收到用户新消息：将正在阻塞等待的前台子代理切为后台继续运行，
  * 并把新消息 steer 进当前主 Bot 回合，让主 Bot 马上接管响应
- * （调用 stop_subagent / steer_subagent 控制分身）。
+ * （调用 stop_subagent / steer_subagent 控制子代理）。
  */
 export async function steerBotTurn(
   sessionId: string,
@@ -45,13 +45,14 @@ export async function steerBotTurn(
   message: string,
 ): Promise<{ accepted: boolean }> {
   const { triggerActiveSubagentHandoff } = await import('../commands.js');
-  const ctx = runRegistry.findActiveTurn(sessionId);
-  if (!ctx || ctx.botId !== botId) return { accepted: false };
+  // 先按 (sessionId, botId) 精确命中，再退化为同会话任意活跃回合（与原实现一致，退化路径不校验 botId）
+  const ctx = runRegistry.getTurn(`${sessionId}:${botId}`) ?? runRegistry.findActiveTurn(sessionId);
+  if (!ctx) return { accepted: false };
   const session = runRegistry.getSession(ctx.runKey);
   if (!session) return { accepted: false };
   if (!message.trim()) return { accepted: false };
 
-  // 1) 触发前台分身转后台（解除 Agent 工具的阻塞等待）
+  // 1) 触发前台子代理转后台（解除 Agent 工具的阻塞等待）
   triggerActiveSubagentHandoff();
 
   // 2) 将用户新消息注入当前主 Bot 回合
@@ -63,7 +64,7 @@ export async function steerBotTurn(
   }
 }
 
-/** 单独停止某一个正在运行的子代理（按 runId），不中断主回合与其他分身 */
+/** 单独停止某一个正在运行的子代理（按 runId），不中断主回合与其他子代理 */
 export async function stopSubagent(
   sessionId: string,
   botId: string,
@@ -80,8 +81,8 @@ export async function stopSubagent(
   }
 
   // 更新本地 runRecord 状态并推送流事件（事件桥也会收到 subagents:failed，此处立即反馈）
-  const ctx = runRegistry.findActiveTurn(sessionId);
-  if (ctx && ctx.sessionId === sessionId && ctx.botId === botId) {
+  const ctx = runRegistry.findActiveTurn(sessionId) ?? runRegistry.getTurn(`${sessionId}:${botId}`);
+  if (ctx) {
     const run = ctx.peekSubagentRun(runId);
     if (run) {
       run.status = 'stopped';
@@ -98,9 +99,9 @@ export async function stopSubagent(
 
 /**
  * 直接向某个子代理发送 steer（运行中插话）或 resume（结束后继续追问）。
- * - steer：通过全局 manager.steer 将消息投递进运行中的分身会话；
+ * - steer：通过全局 manager.steer 将消息投递进运行中的子代理会话；
  * - resume：若 manager 记录仍在则 manager.resume 同一 runId；否则用保存的 sessionFile
- *   重开同一分身上下文执行一轮追问（跨回合场景）。期间推送同一 runId 的
+ *   重开同一子代理上下文执行一轮追问（跨回合场景）。期间推送同一 runId 的
  *   running -> done 状态、steers、toolCalls 与更新后的 replyFull。
  */
 export async function interactSubagent(input: {
@@ -114,14 +115,14 @@ export async function interactSubagent(input: {
   const { sessionId, botId, runId, message, mode } = input;
   if (!message.trim()) return { ok: false, error: 'Message must be non-empty.' };
 
-  const ctx = runRegistry.findActiveTurn(sessionId);
+  const ctx = runRegistry.findActiveTurn(sessionId) ?? runRegistry.getTurn(`${sessionId}:${botId}`);
   const manager = getGlobalSubagentManager();
   const managerRecord = manager?.getRecord?.(runId);
 
-  // 取（或重建）runRecord
+  // 取（或重建）runRecord（进程级 sessionFiles 兜底跨回合 resume）
   let run: SubagentRunRecord | undefined = ctx?.peekSubagentRun(runId);
   if (!run) {
-    const meta = ctx?.sessionFiles.get(runId);
+    const meta = subagentSessionFiles.get(runId);
     run = {
       id: runId,
       subagentId: input.subagentId || meta?.subagentId || managerRecord?.type || 'agent',
@@ -154,7 +155,7 @@ export async function interactSubagent(input: {
     return { ok: true, run };
   }
 
-  // ---- resume：在同一 runId / 同一分身上下文继续追问 ----
+  // ---- resume：在同一 runId / 同一子代理上下文继续追问 ----
   const startedAt = Date.now();
   run.steers ??= [];
   run.steers.push({ message, timestamp: new Date().toISOString(), mode: 'resume' });
@@ -179,8 +180,8 @@ export async function interactSubagent(input: {
       return { ok: true, run };
     }
 
-    // 跨回合：用保存的 sessionFile 重开同一分身上下文执行一轮追问
-    const meta = ctx?.sessionFiles.get(runId);
+    // 跨回合：用保存的 sessionFile 重开同一子代理上下文执行一轮追问
+    const meta = subagentSessionFiles.get(runId);
     if (!meta?.sessionFile || !existsSync(meta.sessionFile)) {
       pushEvent({ status: 'error', replyFull: `Subagent session file for "${runId}" is gone; cannot resume.`, durationMs: Date.now() - startedAt });
       return { ok: false, run, error: `Subagent run "${runId}" has no resumable session file on this node.` };
@@ -210,7 +211,7 @@ export async function interactSubagent(input: {
       return { ok: false, run, error: `Model not found: ${botConfig.modelProvider}/${botConfig.modelId}` };
     }
 
-    // 分身会话文件在 subBotDir 下：重开同一文件继续追问
+    // 子代理会话文件在 subBotDir 下：重开同一文件继续追问
     const sessionManager = SessionManager.open(meta.sessionFile, path.join(subBotDir, 'sessions'), workspaceDir);
     const settingsManager = SettingsManager.inMemory({
       defaultProvider: botConfig.modelProvider,
@@ -222,7 +223,7 @@ export async function interactSubagent(input: {
       botConfig,
       settingsManager,
       () => [],
-      { enableSubagents: false }, // 分身不能再派分身
+      { enableSubagents: false }, // 子代理不能再派子代理
     );
     const created = await createAgentSession({
       cwd: workspaceDir,
@@ -235,12 +236,13 @@ export async function interactSubagent(input: {
     });
     const subSession = created.session;
 
-    // 订阅分身工具事件，实时更新 run.toolCalls
+    // 订阅子代理工具事件，实时更新 run.toolCalls
     run.toolCalls ??= [];
     run.blocks ??= [];
     const recorder = new TurnEventRecorder(
       { blocks: run.blocks, toolCalls: run.toolCalls },
       {
+        splitTextBlocksOnMessageEnd: true,
         onTool: ({ status }) => {
           if (status === 'running') {
             run!.currentTool = run!.toolCalls!.at(-1)?.name;

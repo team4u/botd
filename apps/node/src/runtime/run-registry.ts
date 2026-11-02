@@ -15,13 +15,13 @@ export interface ActiveTurnContext {
   dataDir: string;
   handoffScope: SubagentHandoffScope;
   session: AgentSession;
-  /** 本回合的分身事件桥（未挂载分身扩展时为 undefined） */
+  /** 本回合的子代理事件桥（未挂载子代理扩展时为 undefined） */
   subagentBridge?: SubagentBridge;
-  /** runId → 分身会话文件与身份（跨回合 resume 追问时重开同一上下文） */
+  /** runId → 子代理会话文件与身份（跨回合 resume 追问时重开同一上下文） */
   sessionFiles: Map<string, { sessionFile: string; subagentId: string; task: string }>;
-  /** 推送 / 更新一条分身记录并转发到 Hub */
+  /** 推送 / 更新一条子代理记录并转发到 Hub */
   emitSubagentEvent: (run: SubagentRunRecord, patch?: Partial<SubagentRunRecord>) => void;
-  /** 取本回合已知的分身运行记录 */
+  /** 取本回合已知的子代理运行记录 */
   peekSubagentRun: (runId: string) => SubagentRunRecord | undefined;
 }
 
@@ -57,6 +57,18 @@ export class RunRegistry {
     return this.cancelledRuns.has(runKey);
   }
 
+  isPending(runKey: string): boolean {
+    return this.pendingRuns.has(runKey);
+  }
+
+  /** 防御性满晸：回合外强制丢弃活跃会话引用（resetBotSession 用，不产生事件） */
+  dropSession(runKey: string): AgentSession | undefined {
+    const session = this.activeSessions.get(runKey);
+    this.activeSessions.delete(runKey);
+    this.activeTurns.delete(runKey);
+    return session;
+  }
+
   getSession(runKey: string): AgentSession | undefined {
     return this.activeSessions.get(runKey);
   }
@@ -67,6 +79,15 @@ export class RunRegistry {
 
   registerTurn(ctx: ActiveTurnContext): void {
     this.activeTurns.set(ctx.runKey, ctx);
+  }
+
+  /** 是否存在已注册的活跃回合（对应原始 activeTurns.size > 0；pending 中不算） */
+  hasRegisteredTurns(): boolean {
+    return this.activeTurns.size > 0;
+  }
+
+  getTurn(runKey: string): ActiveTurnContext | undefined {
+    return this.activeTurns.get(runKey);
   }
 
   /** 回合收尾：清空该 runKey 的全部痕迹（finally 路径统一调用） */
@@ -104,10 +125,17 @@ export class RunRegistry {
 /** 进程级唯一注册表 */
 export const runRegistry = new RunRegistry();
 
+export function getActiveSessionCount(): number {
+  return runRegistry.getActiveSessionCount();
+}
+
+/** runId → 子代理会话文件与身份映射（进程级持久：跨回合 resume 追问时重开同一上下文） */
+export const subagentSessionFiles = new Map<string, { sessionFile: string; subagentId: string; task: string }>();
+
 /**
  * 清理上一轮异常退出残留的 pi-subagents 全局 manager 注册表
  * （pi-subagents 仅在自身 session_shutdown 里释放；新回合开始前清掉陈旧注册，
- * 避免旧 manager 的后台分身孤儿化）。
+ * 避免旧 manager 的后台子代理孤儿化）。
  */
 export function purgeStaleSubagentManager(whenIdle: boolean): void {
   try {

@@ -42,6 +42,8 @@ export async function ingestTurnAttachments(
   if (input.attachments?.length) {
     await fs.mkdir(inboxDir, { recursive: true });
     for (const att of input.attachments) {
+      // 清单无论下载成败都列出（与原实现一致），失败仅影响落盘与图片输入
+      attachmentLines.push(`inbox/${path.basename(att.filename)} (id: ${att.id}, ${att.mimeType}, ${att.sizeBytes} bytes)`);
       try {
         const downloaded = await hubRpc.downloadArtifact(att.id);
         downloadedIds.add(att.id);
@@ -52,7 +54,6 @@ export async function ingestTurnAttachments(
           if (VISION_MIME_TYPES.has(mime)) {
             turnImages.push({ type: 'image', data: downloaded.contentBase64, mimeType: mime });
           }
-          attachmentLines.push(`inbox/${path.basename(att.filename)} (id: ${att.id}, ${att.mimeType}, ${att.sizeBytes} bytes)`);
         }
       } catch {
         // If an attachment isn't in artifacts table, don't crash the turn
