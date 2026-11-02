@@ -675,6 +675,31 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
               {/* Tab 1: Basic Config */}
               {activeTab === 'basic' && (
                 <div className="space-y-4">
+                  {/* Subagent color picker */}
+                  {isSubagent && (
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
+                        徽标颜色
+                      </label>
+                      <div className="flex items-center gap-2">
+                        {SUBAGENT_COLOR_OPTIONS.map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => setColor(c.id)}
+                            title={c.label}
+                            aria-label={c.label}
+                            className={`w-5 h-5 rounded-full ${c.bg} transition-all cursor-pointer ${
+                              color === c.id
+                                ? 'ring-2 ring-offset-2 ring-zinc-900 dark:ring-zinc-100 ring-offset-white dark:ring-offset-zinc-950 scale-110'
+                                : 'opacity-60 hover:opacity-100 hover:scale-105'
+                            }`}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Owning node (fixed context) & Bot ID */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>

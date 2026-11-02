@@ -6,7 +6,7 @@ import { readSkill, writeSkill } from './storage.js';
  * survive until the framework ships a newer version.
  */
 export const BUILTIN_SKILL_ID = 'botd-cli';
-export const BUILTIN_SKILL_VERSION = 7;
+export const BUILTIN_SKILL_VERSION = 8;
 const VERSION_MARKER = `<!-- botd-skill: ${BUILTIN_SKILL_ID} v${BUILTIN_SKILL_VERSION} -->`;
 
 export const BUILTIN_SKILL_MD = `${VERSION_MARKER}
@@ -67,6 +67,43 @@ The raw detached-shell alternative (no management, no auto report):
 \`botd restart\` / \`botd stop\` kill the daemon AND every in-flight turn — including
 yours. Never run them mid-turn. If a restart is genuinely required, finish your reply
 and schedule it detached: \`(sleep 5 && botd restart -d & disown; exit 0)\`.
+
+## Subagents (角色分身：创建、管理与并发调度)
+
+Each node has 1 primary BOT (\`$BOTD_BOT_ID\` on node \`$BOTD_NODE_ID\`) and can have multiple **role subagents (角色分身)**.
+Subagents share your workspace by default, appear under you in the Web sidebar, and can be dispatched in parallel via your built-in \`Agent\` and \`SubagentWorkflow\` tools.
+
+### 1. Create & manage subagents via CLI
+
+When the user asks you to create subagents/personas or you need specialized roles (e.g. coder, reviewer, researcher, writer), create them directly with \`botd bots\`:
+
+\`\`\`bash
+# List your current subagents
+botd bots list --parent "$BOTD_BOT_ID" --json
+
+# Create a subagent (inherits your model & skills by default; --tool-scope can be all | readonly | custom)
+botd bots create reviewer --node "$BOTD_NODE_ID" --parent "$BOTD_BOT_ID" \\
+  --name "代码审查员" --desc "负责审查代码缺陷、安全漏洞与边界条件" \\
+  --tool-scope readonly --system-file - << 'EOF'
+你是一名严谨的代码审查专家，专注于发现逻辑缺陷、并发竞态与安全隐患。
+EOF
+
+# Update a subagent's prompt or permissions
+botd bots update reviewer --desc "只读代码审计专家" --tool-scope readonly
+
+# Delete a subagent
+botd bots delete reviewer
+\`\`\`
+
+As soon as \`botd bots create\` returns, the subagent is synced to \`<workspace>/.pi/agents/<subId>.md\` and can be invoked via \`Agent\` **immediately in the same turn**.
+
+### 2. Dispatch subagents (ALWAYS use \`Agent\` / \`SubagentWorkflow\` tools, NOT \`@\`)
+
+- **Single subagent task**: Call the \`Agent\` tool with \`subagent_type: "<subId>"\`, \`description: "<short title>"\`, \`prompt: "<detailed task>"\`, \`run_in_background: false\`.
+- **Parallel subagents (并发执行)**: Emit multiple \`Agent\` tool calls **in the same assistant turn** (with \`run_in_background: false\`). They run concurrently and return all results to you in the same turn so you can synthesize the final answer.
+- **Multi-stage pipeline / adversarial review loop**: Call the \`SubagentWorkflow\` tool with a workflow script using \`pipeline()\` or \`parallel()\`.
+- **Workspace & \`worktree\` isolation**: By default, omit \`isolation\` so subagents work directly in your shared workspace. ONLY pass \`isolation: "worktree"\` when multiple subagents concurrently edit files in the same Git repo or when the user explicitly asks for an isolated branch/worktree.
+- **Do NOT use \`@subId\` or \`-> (@sub1 @sub2)\` in your text reply to call your own subagents** — \`@\` / \`->\` is only for handing off the conversation turn in group chat. Use the \`Agent\` tool for subagent concurrency.
 
 ## Generative UI (Dynamic Cards, Interactive Forms & Concept Deep-Dives)
 

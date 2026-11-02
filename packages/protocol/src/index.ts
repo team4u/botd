@@ -7,13 +7,38 @@ export type SessionStatus = 'idle' | 'running' | 'queued' | 'failed';
 export type MessageRole = 'user' | 'assistant' | 'callback' | 'system';
 
 export interface ToolCallRecord {
+  id?: string;
   name: string;
+  args?: Record<string, unknown>;
   summary?: string;
   status: 'running' | 'done' | 'error';
   durationMs?: number;
   outputPreview?: string;
   isError?: boolean;
 }
+
+export type TurnBlock =
+  | {
+      type: 'thinking';
+      thinking: string;
+      status?: 'running' | 'done';
+      durationMs?: number;
+    }
+  | {
+      type: 'text';
+      text: string;
+    }
+  | {
+      type: 'tool';
+      id: string;
+      name: string;
+      args?: Record<string, unknown>;
+      summary?: string;
+      status: 'running' | 'done' | 'error';
+      durationMs?: number;
+      outputPreview?: string;
+      isError?: boolean;
+    };
 
 export interface TurnUsage {
   inputTokens: number;
@@ -379,6 +404,7 @@ export interface MessageRecord {
   /** 主 BOT 调用分身协同的执行轨迹列表（用于渲染分身协同折叠面板） */
   subagentRuns?: SubagentRunRecord[];
   toolCalls?: ToolCallRecord[];
+  blocks?: TurnBlock[];
   usage?: TurnUsage;
   attachments?: MessageAttachment[];
   createdAt: string;
@@ -406,7 +432,27 @@ export type SessionSseEvent =
       run: SubagentRunRecord;
     }
   | { type: 'text_delta'; sessionId: string; botId: string; delta: string }
-  | { type: 'tool_status'; sessionId: string; botId: string; toolName: string; status: 'running' | 'done'; summary?: string }
+  | {
+      type: 'thinking_stream';
+      sessionId: string;
+      botId: string;
+      delta?: string;
+      status: 'running' | 'done';
+      durationMs?: number;
+    }
+  | {
+      type: 'tool_status';
+      sessionId: string;
+      botId: string;
+      toolCallId?: string;
+      toolName: string;
+      status: 'running' | 'done' | 'error';
+      summary?: string;
+      args?: Record<string, unknown>;
+      outputPreview?: string;
+      durationMs?: number;
+      isError?: boolean;
+    }
   | { type: 'message_created'; message: MessageRecord }
   /** 编辑用户消息后：锚点之后的历史已被截断、锚点内容已更新，客户端应重新拉取消息列表 */
   | { type: 'messages_truncated'; sessionId: string; anchorMessageId: string }
@@ -440,9 +486,17 @@ export interface HubRpcFunctions {
     sessionId: string;
     botId: string;
     deltaText?: string;
+    thinkingDelta?: string;
+    thinkingStatus?: 'running' | 'done';
+    thinkingDurationMs?: number;
+    toolCallId?: string;
     toolName?: string;
-    toolStatus?: 'running' | 'done';
+    toolStatus?: 'running' | 'done' | 'error';
     toolSummary?: string;
+    toolArgs?: Record<string, unknown>;
+    toolOutput?: string;
+    toolDurationMs?: number;
+    toolIsError?: boolean;
     subagentEvent?: {
       id: string;
       subagentId: string;
@@ -530,6 +584,7 @@ export interface NodeRpcFunctions {
     replyText: string;
     modelBadge: string;
     toolCalls?: ToolCallRecord[];
+    blocks?: TurnBlock[];
     usage?: TurnUsage;
     subagentRuns?: SubagentRunRecord[];
   }>;

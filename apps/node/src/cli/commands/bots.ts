@@ -1,5 +1,11 @@
 import { Command, Option } from 'commander';
-import type { BotConfig, SaveBotInput, ThinkingLevel } from '@botd/protocol';
+import type {
+  BotConfig,
+  NodeWithBots,
+  SaveBotInput,
+  SubagentToolScope as BotToolScope,
+  ThinkingLevel,
+} from '@botd/protocol';
 import { cliAction, readGlobals } from '../context.js';
 import { CliError } from '../errors.js';
 import { HubClient } from '../hub-client.js';
@@ -21,11 +27,35 @@ export function registerBotsCommands(program: Command): void {
   const bots = new Command('bots').description('Manage BOTs (create, update, delete, system prompt, memory)');
 
   bots
+    .command('list')
+    .description('List BOTs and subagents')
+    .option('--node <nodeId>', 'Filter by node ID')
+    .option('--parent <parentBotId>', 'Filter subagents by parent BOT ID')
+    .action((options: Record<string, unknown>, command: Command) =>
+      cliAction(async (options, command) => {
+        const g = readGlobals(command);
+        const client = await HubClient.connect(g);
+        const nodes = await client.get<NodeWithBots[]>('/api/nodes');
+        let allBots = nodes.flatMap((n) => n.bots);
+        if (options.node) {
+          allBots = allBots.filter((b) => b.nodeId === (options.node as string));
+        }
+        if (options.parent) {
+          allBots = allBots.filter((b) => b.parentBotId === (options.parent as string));
+        }
+        printResult(allBots, g.json);
+      })(options, command),
+    );
+
+  bots
     .command('create <botId>')
     .description('Create a new BOT configuration')
     .requiredOption('--node <nodeId>', 'Node ID that owns this BOT')
     .requiredOption('--name <name>', 'BOT display name')
-    .requiredOption('--model <provider/modelId>', 'Model in <provider>/<modelId> format')
+    .option(
+      '--model <provider/modelId>',
+      'Model in <provider>/<modelId> format (optional for subagents with --parent, which inherit parent model by default)',
+    )
     .option('--desc <description>', 'BOT description')
     .addOption(
       new Option('--thinking <level>', 'Thinking budget level')
@@ -35,13 +65,51 @@ export function registerBotsCommands(program: Command): void {
     .option('--skill <ids...>', 'Skill ID(s) to enable')
     .option('--extension <ids...>', 'Extension ID(s) to enable')
     .option('--system-file <path>', 'Path to SYSTEM.md file or - for stdin')
+    .option('--parent <parentBotId>', 'Parent primary BOT ID (creates a role subagent under that BOT)')
+    .option('--inherit-model', 'Inherit model from parent BOT (default true when --parent is set and --model is omitted)')
+    .option('--no-inherit-model', 'Use explicit --model instead of inheriting from parent BOT')
+    .option('--inherit-skills', 'Inherit enabled skills from parent BOT (default true for subagents)')
+    .option('--no-inherit-skills', 'Use explicit --skill list instead of inheriting from parent BOT')
+    .addOption(new Option('--tool-scope <scope>', 'Subagent tool permission scope').choices(['all', 'readonly', 'custom']))
+    .option('--custom-tools <tools...>', 'Allowed tool names when --tool-scope is custom')
     .action((botId: string, options: Record<string, unknown>, command: Command) =>
       cliAction(async (options, command) => {
         const g = readGlobals(command);
         const client = await HubClient.connect(g);
 
-        const modelStr = options.model as string;
-        const { modelProvider, modelId } = parseModel(modelStr);
+        const parentBotId = options.parent as string | undefined;
+        const modelStr = options.model as string | undefined;
+
+        let modelProvider: string;
+        let modelId: string;
+        let inheritModel: boolean | undefined;
+
+        if (modelStr) {
+          const parsed = parseModel(modelStr);
+          modelProvider = parsed.modelProvider;
+          modelId = parsed.modelId;
+          inheritModel = parentBotId ? (options.inheritModel === true ? true : false) : undefined;
+        } else {
+          if (!parentBotId) {
+            throw new CliError(
+              'Missing required option --model <provider/modelId> (or specify --parent <parentBotId> to create a subagent that inherits its parent model)',
+            );
+          }
+          const nodes = await client.get<NodeWithBots[]>('/api/nodes');
+          const parentBot = nodes.flatMap((n) => n.bots).find((b) => b.id === parentBotId);
+          modelProvider = parentBot?.modelProvider ?? 'anthropic';
+          modelId = parentBot?.modelId ?? 'claude-sonnet-4-5';
+          inheritModel = options.inheritModel !== false;
+        }
+
+        const inheritSkills =
+          parentBotId !== undefined
+            ? options.inheritSkills !== undefined
+              ? Boolean(options.inheritSkills)
+              : !(Array.isArray(options.skill) && options.skill.length > 0)
+            : undefined;
+        const toolScope = (options.toolScope as BotToolScope | undefined) ?? 'all';
+        const customTools = options.customTools as string[] | undefined;
 
         const systemFile = options.systemFile as string | undefined;
         const systemMd = systemFile ? await readInput(systemFile) : '';
@@ -57,6 +125,15 @@ export function registerBotsCommands(program: Command): void {
           enabledSkills: (options.skill as string[] | undefined) ?? [],
           enabledExtensions: (options.extension as string[] | undefined) ?? [],
           systemMd,
+          ...(parentBotId
+            ? {
+                parentBotId,
+                inheritModel,
+                inheritSkills,
+                toolScope,
+                ...(toolScope === 'custom' && customTools ? { customTools } : {}),
+              }
+            : {}),
         };
 
         const result = await client.post<BotConfig>('/api/bots', body);
@@ -77,6 +154,12 @@ export function registerBotsCommands(program: Command): void {
     .option('--skill <ids...>', 'Skill ID(s) to enable')
     .option('--extension <ids...>', 'Extension ID(s) to enable')
     .option('--system-file <path>', 'Path to SYSTEM.md file or - for stdin')
+    .option('--inherit-model', 'Inherit model from parent BOT')
+    .option('--no-inherit-model', 'Use explicit model instead of inheriting')
+    .option('--inherit-skills', 'Inherit enabled skills from parent BOT')
+    .option('--no-inherit-skills', 'Do not inherit skills from parent BOT')
+    .addOption(new Option('--tool-scope <scope>', 'Subagent tool permission scope').choices(['all', 'readonly', 'custom']))
+    .option('--custom-tools <tools...>', 'Allowed tool names when --tool-scope is custom')
     .action((botId: string, options: Record<string, unknown>, command: Command) =>
       cliAction(async (options, command) => {
         const g = readGlobals(command);
@@ -106,6 +189,18 @@ export function registerBotsCommands(program: Command): void {
         }
         if (options.systemFile !== undefined) {
           body.systemMd = await readInput(options.systemFile as string);
+        }
+        if (options.inheritModel !== undefined) {
+          body.inheritModel = Boolean(options.inheritModel);
+        }
+        if (options.inheritSkills !== undefined) {
+          body.inheritSkills = Boolean(options.inheritSkills);
+        }
+        if (options.toolScope !== undefined) {
+          body.toolScope = options.toolScope as BotToolScope;
+        }
+        if (options.customTools !== undefined) {
+          body.customTools = options.customTools as string[];
         }
 
         const result = await client.put<BotConfig>(`/api/bots/${encodeURIComponent(botId)}`, body);

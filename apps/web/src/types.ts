@@ -1,4 +1,4 @@
-import type { BotConfig, NodeRecord } from '@botd/protocol';
+import type { BotConfig, NodeRecord, TurnBlock } from '@botd/protocol';
 
 export type MainViewTab = 'chat' | 'nodes';
 
@@ -17,9 +17,14 @@ export interface ToastItem {
 }
 
 export interface ToolExecutionState {
+  id?: string;
   toolName: string;
-  status: 'running' | 'done';
+  status: 'running' | 'done' | 'error';
   summary?: string;
+  args?: Record<string, unknown>;
+  outputPreview?: string;
+  durationMs?: number;
+  isError?: boolean;
   updatedAt: number;
 }
 
@@ -27,6 +32,7 @@ export interface StreamingAssistantState {
   botId: string;
   delta: string;
   tools: ToolExecutionState[];
+  blocks?: TurnBlock[];
 }
 
 export interface BotWithNode extends BotConfig {
@@ -44,5 +50,6 @@ export type {
   TriggerKind,
   TriggerRecord,
   CreateTriggerInput,
+  TurnBlock,
 } from '@botd/protocol';
 

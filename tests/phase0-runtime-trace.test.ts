@@ -31,12 +31,22 @@ import {
   executeBotTurn,
   extractToolSummary,
   extractToolOutputPreview,
+  sanitizeToolArgs,
 } from '../apps/node/src/runtime.js';
 import { saveBot } from '../apps/node/src/storage.js';
 
 // Dynamically import web components with dynamic path so tsc (NodeNext) doesn't crawl unowned web imports
 const webComponentPath = '../apps/web/src/components/MessageItem.js';
-const { MessageItem, ToolCallsTrace } = (await import(webComponentPath)) as any;
+const {
+  MessageItem,
+  ToolCallsTrace,
+  ThinkingTrace,
+  SingleToolView,
+  ToolGroupView,
+  AssistantTurnContent,
+  formatToolSignature,
+  computeToolBreakdown,
+} = (await import(webComponentPath)) as any;
 
 /** Helper to inject BOTD_API_KEY_<PROVIDER> credentials */
 const withProviderKey = (t: TestContext, variable: string, value: string) => {
@@ -135,20 +145,22 @@ test('extractToolOutputPreview extracts content, respects truncation limits for 
   // Short normal output
   assert.equal(extractToolOutputPreview('hello world', false), 'hello world');
 
-  // Long normal output (over 600 chars -> kept last 600 chars)
-  const longNormal = 'A'.repeat(500) + 'B'.repeat(400);
+  // Long normal output (over 4000 chars -> kept 2200 head + ... + 1500 tail)
+  const longNormal = 'A'.repeat(2500) + 'B'.repeat(2000);
   const normalPreview = extractToolOutputPreview(longNormal, false);
-  assert.equal(normalPreview?.length, 600);
-  assert.equal(normalPreview, 'A'.repeat(200) + 'B'.repeat(400));
+  assert.equal(normalPreview?.length, 3705);
+  assert(normalPreview?.startsWith('A'.repeat(2200)));
+  assert(normalPreview?.endsWith('B'.repeat(1500)));
+  assert(normalPreview?.includes('\n...\n'));
 
   // Short error output
   assert.equal(extractToolOutputPreview('fatal: error occurred', true), 'fatal: error occurred');
 
-  // Long error output (over 1200 chars -> kept head + tail, total <= 1200)
-  const longError = 'HEAD_'.repeat(200) + 'TAIL_'.repeat(200); // 1000 + 1000 = 2000 chars
+  // Long error output (over 4000 chars -> kept head + tail, total <= 4000)
+  const longError = 'HEAD_'.repeat(500) + 'TAIL_'.repeat(500); // 2500 + 2500 = 5000 chars
   const errorPreview = extractToolOutputPreview(longError, true);
   assert(errorPreview !== undefined);
-  assert(errorPreview.length <= 1200);
+  assert.equal(errorPreview.length, 3705);
   assert(errorPreview.startsWith('HEAD_'));
   assert(errorPreview.endsWith('TAIL_'));
   assert(errorPreview.includes('\n...\n'));
@@ -485,8 +497,8 @@ test('ToolCallsTrace renders error states, auto-expands errors, and formats outp
 
   // Collapsed state
   const collapsedHtml = renderToStaticMarkup(React.createElement(ToolCallsTrace, { toolCalls: tools }));
-  assert(collapsedHtml.includes('3 次工具调用'), 'Should show total tool count');
-  assert(collapsedHtml.includes('1 失败'), 'Should show failure count');
+  assert(collapsedHtml.includes('3 tool calls'), 'Should show total tool count');
+  assert(collapsedHtml.includes('1 error'), 'Should show failure count');
 
   // Expanded state
   const expandedHtml = renderToStaticMarkup(
@@ -495,7 +507,7 @@ test('ToolCallsTrace renders error states, auto-expands errors, and formats outp
 
   // Read tool has error -> auto-expanded with rose tint and pre block
   assert(expandedHtml.includes('ENOENT: no such file or directory'), 'Error tool preview should be auto-expanded');
-  assert(expandedHtml.includes('bg-rose-'), 'Error tool row or pre should have rose tint');
+  assert(expandedHtml.includes('bg-rose-') || expandedHtml.includes('text-rose-'), 'Error tool row or pre should have rose tint');
   assert(expandedHtml.includes('missing.json'), 'Tool summary must be shown');
 
   // Non-error tools
@@ -505,4 +517,135 @@ test('ToolCallsTrace renders error states, auto-expands errors, and formats outp
   // Empty tools
   const emptyHtml = renderToStaticMarkup(React.createElement(ToolCallsTrace, { toolCalls: [] }));
   assert.equal(emptyHtml, '');
+});
+
+test('sanitizeToolArgs preserves nested structures and truncates long strings', () => {
+  const input = {
+    command: 'git log -n 5',
+    timeout: 30,
+    nested: {
+      path: '/foo/bar',
+      veryLong: 'X'.repeat(5000),
+    },
+    edits: [
+      { oldText: 'hello', newText: 'world' },
+    ],
+  };
+  const sanitized = sanitizeToolArgs(input);
+  assert(sanitized !== undefined);
+  assert.equal(sanitized.command, 'git log -n 5');
+  assert.equal(sanitized.timeout, 30);
+  assert.equal((sanitized.nested as any).path, '/foo/bar');
+  assert(((sanitized.nested as any).veryLong as string).endsWith('...(truncated)'));
+  assert.equal(((sanitized.nested as any).veryLong as string).length, 4014);
+  assert.deepEqual(sanitized.edits, [{ oldText: 'hello', newText: 'world' }]);
+});
+
+test('Pi TUI tool signatures, breakdown, and edit diff rendering', () => {
+  // computeToolBreakdown
+  const tools = [
+    { type: 'tool', id: '1', name: 'read', status: 'done' },
+    { type: 'tool', id: '2', name: 'read', status: 'done' },
+    { type: 'tool', id: '3', name: 'edit', status: 'done' },
+    { type: 'tool', id: '4', name: 'bash', status: 'done' },
+  ] as any;
+  assert.equal(computeToolBreakdown(tools), 'read ×2, edit ×1, bash ×1');
+
+  // formatToolSignature
+  assert.equal(
+    formatToolSignature({ name: 'bash', args: { command: 'npm test', timeout: 10 } }),
+    '$ npm test (timeout 10s)'
+  );
+  assert.equal(
+    formatToolSignature({ name: 'read', args: { path: 'src/App.tsx', offset: 10, limit: 20 } }),
+    'read src/App.tsx:10-29'
+  );
+  assert.equal(
+    formatToolSignature({ name: 'write', args: { path: 'out.txt' } }),
+    'write out.txt'
+  );
+
+  // SingleToolView (Case 1B): renders single tool directly without outer group header
+  const singleToolHtml = renderToStaticMarkup(
+    React.createElement(SingleToolView, {
+      tool: {
+        type: 'tool',
+        id: 't-1',
+        name: 'bash',
+        args: { command: 'ls -la' },
+        status: 'done',
+        durationMs: 42,
+      },
+    })
+  );
+  assert(!singleToolHtml.includes('tool calls'), 'Single tool view must not wrap in outer group header');
+  assert(singleToolHtml.includes('$ ls -la'), 'Must show command signature');
+  assert(singleToolHtml.includes('42ms'), 'Must show duration');
+
+  // Edit diff rendering in ToolCallsTrace / SingleToolView
+  const editToolHtml = renderToStaticMarkup(
+    React.createElement(SingleToolView, {
+      tool: {
+        type: 'tool',
+        id: 'edit-1',
+        name: 'edit',
+        args: {
+          path: 'src/main.ts',
+          edits: [{ oldText: 'const x = 1;', newText: 'const x = 2;' }],
+        },
+        status: 'done',
+        durationMs: 15,
+      },
+      initialExpanded: true,
+    })
+  );
+  assert(editToolHtml.includes('- const x = 1;'), 'Must render - line for diff');
+  assert(editToolHtml.includes('+ const x = 2;'), 'Must render + line for diff');
+});
+
+test('ThinkingTrace renders collapsed and expanded states', () => {
+  // Completed thinking -> collapsed by default
+  const completedHtml = renderToStaticMarkup(
+    React.createElement(ThinkingTrace, {
+      block: {
+        type: 'thinking',
+        thinking: 'Detailed thought process here',
+        status: 'done',
+        durationMs: 1250,
+      },
+    })
+  );
+  assert(completedHtml.includes('Thinking · 1.3s'), 'Collapsed thinking must show duration');
+  assert(!completedHtml.includes('Detailed thought process here'), 'Collapsed thinking must not show body');
+
+  // Running thinking -> expanded by default
+  const runningHtml = renderToStaticMarkup(
+    React.createElement(ThinkingTrace, {
+      block: {
+        type: 'thinking',
+        thinking: 'Actively thinking about solution...',
+        status: 'running',
+      },
+    })
+  );
+  assert(runningHtml.includes('Thinking...'), 'Running thinking must show Thinking...');
+  assert(runningHtml.includes('Actively thinking about solution...'), 'Running thinking must show content');
+});
+
+test('AssistantTurnContent interleaves thinking, tool group, and text chronologically', () => {
+  const blocks: any[] = [
+    { type: 'thinking', thinking: 'First thoughts', status: 'done', durationMs: 500 },
+    { type: 'tool', id: 't1', name: 'read', args: { path: 'file1.txt' }, status: 'done', durationMs: 10 },
+    { type: 'tool', id: 't2', name: 'read', args: { path: 'file2.txt' }, status: 'done', durationMs: 12 },
+    { type: 'text', text: 'Midway summary' },
+    { type: 'tool', id: 't3', name: 'write', args: { path: 'out.txt' }, status: 'done', durationMs: 30 },
+    { type: 'text', text: 'Final conclusion' },
+  ];
+
+  const html = renderToStaticMarkup(React.createElement(AssistantTurnContent, { blocks }));
+  assert(html.includes('Thinking · 500ms'), 'Thinking block must be rendered');
+  assert(html.includes('2 tool calls (read ×2)'), 'Adjacent read tools must be grouped');
+  assert(html.includes('Midway summary'), 'Midway text must be rendered in position');
+  assert(html.includes('write') && html.includes('out.txt'), 'Single write tool must be rendered');
+  assert(html.includes('Final conclusion'), 'Final text must be rendered in position');
 });

@@ -11,10 +11,11 @@ import type {
   MessageAttachment,
   PendingAskRecord,
   SubagentRunRecord,
+  TurnBlock,
 } from '@botd/protocol';
 import { api, AuthRequiredError, subscribeGlobalEvents } from './api';
 import { emitGlobalEvent } from './events';
-import type { StreamingAssistantState, ToastItem, MainViewTab, UserInfo } from './types';
+import type { StreamingAssistantState, ToolExecutionState, ToastItem, MainViewTab, UserInfo } from './types';
 import { LoginView } from './components/LoginView';
 import { Sidebar, pickCurrentDirectSession } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
@@ -560,18 +561,60 @@ export const App: React.FC = () => {
     // 当前会话事件全量处理（分流层已保证事件属于当前活跃会话）
     const handleCurrentSessionEvent = (event: SessionSseEvent) => {
       switch (event.type) {
-        case 'text_delta': {
+        case 'thinking_stream': {
           updateStreamingStates(event.botId, (prev) => {
-            if (!prev) {
-              return {
-                botId: event.botId,
-                delta: event.delta,
-                tools: [],
-              };
+            const currentBlocks: TurnBlock[] = prev?.blocks ? [...prev.blocks] : [];
+            const lastBlock = currentBlocks[currentBlocks.length - 1];
+            if (lastBlock && lastBlock.type === 'thinking' && lastBlock.status === 'running') {
+              const updated = { ...lastBlock };
+              if (event.delta) {
+                updated.thinking += event.delta;
+              }
+              if (event.status) {
+                updated.status = event.status;
+              }
+              if (event.durationMs !== undefined) {
+                updated.durationMs = event.durationMs;
+              }
+              currentBlocks[currentBlocks.length - 1] = updated;
+            } else if (event.status === 'running' || event.delta) {
+              currentBlocks.push({
+                type: 'thinking',
+                thinking: event.delta || '',
+                status: event.status ?? 'running',
+                ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
+              });
             }
             return {
-              ...prev,
-              delta: prev.delta + event.delta,
+              botId: event.botId,
+              delta: prev?.delta || '',
+              tools: prev?.tools || [],
+              blocks: currentBlocks,
+            };
+          });
+          break;
+        }
+
+        case 'text_delta': {
+          updateStreamingStates(event.botId, (prev) => {
+            const currentBlocks: TurnBlock[] = prev?.blocks ? [...prev.blocks] : [];
+            const lastBlock = currentBlocks[currentBlocks.length - 1];
+            if (lastBlock && lastBlock.type === 'text') {
+              currentBlocks[currentBlocks.length - 1] = {
+                ...lastBlock,
+                text: lastBlock.text + event.delta,
+              };
+            } else {
+              currentBlocks.push({
+                type: 'text',
+                text: event.delta,
+              });
+            }
+            return {
+              botId: event.botId,
+              delta: (prev?.delta || '') + event.delta,
+              tools: prev?.tools || [],
+              blocks: currentBlocks,
             };
           });
           break;
@@ -579,15 +622,24 @@ export const App: React.FC = () => {
 
         case 'tool_status': {
           updateStreamingStates(event.botId, (prev) => {
-            const toolItem = {
+            const toolItem: ToolExecutionState = {
+              id: event.toolCallId,
               toolName: event.toolName,
               status: event.status,
               summary: event.summary,
+              args: event.args,
+              outputPreview: event.outputPreview,
+              durationMs: event.durationMs,
+              isError: event.isError,
               updatedAt: Date.now(),
             };
 
             const currentTools = prev?.tools || [];
-            const existingIdx = currentTools.findIndex((t) => t.toolName === event.toolName);
+            const existingIdx = currentTools.findIndex(
+              (t) =>
+                (event.toolCallId && t.id === event.toolCallId) ||
+                (!event.toolCallId && t.toolName === event.toolName && t.status === 'running')
+            );
             let nextTools = [...currentTools];
             if (existingIdx >= 0) {
               nextTools[existingIdx] = toolItem;
@@ -595,10 +647,43 @@ export const App: React.FC = () => {
               nextTools.push(toolItem);
             }
 
+            const currentBlocks: TurnBlock[] = prev?.blocks ? [...prev.blocks] : [];
+            const toolBlockId = event.toolCallId || event.toolName;
+            const existingBlockIdx = currentBlocks.findIndex(
+              (b) =>
+                b.type === 'tool' &&
+                (b.id === toolBlockId || (b.name === event.toolName && b.status === 'running'))
+            );
+
+            const toolBlock: TurnBlock = {
+              type: 'tool',
+              id: event.toolCallId || `${event.toolName}_${Date.now()}`,
+              name: event.toolName,
+              ...(event.args ? { args: event.args } : {}),
+              ...(event.summary ? { summary: event.summary } : {}),
+              status: event.status,
+              ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
+              ...(event.outputPreview !== undefined ? { outputPreview: event.outputPreview } : {}),
+              ...(event.isError !== undefined ? { isError: event.isError } : {}),
+            };
+
+            if (existingBlockIdx >= 0) {
+              const existing = currentBlocks[existingBlockIdx] as Extract<TurnBlock, { type: 'tool' }>;
+              currentBlocks[existingBlockIdx] = {
+                ...existing,
+                ...toolBlock,
+                args: event.args ?? existing.args,
+                summary: event.summary ?? existing.summary,
+              };
+            } else {
+              currentBlocks.push(toolBlock);
+            }
+
             return {
               botId: event.botId,
               delta: prev?.delta || '',
               tools: nextTools,
+              blocks: currentBlocks,
             };
           });
           break;

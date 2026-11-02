@@ -241,6 +241,53 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     }, 10);
   };
 
+  // 快捷协作胶囊栏（群聊且非编辑态且成员数>=2时展示）
+  const showWorkflowPills =
+    sessionMode !== 'direct' &&
+    !editingMessage &&
+    memberBots.length >= 2;
+
+  const { relayPillText, refinePillText, whisperPillText } = useMemo(() => {
+    const nonLeads = memberBots.filter((b) => b.id !== leadBotId);
+    const nonLead0 = nonLeads[0]?.id || memberBots[0]?.id;
+    const nonLead1 =
+      nonLeads[1]?.id ||
+      (memberBots[1]?.id !== nonLead0 ? memberBots[1]?.id : memberBots[0]?.id);
+    const lead = leadBotId || memberBots[memberBots.length - 1]?.id;
+
+    if (nonLeads.length >= 2) {
+      return {
+        relayPillText: `@${nonLead0} -> @${nonLead1} -> @${lead} `,
+        refinePillText: `@${nonLead0} <-> @${nonLead1} -> @${lead} `,
+        whisperPillText: `@${nonLead0} >> @${nonLead1} `,
+      };
+    } else if (nonLeads.length === 1 && lead && lead !== nonLead0) {
+      return {
+        relayPillText: `@${nonLead0} -> @${lead} `,
+        refinePillText: `@${nonLead0} <-> @${lead} `,
+        whisperPillText: `@${nonLead0} >> @${lead} `,
+      };
+    } else {
+      const b0 = memberBots[0]?.id;
+      const b1 = memberBots[1]?.id;
+      return {
+        relayPillText: `@${b0} -> @${b1} `,
+        refinePillText: `@${b0} <-> @${b1} `,
+        whisperPillText: `@${b0} >> @${b1} `,
+      };
+    }
+  }, [memberBots, leadBotId]);
+
+  const handleInsertWorkflowPill = (prefix: string) => {
+    setContent((prev) => {
+      if (prev.startsWith(prefix)) return prev;
+      return `${prefix}${prev}`;
+    });
+    setTimeout(() => {
+      textareaRef.current?.focus();
+    }, 10);
+  };
+
   // 按目标 BOT 加载命令目录（具备防竞态与异常重试）
   const fetchCommands = useCallback(async (botId: string) => {
     if (!botId) return;
@@ -1129,6 +1176,11 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                   aria-selected={isSelected}
                 >
                   <div className="flex items-center gap-2 truncate">
+                    {bot.parentBotId && (
+                      <span className="text-zinc-400 dark:text-zinc-600 font-mono text-xs shrink-0 select-none">
+                        └─
+                      </span>
+                    )}
                     <div
                       className={`w-5 h-5 rounded-md flex items-center justify-center shrink-0 ${
                         isSelected
@@ -1139,6 +1191,11 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                       <Bot className="w-3 h-3" />
                     </div>
                     <span className="font-semibold text-xs truncate text-zinc-900 dark:text-zinc-100">{bot.name}</span>
+                    {bot.parentBotId && (
+                      <span className="text-[10px] px-1 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 shrink-0">
+                        分身
+                      </span>
+                    )}
                     <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0">@{bot.id}</span>
                   </div>
 
