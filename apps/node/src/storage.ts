@@ -208,6 +208,12 @@ export async function readBot(
 
 export async function saveBot(dataDir: string, bot: BotConfig, systemMd?: string): Promise<void> {
   assertSafeId(bot.id, 'Bot ID');
+  const existing = await readBot(dataDir, bot.id).catch(() => null);
+  if (existing?.bot.parentBotId && existing.bot.parentBotId !== bot.parentBotId) {
+    const oldParentDir = getBotDir(dataDir, existing.bot.parentBotId);
+    await fs.rm(path.join(oldParentDir, 'agents', `${bot.id}.md`), { force: true }).catch(() => {});
+  }
+
   const botDir = getBotDir(dataDir, bot.id);
   const workspaceDir = path.join(botDir, 'workspace');
   const sessionsDir = path.join(botDir, 'sessions');
