@@ -198,6 +198,31 @@ export function buildGroupContextPrompt(
         '当前你麾下暂无子代理。当用户要求创建子代理、或需要多角色并发协同（如编码、审查、测试、调研分工）时，你可直接在 bash 中运行以下命令创建子代理（默认继承你的模型与技能，创建后在当前回合即可立即通过 `Agent` 工具并发调用）：\n' +
         '`botd bots create <subId> --node "$BOTD_NODE_ID" --parent "$BOTD_BOT_ID" --name "<展示名称>" --desc "<职责说明>" --tool-scope <all|readonly> --system-file -`\n';
     }
+
+    const ownerId = session.ownerId || (db ? db.getSessionOwner(session.id) : undefined);
+    const peerPrimaryBots = db && currentBotId
+      ? db.getAllBots().filter(
+          (b) =>
+            !b.parentBotId &&
+            b.id !== currentBotId &&
+            (!ownerId || db.canUserUseBot(b.id, ownerId))
+        )
+      : [];
+    if (peerPrimaryBots.length > 0 && db) {
+      prompt += '\n### 🌐 可协同的其他主 BOT (跨节点 / 独立工作区)\n';
+      for (const peer of peerPrimaryBots) {
+        const node = db.getNode(peer.nodeId);
+        const tags: string[] = [];
+        if (node) tags.push(`节点:${node.name || peer.nodeId}·${node.status === 'online' ? '在线' : '离线'}`);
+        if (peer.visibility === 'team') tags.push('团队共享');
+        if (peer.enabledSkills?.length) tags.push(`技能:${peer.enabledSkills.join(',')}`);
+        prompt += `- @${peer.id} (${peer.name}${peer.description ? ` - ${peer.description}` : ''}${tags.length ? ` [${tags.join(' · ')}]` : ''})\n`;
+      }
+      prompt +=
+        '【跨 BOT 协同规范】：\n' +
+        '1. 同工作区内的多角色分工请优先使用 `Agent` / `SubagentWorkflow` 调度你麾下的子代理。\n' +
+        '2. 当任务需要跨机器节点执行、需要其他主 BOT 的独立工作区/专属环境变量、或需调用团队共享主 BOT 时，请调用 `delegate_bot` 工具（默认 `run_in_background: false` 可在本回合内同步等待结果与回传产物，同一回合多次调用可并发执行；耗时任务传 `run_in_background: true` 转为后台子会话并在全部完成后自动汇总唤醒），也可在 bash 中执行 `botd sessions delegate "$BOTD_SESSION_ID" --bot <botId> --prompt "<任务>" [--wait]`。\n';
+    }
   }
 
   prompt += `\n你当前处于单聊模式。`;

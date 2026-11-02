@@ -406,12 +406,20 @@ export interface DelegateSessionInput {
   memberBotIds?: string[];
   mode?: SessionMode;
   artifactIds?: string[];
+  /** 是否在子会话完成后自动唤醒父会话的主控 Bot（默认 true；同步等待或静默委派时传 false） */
+  autoWakeParent?: boolean;
 }
 
 export interface DelegateSessionResult {
   parentSessionId: string;
   childSession: SessionRecord;
   initialMessage: MessageRecord;
+}
+
+export interface DelegateSessionWaitResult extends DelegateSessionResult {
+  status: 'done' | 'failed';
+  reply: string;
+  returnedArtifacts: MessageAttachment[];
 }
 
 export type NotificationChannelKind = 'webhook' | 'feishu' | 'slack' | 'telegram';

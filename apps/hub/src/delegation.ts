@@ -58,7 +58,7 @@ export function registerDelegationRoutes(
     if (!bot) {
       return c.json({ error: `Bot ${botId} not found` }, 404);
     }
-    if (db.getNodeOwner(bot.nodeId) !== user.id) {
+    if (!db.canUserUseBot(botId, user.id)) {
       return c.json({ error: 'Forbidden' }, 403);
     }
 
@@ -94,11 +94,13 @@ export function registerDelegationRoutes(
 
     // 注意：此处"复制"产物为同 storagePath 多行引用（不复制文件）。删除安全性依赖 artifact-service 的按引用计数回收（见 reclaimUnreferencedFiles），修改删除逻辑前必须保持该不变量。
     // 若请求中指定了 artifactIds，或父会话存在产物，则将对应产物复制/关联给子会话
-    const targetArtifacts = (Array.isArray(body.artifactIds) && body.artifactIds.length > 0)
+    const targetArtifacts = Array.isArray(body.artifactIds)
       ? body.artifactIds
           .map((artId) => (typeof artId === 'string' ? db.getArtifactWithStoragePath(artId.trim()) : undefined))
           .filter((art): art is NonNullable<typeof art> => Boolean(art && art.sessionId === id))
-      : db.listSessionArtifacts(id).map((a) => db.getArtifactWithStoragePath(a.id)).filter((art): art is NonNullable<typeof art> => Boolean(art));
+      : db.listSessionArtifacts(id)
+          .map((a) => db.getArtifactWithStoragePath(a.id))
+          .filter((art): art is NonNullable<typeof art> => Boolean(art));
 
     // 继承产物的底层存储路径集合：子会话完成时用它区分「新产出」与「从父会话继承」的产物，
     // 只回传新产出部分，避免把父会话自己的文件原样回传一遍。
@@ -148,11 +150,18 @@ export function registerDelegationRoutes(
 
     // 唤醒父会话 Lead Bot 执行后续汇总或处理
     const wakeParent = (triggerMsgId: string, summaryText: string) => {
-      const autoWake = (body as any).autoWakeParent !== false;
+      const autoWake = body.autoWakeParent !== false;
       if (!autoWake) return;
       const parentSession = db.getSession(id);
       if (!parentSession?.leadBotId) return;
       if (!router.canRunBot(id, parentSession.leadBotId)) return;
+      // Barrier 汇合：若父会话下仍有其他处于 running 或 queued 状态的兄弟子会话，
+      // 本次仅落库 callback 消息与回传产物，等最后一个子会话收敛后再统一唤醒父会话主控 Bot。
+      const siblingSubs = db.listSubSessions(id);
+      const stillActive = siblingSubs.some(
+        (s) => s.id !== childSession.id && (s.status === 'running' || s.status === 'queued')
+      );
+      if (stillActive) return;
       router.handleUserMessage(
         id,
         triggerMsgId,
