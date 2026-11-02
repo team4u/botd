@@ -447,6 +447,8 @@ export class GroupRouter {
       durationMs?: number;
       toolUses?: number;
       currentTool?: string;
+      startedAt?: string;
+      blocks?: TurnBlock[];
       toolCalls?: ToolCallRecord[];
       steers?: SubagentSteerRecord[];
     }
@@ -478,6 +480,8 @@ export class GroupRouter {
     if (typeof subEvent.durationMs === 'number') entry.run.durationMs = subEvent.durationMs;
     if (typeof subEvent.toolUses === 'number') entry.run.toolCount = subEvent.toolUses;
     if (subEvent.currentTool !== undefined) entry.run.currentTool = subEvent.currentTool;
+    if (subEvent.startedAt) entry.run.startedAt = subEvent.startedAt;
+    if (subEvent.blocks) entry.run.blocks = subEvent.blocks;
     if (subEvent.toolCalls) entry.run.toolCalls = subEvent.toolCalls;
     if (subEvent.steers) {
       // 合并追加 steer / resume 记录（按 timestamp+message 去重）

@@ -734,6 +734,8 @@ export async function executeBotTurn(
               ...(run.durationMs !== undefined ? { durationMs: run.durationMs } : {}),
               ...(run.toolCount !== undefined ? { toolUses: run.toolCount } : {}),
               ...(run.currentTool !== undefined ? { currentTool: run.currentTool } : {}),
+              ...(run.startedAt ? { startedAt: run.startedAt } : {}),
+              ...(run.blocks ? { blocks: run.blocks } : {}),
               ...(run.toolCalls ? { toolCalls: run.toolCalls } : {}),
               ...(run.steers ? { steers: run.steers } : {}),
             },
@@ -1013,6 +1015,7 @@ export async function executeBotTurn(
             subagentId: d.type || 'agent',
             task: d.description || d.id,
             status: 'running',
+            startedAt: new Date().toISOString(),
           };
           if (d.type) record.subagentId = d.type;
           if (d.description) record.task = d.description;
@@ -1037,18 +1040,64 @@ export async function executeBotTurn(
           }
         };
 
-        /** 订阅分身 session 的工具事件，实时收集 toolCalls / currentTool */
+        /** 订阅分身 session 的事件，实时收集交错 blocks（思考/文本流）与 toolCalls / currentTool */
         const attachToolListener = (runId: string, subSession: AgentSession) => {
           if (subagentToolListeners.has(runId)) return;
           const record = subagentRunsMap.get(runId);
           if (!record) return;
           record.toolCalls ??= [];
+          record.blocks ??= [];
           const runningStarts = new Map<string, number>();
+          let subThinkingStartMs: number | null = null;
+          let subThinkingBlock: Extract<TurnBlock, { type: 'thinking' }> | null = null;
+          const runningBlocks = new Map<string, Extract<TurnBlock, { type: 'tool' }>>();
+          const pushBlock = (b: TurnBlock) => {
+            record.blocks!.push(b);
+          };
+          const closeSubThinking = () => {
+            if (subThinkingBlock && subThinkingBlock.status === 'running') {
+              subThinkingBlock.status = 'done';
+              subThinkingBlock.durationMs = Math.max(1, Date.now() - (subThinkingStartMs ?? Date.now()));
+            }
+            subThinkingBlock = null;
+            subThinkingStartMs = null;
+          };
           const unsub = subSession.subscribe((event: any) => {
             const current = subagentRunsMap.get(runId);
             if (!current) return;
             current.toolCalls ??= [];
-            if (event.type === 'tool_execution_start') {
+            current.blocks ??= [];
+            if (event.type === 'message_update') {
+              const ame = event.assistantMessageEvent;
+              if (ame?.type === 'thinking_start') {
+                if (!subThinkingBlock || subThinkingBlock.status !== 'running') {
+                  subThinkingStartMs = Date.now();
+                  subThinkingBlock = { type: 'thinking', thinking: '', status: 'running' };
+                  pushBlock(subThinkingBlock);
+                }
+              } else if (ame?.type === 'thinking_delta' && ame.delta) {
+                if (!subThinkingBlock || subThinkingBlock.status !== 'running') {
+                  subThinkingStartMs = Date.now();
+                  subThinkingBlock = { type: 'thinking', thinking: ame.delta, status: 'running' };
+                  pushBlock(subThinkingBlock);
+                } else {
+                  subThinkingBlock.thinking += ame.delta;
+                }
+              } else if (ame?.type === 'thinking_end') {
+                closeSubThinking();
+              } else if (ame?.type === 'text_delta' && ame.delta) {
+                const last = current.blocks[current.blocks.length - 1];
+                if (last && last.type === 'text' && !(last as any).closed) {
+                  last.text += ame.delta;
+                } else {
+                  pushBlock({ type: 'text', text: ame.delta });
+                }
+              }
+            } else if (event.type === 'message_end' && event.message?.role === 'assistant') {
+              closeSubThinking();
+              const last = current.blocks[current.blocks.length - 1];
+              if (last && last.type === 'text') (last as any).closed = true;
+            } else if (event.type === 'tool_execution_start') {
               const key = event.toolCallId || `${event.toolName}_${current.toolCalls.length}`;
               runningStarts.set(key, Date.now());
               const summary = extractToolSummary(event.toolName, event.args ?? event.input);
@@ -1060,6 +1109,16 @@ export async function executeBotTurn(
                 ...(summary ? { summary } : {}),
                 status: 'running',
               });
+              const toolBlock: Extract<TurnBlock, { type: 'tool' }> = {
+                type: 'tool',
+                id: key,
+                name: event.toolName,
+                ...(sanitizedArgs ? { args: sanitizedArgs } : {}),
+                ...(summary ? { summary } : {}),
+                status: 'running',
+              };
+              pushBlock(toolBlock);
+              runningBlocks.set(key, toolBlock);
               current.currentTool = event.toolName;
               current.toolCount = current.toolCalls.length;
               turnContext.emitSubagentEvent(current);
@@ -1070,16 +1129,26 @@ export async function executeBotTurn(
                 entry = { id: key, name: event.toolName, status: 'running' };
                 current.toolCalls.push(entry);
               }
+              const block = runningBlocks.get(key);
               const startedAt = runningStarts.get(key) ?? (entry.id !== undefined ? runningStarts.get(entry.id) : undefined);
               runningStarts.delete(key);
+              runningBlocks.delete(key);
               entry.status = event.isError ? 'error' : 'done';
               if (startedAt !== undefined) entry.durationMs = Math.max(0, Date.now() - startedAt);
               entry.isError = Boolean(event.isError);
+              if (block) {
+                block.status = event.isError ? 'error' : 'done';
+                if (startedAt !== undefined) block.durationMs = Math.max(0, Date.now() - startedAt);
+                block.isError = Boolean(event.isError);
+              }
               const outputPreview = extractToolOutputPreview(
                 event.result !== undefined ? event.result : event.output,
                 Boolean(event.isError),
               );
-              if (outputPreview) entry.outputPreview = outputPreview;
+              if (outputPreview) {
+                entry.outputPreview = outputPreview;
+                if (block) block.outputPreview = outputPreview;
+              }
               // 仍有 running 项则保留 currentTool，否则清空
               if (!current.toolCalls.some((tc) => tc.status === 'running')) {
                 current.currentTool = undefined;
@@ -1157,6 +1226,8 @@ export async function executeBotTurn(
                 ...(typeof d.durationMs === 'number' ? { durationMs: d.durationMs } : {}),
                 ...(record.toolCount !== undefined ? { toolUses: record.toolCount } : {}),
                 ...(record.currentTool !== undefined ? { currentTool: record.currentTool } : {}),
+                ...(record.startedAt ? { startedAt: record.startedAt } : {}),
+                ...(record.blocks ? { blocks: record.blocks } : {}),
                 ...(record.toolCalls ? { toolCalls: record.toolCalls } : {}),
                 ...(record.steers ? { steers: record.steers } : {}),
               },
@@ -1662,6 +1733,7 @@ export async function interactSubagent(input: {
       subagentId: input.subagentId || meta?.subagentId || managerRecord?.type || 'agent',
       task: meta?.task || managerRecord?.description || runId,
       status: 'running',
+      ...(managerRecord?.startedAt ? { startedAt: new Date(managerRecord.startedAt).toISOString() } : {}),
     };
   }
   const pushEvent = (patch: Partial<SubagentRunRecord>) => {
@@ -1682,6 +1754,8 @@ export async function interactSubagent(input: {
             ...(run!.durationMs !== undefined ? { durationMs: run!.durationMs } : {}),
             ...(run!.toolCount !== undefined ? { toolUses: run!.toolCount } : {}),
             ...(run!.currentTool !== undefined ? { currentTool: run!.currentTool } : {}),
+            ...(run!.startedAt ? { startedAt: run!.startedAt } : {}),
+            ...(run!.blocks ? { blocks: run!.blocks } : {}),
             ...(run!.toolCalls ? { toolCalls: run!.toolCalls } : {}),
             ...(run!.steers ? { steers: run!.steers } : {}),
           },

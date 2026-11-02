@@ -1,30 +1,26 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  X,
-  Loader2,
-  Square,
-  Send,
-  Terminal,
-  MessageSquareQuote,
-  Wrench,
-  FileText,
-  ChevronDown,
-  ChevronRight,
-  CircleStop,
-} from 'lucide-react';
-import type { SubagentRunRecord, ToolCallRecord } from '@botd/protocol';
+import { X, Loader2, Send, CircleStop } from 'lucide-react';
+import type {
+  BotConfig,
+  MessageRecord,
+  NodeRecord,
+  SubagentRunRecord,
+} from '@botd/protocol';
 import { api } from '../api';
-import { formatDuration, subagentColorStyles } from './MessageItem';
-import type { ToastItem } from '../types';
+import { BotAvatarBadge, formatDuration } from './MessageItem';
+import { MessageTimeline } from './MessageTimeline';
+import type { StreamingAssistantState, ToastItem } from '../types';
 
 interface SubagentRunDrawerProps {
   isOpen: boolean;
   sessionId: string;
   /** 当前查看的分身运行记录（由上层从实时 activeSubagentRuns 或已落库 messages 中派生最新值） */
   run: SubagentRunRecord | null;
+  botMap: Map<string, BotConfig>;
+  nodeMap: Map<string, NodeRecord>;
   onClose: () => void;
   onToast: (type: ToastItem['type'], message: string) => void;
-}
+};
 
 /** 状态徽章配色 */
 const statusBadgeClass = (status: SubagentRunRecord['status']): string => {
@@ -57,74 +53,84 @@ const statusLabel = (status: SubagentRunRecord['status']): string => {
   }
 };
 
-/** 单条工具调用行（可展开看输出预览） */
-const ToolCallRow: React.FC<{ tool: ToolCallRecord }> = ({ tool }) => {
-  const [expanded, setExpanded] = useState(false);
-  const isError = tool.status === 'error' || Boolean(tool.isError);
-  const hasDetail = Boolean(tool.outputPreview || tool.summary || tool.args);
+/**
+ * 把一次分身运行记录合成为 MessageTimeline 的标准输入：
+ * - 初始任务 + 历次 steer/resume 指令 → 右对齐用户气泡（senderUsername 标注指令类型）
+ * - 分身执行过程 → 运行中映射为流式状态（思考/工具/文本实时滚动）；
+ *   已结束映射为一条 assistant 消息（blocks 交错时间线 + toolCalls + 完整输出）
+ * 零特判：时间线组件与主对话共用同一渲染路径，视觉/交互完全一致。
+ */
+export function subagentRunToTimeline(run: SubagentRunRecord): {
+  messages: MessageRecord[];
+  streamingStates: StreamingAssistantState[];
+} {
+  const startIso = run.startedAt || new Date().toISOString();
+  const messages: MessageRecord[] = [];
 
-  return (
-    <div className="rounded-lg border border-zinc-200/70 dark:border-zinc-800 bg-zinc-50/60 dark:bg-zinc-900/50 overflow-hidden">
-      <button
-        type="button"
-        onClick={() => hasDetail && setExpanded((v) => !v)}
-        className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 text-left ${
-          hasDetail ? 'cursor-pointer hover:bg-zinc-100/60 dark:hover:bg-zinc-800/40 transition-colors' : 'cursor-default'
-        }`}
-      >
-        <div className="flex items-center gap-1.5 min-w-0 font-mono text-[11px]">
-          {hasDetail ? (
-            <span className="text-zinc-400 shrink-0">{expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}</span>
-          ) : (
-            <span className="w-3 shrink-0" />
-          )}
-          <span className={`font-semibold truncate ${isError ? 'text-rose-600 dark:text-rose-400' : 'text-zinc-700 dark:text-zinc-300'}`}>
-            {tool.name}
-          </span>
-          {tool.summary && (
-            <span className="text-zinc-400 dark:text-zinc-500 truncate">{tool.summary}</span>
-          )}
-        </div>
-        <div className="flex items-center gap-1.5 shrink-0 text-[11px] font-mono">
-          {tool.status === 'running' && <span className="text-blue-500">running…</span>}
-          {tool.status === 'error' && <span className="text-rose-500">error</span>}
-          {typeof tool.durationMs === 'number' && (
-            <span className="text-zinc-400 dark:text-zinc-500">{formatDuration(tool.durationMs)}</span>
-          )}
-        </div>
-      </button>
-      {expanded && (tool.outputPreview || tool.args) && (
-        <div className="px-2.5 pb-2 space-y-1.5">
-          {tool.args && Object.keys(tool.args).length > 0 && (
-            <pre className="px-2 py-1.5 rounded bg-white dark:bg-zinc-950/70 border border-zinc-200/50 dark:border-zinc-800/50 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap break-all max-h-32 overflow-y-auto">
-              {JSON.stringify(tool.args, null, 2)}
-            </pre>
-          )}
-          {tool.outputPreview && (
-            <pre
-              className={`px-2 py-1.5 rounded border text-[11px] font-mono whitespace-pre-wrap break-all max-h-48 overflow-y-auto ${
-                isError
-                  ? 'bg-rose-50/80 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200/60 dark:border-rose-900/60'
-                  : 'bg-white dark:bg-zinc-950/70 text-zinc-600 dark:text-zinc-300 border-zinc-200/50 dark:border-zinc-800/50'
-              }`}
-            >
-              {tool.outputPreview}
-            </pre>
-          )}
-        </div>
-      )}
-    </div>
-  );
-};
+  // 1) 指令侧：初始任务 + steer/resume 全部作为用户消息（同一时间轴，按到达顺序）
+  messages.push({
+    id: `${run.id}:task`,
+    sessionId: '',
+    role: 'user',
+    content: run.task || '（无任务描述）',
+    mentions: [],
+    senderUsername: '任务指令',
+    createdAt: startIso,
+  });
+  for (const [idx, steer] of (run.steers ?? []).entries()) {
+    messages.push({
+      id: `${run.id}:steer:${idx}`,
+      sessionId: '',
+      role: 'user',
+      content: steer.message,
+      mentions: [],
+      senderUsername: steer.mode === 'resume' ? '追问 (Resume)' : '插话纠偏 (Steer)',
+      createdAt: steer.timestamp || startIso,
+    });
+  }
+
+  // 2) 分身侧
+  const baseAssistant: MessageRecord = {
+    id: `${run.id}:reply`,
+    sessionId: '',
+    role: 'assistant',
+    senderBotId: run.subagentId,
+    content: run.replyFull || run.replyPreview || '',
+    mentions: [],
+    createdAt: startIso,
+    ...(run.status === 'stopped' ? { aborted: true } : {}),
+    ...(run.toolCalls && run.toolCalls.length > 0 ? { toolCalls: run.toolCalls } : {}),
+    ...(run.blocks && run.blocks.length > 0 ? { blocks: run.blocks } : {}),
+  };
+
+  const streamingStates: StreamingAssistantState[] = [];
+  if (run.status === 'running') {
+    // 运行中：交给流式渲染（呼吸徽章 + 思考/工具/文本实时滚动）
+    streamingStates.push({
+      botId: run.subagentId,
+      delta: '',
+      tools: [],
+      blocks: run.blocks,
+    });
+    // 若已有部分文本输出（run.blocks 内含 text 块），流式块本身即可渲染，无需额外消息
+    return { messages, streamingStates };
+  }
+
+  // 已结束：一条完整 assistant 消息（blocks 优先；无 blocks 时由 toolCalls+content 合成）
+  messages.push(baseAssistant);
+  return { messages, streamingStates };
+}
 
 /**
- * 分身运行详情抽屉：展示单个 runId 的初始任务、交互指令记录、工具调用轨迹与完整输出，
- * 并提供运行中停止 / steer 插话 / resume 追问控制（不跳转离开主会话窗口）。
+ * 分身运行详情抽屉：上部为与主对话完全同源的 MessageTimeline（同一组件、同一渲染路径），
+ * 底部为 steer / resume 输入框与运行中停止按钮。主对话界面后续任何改进此处自动同步。
  */
 export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
   isOpen,
   sessionId,
   run,
+  botMap,
+  nodeMap,
   onClose,
   onToast,
 }) => {
@@ -132,6 +138,32 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const isRunning = run?.status === 'running';
+
+  // 合成 botMap：确保分身 id 能命中（主会话的 botMap 可能未含分身条目）
+  const effectiveBotMap = useMemo(() => {
+    if (!run) return botMap;
+    if (botMap.has(run.subagentId)) return botMap;
+    const next = new Map(botMap);
+    next.set(run.subagentId, {
+      id: run.subagentId,
+      nodeId: '',
+      name: run.subagentName || run.subagentId,
+      description: '',
+      ...(run.color ? { color: run.color } : {}),
+      parentBotId: '',
+      modelProvider: '',
+      modelId: '',
+      toolScope: 'all',
+      inheritModel: true,
+      inheritSkills: true,
+      enabledSkills: [],
+      enabledExtensions: [],
+      updatedAt: '',
+    } as BotConfig);
+    return next;
+  }, [botMap, run]);
 
   // Esc 关闭
   useEffect(() => {
@@ -142,11 +174,6 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [isOpen, onClose]);
-
-  const isRunning = run?.status === 'running';
-  const colorStyle = run?.color && subagentColorStyles[run.color] ? subagentColorStyles[run.color] : undefined;
-  const fullReply = useMemo(() => run?.replyFull || run?.replyPreview || '', [run]);
-  const toolCalls = run?.toolCalls ?? [];
 
   const handleStop = async () => {
     if (!run || stopping) return;
@@ -183,6 +210,11 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
     }
   };
 
+  const { messages: timelineMessages, streamingStates } = useMemo(
+    () => (run ? subagentRunToTimeline(run) : { messages: [], streamingStates: [] }),
+    [run]
+  );
+
   if (!isOpen || !run) return null;
 
   return (
@@ -199,23 +231,25 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
         role="dialog"
         aria-modal="true"
         aria-label={`分身运行详情 ${run.id}`}
-        className="fixed inset-y-0 right-0 z-40 w-[min(28rem,92vw)] bg-white dark:bg-zinc-950 border-l border-zinc-200/90 dark:border-zinc-800/90 shadow-xl flex flex-col animate-in fade-in slide-in-from-right duration-200"
+        className="fixed inset-y-0 right-0 z-40 w-[min(38rem,96vw)] bg-white dark:bg-zinc-950 border-l border-zinc-200/90 dark:border-zinc-800/90 shadow-xl flex flex-col animate-in fade-in slide-in-from-right duration-200"
       >
         {/* 顶部栏：分身身份 + 状态徽章 + 耗时 + 停止按钮 */}
         <div className="flex items-center justify-between gap-2 px-4 h-13 sm:h-14 border-b border-zinc-200/80 dark:border-zinc-800/80 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
-            <div
-              className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 border ${
-                colorStyle?.iconBg ?? 'bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 border-zinc-200 dark:border-zinc-800'
-              }`}
-            >
-              <Wrench className="w-4 h-4" />
-            </div>
+            <BotAvatarBadge
+              botId={run.subagentId}
+              name={run.subagentName}
+              color={run.color}
+              className="!w-7 !h-7 !text-[11px]"
+            />
             <div className="min-w-0">
               <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 truncate">
                 {run.subagentName || `@${run.subagentId}`}
               </h2>
-              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate font-mono" title={run.id}>
+              <p
+                className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate font-mono"
+                title={run.id}
+              >
                 {run.id}
               </p>
             </div>
@@ -259,88 +293,14 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
           </div>
         </div>
 
-        {/* 内容区：初始任务 / 交互指令 / 工具调用轨迹 / 完整回复 */}
-        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-4">
-          {/* 1. 初始任务（Task Prompt） */}
-          <section>
-            <h3 className="flex items-center gap-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">
-              <FileText className="w-3.5 h-3.5" />
-              <span>初始任务 (Task)</span>
-            </h3>
-            <div className="rounded-lg border border-zinc-200/70 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/50 px-3 py-2.5 text-xs text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-words leading-relaxed">
-              {run.task || '（无任务描述）'}
-            </div>
-          </section>
-
-          {/* 2. 交互指令记录（Steers / Resumes） */}
-          {run.steers && run.steers.length > 0 && (
-            <section>
-              <h3 className="flex items-center gap-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">
-                <MessageSquareQuote className="w-3.5 h-3.5" />
-                <span>交互指令记录 ({run.steers.length})</span>
-              </h3>
-              <div className="space-y-1.5">
-                {run.steers.map((steer, idx) => (
-                  <div
-                    key={`${steer.timestamp}-${idx}`}
-                    className="rounded-lg border border-amber-200/60 dark:border-amber-900/50 bg-amber-50/60 dark:bg-amber-950/30 px-3 py-2"
-                  >
-                    <div className="flex items-center gap-1.5 mb-0.5">
-                      <span className="text-[11px] font-medium text-amber-700 dark:text-amber-300">
-                        {steer.mode === 'resume' ? '追问 (Resume)' : '插话 (Steer)'}
-                      </span>
-                      <span className="text-[11px] text-amber-600/60 dark:text-amber-400/50 font-mono">
-                        {new Date(steer.timestamp).toLocaleTimeString()}
-                      </span>
-                    </div>
-                    <div className="text-xs text-amber-900 dark:text-amber-200 whitespace-pre-wrap break-words">
-                      {steer.message}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
-
-          {/* 3. 工具调用轨迹（Tool Calls） */}
-          <section>
-            <h3 className="flex items-center gap-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">
-              <Terminal className="w-3.5 h-3.5" />
-              <span>
-                工具调用轨迹 ({toolCalls.length}
-                {run.currentTool ? ` · 当前: ${run.currentTool}` : ''})
-              </span>
-            </h3>
-            {toolCalls.length > 0 ? (
-              <div className="space-y-1.5">
-                {toolCalls.map((tool, idx) => (
-                  <ToolCallRow key={tool.id || `${tool.name}-${idx}`} tool={tool} />
-                ))}
-              </div>
-            ) : (
-              <div className="text-xs text-zinc-400 dark:text-zinc-500 italic px-1">
-                {isRunning ? '尚未调用工具…' : '（无工具调用记录）'}
-              </div>
-            )}
-          </section>
-
-          {/* 4. 完整回复内容（Full Reply，不截断） */}
-          <section>
-            <h3 className="flex items-center gap-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">
-              <FileText className="w-3.5 h-3.5" />
-              <span>完整输出 (Full Reply)</span>
-            </h3>
-            {fullReply ? (
-              <div className="rounded-lg border border-zinc-200/70 dark:border-zinc-800 bg-white dark:bg-zinc-900/40 px-3 py-2.5 text-xs text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-words leading-relaxed max-h-[50vh] overflow-y-auto">
-                {fullReply}
-              </div>
-            ) : (
-              <div className="text-xs text-zinc-400 dark:text-zinc-500 italic px-1">
-                {isRunning ? '分身仍在运行，输出尚未产生…' : '（无输出内容）'}
-              </div>
-            )}
-          </section>
-        </div>
+        {/* 内容区：与主对话完全同源的时间线（同一组件，自动获得全部视觉与交互） */}
+        <MessageTimeline
+          messages={timelineMessages}
+          streamingStates={streamingStates}
+          botMap={effectiveBotMap}
+          nodeMap={nodeMap}
+          className="max-w-none px-4"
+        />
 
         {/* 底部控制栏：steer / resume 输入框 */}
         <div className="px-4 py-3 border-t border-zinc-200/80 dark:border-zinc-800/80 shrink-0">
@@ -380,13 +340,10 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
               <span>{isRunning ? 'Steer' : 'Resume'}</span>
             </button>
           </div>
-          <p className="mt-1.5 text-[11px] text-zinc-400 dark:text-zinc-500 flex items-center gap-1">
-            <Square className="w-3 h-3 shrink-0" />
-            <span>
-              {isRunning
-                ? 'Steer 消息将在分身当前工具执行完后注入其会话；「停止分身」仅停该 runId，不影响主回合。'
-                : 'Resume 在同一分身会话上下文继续追问，结果将更新到本抽屉与消息卡片。'}
-            </span>
+          <p className="mt-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
+            {isRunning
+              ? 'Steer 消息将在分身当前工具执行完后注入其会话；「停止分身」仅停该 runId，不影响主回合。'
+              : 'Resume 在同一分身会话上下文继续追问，结果将更新到本抽屉与消息卡片。'}
           </p>
         </div>
       </div>

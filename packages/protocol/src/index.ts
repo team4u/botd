@@ -274,6 +274,8 @@ export interface SubagentRunRecord {
   color?: SubagentColor;
   task: string;
   phase?: string;
+  /** 本次运行的启动时间（ISO），供检视抽屉合成消息时间戳与日期分隔线 */
+  startedAt?: string;
   status: 'running' | 'done' | 'error' | 'stopped' | 'skipped';
   toolCount?: number;
   currentTool?: string;
@@ -281,6 +283,8 @@ export interface SubagentRunRecord {
   replyPreview?: string;
   /** 分身完整回复或错误输出（不截断，供详情抽屉查看） */
   replyFull?: string;
+  /** 分身执行过程中的交错时间线（思考/工具/文本流，与主对话 blocks 同构） */
+  blocks?: TurnBlock[];
   /** 分身执行过程中的工具调用记录列表 */
   toolCalls?: ToolCallRecord[];
   /** 运行过程中收到的 steer / resume 追加指令历史 */
@@ -567,6 +571,7 @@ export interface HubRpcFunctions {
       durationMs?: number;
       toolUses?: number;
       currentTool?: string;
+      blocks?: TurnBlock[];
       toolCalls?: ToolCallRecord[];
       steers?: SubagentSteerRecord[];
     };

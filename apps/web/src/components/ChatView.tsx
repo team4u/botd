@@ -1,25 +1,20 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Menu,
   Users,
-  Bot,
   Settings as SettingsIcon,
   Loader2,
-  AlertTriangle,
-  RefreshCw,
   MoreHorizontal,
   MessageSquarePlus,
   Pencil,
   Eraser,
   Trash2,
-  ArrowDown,
   Check,
   X,
   Clock,
   Hourglass,
   Package,
   SquareTerminal,
-  ChevronUp,
   ChevronRight,
   Plus,
   Share2,
@@ -37,17 +32,8 @@ import type {
   SubagentRunRecord,
 } from '@botd/protocol';
 import type { StreamingAssistantState } from '../types';
-import {
-  MemoizedMessageItem,
-  formatShortModel,
-  subagentColorStyles,
-  SubagentRunsPanel,
-  AssistantTurnContent,
-  BotAvatarBadge,
-  TypingDots,
-  formatChatDayLabel,
-  isSameCalendarDay,
-} from './MessageItem';
+import { subagentColorStyles } from './MessageItem';
+import { MessageTimeline } from './MessageTimeline';
 import { ChatInput } from './ChatInput';
 import { ConfirmDialog } from './ConfirmDialog';
 import { AskCard } from './AskCard';
@@ -152,8 +138,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onLoadEarlier,
   highlightMessageId = null,
 }) => {
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const [userScrolledUp, setUserScrolledUp] = useState(false);
   const keyboardInset = useKeyboardInset();
 
   // 临时点名下拉菜单状态
@@ -271,82 +255,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
   }, [directBot, botMap]);
 
   const isDirectNodeOnline = directNode?.status === 'online';
-
-  // 回到底部按钮触发的程序化平滑滚动标记，避免滚动动画的中间位置误触发 userScrolledUp
-  const programmaticScrollRef = useRef(false);
-
-  // ===== 历史消息向上分页：prepend 滚动锚定 =====
-  // 点击「加载更早消息」前记录 scrollHeight 与首条消息 id；messages 变长后在
-  // useLayoutEffect 里判定是否为顶部 prepend（首条消息 id 变化），是刚补偿 scrollHeight
-  // 差值保证视口不跳，并置抑制标记让同一次 commit 的自动滚底 effect 跳过。
-  const prevScrollHeightRef = useRef<number | null>(null);
-  const prevFirstMessageIdRef = useRef<string | null>(null);
-  const prevMessageCountRef = useRef(messages.length);
-  const pendingPrependRef = useRef(false);
-
-  const handleLoadEarlier = () => {
-    if (loadingEarlier || !onLoadEarlier) return;
-    const el = scrollContainerRef.current;
-    if (el) prevScrollHeightRef.current = el.scrollHeight;
-    prevFirstMessageIdRef.current = messages.length > 0 ? messages[0].id : null;
-    pendingPrependRef.current = true;
-    onLoadEarlier();
-  };
-
-  // IntersectionObserver 哨兵：列表顶部进入视口时自动触发加载（按钮仍是主入口）
-  const earlierSentinelRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const sentinel = earlierSentinelRef.current;
-    if (!hasEarlierMessages || loadingEarlier || !onLoadEarlier || !sentinel) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((en) => en.isIntersecting)) handleLoadEarlier();
-      },
-      { root: scrollContainerRef.current, rootMargin: '80px' }
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [hasEarlierMessages, loadingEarlier, onLoadEarlier, messages.length]);
-
-  useLayoutEffect(() => {
-    const el = scrollContainerRef.current;
-    const grew = messages.length > prevMessageCountRef.current;
-    prevMessageCountRef.current = messages.length;
-    if (!pendingPrependRef.current || !el || !grew) return;
-    // 仅当首条消息 id 变化才判定为 prepend（追加消息不改首条 id）
-    const firstId = messages.length > 0 ? messages[0].id : null;
-    const isPrepend = firstId !== prevFirstMessageIdRef.current;
-    prevFirstMessageIdRef.current = firstId;
-    if (!isPrepend) return;
-    const prevHeight = prevScrollHeightRef.current;
-    prevScrollHeightRef.current = null;
-    if (prevHeight == null) return;
-    // 补偿高度差：视口停在原消息位置；prepend 后必不在底部，确保回到底部按钮可见
-    const delta = el.scrollHeight - prevHeight;
-    if (delta > 0) {
-      el.scrollTop += delta;
-      setUserScrolledUp(true);
-    }
-  }, [messages.length]);
-
-  // ===== 搜索跳转定位高亮 =====
-  const [highlightedId, setHighlightedId] = useState<string | null>(null);
-  useEffect(() => {
-    if (!highlightMessageId) return;
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const target = container.querySelector<HTMLElement>(`[data-message-id="${highlightMessageId}"]`);
-    if (!target) return;
-    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    // 平滑滚动中间位置不触发 userScrolledUp 误判，结束后若不在底部再交回监听
-    programmaticScrollRef.current = true;
-    window.setTimeout(() => {
-      programmaticScrollRef.current = false;
-    }, 800);
-    setHighlightedId(highlightMessageId);
-    const timer = window.setTimeout(() => setHighlightedId(null), 2000);
-    return () => window.clearTimeout(timer);
-  }, [highlightMessageId]);
 
   // ===== 会话产物 / 后台任务抽屉 =====
   const [artifactsOpen, setArtifactsOpen] = useState(false);
@@ -510,70 +418,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
     });
     return unsubscribe;
   }, [session.id]);
-
-  // 自动滚动到底部
-  const scrollToBottom = (smooth = true) => {
-    if (userScrolledUp) return;
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    el.scrollTo({
-      top: el.scrollHeight,
-      behavior: smooth ? 'smooth' : 'auto',
-    });
-  };
-
-  useEffect(() => {
-    scrollToBottom(false);
-  }, [session.id]);
-
-  const effectiveStreamingStates = streamingStates;
-  const isParallelStreaming = effectiveStreamingStates.length > 1;
-
-  useEffect(() => {
-    // prepend 加载更早消息时不触发自动滚底（视口锚定由 useLayoutEffect 补偿）。
-    // 注意：layout effect 先于本 effect 运行，此处消费标记（而非依赖它被清除前判断）
-    if (pendingPrependRef.current) {
-      pendingPrependRef.current = false;
-      return;
-    }
-    scrollToBottom(true);
-  }, [
-    messages.length,
-    effectiveStreamingStates.length,
-    effectiveStreamingStates.map((s) => `${s.botId}:${s.delta.length}:${s.tools.length}`).join(','),
-  ]);
-
-  // 移动端软键盘联动：键盘弹起垫片高度变化时，若用户在底部则保持贴底可见
-  useEffect(() => {
-    if (!userScrolledUp) {
-      scrollToBottom(false);
-    }
-  }, [keyboardInset, userScrolledUp]);
-
-  const handleScroll = () => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    if (programmaticScrollRef.current) {
-      // 平滑滚动动画进行中：到达底部后恢复监听，忽略中间位置
-      if (isAtBottom) programmaticScrollRef.current = false;
-      return;
-    }
-    setUserScrolledUp(!isAtBottom);
-  };
-
-  // 回到底部：先解除 userScrolledUp 守卫再平滑滚动，否则会被 scrollToBottom 的守卫拦截
-  const handleJumpToBottom = () => {
-    const el = scrollContainerRef.current;
-    setUserScrolledUp(false);
-    if (!el) return;
-    programmaticScrollRef.current = true;
-    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-    // 兑底：万一滚动事件未触发，稍后自动恢复监听
-    window.setTimeout(() => {
-      programmaticScrollRef.current = false;
-    }, 800);
-  };
 
   // 切换会话时重置头部交互状态
   useEffect(() => {
@@ -766,71 +610,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
       : session.activeBotId
         ? [session.activeBotId]
         : [];
-
-  // 单个流式 BOT 输出块（并发网格内复用，风格与 MessageItem Assistant 一致）
-  const renderStreamingBlock = (state: StreamingAssistantState) => {
-    const bot = botMap.get(state.botId);
-    const shortModel = formatShortModel(bot?.modelId);
-    const hasContent = Boolean(
-      (state.blocks && state.blocks.length > 0) || state.delta || state.tools.length > 0
-    );
-
-    return (
-      <div
-        key={state.botId}
-        className={
-          isParallelStreaming
-            ? 'p-3 bg-white dark:bg-zinc-900/40 border border-zinc-200/80 dark:border-zinc-800 rounded-xl min-w-0'
-            : 'py-2 sm:py-2.5 animate-in fade-in'
-        }
-      >
-        {/* 身份行：微徽章 + 名称 + 模型 + 运行中呼吸指示 */}
-        <div className="flex items-center gap-1.5 min-w-0 mb-0.5">
-          <BotAvatarBadge botId={state.botId} name={bot?.name} color={bot?.color} />
-          <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate">
-            {bot?.name || state.botId}
-          </span>
-          {shortModel && (
-            <span className="text-[11px] font-mono text-zinc-400 dark:text-zinc-500 truncate">
-              {shortModel}
-            </span>
-          )}
-          <span className="inline-flex items-center gap-1.5 shrink-0">
-            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
-            <span className="text-[11px] text-blue-500 dark:text-blue-400">生成中</span>
-          </span>
-        </div>
-
-        {/* 分身协同运行中轨迹 */}
-        {activeSubagentRuns?.[state.botId] && activeSubagentRuns[state.botId].length > 0 && (
-          <SubagentRunsPanel runs={activeSubagentRuns[state.botId]} onInspectSubagentRun={onInspectSubagentRun} />
-        )}
-
-        {/* 统一交错时间线渲染器 */}
-        {hasContent ? (
-          <AssistantTurnContent
-            blocks={state.blocks}
-            toolCalls={state.tools.map((t, idx) => ({
-              id: t.id || `${t.toolName}_${idx}`,
-              name: t.toolName,
-              status: t.status,
-              summary: t.summary,
-              args: t.args,
-              outputPreview: t.outputPreview,
-              durationMs: t.durationMs,
-              isError: t.isError,
-            }))}
-            content={state.delta}
-          />
-        ) : (
-          <div className="flex items-center gap-2 py-2">
-            <TypingDots />
-            <span className="text-xs text-zinc-400 dark:text-zinc-500">正在思考如何回应…</span>
-          </div>
-        )}
-      </div>
-    );
-  };
 
   return (
     <div className="flex-1 flex flex-col h-full bg-white dark:bg-zinc-950 overflow-hidden">
@@ -1220,152 +999,28 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       )}
 
-      {/* 消息滚动主区域（外层包裹用于定位回到底部悬浮按钮；外层全宽承载滚动条，内部收敛到中轴阅读宽度与输入框对齐） */}
-      <div className="relative flex-1 min-h-0">
-        <div
-          ref={scrollContainerRef}
-          onScroll={handleScroll}
-          className="absolute inset-0 overflow-y-auto"
-          role="log"
-          aria-label="聊天消息记录"
-        >
-        <div className="max-w-4xl w-full mx-auto px-3 sm:px-5 py-3">
-        {loadingMessages && messages.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-zinc-400 dark:text-zinc-500 gap-2">
-            <Loader2 className="w-5 h-5 animate-spin-fast text-blue-600 dark:text-blue-400" />
-            <p className="text-xs">正在同步会话消息记录...</p>
-          </div>
-        ) : loadError ? (
-          <div className="p-4 mx-auto max-w-md bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 rounded-2xl text-center my-8">
-            <AlertTriangle className="w-5 h-5 text-rose-500 dark:text-rose-400 mx-auto mb-2" />
-            <p className="text-sm font-semibold text-rose-800 dark:text-rose-300 mb-1">加载历史消息失败</p>
-            <p className="text-xs text-rose-600 dark:text-rose-400 mb-3">{loadError}</p>
-            <button
-              onClick={onRetryLoad}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-zinc-900 border border-rose-300 dark:border-rose-900/60 text-rose-700 dark:text-rose-300 rounded-lg text-xs font-medium hover:bg-rose-100/50 dark:hover:bg-rose-900/30 shadow-xs cursor-pointer"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>重新加载</span>
-            </button>
-          </div>
-        ) : messages.length === 0 && effectiveStreamingStates.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-center p-6 max-w-md mx-auto">
-            <div className="w-12 h-12 rounded-2xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-200/80 dark:border-zinc-800/80 flex items-center justify-center text-zinc-700 dark:text-zinc-300 mb-3 shadow-xs">
-              {session.mode === 'direct' ? (
-                <Bot className="w-6 h-6" />
-              ) : (
-                <Users className="w-6 h-6" />
-              )}
-            </div>
-            <h3 className="text-sm sm:text-base font-semibold text-zinc-800 dark:text-zinc-200 mb-1">
-              {session.mode === 'direct' ? `开启与 ${session.title} 的对话` : session.title}
-            </h3>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4 leading-relaxed">
-              {session.mode === 'direct'
-                ? '发送消息开始对话。智能体将根据配置的角色与技能为你提供协助。输入 /new 可随时开启新话题。'
-                : '发送消息开始对话。在群聊中输入 @ 提及成员接力发言与协作。'}
-            </p>
-            <div className="flex flex-wrap justify-center gap-1.5">
-              {memberBots.map((b) => (
-                <span
-                  key={b.id}
-                  className="inline-flex items-center gap-1.5 px-2 py-1 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800/80 rounded-full text-[11px] text-zinc-600 dark:text-zinc-400"
-                  title={`${b.name} · @${b.id}`}
-                >
-                  <BotAvatarBadge botId={b.id} name={b.name} color={b.color} className="!w-4 !h-4 !text-[9px]" />
-                  <span className="truncate max-w-[120px]">{b.name}</span>
-                </span>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <>
-            {/* 加载更早消息：IntersectionObserver 哨兵（自动触发）+ 居中按钮（可靠主入口） */}
-            {hasEarlierMessages && (
-              <div ref={earlierSentinelRef} className="flex justify-center py-1.5">
-                <button
-                  type="button"
-                  onClick={handleLoadEarlier}
-                  disabled={loadingEarlier || !onLoadEarlier}
-                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors disabled:opacity-50 cursor-pointer"
-                >
-                  {loadingEarlier ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin-fast" />
-                      <span>正在加载...</span>
-                    </>
-                  ) : (
-                    <>
-                      <ChevronUp className="w-3.5 h-3.5" />
-                      <span>加载更早消息</span>
-                    </>
-                  )}
-                </button>
-              </div>
-            )}
-
-            {messages.map((msg, idx) => (
-              <React.Fragment key={msg.id}>
-                {/* 日期分隔线：相邻消息跨自然日时插入时间锚点 */}
-                {(idx === 0 || !isSameCalendarDay(messages[idx - 1].createdAt, msg.createdAt)) && (
-                  <div className="flex justify-center my-3">
-                    <span className="px-2.5 py-0.5 rounded-full bg-zinc-100/90 dark:bg-zinc-800/90 text-[11px] text-zinc-500 dark:text-zinc-400 select-none">
-                      {formatChatDayLabel(msg.createdAt)}
-                    </span>
-                  </div>
-                )}
-                <div
-                  className={
-                    highlightedId === msg.id
-                      ? 'rounded-2xl ring-2 ring-blue-400/60 bg-blue-50/50 dark:bg-blue-500/5 transition-colors duration-500'
-                      : 'transition-colors duration-500'
-                  }
-                >
-                  <MemoizedMessageItem
-                    message={msg}
-                    botMap={botMap}
-                    nodeMap={nodeMap}
-                    canEdit={canEdit}
-                    isEditing={editingMessage?.id === msg.id}
-                    onStartEdit={startEdit}
-                    onForkMessage={handleForkMessage}
-                    onInspectSubagentRun={onInspectSubagentRun}
-                  />
-                </div>
-              </React.Fragment>
-            ))}
-
-            {/* 多 BOT 并发流式：网格并排展示，互不覆盖；单 BOT 保持平铺风格 */}
-            {isParallelStreaming ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 my-2">
-                <div className="col-span-full flex items-center justify-center gap-1.5 py-1.5 px-3 bg-blue-50/80 dark:bg-blue-950/40 border border-blue-200/70 dark:border-blue-900/60 rounded-full w-fit mx-auto">
-                  <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse shrink-0" />
-                  <span className="text-[11px] font-medium text-blue-700 dark:text-blue-300">
-                    {effectiveStreamingStates.length} 位智能体并发执行中
-                  </span>
-                </div>
-                {effectiveStreamingStates.map((state) => renderStreamingBlock(state))}
-              </div>
-            ) : (
-              effectiveStreamingStates.map((state) => renderStreamingBlock(state))
-            )}
-          </>
-        )}
-        </div>
-        </div>
-
-        {/* 回到底部悬浮按钮：画布底部水平居中，毛玻璃质感 */}
-        {userScrolledUp && (
-          <button
-            onClick={handleJumpToBottom}
-            className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 h-9 px-3.5 rounded-full bg-white/90 dark:bg-zinc-800/90 backdrop-blur-md border border-zinc-200 dark:border-zinc-700 shadow-lg text-xs font-medium text-zinc-700 dark:text-zinc-200 hover:bg-white dark:hover:bg-zinc-700 transition-colors cursor-pointer animate-in fade-in"
-            aria-label="回到底部"
-          >
-            <ArrowDown className="w-3.5 h-3.5" />
-            <span>回到底部</span>
-          </button>
-        )}
-      </div>
+      {/* 消息时间线：与分身运行抽屉共用的唯一渲染器（滚动/分页/流式网格/回到底部均在内部） */}
+      <MessageTimeline
+        messages={messages}
+        streamingStates={streamingStates}
+        botMap={botMap}
+        nodeMap={nodeMap}
+        session={session}
+        loadingMessages={loadingMessages}
+        loadError={loadError}
+        onRetryLoad={onRetryLoad}
+        highlightMessageId={highlightMessageId}
+        onStartEdit={startEdit}
+        onForkMessage={handleForkMessage}
+        onInspectSubagentRun={onInspectSubagentRun}
+        editingMessage={editingMessage}
+        canEdit={canEdit}
+        hasEarlierMessages={hasEarlierMessages}
+        loadingEarlier={loadingEarlier}
+        onLoadEarlier={onLoadEarlier}
+        keyboardInset={keyboardInset}
+        activeSubagentRunsFor={activeSubagentRuns}
+      />
 
       {/* 上下文高水位线报警与一键压缩（小屏或输入框上方常驻） */}
       {latestCtxPct >= 75 && (
@@ -1653,11 +1308,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onToast={(type, message) => onAddToast?.(type, message)}
       />
 
-      {/* 分身运行详情抽屉：初始任务 / 交互指令 / 工具轨迹 / 完整输出 + Steer/Resume/停止控制 */}
+      {/* 分身运行详情抽屉：与主对话同源的时间线 + Steer/Resume/停止控制 */}
       <SubagentRunDrawer
         isOpen={Boolean(inspectingRunId)}
         sessionId={session.id}
         run={inspectingRun}
+        botMap={botMap}
+        nodeMap={nodeMap}
         onClose={() => onInspectSubagentRun?.(null)}
         onToast={(type, message) => onAddToast?.(type, message)}
       />

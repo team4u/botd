@@ -12,6 +12,7 @@ import {
   type SubagentRunRecord,
   type SubagentSteerRecord,
   type ToolCallRecord,
+  type TurnBlock,
 } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
 import type { AuthManager } from './auth.js';
@@ -42,6 +43,8 @@ export interface GroupRouterDelegate {
       durationMs?: number;
       toolUses?: number;
       currentTool?: string;
+      startedAt?: string;
+      blocks?: TurnBlock[];
       toolCalls?: ToolCallRecord[];
       steers?: SubagentSteerRecord[];
     }

@@ -1252,11 +1252,7 @@ export const AssistantTurnContent: React.FC<{
   );
 };
 
-/**
- * 整条消息复制按钮：复制原文（message.content），成功后短暂显示"已复制"状态
- * 可通过 className 追加可见性控制（如 hover 才显示）与布局类
- */
-const MessageCopyButton: React.FC<{ content: string; className?: string }> = ({ content, className = '' }) => {
+export const MessageCopyButton: React.FC<{ content: string; className?: string }> = ({ content, className = '' }) => {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -1293,7 +1289,7 @@ const MessageCopyButton: React.FC<{ content: string; className?: string }> = ({ 
  */
 const MessageForkButton: React.FC<{
   messageId: string;
-  onForkMessage: (messageId: string) => Promise<void>;
+  onForkMessage: (messageId: string) => void | Promise<void>;
   className?: string;
 }> = ({ messageId, onForkMessage, className = '' }) => {
   return (
@@ -1320,7 +1316,7 @@ interface MessageItemProps {
   /** 点击铅笔进入编辑态（Slack 式：复用底部发送框） */
   onStartEdit?: (message: MessageRecord) => void;
   /** 从该消息（含）分叉出新会话并自动切换（MessageItem 不感知 sessionId，由上层闭包绑定） */
-  onForkMessage?: (messageId: string) => Promise<void>;
+  onForkMessage?: (messageId: string) => void | Promise<void>;
   /** 点击分身运行记录打开右侧详情抽屉（Steer / Resume / 停止控制） */
   onInspectSubagentRun?: (run: SubagentRunRecord) => void;
 }
