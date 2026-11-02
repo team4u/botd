@@ -57,7 +57,7 @@ async function createTestContext(t: TestContext): Promise<TestEnv> {
   return { hub, dir, cookie, mockRpcs, jsonRequest };
 }
 
-test('1 Node = 1 Primary Bot: POST /api/bots enforces single primary bot per node', async (t) => {
+test('Multiple primary bots per node: POST /api/bots allows multiple primary bots and subagents', async (t) => {
   const ctx = await createTestContext(t);
 
   // 1. Register a node with 1 primary bot
@@ -88,22 +88,24 @@ test('1 Node = 1 Primary Bot: POST /api/bots enforces single primary bot per nod
   assert.equal(firstBot.json.id, 'bot_primary');
   assert.equal(firstBot.json.parentBotId, undefined);
 
-  // 2. Creating another primary bot on node_alpha without parentBotId must return 409
+  // 2. Creating another primary bot on node_alpha without parentBotId also succeeds
   const secondPrimary = await ctx.jsonRequest('/api/bots', 'POST', {
     id: 'bot_second_primary',
     nodeId: 'node_alpha',
     name: 'Second Primary Bot',
-    description: 'Should fail',
+    description: 'Second primary bot on same node',
     modelProvider: 'openai',
     modelId: 'gpt-4o',
     enabledSkills: [],
-    systemMd: 'I should be rejected',
+    systemMd: 'I am second primary',
   });
-  assert.equal(secondPrimary.status, 409);
-  assert.match(secondPrimary.json.error, /该节点已有主 BOT，如需新增角色请新建角色分身（Subagent）/);
+  assert.equal(secondPrimary.status, 200);
+  assert.equal(secondPrimary.json.id, 'bot_second_primary');
+  assert.equal(secondPrimary.json.parentBotId, undefined);
 
-  // 3. Creating a subagent with parentBotId set succeeds
-  const subagent = await ctx.jsonRequest('/api/bots', 'POST', {
+  // 3. Creating a subagent bot_sub_1 with parentBotId: 'bot_primary' succeeds,
+  // and creating bot_sub_2 with parentBotId: 'bot_second_primary' also succeeds
+  const subagent1 = await ctx.jsonRequest('/api/bots', 'POST', {
     id: 'bot_sub_1',
     nodeId: 'node_alpha',
     parentBotId: 'bot_primary',
@@ -112,23 +114,41 @@ test('1 Node = 1 Primary Bot: POST /api/bots enforces single primary bot per nod
     modelProvider: 'openai',
     modelId: 'gpt-4o',
     enabledSkills: [],
-    systemMd: 'I am subagent',
+    systemMd: 'I am subagent 1',
   });
-  assert.equal(subagent.status, 200);
-  assert.equal(subagent.json.id, 'bot_sub_1');
-  assert.equal(subagent.json.parentBotId, 'bot_primary');
+  assert.equal(subagent1.status, 200);
+  assert.equal(subagent1.json.id, 'bot_sub_1');
+  assert.equal(subagent1.json.parentBotId, 'bot_primary');
 
-  // 4. PUT /api/bots/:botId: changing parentBotId from set to unset on node with primary bot returns 409
-  const unnestSubagent = await ctx.jsonRequest('/api/bots/bot_sub_1', 'PUT', {
-    parentBotId: undefined,
+  const subagent2 = await ctx.jsonRequest('/api/bots', 'POST', {
+    id: 'bot_sub_2',
+    nodeId: 'node_alpha',
+    parentBotId: 'bot_second_primary',
+    name: 'Subagent 2',
+    description: 'Role',
+    modelProvider: 'openai',
+    modelId: 'gpt-4o',
+    enabledSkills: [],
+    systemMd: 'I am subagent 2',
   });
-  // Note: if parentBotId is undefined in JSON, it is omitted, so body.parentBotId is undefined, fallback to existing.
-  // But if parentBotId is explicitly set to empty string or null:
+  assert.equal(subagent2.status, 200);
+  assert.equal(subagent2.json.id, 'bot_sub_2');
+  assert.equal(subagent2.json.parentBotId, 'bot_second_primary');
+
+  // 4. Promoting bot_sub_1 to a primary bot via PUT /api/bots/bot_sub_1 with { parentBotId: '' } succeeds,
+  // while setting { parentBotId: 'bot_sub_1' } (self-parent) returns 400
+  const selfParent = await ctx.jsonRequest('/api/bots/bot_sub_1', 'PUT', {
+    parentBotId: 'bot_sub_1',
+  });
+  assert.equal(selfParent.status, 400);
+  assert.equal(selfParent.json.error, 'Bot cannot be its own parent');
+
   const promoteSubagent = await ctx.jsonRequest('/api/bots/bot_sub_1', 'PUT', {
-    parentBotId: '' as any,
+    parentBotId: '',
   });
-  assert.equal(promoteSubagent.status, 409);
-  assert.match(promoteSubagent.json.error, /该节点已有主 BOT/);
+  assert.equal(promoteSubagent.status, 200);
+  assert.equal(promoteSubagent.json.id, 'bot_sub_1');
+  assert.equal(promoteSubagent.json.parentBotId, undefined);
 });
 
 test('Session validation: rejects non-direct mode and validates lead bot', async (t) => {

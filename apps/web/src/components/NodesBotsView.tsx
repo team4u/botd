@@ -202,11 +202,6 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
   };
 
   const handleOpenCreateBot = (node: NodeWithBots) => {
-    const primaryBot = (node.bots || []).find((b: BotConfig) => !b.parentBotId);
-    if (primaryBot) {
-      handleOpenCreateSubagent(node, primaryBot);
-      return;
-    }
     setSelectedNodeForBot(node);
     setSelectedBot(null);
     setSelectedParentBot(null);
@@ -807,26 +802,16 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                       <Bot className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" />
                       <span>智能体 ({nodeBots.length})</span>
                     </span>
-                    {(() => {
-                      const primaryBot = nodeBots.find((b) => !b.parentBotId);
-                      return (
-                        <button
-                          onClick={() => handleOpenCreateBot(node)}
-                          disabled={!isOnline}
-                          className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                          title={
-                            !isOnline
-                              ? '节点离线'
-                              : primaryBot
-                              ? '在该节点主 BOT 下新建角色分身'
-                              : '在该节点上创建主 BOT'
-                          }
-                        >
-                          <Plus className="w-3 h-3" />
-                          <span>{primaryBot ? '新建角色分身' : '新建主 BOT'}</span>
-                        </button>
-                      );
-                    })()}
+                    <button
+                      type="button"
+                      onClick={() => handleOpenCreateBot(node)}
+                      disabled={!isOnline}
+                      className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                      title={!isOnline ? '节点离线' : '在该节点上新建独立主 BOT（独立工作空间）'}
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>新建主 BOT</span>
+                    </button>
                   </div>
 
                   {nodeBots.length === 0 ? (
@@ -986,6 +971,17 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                       >
                                         <Sparkles className="w-3 h-3 text-amber-500" />
                                         <span>人设/记忆</span>
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenCreateSubagent(node, bot)}
+                                        disabled={!isOnline}
+                                        className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                                        title={!isOnline ? '节点离线，无法新建角色分身' : '在该主 BOT 下新建共享工作区的角色分身'}
+                                      >
+                                        <Plus className="w-3 h-3 text-zinc-500" />
+                                        <span>新建分身</span>
                                       </button>
                                     </div>
 

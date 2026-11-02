@@ -597,13 +597,8 @@ export function createHub(options?: HubOptions): HubInstance {
       return c.json({ error: `Bot id "${body.id}" already owned by node "${existing.nodeId}"` }, 409);
     }
 
-    const isPrimary = !body.parentBotId;
-    if (isPrimary) {
-      const existingBots = db.getBotsForNode(body.nodeId);
-      const hasOtherPrimary = existingBots.some(b => !b.parentBotId && b.id !== body.id);
-      if (hasOtherPrimary) {
-        return c.json({ error: '该节点已有主 BOT，如需新增角色请新建角色分身（Subagent）' }, 409);
-      }
+    if (body.parentBotId && body.parentBotId === body.id) {
+      return c.json({ error: 'Bot cannot be its own parent' }, 400);
     }
 
     const botConfig: BotConfig = {
@@ -653,13 +648,10 @@ export function createHub(options?: HubOptions): HubInstance {
       return c.json({ error: 'Cannot transfer bot to a different node' }, 409);
     }
 
-    const nextParentBotId = body.parentBotId !== undefined ? body.parentBotId : existing.parentBotId;
-    if (!nextParentBotId) {
-      const existingBots = db.getBotsForNode(existing.nodeId);
-      const hasOtherPrimary = existingBots.some(b => !b.parentBotId && b.id !== botId);
-      if (hasOtherPrimary) {
-        return c.json({ error: '该节点已有主 BOT，如需新增角色请新建角色分身（Subagent）' }, 409);
-      }
+    const rawNextParent = body.parentBotId !== undefined ? body.parentBotId : existing.parentBotId;
+    const nextParentBotId = rawNextParent ? rawNextParent : undefined;
+    if (nextParentBotId === botId) {
+      return c.json({ error: 'Bot cannot be its own parent' }, 400);
     }
 
     const { systemMd: requestedSystem, ...botPatch } = body;
@@ -672,6 +664,11 @@ export function createHub(options?: HubOptions): HubInstance {
       nodeId: existing.nodeId,
       updatedAt: new Date().toISOString(),
     };
+    if (nextParentBotId) {
+      botConfig.parentBotId = nextParentBotId;
+    } else {
+      delete botConfig.parentBotId;
+    }
 
     try {
       const systemMd = requestedSystem ?? await rpc.readFile({ kind: 'system', botId, id: 'SYSTEM.md' });
