@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   X,
   Zap,
@@ -15,6 +15,16 @@ import {
   Check,
   Send,
   Share2,
+  Inbox,
+  RefreshCw,
+  ChevronDown,
+  ChevronRight,
+  ExternalLink,
+  Split,
+  BellRing,
+  BellOff,
+  CircleAlert,
+  CircleX,
 } from 'lucide-react';
 import type {
   SessionRecord,
@@ -22,9 +32,14 @@ import type {
   TriggerRecord,
   TriggerKind,
   CreateTriggerInput,
+  TriggerDispatchMode,
+  TriggerEventFilter,
   NotificationChannelRecord,
   NotificationChannelKind,
   NotificationEventKind,
+  NotificationTellPolicy,
+  AutomationEventRecord,
+  NotificationOutboxRecord,
 } from '@botd/protocol';
 import { isValidCronExpr, describeCronExpr } from '@botd/protocol';
 import { api } from '../api';
@@ -47,6 +62,26 @@ const ONCE_PRESETS = [
   { value: '3h', label: '3 小时后' },
   { value: '1d', label: '1 天后' },
 ] as const;
+
+/** 逗号分隔的事件类型列表 → 去重后的非空数组（如 'pull_request.opened, push'） */
+function parseEventTypes(raw: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of raw.split(/[\s,]+/)) {
+    const t = part.trim();
+    if (t && !seen.has(t)) {
+      seen.add(t);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+const TELL_POLICY_LABELS: Record<NotificationTellPolicy, string> = {
+  needed: '按需打扰',
+  always: '全部推送',
+  never: '静默',
+};
 
 /** 校验一次性延时输入：支持相对延时（30s/15m/2h/1d）或 ISO 时间 */
 function parseOnceRunAt(raw: string): string | null {
@@ -131,10 +166,19 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
     'ask_request',
     'wakeup',
   ]);
+  const [channelTellPolicy, setChannelTellPolicy] = useState<NotificationTellPolicy>('needed');
   const [channelSubmitting, setChannelSubmitting] = useState(false);
   const [testingChannelId, setTestingChannelId] = useState<string | null>(null);
   const [togglingChannelId, setTogglingChannelId] = useState<string | null>(null);
   const [deletingChannelId, setDeletingChannelId] = useState<string | null>(null);
+
+  // Event Inbox（事件收件箱）与通知 Outbox（投递队列）
+  const [showInbox, setShowInbox] = useState(false);
+  const [inboxEvents, setInboxEvents] = useState<AutomationEventRecord[]>([]);
+  const [inboxLoading, setInboxLoading] = useState(false);
+  const [showOutbox, setShowOutbox] = useState(false);
+  const [outboxRecords, setOutboxRecords] = useState<NotificationOutboxRecord[]>([]);
+  const [outboxLoading, setOutboxLoading] = useState(false);
 
   // New trigger form state (also reused as edit form via editingTrigger)
   const [showAddForm, setShowAddForm] = useState(false);
@@ -145,6 +189,9 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
   const [cronExpr, setCronExpr] = useState('*/30 * * * *');
   const [runAtInput, setRunAtInput] = useState('15m');
   const [prompt, setPrompt] = useState('');
+  const [dispatchMode, setDispatchMode] = useState<TriggerDispatchMode>('subsession');
+  const [skillIdInput, setSkillIdInput] = useState('');
+  const [eventTypesInput, setEventTypesInput] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   // Action loading state (toggling or deleting)
@@ -183,12 +230,43 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
     }
   };
 
+  const fetchInboxEvents = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      if (!opts?.silent) setInboxLoading(true);
+      try {
+        const list = await api.listAutomationEvents(session.id);
+        setInboxEvents(list);
+      } catch (err: any) {
+        if (!opts?.silent) onAddToast('error', err?.message || '获取事件收件箱失败');
+      } finally {
+        setInboxLoading(false);
+      }
+    },
+    [session.id, onAddToast]
+  );
+
+  const fetchOutbox = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      if (!opts?.silent) setOutboxLoading(true);
+      try {
+        const list = await api.listNotificationOutbox(session.id);
+        setOutboxRecords(list);
+      } catch (err: any) {
+        if (!opts?.silent) onAddToast('error', err?.message || '获取通知投递记录失败');
+      } finally {
+        setOutboxLoading(false);
+      }
+    },
+    [session.id, onAddToast]
+  );
+
   const resetChannelForm = () => {
     setChannelName('');
     setChannelKind('feishu');
     setChannelTargetUrl('');
     setChannelSecret('');
     setChannelEvents(['assistant_reply', 'ask_request', 'wakeup']);
+    setChannelTellPolicy('needed');
     setShowAddChannelForm(false);
   };
 
@@ -199,6 +277,9 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
     setCronExpr('*/30 * * * *');
     setRunAtInput('15m');
     setBotId(session.leadBotId || memberBots[0]?.id || '');
+    setDispatchMode('subsession');
+    setSkillIdInput('');
+    setEventTypesInput('');
   };
 
   useEffect(() => {
@@ -210,6 +291,10 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
       setEditingTrigger(null);
       setRunConfirmTrigger(null);
       setCopiedUrlId(null);
+      setShowInbox(false);
+      setShowOutbox(false);
+      setInboxEvents([]);
+      setOutboxRecords([]);
       resetForm();
       resetChannelForm();
     }
@@ -246,6 +331,9 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
     setPrompt(trigger.prompt);
     setCronExpr(trigger.cronExpr || '*/30 * * * *');
     setRunAtInput(trigger.runAt ? isoToLocalDatetimeInput(trigger.runAt) : '');
+    setDispatchMode(trigger.dispatchMode || 'append');
+    setSkillIdInput(trigger.skillId || '');
+    setEventTypesInput(trigger.eventFilter?.types?.join(', ') || '');
   };
 
   const handleCancelEdit = () => {
@@ -314,6 +402,11 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
       }
     }
 
+    const trimmedSkillId = skillIdInput.trim();
+    const parsedTypes = parseEventTypes(eventTypesInput);
+    const eventFilter: TriggerEventFilter | undefined =
+      kind === 'webhook' && parsedTypes.length > 0 ? { types: parsedTypes } : undefined;
+
     const payload: CreateTriggerInput = {
       name: trimmedName,
       botId,
@@ -322,6 +415,9 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
       enabled: true,
       ...(kind === 'cron' ? { cronExpr: trimmedCron } : {}),
       ...(kind === 'once' && parsedRunAt ? { runAt: parsedRunAt } : {}),
+      dispatchMode,
+      ...(trimmedSkillId ? { skillId: trimmedSkillId } : {}),
+      ...(eventFilter ? { eventFilter } : {}),
     };
 
     setSubmitting(true);
@@ -329,12 +425,15 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
 
     try {
       if (editingTrigger) {
-        // kind/botId 不可变，仅提交可变字段
+        // kind/botId 不可变，仅提交可变字段（skillId 传 null 清除绑定，eventFilter 传 undefined 清除过滤）
         const updated = await api.updateTrigger(editingTrigger.id, {
           name: trimmedName,
           prompt: trimmedPrompt,
           ...(kind === 'cron' ? { cronExpr: trimmedCron } : {}),
           ...(kind === 'once' && parsedRunAt ? { runAt: parsedRunAt } : {}),
+          dispatchMode,
+          skillId: trimmedSkillId || null,
+          ...(kind === 'webhook' ? { eventFilter: eventFilter ?? null } : {}),
         });
         setTriggers((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
         onAddToast('success', '触发器已更新');
@@ -404,6 +503,7 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
         targetUrl: trimmedUrl,
         secret: channelSecret.trim() || undefined,
         events: channelEvents,
+        tellPolicy: channelTellPolicy,
         enabled: true,
       });
       setChannels((prev) => [...prev, created]);
@@ -423,6 +523,21 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
       setChannels((prev) => prev.map((c) => (c.id === channel.id ? updated : c)));
     } catch (err: any) {
       onAddToast('error', err?.message || '更新通道状态失败');
+    } finally {
+      setTogglingChannelId(null);
+    }
+  };
+
+  const handleCycleTellPolicy = async (channel: NotificationChannelRecord) => {
+    const order: NotificationTellPolicy[] = ['needed', 'always', 'never'];
+    const current = channel.tellPolicy || 'always';
+    const next = order[(order.indexOf(current) + 1) % order.length];
+    setTogglingChannelId(channel.id);
+    try {
+      const updated = await api.updateChannel(channel.id, { tellPolicy: next });
+      setChannels((prev) => prev.map((c) => (c.id === channel.id ? updated : c)));
+    } catch (err: any) {
+      onAddToast('error', err?.message || '更新通知策略失败');
     } finally {
       setTogglingChannelId(null);
     }
@@ -677,6 +792,42 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                 </div>
               </div>
 
+              {/* Execution: dispatch mode + skill binding */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="trigger-dispatch-mode" className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                    执行方式
+                  </label>
+                  <select
+                    id="trigger-dispatch-mode"
+                    value={dispatchMode}
+                    onChange={(e) => setDispatchMode(e.target.value as TriggerDispatchMode)}
+                    className="w-full h-8 px-2.5 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="subsession">派生独立子会话（推荐，隔离每次运行）</option>
+                    <option value="append">追加到当前会话</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label htmlFor="trigger-skill" className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                    绑定技能
+                    <span className="ml-1.5 text-[11px] font-normal text-zinc-400 dark:text-zinc-500">可选</span>
+                  </label>
+                  <input
+                    id="trigger-skill"
+                    type="text"
+                    value={skillIdInput}
+                    onChange={(e) => setSkillIdInput(e.target.value)}
+                    placeholder="可选，如 github-pr-review"
+                    className="w-full h-8 px-2.5 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1">
+                    触发时自动以 <span className="font-mono">/skill:&lt;id&gt;</span> 启动
+                  </p>
+                </div>
+              </div>
+
               {/* Kind specific config */}
               {kind === 'cron' && (
                 <div>
@@ -732,6 +883,26 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                       </button>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {kind === 'webhook' && (
+                <div>
+                  <label htmlFor="trigger-event-types" className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                    事件类型过滤
+                    <span className="ml-1.5 text-[11px] font-normal text-zinc-400 dark:text-zinc-500">可选</span>
+                  </label>
+                  <input
+                    id="trigger-event-types"
+                    type="text"
+                    value={eventTypesInput}
+                    onChange={(e) => setEventTypesInput(e.target.value)}
+                    placeholder="可选，如 pull_request.opened, pull_request.synchronize"
+                    className="w-full h-8 px-2.5 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 placeholder:font-sans focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1">
+                    逗号分隔；留空接收全部事件，填写后仅匹配类型才触发
+                  </p>
                 </div>
               )}
 
@@ -927,6 +1098,36 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                           <span className="text-[11px] font-mono text-zinc-400 dark:text-zinc-500 shrink-0">
                             @{trigger.botId}
                           </span>
+
+                          {trigger.dispatchMode === 'subsession' && (
+                            <span
+                              className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-cyan-50 dark:bg-cyan-950/50 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-900/60 shrink-0 inline-flex items-center gap-1"
+                              title="触发时派生独立子会话执行，隔离每次运行"
+                            >
+                              <Split className="w-3 h-3" />
+                              派生子会话
+                            </span>
+                          )}
+
+                          {trigger.skillId && (
+                            <span
+                              className="px-1.5 py-0.5 rounded text-[11px] font-medium font-mono bg-violet-50 dark:bg-violet-950/50 text-violet-700 dark:text-violet-300 border border-violet-200 dark:border-violet-900/60 shrink-0"
+                              title="触发时自动以 /skill 启动"
+                            >
+                              /skill:{trigger.skillId}
+                            </span>
+                          )}
+
+                          {trigger.kind === 'webhook' &&
+                            trigger.eventFilter?.types &&
+                            trigger.eventFilter.types.length > 0 && (
+                              <span
+                                className="px-1.5 py-0.5 rounded text-[11px] font-mono bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700 shrink-0 max-w-full truncate"
+                                title={`仅匹配事件类型：${trigger.eventFilter.types.join(', ')}`}
+                              >
+                                {trigger.eventFilter.types.join(', ')}
+                              </span>
+                            )}
                         </div>
 
                         {trigger.kind === 'cron' && cronRawExpr && (
@@ -1059,6 +1260,99 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
               })}
             </div>
           )}
+
+              {/* Event Inbox：最近收到的自动化事件 */}
+              <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900/60">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !showInbox;
+                    setShowInbox(next);
+                    if (next) fetchInboxEvents();
+                  }}
+                  className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/50 rounded-lg transition-colors"
+                  aria-expanded={showInbox}
+                >
+                  <span className="flex items-center gap-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                    {showInbox ? (
+                      <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
+                    ) : (
+                      <ChevronRight className="w-3.5 h-3.5 text-zinc-400" />
+                    )}
+                    <Inbox className="w-3.5 h-3.5 text-zinc-400" />
+                    事件收件箱 (Event Inbox)
+                    {inboxEvents.length > 0 && (
+                      <span className="text-[11px] font-normal text-zinc-400 dark:text-zinc-500">
+                        · {inboxEvents.length} 条
+                      </span>
+                    )}
+                  </span>
+                  <span className="text-[11px] text-zinc-400 dark:text-zinc-500">Webhook 最近收到的事件</span>
+                </button>
+
+                {showInbox && (
+                  <div className="px-3 pb-3 space-y-2 border-t border-zinc-100 dark:border-zinc-800/60 pt-2.5">
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => fetchInboxEvents()}
+                        disabled={inboxLoading}
+                        className="h-7 px-2 text-[11px] font-medium rounded-lg border border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${inboxLoading ? 'animate-spin-fast' : ''}`} />
+                        <span>刷新</span>
+                      </button>
+                    </div>
+
+                    {inboxLoading && inboxEvents.length === 0 ? (
+                      <div className="py-6 flex items-center justify-center gap-2 text-xs text-zinc-400">
+                        <Loader2 className="w-4 h-4 animate-spin-fast" />
+                        加载事件中...
+                      </div>
+                    ) : inboxEvents.length === 0 ? (
+                      <p className="py-6 text-center text-[11px] text-zinc-400 dark:text-zinc-500">
+                        暂无收到的事件，Webhook 被调用后将在这里展示
+                      </p>
+                    ) : (
+                      <ul className="space-y-1.5">
+                        {inboxEvents.map((ev) => (
+                          <li
+                            key={ev.id}
+                            className="p-2 rounded-lg border border-zinc-100 dark:border-zinc-800/80 bg-zinc-50/60 dark:bg-zinc-900/60"
+                          >
+                            <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
+                              <span className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-900/60">
+                                {ev.source}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded text-[11px] font-mono bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300">
+                                {ev.eventType}
+                              </span>
+                              <span className="text-[11px] text-zinc-400 dark:text-zinc-500 ml-auto shrink-0">
+                                {new Date(ev.createdAt).toLocaleString()}
+                              </span>
+                            </div>
+                            {ev.summary && (
+                              <p className="text-xs text-zinc-600 dark:text-zinc-400 break-all mb-0.5">
+                                {ev.summary}
+                              </p>
+                            )}
+                            {ev.childSessionId && (
+                              <a
+                                href={`#?s=${ev.childSessionId}`}
+                                className="inline-flex items-center gap-1 text-[11px] text-blue-600 dark:text-blue-400 hover:underline"
+                                title="跳转到派生的子会话"
+                              >
+                                <ExternalLink className="w-3 h-3" />
+                                查看子会话
+                              </a>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
           </div>
           ) : (
             <div className="space-y-4 animate-in fade-in">
@@ -1278,6 +1572,60 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                     </div>
                   </div>
 
+                  {/* Notification Tell Policy */}
+                  <div>\n                    <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                      通知打扰策略
+                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setChannelTellPolicy('needed')}
+                        className={`h-8 px-2.5 text-xs font-medium rounded-lg border flex items-center justify-center gap-1.5 cursor-pointer transition-colors text-center ${
+                          channelTellPolicy === 'needed'
+                            ? 'bg-blue-50 dark:bg-blue-950/50 border-blue-400 dark:border-blue-700 text-blue-700 dark:text-blue-300'
+                            : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                        }`}
+                        title="仅人工审批与异常失败时推送"
+                      >
+                        <BellRing className="w-3.5 h-3.5 shrink-0" />
+                        <span>按需打扰（推荐）</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setChannelTellPolicy('always')}
+                        className={`h-8 px-2.5 text-xs font-medium rounded-lg border flex items-center justify-center gap-1.5 cursor-pointer transition-colors text-center ${
+                          channelTellPolicy === 'always'
+                            ? 'bg-blue-50 dark:bg-blue-950/50 border-blue-400 dark:border-blue-700 text-blue-700 dark:text-blue-300'
+                            : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                        }`}
+                        title="全部勾选事件均推送"
+                      >
+                        <Send className="w-3.5 h-3.5 shrink-0" />
+                        <span>全部推送</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setChannelTellPolicy('never')}
+                        className={`h-8 px-2.5 text-xs font-medium rounded-lg border flex items-center justify-center gap-1.5 cursor-pointer transition-colors text-center ${
+                          channelTellPolicy === 'never'
+                            ? 'bg-blue-50 dark:bg-blue-950/50 border-blue-400 dark:border-blue-700 text-blue-700 dark:text-blue-300'
+                            : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                        }`}
+                        title="静默，暂停推送"
+                      >
+                        <BellOff className="w-3.5 h-3.5 shrink-0" />
+                        <span>静默</span>
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1">
+                      {channelTellPolicy === 'needed'
+                        ? '仅人工审批与异常失败时推送，推荐'
+                        : channelTellPolicy === 'always'
+                        ? '全部勾选事件均推送'
+                        : '静默，暂停推送'}
+                    </p>
+                  </div>
+
                   {/* Form Actions */}
                   <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-200/80 dark:border-zinc-800">
                     <button
@@ -1355,10 +1703,32 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                       >
                         {/* Header: Badge, Name, Controls */}
                         <div className="flex items-center justify-between gap-2 mb-2">
-                          <div className="flex items-center gap-2 min-w-0">
+                          <div className="flex items-center gap-2 min-w-0 flex-wrap">
                             <span className={`px-1.5 py-0.5 rounded text-[11px] font-medium border shrink-0 ${kindColor}`}>
                               {kindLabel}
                             </span>
+                            <button
+                              type="button"
+                              onClick={() => handleCycleTellPolicy(ch)}
+                              disabled={isToggling}
+                              className={`h-7 px-2 text-[11px] font-medium rounded-lg border transition-colors cursor-pointer inline-flex items-center gap-1 disabled:opacity-50 shrink-0 ${
+                                (ch.tellPolicy || 'always') === 'needed'
+                                  ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-900/60 hover:bg-blue-100 dark:hover:bg-blue-900/50'
+                                  : (ch.tellPolicy || 'always') === 'always'
+                                  ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                                  : 'bg-zinc-50 dark:bg-zinc-950/60 text-zinc-500 dark:text-zinc-400 border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-900'
+                              }`}
+                              title={`当前策略：${TELL_POLICY_LABELS[ch.tellPolicy || 'always']}，点击切换（按需 → 全部 → 静默）`}
+                            >
+                              {isToggling ? (
+                                <Loader2 className="w-3 h-3 animate-spin-fast" />
+                              ) : (ch.tellPolicy || 'always') === 'needed' ? (
+                                <BellRing className="w-3 h-3" />
+                              ) : (ch.tellPolicy || 'always') === 'never' ? (
+                                <BellOff className="w-3 h-3" />
+                              ) : null}
+                              {TELL_POLICY_LABELS[ch.tellPolicy || 'always']}
+                            </button>
                             <span className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 truncate">
                               {ch.name}
                             </span>
@@ -1471,6 +1841,113 @@ export const TriggersModal: React.FC<TriggersModalProps> = ({
                   })}
                 </div>
               )}
+
+              {/* Outbox：最近通知投递记录 */}
+              <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900/60">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !showOutbox;
+                    setShowOutbox(next);
+                    if (next) fetchOutbox();
+                  }}
+                  className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/50 rounded-lg transition-colors"
+                  aria-expanded={showOutbox}
+                >
+                  <span className="flex items-center gap-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                    {showOutbox ? (
+                      <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
+                    ) : (
+                      <ChevronRight className="w-3.5 h-3.5 text-zinc-400" />
+                    )}
+                    <Send className="w-3.5 h-3.5 text-zinc-400" />
+                    最近通知投递记录 (Outbox)
+                    {outboxRecords.length > 0 && (
+                      <span className="text-[11px] font-normal text-zinc-400 dark:text-zinc-500">
+                        · {outboxRecords.length} 条
+                      </span>
+                    )}
+                  </span>
+                  <span className="text-[11px] text-zinc-400 dark:text-zinc-500">失败自动重试，超限标记投递失败</span>
+                </button>
+
+                {showOutbox && (
+                  <div className="px-3 pb-3 space-y-2 border-t border-zinc-100 dark:border-zinc-800/60 pt-2.5">
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => fetchOutbox()}
+                        disabled={outboxLoading}
+                        className="h-7 px-2 text-[11px] font-medium rounded-lg border border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${outboxLoading ? 'animate-spin-fast' : ''}`} />
+                        <span>刷新</span>
+                      </button>
+                    </div>
+
+                    {outboxLoading && outboxRecords.length === 0 ? (
+                      <div className="py-6 flex items-center justify-center gap-2 text-xs text-zinc-400">
+                        <Loader2 className="w-4 h-4 animate-spin-fast" />
+                        加载投递记录中...
+                      </div>
+                    ) : outboxRecords.length === 0 ? (
+                      <p className="py-6 text-center text-[11px] text-zinc-400 dark:text-zinc-500">
+                        暂无投递记录，通道推送后将在这里展示
+                      </p>
+                    ) : (
+                      <ul className="space-y-1.5">
+                        {outboxRecords.map((rec) => (
+                          <li
+                            key={rec.id}
+                            className="p-2 rounded-lg border border-zinc-100 dark:border-zinc-800/80 bg-zinc-50/60 dark:bg-zinc-900/60"
+                          >
+                            <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
+                              {rec.status === 'sent' ? (
+                                <span className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/60 inline-flex items-center gap-1">
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  已送达
+                                </span>
+                              ) : rec.status === 'pending' ? (
+                                <span className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-900/60 inline-flex items-center gap-1">
+                                  <Loader2 className="w-3 h-3" />
+                                  重试中
+                                </span>
+                              ) : (
+                                <span className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900/60 inline-flex items-center gap-1">
+                                  <CircleX className="w-3 h-3" />
+                                  投递失败
+                                </span>
+                              )}
+
+                              <span className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300">
+                                {rec.eventKind === 'assistant_reply'
+                                  ? '智能体回复'
+                                  : rec.eventKind === 'ask_request'
+                                  ? 'botd ask 交互'
+                                  : '异步唤醒'}
+                              </span>
+
+                              <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                                重试 {rec.attemptCount} 次
+                              </span>
+
+                              <span className="text-[11px] text-zinc-400 dark:text-zinc-500 ml-auto shrink-0">
+                                {new Date(rec.updatedAt).toLocaleString()}
+                              </span>
+                            </div>
+                            {rec.lastError && (
+                              <p className="text-[11px] text-rose-600 dark:text-rose-400 break-all flex items-start gap-1">
+                                <CircleAlert className="w-3 h-3 shrink-0 mt-0.5" />
+                                {rec.lastError}
+                              </p>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
