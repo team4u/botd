@@ -292,6 +292,7 @@ export async function executeBotTurn(
   blocks?: TurnBlock[];
   usage?: TurnUsage;
   subagentRuns?: SubagentRunRecord[];
+  aborted?: boolean;
 }> {
   assertSafeId(bot.id, 'Bot ID');
   assertSafeId(input.sessionId, 'Session ID');

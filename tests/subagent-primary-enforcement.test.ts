@@ -150,6 +150,7 @@ test('Session validation: rejects roundtable mode and enforces lead mode >=2 mem
     description: '',
     modelProvider: 'openai',
     modelId: 'gpt-4o',
+    enabledSkills: [],
     updatedAt: new Date().toISOString(),
   });
   ctx.hub.db.saveBot({
@@ -160,6 +161,7 @@ test('Session validation: rejects roundtable mode and enforces lead mode >=2 mem
     description: '',
     modelProvider: 'openai',
     modelId: 'gpt-4o',
+    enabledSkills: [],
     updatedAt: new Date().toISOString(),
   });
   ctx.hub.db.saveBot({
@@ -170,6 +172,7 @@ test('Session validation: rejects roundtable mode and enforces lead mode >=2 mem
     description: '',
     modelProvider: 'openai',
     modelId: 'gpt-4o',
+    enabledSkills: [],
     updatedAt: new Date().toISOString(),
   });
 
@@ -211,6 +214,7 @@ test('Session validation: rejects roundtable mode and enforces lead mode >=2 mem
     description: '',
     modelProvider: 'openai',
     modelId: 'gpt-4o',
+    enabledSkills: [],
     updatedAt: new Date().toISOString(),
   });
   ctx.hub.db.saveBot({
@@ -221,6 +225,7 @@ test('Session validation: rejects roundtable mode and enforces lead mode >=2 mem
     description: '',
     modelProvider: 'openai',
     modelId: 'gpt-4o',
+    enabledSkills: [],
     updatedAt: new Date().toISOString(),
   });
 

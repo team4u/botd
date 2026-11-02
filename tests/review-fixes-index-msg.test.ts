@@ -19,7 +19,7 @@ interface TestEnv {
   registerNodeWithBots: (
     ownerId: string,
     nodeId: string,
-    bots: Array<string | { id: string; visibility?: 'private' | 'team' }>
+    bots: Array<string | { id: string; visibility?: 'private' | 'team'; parentBotId?: string }>
   ) => void;
   jsonRequest: (
     url: string,
@@ -99,7 +99,7 @@ async function createTestContext(t: TestContext): Promise<TestEnv> {
   const registerNodeWithBots = (
     ownerId: string,
     nodeId: string,
-    botConfigs: Array<string | { id: string; visibility?: 'private' | 'team' }>
+    botConfigs: Array<string | { id: string; visibility?: 'private' | 'team'; parentBotId?: string }>
   ) => {
     hub.db.createNode({
       id: nodeId,
