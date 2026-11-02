@@ -324,10 +324,13 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
     };
   }, [isOpen, bot?.id, parentBot?.id, initialTab]);
 
-  // Providers list derived from catalog
+  // Providers list derived from catalog：仅展示已在节点上完成登录/配置的服务商（与设置页「已配置」同口径）。
+  // 节点离线时的内置目录兑底无法判定配置状态，保持全量展示。
   const catalogProviders: ProviderCatalogEntry[] = useMemo(() => {
-    return catalog?.providers || [];
-  }, [catalog]);
+    const providers = catalog?.providers || [];
+    if (catalogError) return providers;
+    return providers.filter((p) => p.configured || p.credentialType);
+  }, [catalog, catalogError]);
 
   // Current selected provider object
   const activeProvider = useMemo(() => {
@@ -882,7 +885,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                           searchPlaceholder="搜索服务商名称 / 标识..."
                           unknownValueLabel={modelProvider ? `${modelProvider}（已保存/外部服务商）` : undefined}
                           customTrigger={{ id: '__custom_provider__', label: '自定义服务商...' }}
-                          emptyText="无匹配的服务商"
+                          emptyText="该节点暂无已配置的服务商，可先在设置中登录，或选择自定义服务商"
                         />
                       </div>
 
