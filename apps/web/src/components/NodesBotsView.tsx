@@ -18,9 +18,6 @@ import {
   PowerOff,
   Share2,
   ArrowUpCircle,
-  MessageSquare,
-  Sparkles,
-  History as HistoryIcon,
   Settings,
 } from 'lucide-react';
 import type { NodeWithBots, BotConfig, NodeUpgradeCheckResult } from '@botd/protocol';
@@ -29,7 +26,6 @@ import { PairingModal } from './PairingModal';
 import { SkillEditorModal } from './SkillEditorModal';
 import { ExtensionEditorModal } from './ExtensionEditorModal';
 import { BotEditorModal } from './BotEditorModal';
-import { BotHistoryDrawer } from './BotHistoryDrawer';
 import { ConfirmDialog } from './ConfirmDialog';
 import { api } from '../api';
 
@@ -107,9 +103,6 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
   const [selectedBot, setSelectedBot] = useState<BotConfig | null>(null);
   const [selectedParentBot, setSelectedParentBot] = useState<BotConfig | null>(null);
   const [initialBotTab, setInitialBotTab] = useState<'basic' | 'system' | 'memory'>('basic');
-
-  // Bot history drawer state: per-bot archived/past direct sessions
-  const [historyBot, setHistoryBot] = useState<BotConfig | null>(null);
 
   // Deleting bot ID tracking
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
@@ -232,43 +225,7 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
     setBotEditorOpen(true);
   };
 
-  const handleStartChat = async (bot: BotConfig) => {
-    try {
-      const sessions = await api.listSessions();
-      const existing = sessions.find(
-        (s) =>
-          s.mode === 'direct' &&
-          !s.archived &&
-          !s.parentSessionId &&
-          s.memberBotIds?.length === 1 &&
-          s.memberBotIds[0] === bot.id
-      );
-      if (existing) {
-        window.location.hash = `#?s=${existing.id}&v=chat`;
-        onBackToChat();
-        return;
-      }
-      const created = await api.createSession({
-        title: bot.name || bot.id,
-        mode: 'direct',
-        leadBotId: bot.id,
-        memberBotIds: [bot.id],
-      });
-      window.location.hash = `#?s=${created.id}&v=chat`;
-      onBackToChat();
-    } catch (err: any) {
-      onAddToast('error', err?.message || '发起对话失败');
-    }
-  };
-
-  // 历史话题抽屉：点击历史话题直接跳回聊天视图定位该会话
-  const handleOpenHistorySession = (sessionId: string) => {
-    setHistoryBot(null);
-    window.location.hash = `#?s=${sessionId}&v=chat`;
-    onBackToChat();
-  };
-
-  const handleDeleteBot = async () => {
+    const handleDeleteBot = async () => {
     if (!botToDelete) return;
 
     setDeletingBotId(botToDelete.id);
@@ -881,16 +838,7 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                     <div className="flex items-center gap-1 shrink-0">
                                       <button
                                         type="button"
-                                        onClick={() => setHistoryBot(bot)}
-                                        className="p-1.5 text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 dark:text-zinc-500 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
-                                        title="历史话题"
-                                        aria-label={`查看 ${bot.name} 的历史话题`}
-                                      >
-                                        <HistoryIcon className="w-3.5 h-3.5" />
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleOpenEditBot(node, bot, 'basic')}
+                                        onClick={() => handleOpenEditBot(node, bot)}
                                         disabled={!isOnline}
                                         className="p-1.5 text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 dark:text-zinc-500 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                                         title={!isOnline ? '节点离线，无法编辑配置' : '智能体设置'}
@@ -953,24 +901,13 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                     <div className="flex items-center gap-1.5 flex-wrap">
                                       <button
                                         type="button"
-                                        onClick={() => handleStartChat(bot)}
+                                        onClick={() => handleOpenEditBot(node, bot)}
                                         disabled={!isOnline}
                                         className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                                        title={!isOnline ? '节点离线，无法发起对话' : '发起对话'}
+                                        title={!isOnline ? '节点离线，无法编辑配置' : '智能体设置'}
                                       >
-                                        <MessageSquare className="w-3 h-3 text-zinc-500" />
-                                        <span>对话</span>
-                                      </button>
-
-                                      <button
-                                        type="button"
-                                        onClick={() => handleOpenEditBot(node, bot, 'system')}
-                                        disabled={!isOnline}
-                                        className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed"
-                                        title={!isOnline ? '节点离线，无法编辑提示词与记忆' : '查看/编辑提示词与长期记忆'}
-                                      >
-                                        <Sparkles className="w-3 h-3 text-amber-500" />
-                                        <span>人设/记忆</span>
+                                        <Settings className="w-3 h-3" />
+                                        <span>设置</span>
                                       </button>
 
                                       <button
@@ -1000,104 +937,72 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                     </button>
                                   </div>
 
-                                  {/* Subagents indented tree list underneath parent bot */}
+                                  {/* Subagents list underneath parent bot */}
                                   {subagents.length > 0 && (
-                                    <div className="mt-2 pt-2.5 border-t border-dashed border-zinc-200 dark:border-zinc-800 space-y-2">
-                                      <div className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400 flex items-center justify-between">
-                                        <span>角色分身 ({subagents.length})</span>
+                                    <div className="mt-2 pt-2.5 border-t border-dashed border-zinc-200 dark:border-zinc-800 space-y-1.5">
+                                      <div className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                                        角色分身 ({subagents.length})
                                       </div>
-                                      <div className="space-y-1.5">
-                                        {subagents.map((sub) => {
-                                          const subDeleting = deletingBotId === sub.id;
-                                          return (
-                                            <div
-                                              key={sub.id}
-                                              className="p-2.5 bg-zinc-50/80 dark:bg-zinc-900/60 rounded-xl border border-zinc-200/70 dark:border-zinc-800/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
-                                            >
-                                              <div className="flex items-center gap-2 min-w-0 flex-wrap sm:flex-nowrap">
-                                                <span className="text-zinc-400 dark:text-zinc-600 font-mono text-xs select-none">└─</span>
-                                                <span className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 truncate">{sub.name}</span>
-                                                <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate">@{sub.id}</span>
+                                      {subagents.map((sub) => {
+                                        const subDeleting = deletingBotId === sub.id;
+                                        return (
+                                          <div
+                                            key={sub.id}
+                                            className="p-2 bg-zinc-50/80 dark:bg-zinc-900/60 rounded-lg border border-zinc-200/70 dark:border-zinc-800/70 flex items-center justify-between gap-2"
+                                          >
+                                            <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                                              <span className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 truncate">{sub.name}</span>
+                                              <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate">@{sub.id}</span>
 
-                                                {/* Capability badges */}
-                                                <div className="flex items-center gap-1 shrink-0 flex-wrap">
-                                                  {sub.inheritModel ? (
-                                                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 font-medium">
-                                                      跟随主模型
-                                                    </span>
-                                                  ) : (
-                                                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700">
-                                                      {getShortModelId(sub.modelId)}
-                                                    </span>
-                                                  )}
-                                                  {sub.toolScope === 'readonly' && (
-                                                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 font-medium">
-                                                      只读
-                                                    </span>
-                                                  )}
-                                                </div>
-                                              </div>
-
-                                              {/* Quick actions for subagent */}
-                                              <div className="flex items-center gap-1 shrink-0 self-end sm:self-center">
-                                                <button
-                                                  type="button"
-                                                  onClick={() => handleStartChat(sub)}
-                                                  disabled={!isOnline}
-                                                  className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                                  title={!isOnline ? '节点离线' : '发起对话'}
-                                                  aria-label={`与分身 ${sub.name} 对话`}
-                                                >
-                                                  <MessageSquare className="w-3 h-3" />
-                                                </button>
-                                                <button
-                                                  type="button"
-                                                  onClick={() => setHistoryBot(sub)}
-                                                  className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
-                                                  title="历史话题"
-                                                  aria-label={`分身 ${sub.name} 的历史话题`}
-                                                >
-                                                  <HistoryIcon className="w-3 h-3" />
-                                                </button>
-                                                <button
-                                                  type="button"
-                                                  onClick={() => handleOpenEditBot(node, sub, 'basic')}
-                                                  disabled={!isOnline}
-                                                  className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                                  title={!isOnline ? '节点离线' : '分身设置'}
-                                                  aria-label={`分身 ${sub.name} 设置`}
-                                                >
-                                                  <Settings className="w-3 h-3" />
-                                                </button>
-                                                <button
-                                                  type="button"
-                                                  onClick={() => handleOpenEditBot(node, sub, 'system')}
-                                                  disabled={!isOnline}
-                                                  className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                                  title={!isOnline ? '节点离线' : '提示词与记忆'}
-                                                  aria-label={`分身 ${sub.name} 提示词与记忆`}
-                                                >
-                                                  <Sparkles className="w-3 h-3 text-amber-500" />
-                                                </button>
-                                                <button
-                                                  type="button"
-                                                  onClick={() => setBotToDelete(sub)}
-                                                  disabled={!isOnline || subDeleting}
-                                                  className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:text-zinc-500 dark:hover:text-rose-400 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                                  title={!isOnline ? '节点离线' : '删除分身'}
-                                                  aria-label={`删除分身 ${sub.name}`}
-                                                >
-                                                  {subDeleting ? (
-                                                    <Loader2 className="w-3.5 h-3.5 animate-spin-fast text-rose-500" />
-                                                  ) : (
-                                                    <Trash2 className="w-3.5 h-3.5" />
-                                                  )}
-                                                </button>
+                                              {/* Capability badges */}
+                                              <div className="flex items-center gap-1 shrink-0 flex-wrap">
+                                                {sub.inheritModel ? (
+                                                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 font-medium">
+                                                    跟随主模型
+                                                  </span>
+                                                ) : (
+                                                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700">
+                                                    {getShortModelId(sub.modelId)}
+                                                  </span>
+                                                )}
+                                                {sub.toolScope === 'readonly' && (
+                                                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 font-medium">
+                                                    只读
+                                                  </span>
+                                                )}
                                               </div>
                                             </div>
-                                          );
-                                        })}
-                                      </div>
+
+                                            {/* Quick actions for subagent */}
+                                            <div className="flex items-center gap-1 shrink-0">
+                                              <button
+                                                type="button"
+                                                onClick={() => handleOpenEditBot(node, sub)}
+                                                disabled={!isOnline}
+                                                className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                                                title={!isOnline ? '节点离线' : '分身设置'}
+                                                aria-label={`分身 ${sub.name} 设置`}
+                                              >
+                                                <Settings className="w-3 h-3" />
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={() => setBotToDelete(sub)}
+                                                disabled={!isOnline || subDeleting}
+                                                className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:text-zinc-500 dark:hover:text-rose-400 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                                                title={!isOnline ? '节点离线' : '删除分身'}
+                                                aria-label={`删除分身 ${sub.name}`}
+                                              >
+                                                {subDeleting ? (
+                                                  <Loader2 className="w-3.5 h-3.5 animate-spin-fast text-rose-500" />
+                                                ) : (
+                                                  <Trash2 className="w-3.5 h-3.5" />
+                                                )}
+                                              </button>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
                                     </div>
                                   )}
                                 </div>
@@ -1131,26 +1036,7 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                         <div className="flex items-center gap-1 shrink-0">
                                           <button
                                             type="button"
-                                            onClick={() => handleStartChat(sub)}
-                                            disabled={!isOnline}
-                                            className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
-                                            title="发起对话"
-                                            aria-label={`与分身 ${sub.name} 对话`}
-                                          >
-                                            <MessageSquare className="w-3 h-3" />
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={() => setHistoryBot(sub)}
-                                            className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
-                                            title="历史话题"
-                                            aria-label={`分身 ${sub.name} 的历史话题`}
-                                          >
-                                            <HistoryIcon className="w-3 h-3" />
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={() => handleOpenEditBot(node, sub, 'basic')}
+                                            onClick={() => handleOpenEditBot(node, sub)}
                                             disabled={!isOnline}
                                             className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                                             title={!isOnline ? '节点离线' : '分身设置'}
@@ -1537,15 +1423,6 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
           );
           await onRefresh();
         }}
-      />
-
-      {/* 单个智能体的历史话题抽屉：数据存于 Hub，节点离线也可查看 */}
-      <BotHistoryDrawer
-        isOpen={historyBot !== null}
-        bot={historyBot}
-        onClose={() => setHistoryBot(null)}
-        onOpenSession={handleOpenHistorySession}
-        onAddToast={onAddToast}
       />
     </div>
   );

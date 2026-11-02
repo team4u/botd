@@ -862,9 +862,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         </div>
                       </div>
 
-                      {/* 子分身缩进列表 */}
+                      {/* 子分身平铺列表（不缩进不树状） */}
                       {childSubagents.length > 0 && (
-                        <div className="space-y-0.5 ml-3 pl-2 border-l border-zinc-200 dark:border-zinc-800">
+                        <div className="space-y-0.5">
                           {childSubagents.map((sub) => {
                             const subDirect = currentDirectByBot.get(sub.id);
                             const isSubActive = !!subDirect && subDirect.id === activeSessionId;
@@ -893,7 +893,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                     : 'hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 border-transparent'
                                 }`}
                               >
-                                <span className="text-zinc-400 dark:text-zinc-600 font-mono text-xs select-none">└─</span>
                                 <div className="flex-1 min-w-0">
                                   <div className="flex items-center gap-1.5">
                                     <span className="truncate font-medium text-zinc-900 dark:text-zinc-100">
