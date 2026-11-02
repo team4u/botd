@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Bot, Loader2 } from 'lucide-react';
 import type { BotConfig, SessionMode, CreateSessionInput } from '@botd/protocol';
-import { CheckList } from './CheckList.js';
-import { MemberOptionRow, SelectedMembersChips, orderBotsAsTree } from './GroupMemberPicker.js';
+import { GroupMemberPicker, orderBotsAsTree } from './GroupMemberPicker.js';
 
 export interface CreateSessionDraft {
   groupTitle: string;
@@ -15,12 +14,13 @@ export interface CreateSessionDraft {
 }
 
 export function createDefaultSessionDraft(bots: BotConfig[]): CreateSessionDraft {
-  const firstBot = bots[0];
+  const ordered = orderBotsAsTree(bots);
+  const firstBot = ordered[0];
   return {
     groupTitle: 'AI 协同群聊',
     groupMode: 'lead',
     groupLeadBotId: firstBot ? firstBot.id : '',
-    groupMemberBotIds: bots.slice(0, 3).map((b) => b.id),
+    groupMemberBotIds: ordered.slice(0, 3).map((b) => b.id),
     error: null,
     memberRoles: {},
     blackboard: '',
@@ -187,14 +187,6 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
     }
   }, [isOpen, bots]);
 
-  // 树序：主 BOT 保持原序，其分身紧随其后；供勾选列表与 chips 共用
-  const treeOrderedBots = React.useMemo(() => orderBotsAsTree(bots), [bots]);
-  // 已选成员（含锁定的主持人），按树序展示
-  const selectedMemberBots = React.useMemo(() => {
-    const ids = new Set([...groupMemberBotIds, ...(groupLeadBotId ? [groupLeadBotId] : [])]);
-    return treeOrderedBots.filter((bot) => ids.has(bot.id));
-  }, [treeOrderedBots, groupMemberBotIds, groupLeadBotId]);
-
   if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -290,62 +282,21 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
                 />
               </div>
 
-              {/* 主持人选择 */}
-              <div>
-                <label
-                  id="create-group-lead-label"
-                  htmlFor="create-group-lead-select"
-                  className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5"
-                >
-                  主持人
-                </label>
-                <select
-                  id="create-group-lead-select"
-                  aria-labelledby="create-group-lead-label"
-                  value={groupLeadBotId}
-                  onChange={(e) => {
-                    const newLead = e.target.value;
-                    setGroupLeadBotId(newLead);
-                    if (!groupMemberBotIds.includes(newLead)) {
-                      setGroupMemberBotIds((prev) => [...prev, newLead]);
-                    }
-                  }}
-                  className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
-                >
-                  {bots.map((bot) => (
-                    <option key={bot.id} value={bot.id}>
-                      {bot.name} (@{bot.id}) - {bot.modelId}
-                    </option>
-                  ))}
-                </select>
-                <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1">
-                  默认由该成员先行响应并统筹分工
-                </p>
-              </div>
-
-              {/* 成员勾选列表：树序（主 BOT 后跟其分身），行视觉与 @ 提及下拉一致 */}
-              <CheckList
+              {/* 三合一树状参会成员（勾选入群 + 设为主持 + 行内头衔） */}
+              <GroupMemberPicker
                 label="参会成员"
-                countUnit="个"
-                emptyText="暂无可选成员"
-                options={treeOrderedBots.map((bot) => ({ id: bot.id, data: bot }))}
-                selected={groupMemberBotIds}
-                onChange={setGroupMemberBotIds}
-                lockedIds={groupLeadBotId ? [groupLeadBotId] : []}
-                getAriaLabel={(bot: BotConfig) => `选择成员 ${bot.name}`}
-                renderItem={(bot: BotConfig) => (
-                  <MemberOptionRow bot={bot} nodeMap={nodeMap} isLead={bot.id === groupLeadBotId} />
-                )}
-              />
-
-              {/* 已选成员 chips：点击 chip 展开头衔编辑，头衔不进列表行 */}
-              <SelectedMembersChips
-                bots={selectedMemberBots}
-                roles={memberRoles}
+                bots={bots}
+                nodeMap={nodeMap}
+                selectedIds={groupMemberBotIds}
+                leadBotId={groupLeadBotId}
+                memberRoles={memberRoles}
+                onChange={({ selectedIds, leadBotId }) => {
+                  setGroupMemberBotIds(selectedIds);
+                  setGroupLeadBotId(leadBotId);
+                }}
                 onRoleChange={(botId, role) =>
                   setMemberRoles((prev) => ({ ...prev, [botId]: role }))
                 }
-                leadBotId={groupLeadBotId}
               />
 
               {/* 📌 群备忘录 (Shared Blackboard) */}
