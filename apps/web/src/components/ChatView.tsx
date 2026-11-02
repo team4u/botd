@@ -81,6 +81,8 @@ interface ChatViewProps {
   onRenameSession: (sessionId: string, title: string) => Promise<void> | void;
   onClearMessages: (sessionId: string) => Promise<void> | void;
   onDeleteSession: (sessionId: string) => Promise<void> | void;
+  /** 批量删除会话（历史话题抽屉全选删除），由 App 统一同步全局列表 */
+  onDeleteSessions?: (ids: string[]) => Promise<void> | void;
   onNewTopic: (sessionId: string) => Promise<void> | void;
   /** 从指定消息（含）分叉出新会话并自动切换 */
   onForkMessage: (sessionId: string, messageId: string) => Promise<void>;
@@ -134,6 +136,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onRenameSession,
   onClearMessages,
   onDeleteSession,
+  onDeleteSessions,
   onNewTopic,
   onForkMessage,
   cancelling,
@@ -1006,6 +1009,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </button>
           )}
 
+          {/* 群设置（群聊模式下直接外显设置图标） */}
+          {session.mode !== 'direct' && (
+            <button
+              type="button"
+              onClick={onOpenGroupSettings}
+              className="p-2 rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+              title="群设置"
+              aria-label="群设置"
+            >
+              <SettingsIcon className="w-4 h-4" />
+            </button>
+          )}
+
           {/* 📌 群备忘录入口（群聊可见） */}
           {session.mode !== 'direct' && (
             <button
@@ -1078,16 +1094,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             )}
           </div>
 
-          {/* 分享对话入口 */}
-          <button
-            onClick={() => setShareModalOpen(true)}
-            className="h-8 w-8 rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-center transition-colors cursor-pointer"
-            title="分享对话"
-            aria-label="分享对话"
-          >
-            <Share2 className="w-4 h-4" />
-          </button>
-
+          {/* 更多操作下拉菜单：收纳分享、重命名、定时与触发器、清空、删除等低频操作（绝不与外显图标重复） */}
           <div className="relative" ref={menuRef}>
             <button
               onClick={() => setMenuOpen((v) => !v)}
@@ -1113,17 +1120,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   role="menuitem"
                   onClick={() => {
                     setMenuOpen(false);
-                    void onNewTopic(session.id);
+                    setShareModalOpen(true);
                   }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
                 >
-                  <MessageSquarePlus className="w-3.5 h-3.5 shrink-0" />
-                  <span className="flex flex-col items-start gap-0.5 min-w-0">
-                    <span>开启新话题</span>
-                    <span className="text-[11px] font-normal text-zinc-400 dark:text-zinc-500 text-left leading-tight">
-                      归档当前话题并开始新会话
-                    </span>
-                  </span>
+                  <Share2 className="w-3.5 h-3.5" />
+                  <span>分享对话</span>
                 </button>
 
                 <button
@@ -1134,62 +1136,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <Pencil className="w-3.5 h-3.5" />
                   <span>重命名…</span>
                 </button>
-
-                <button
-                  role="menuitem"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    setShareModalOpen(true);
-                  }}
-                  className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-                >
-                  <Share2 className="w-3.5 h-3.5" />
-                  <span>分享对话</span>
-                </button>
-
-                {session.mode === 'direct' && directBot && (
-                  <>
-                    <button
-                      role="menuitem"
-                      onClick={() => {
-                        setMenuOpen(false);
-                        setHistoryDrawerOpen(true);
-                      }}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-                    >
-                      <HistoryIcon className="w-3.5 h-3.5" />
-                      <span>历史话题</span>
-                    </button>
-                    <button
-                      role="menuitem"
-                      onClick={() => {
-                        setMenuOpen(false);
-                        setBotEditorOpen(true);
-                      }}
-                      disabled={!isDirectNodeOnline}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      <SettingsIcon className="w-3.5 h-3.5" />
-                      <span>{directBot.parentBotId ? '分身设置' : '智能体设置'}</span>
-                    </button>
-                  </>
-                )}
-
-                {session.mode !== 'direct' && (
-                  <button
-                    role="menuitem"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      onOpenGroupSettings();
-                    }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-                  >
-                    <SettingsIcon className="w-3.5 h-3.5" />
-                    <span>群设置</span>
-                  </button>
-                )}
-
-                <div className="my-1 border-t border-zinc-100 dark:border-zinc-800/80" />
 
                 <button
                   role="menuitem"
@@ -1781,6 +1727,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             }
           }}
           onAddToast={(type, message) => onAddToast?.(type, message)}
+          onDeleteSessions={onDeleteSessions}
         />
       )}
 

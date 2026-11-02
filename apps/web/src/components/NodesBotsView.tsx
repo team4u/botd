@@ -979,27 +979,6 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
 
                                       <button
                                         type="button"
-                                        onClick={() => handleOpenEditBot(node, bot, 'basic')}
-                                        disabled={!isOnline}
-                                        className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed"
-                                        title={!isOnline ? '节点离线，无法编辑该智能体' : '编辑智能体配置'}
-                                      >
-                                        <Settings className="w-3 h-3" />
-                                        <span>设置</span>
-                                      </button>
-
-                                      <button
-                                        type="button"
-                                        onClick={() => setHistoryBot(bot)}
-                                        className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 cursor-pointer"
-                                        title="查看历史话题"
-                                      >
-                                        <HistoryIcon className="w-3 h-3" />
-                                        <span>历史</span>
-                                      </button>
-
-                                      <button
-                                        type="button"
                                         onClick={() => handleOpenEditBot(node, bot, 'system')}
                                         disabled={!isOnline}
                                         className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed"
