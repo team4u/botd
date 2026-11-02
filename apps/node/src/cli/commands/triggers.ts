@@ -43,6 +43,13 @@ export function registerTriggersCommands(program: Command): void {
     )
     .option('--delay <duration>', 'Delay duration for --kind once (e.g. 30s, 15m, 2h)')
     .option('--at <isoOrDuration>', 'ISO timestamp or duration for --kind once')
+    .addOption(
+      new Option('--dispatch <mode>', 'Dispatch mode: append wakes the session, subsession spawns an isolated child session')
+        .choices(['append', 'subsession'])
+        .default('append'),
+    )
+    .option('--skill <skillId>', 'Skill ID to invoke via /skill:<id> prefix when the trigger fires')
+    .option('--event-types <csv>', 'Comma-separated webhook event types to accept (e.g. pull_request.opened,push)', '')
     .action(
       (sessionId: string, options: Record<string, unknown>, command: Command) =>
         cliAction(async (_opts, cmd) => {
@@ -89,6 +96,32 @@ export function registerTriggersCommands(program: Command): void {
             }
           } else if (delay || at) {
             throw new Error('--delay/--at is only valid for --kind once');
+          }
+
+          const dispatch = String(options.dispatch || 'append') as CreateTriggerInput['dispatchMode'];
+          if (dispatch) {
+            body.dispatchMode = dispatch;
+          }
+
+          const skill = typeof options.skill === 'string' ? options.skill.trim() : '';
+          if (skill) {
+            body.skillId = skill;
+          }
+
+          const eventTypesCsv =
+            typeof options.eventTypes === 'string' ? options.eventTypes.trim() : '';
+          if (eventTypesCsv) {
+            const types = eventTypesCsv
+              .split(',')
+              .map((t) => t.trim())
+              .filter(Boolean);
+            if (types.length === 0) {
+              throw new Error('--event-types must be a comma-separated list of event types');
+            }
+            if (kind !== 'webhook') {
+              throw new Error('--event-types is only valid for --kind webhook');
+            }
+            body.eventFilter = { types };
           }
 
           const trigger = await client.post<TriggerRecord>(

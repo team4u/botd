@@ -1389,7 +1389,7 @@ export function createHub(options?: HubOptions): HubInstance {
   registerProviderRoutes(app, db, connections);
   registerArtifactRoutes(app, artifacts);
   registerShareRoutes(app, db, artifacts, getSessionOwnerId);
-  const triggerScheduler = registerTriggerRoutes(app, db, router, getSessionOwnerId);
+  const triggerScheduler = registerTriggerRoutes(app, db, router, getSessionOwnerId, { sseHub, artifacts });
   registerBgJobRoutes(app, db, connections);
   registerSkillSyncAndAskRoutes(app, db, connections, router, getSessionOwnerId);
   registerDelegationRoutes(app, db, router, sseHub, getSessionOwnerId);
