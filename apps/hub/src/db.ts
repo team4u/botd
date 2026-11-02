@@ -152,7 +152,7 @@ const mapArtifactRow = (row: ArtifactRow): ArtifactRecord => ({
 });
 
 const TRIGGER_COLUMNS =
-  'id, session_id, bot_id, owner_id, name, kind, token, cron_expr, run_at, prompt, enabled, dispatch_mode, skill_id, event_filter_json, last_triggered_at, created_at';
+  'id, session_id, bot_id, owner_id, name, kind, token, secret, cron_expr, run_at, prompt, enabled, dispatch_mode, skill_id, event_filter_json, last_triggered_at, created_at';
 
 type NodeRow = {
   id: string;
@@ -262,6 +262,7 @@ type TriggerRow = {
   name: string;
   kind: string;
   token: string | null;
+  secret: string | null;
   cron_expr: string | null;
   run_at: string | null;
   prompt: string;
@@ -282,6 +283,7 @@ const mapTriggerRow = (row: TriggerRow): TriggerRecord => {
     name: row.name,
     kind: row.kind as TriggerKind,
     ...(row.token ? { token: row.token } : {}),
+    ...(row.secret ? { secret: row.secret } : {}),
     ...(row.cron_expr ? { cronExpr: row.cron_expr } : {}),
     ...(row.run_at ? { runAt: row.run_at } : {}),
     prompt: row.prompt,
@@ -444,6 +446,7 @@ export class HubDatabase {
         active_bot_id TEXT,
         archived INTEGER NOT NULL DEFAULT 0,
         parent_session_id TEXT,
+        parent_notified INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -487,6 +490,7 @@ export class HubDatabase {
         name TEXT NOT NULL,
         kind TEXT NOT NULL,
         token TEXT UNIQUE,
+        secret TEXT,
         cron_expr TEXT,
         run_at TEXT,
         prompt TEXT NOT NULL,
@@ -608,6 +612,8 @@ export class HubDatabase {
       `ALTER TABLE triggers ADD COLUMN dispatch_mode TEXT NOT NULL DEFAULT 'append'`,
       `ALTER TABLE triggers ADD COLUMN skill_id TEXT`,
       `ALTER TABLE triggers ADD COLUMN event_filter_json TEXT`,
+      `ALTER TABLE triggers ADD COLUMN secret TEXT`,
+      `ALTER TABLE sessions ADD COLUMN parent_notified INTEGER NOT NULL DEFAULT 0`,
     ];
 
     for (const sql of migrations) {
@@ -1914,6 +1920,19 @@ export class HubDatabase {
     stmt.run(status, activeBotId ?? null, now, id);
   }
 
+  /**
+   * 原子标记子会话已向父会话发送完成/失败回调（幂等防重）。
+   * 仅当 parent_notified 仍为 0 时置 1 并返回 true；重复调用返回 false，
+   * 确保同一子会话绝不重复向父会话插入 ✅/❌ callback 消息，Hub 重启后依然生效。
+   */
+  markSessionParentNotified(sessionId: string): boolean {
+    const stmt = this.db.prepare(
+      'UPDATE sessions SET parent_notified = 1 WHERE id = ? AND parent_notified = 0'
+    );
+    const result = stmt.run(sessionId);
+    return Number(result.changes) > 0;
+  }
+
   updateSessionCursor(sessionId: string, botId: string, rowid: number): void {
     const session = this.getSession(sessionId);
     if (!session) return;
@@ -2258,6 +2277,7 @@ export class HubDatabase {
     name: string;
     kind: TriggerKind;
     token?: string;
+    secret?: string;
     cronExpr?: string;
     runAt?: string;
     prompt: string;
@@ -2268,8 +2288,8 @@ export class HubDatabase {
   }): TriggerRecord {
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
-      INSERT INTO triggers (id, session_id, bot_id, owner_id, name, kind, token, cron_expr, run_at, prompt, enabled, dispatch_mode, skill_id, event_filter_json, last_triggered_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+      INSERT INTO triggers (id, session_id, bot_id, owner_id, name, kind, token, secret, cron_expr, run_at, prompt, enabled, dispatch_mode, skill_id, event_filter_json, last_triggered_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
     `);
     const enabled = input.enabled ?? true;
     stmt.run(
@@ -2280,6 +2300,7 @@ export class HubDatabase {
       input.name,
       input.kind,
       input.token ?? null,
+      input.secret ?? null,
       input.cronExpr ?? null,
       input.runAt ?? null,
       input.prompt,
@@ -2296,6 +2317,7 @@ export class HubDatabase {
       name: input.name,
       kind: input.kind,
       ...(input.token ? { token: input.token } : {}),
+      ...(input.secret ? { secret: input.secret } : {}),
       ...(input.cronExpr !== undefined ? { cronExpr: input.cronExpr } : {}),
       ...(input.runAt !== undefined ? { runAt: input.runAt } : {}),
       prompt: input.prompt,
@@ -2359,6 +2381,8 @@ export class HubDatabase {
       dispatchMode?: TriggerRecord['dispatchMode'];
       /** 传 null 显式清除 */
       skillId?: string | null;
+      /** 传 null 显式清除 */
+      secret?: string | null;
       eventFilter?: TriggerRecord['eventFilter'];
     }
   ): TriggerRecord | undefined {
@@ -2373,11 +2397,12 @@ export class HubDatabase {
       ...(patch.runAt !== undefined ? { runAt: patch.runAt } : {}),
       ...(patch.dispatchMode !== undefined ? { dispatchMode: patch.dispatchMode } : {}),
       ...(patch.skillId !== undefined ? { skillId: patch.skillId ?? undefined } : {}),
+      ...(patch.secret !== undefined ? { secret: patch.secret ?? undefined } : {}),
       ...(patch.eventFilter !== undefined ? { eventFilter: patch.eventFilter } : {}),
     };
     const stmt = this.db.prepare(`
       UPDATE triggers
-      SET enabled = ?, name = ?, prompt = ?, cron_expr = ?, run_at = ?, dispatch_mode = ?, skill_id = ?, event_filter_json = ?
+      SET enabled = ?, name = ?, prompt = ?, cron_expr = ?, run_at = ?, dispatch_mode = ?, skill_id = ?, secret = ?, event_filter_json = ?
       WHERE id = ?
     `);
     stmt.run(
@@ -2388,6 +2413,7 @@ export class HubDatabase {
       next.runAt ?? null,
       next.dispatchMode ?? 'append',
       next.skillId ?? null,
+      next.secret ?? null,
       next.eventFilter ? JSON.stringify(next.eventFilter) : null,
       id
     );

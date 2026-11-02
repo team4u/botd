@@ -175,6 +175,8 @@ export function registerDelegationRoutes(
       if (event.type !== 'session_status') return;
       if (event.status === 'idle') {
         cleanup();
+        // 幂等防重：仅首个完成/失败回调可插入父会话消息，跨 Hub 重启依然生效
+        if (!db.markSessionParentNotified(childSession.id)) return;
         const messages = db.getMessages(childSession.id);
         const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
         const summary = lastAssistant?.content?.trim() || '(无回复内容)';
@@ -237,6 +239,7 @@ export function registerDelegationRoutes(
         wakeParent(resultMsg.message.id, `子会话「${childSession.title}」已完成，请汇总处理。`);
       } else if (event.status === 'failed') {
         cleanup();
+        if (!db.markSessionParentNotified(childSession.id)) return;
         const messages = db.getMessages(childSession.id);
         const lastSys = [...messages].reverse().find((m) => m.role === 'system');
         const failContent = `❌ 子会话「[${childSession.title}](#?s=${childSession.id})」执行失败：\n\n${lastSys?.content?.trim() || '(未知错误)'}`;
