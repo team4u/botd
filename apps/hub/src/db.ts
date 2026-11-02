@@ -45,7 +45,7 @@ export interface IncrementalMessageResult {
   rowid: number;
 }
 
-export const HUB_SCHEMA_VERSION = 3;
+export const HUB_SCHEMA_VERSION = 4;
 
 const PREVIEW_MAX_LENGTH = 60;
 
@@ -95,6 +95,7 @@ type MessageRow = {
   blocks_json?: string | null;
   usage_json: string | null;
   attachments_json: string | null;
+  aborted?: number | null;
   created_at: string;
 };
 
@@ -122,12 +123,13 @@ const mapMessageRow = (row: MessageRow): MessageRecord => {
     ...(blocks && blocks.length > 0 ? { blocks } : {}),
     ...(usage ? { usage } : {}),
     ...(attachments ? { attachments } : {}),
+    ...(row.aborted ? { aborted: true } : {}),
     createdAt: row.created_at,
   };
 };
 
 const MESSAGE_SELECT_COLUMNS =
-  'id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, created_at';
+  'id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, aborted, created_at';
 
 const ARTIFACT_COLUMNS = 'id, session_id, filename, mime_type, size_bytes, sender_bot_id, created_at';
 
@@ -424,6 +426,7 @@ export class HubDatabase {
         blocks_json TEXT,
         usage_json TEXT,
         attachments_json TEXT,
+        aborted INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
@@ -550,6 +553,7 @@ export class HubDatabase {
       `ALTER TABLE messages ADD COLUMN orchestration_plan TEXT`,
       `ALTER TABLE messages ADD COLUMN subagent_runs_json TEXT`,
       `ALTER TABLE messages ADD COLUMN blocks_json TEXT`,
+      `ALTER TABLE messages ADD COLUMN aborted INTEGER NOT NULL DEFAULT 0`,
     ];
 
     for (const sql of migrations) {
@@ -1905,6 +1909,7 @@ export class HubDatabase {
     blocks?: TurnBlock[];
     usage?: TurnUsage;
     attachments?: MessageAttachment[];
+    aborted?: boolean;
     createdAt?: string;
   }): IncrementalMessageResult {
     const now = msg.createdAt ?? new Date().toISOString();
@@ -1915,8 +1920,8 @@ export class HubDatabase {
     const whisperTargetBotIdsJson = msg.whisperTargetBotIds && msg.whisperTargetBotIds.length > 0 ? JSON.stringify(msg.whisperTargetBotIds) : null;
     const subagentRunsJson = msg.subagentRuns && msg.subagentRuns.length > 0 ? JSON.stringify(msg.subagentRuns) : null;
     const stmt = this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, aborted, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       msg.id,
@@ -1935,6 +1940,7 @@ export class HubDatabase {
       blocksJson,
       usageJson,
       attachmentsJson,
+      msg.aborted ? 1 : 0,
       now
     );
     const rowid = Number(result.lastInsertRowid);
@@ -1958,6 +1964,7 @@ export class HubDatabase {
         ...(msg.toolCalls ? { toolCalls: msg.toolCalls } : {}),
         ...(msg.blocks && msg.blocks.length > 0 ? { blocks: msg.blocks } : {}),
         ...(msg.usage ? { usage: msg.usage } : {}),
+        ...(msg.aborted ? { aborted: true } : {}),
         ...(msg.attachments ? { attachments: msg.attachments } : {}),
         createdAt: now,
       },

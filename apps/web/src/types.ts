@@ -19,7 +19,7 @@ export interface ToastItem {
 export interface ToolExecutionState {
   id?: string;
   toolName: string;
-  status: 'running' | 'done' | 'error';
+  status: 'running' | 'done' | 'error' | 'cancelled';
   summary?: string;
   args?: Record<string, unknown>;
   outputPreview?: string;

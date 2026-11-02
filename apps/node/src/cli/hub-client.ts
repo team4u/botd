@@ -45,7 +45,8 @@ export class HubClient {
   /** Resolve hub URL + credentials from config/flags, logging in when needed. */
   static async connect(options: HubClientOptions): Promise<HubClient> {
     const config = await readCliConfig(options.dataDir);
-    const explicitHub = options.hubUrl ? normalizeUrl(options.hubUrl) : undefined;
+    const envHub = process.env.BOTD_HUB_URL ? normalizeUrl(process.env.BOTD_HUB_URL) : undefined;
+    const explicitHub = options.hubUrl ? normalizeUrl(options.hubUrl) : envHub;
     const configHub = config.hubUrl ? normalizeUrl(config.hubUrl) : undefined;
     const hubUrl = explicitHub || configHub || '';
 

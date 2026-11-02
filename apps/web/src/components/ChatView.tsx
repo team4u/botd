@@ -90,6 +90,8 @@ interface ChatViewProps {
   ) => Promise<void>;
   /** 跳转/打开指定智能体的单聊 */
   onOpenBotChat?: (bot: BotConfig) => void;
+  /** 点击分身运行记录跳转对应独立会话 */
+  onSelectSession?: (sessionId: string) => void;
   /** 是否还有更早的历史消息可加载（App 负责分页） */
   hasEarlierMessages?: boolean;
   /** 正在加载更早消息 */
@@ -130,6 +132,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onAddToast,
   onUpdateSession,
   onOpenBotChat,
+  onSelectSession,
   hasEarlierMessages = false,
   loadingEarlier = false,
   onLoadEarlier,
@@ -160,25 +163,48 @@ export const ChatView: React.FC<ChatViewProps> = ({
   );
 
   // 输入框 @ 可提及的智能体列表：
-  // - 单聊 (direct)：不展示当前单聊对象自己（不能 @ 自己）；若当前是主 BOT，则仅展示其麾下的所有角色分身
-  // - 群聊 (lead)：展示群内所有成员 BOT，并紧随每个主 BOT 之后纳入其麾下的角色分身
+  // - 单聊 (direct)：排除当前单聊对象自己（不能 @ 自己）；优先展示同门分身与主 BOT，其次展示其他可用 BOT
+  // - 群聊 (lead)：展示群内所有成员 BOT 及其麾下分身，其次展示其他可用 BOT
   const mentionableBots = useMemo<BotConfig[]>(() => {
     const allBots = Array.from(botMap.values());
-    if (session.mode === 'direct') {
-      const leadBot = botMap.get(session.leadBotId);
-      if (!leadBot || leadBot.parentBotId) {
-        return [];
-      }
-      return allBots.filter((b) => b.parentBotId === leadBot.id);
-    }
-
     const result: BotConfig[] = [];
     const seen = new Set<string>();
-    const pushBot = (b: BotConfig) => {
-      if (seen.has(b.id)) return;
+    const pushBot = (b: BotConfig | undefined) => {
+      if (!b || seen.has(b.id)) return;
       seen.add(b.id);
       result.push(b);
     };
+
+    if (session.mode === 'direct') {
+      // 单聊中绝不允许 @ 当前对话对象自己
+      seen.add(session.leadBotId);
+      const leadBot = botMap.get(session.leadBotId);
+      if (leadBot) {
+        if (!leadBot.parentBotId) {
+          // 当前是主 BOT：优先展示它麾下的分身
+          for (const b of allBots) {
+            if (b.parentBotId === leadBot.id) pushBot(b);
+          }
+        } else {
+          // 当前是分身：优先展示它的主 BOT 及同门兄弟分身
+          pushBot(botMap.get(leadBot.parentBotId));
+          for (const b of allBots) {
+            if (b.parentBotId === leadBot.parentBotId) pushBot(b);
+          }
+        }
+      }
+      // 其余 BOT 按主从顺序追加，方便随时 @ 其他 BOT/分身接力
+      for (const b of allBots) {
+        if (!b.parentBotId) {
+          pushBot(b);
+          for (const sub of allBots) {
+            if (sub.parentBotId === b.id) pushBot(sub);
+          }
+        }
+      }
+      for (const b of allBots) pushBot(b);
+      return result;
+    }
 
     for (const member of memberBots) {
       pushBot(member);
@@ -718,7 +744,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
         {/* 分身协同运行中轨迹 */}
         {activeSubagentRuns?.[state.botId] && activeSubagentRuns[state.botId].length > 0 && (
-          <SubagentRunsPanel runs={activeSubagentRuns[state.botId]} />
+          <SubagentRunsPanel runs={activeSubagentRuns[state.botId]} onSelectSession={onSelectSession} />
         )}
 
         {/* 统一交错时间线渲染器 */}
@@ -1345,6 +1371,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   isEditing={editingMessage?.id === msg.id}
                   onStartEdit={startEdit}
                   onForkMessage={handleForkMessage}
+                  onSelectSession={onSelectSession}
                 />
               </div>
             ))}
@@ -1547,7 +1574,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         sessionId={session.id}
         leadBotId={session.leadBotId}
         sessionMode={session.mode}
-        isSubagentSession={Boolean(session.mode === 'direct' && botMap.get(session.leadBotId)?.parentBotId)}
+        isSubagentSession={false}
         botMap={botMap}
         onSendMessage={onSendMessage}
         memberBots={mentionableBots}

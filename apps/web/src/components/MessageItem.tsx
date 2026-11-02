@@ -177,9 +177,13 @@ export const OrchestrationPlanCard: React.FC<{ plan: string }> = ({ plan }) => {
 /**
  * 分身协同执行面板组件（Pi TUI 纯文本折叠组风格）
  */
-export const SubagentRunsPanel: React.FC<{ runs: SubagentRunRecord[] }> = ({ runs }) => {
+export const SubagentRunsPanel: React.FC<{
+  runs: SubagentRunRecord[];
+  onSelectSession?: (sessionId: string) => void;
+}> = ({ runs, onSelectSession }) => {
   const hasRunning = runs.some((r) => r.status === 'running');
   const [expanded, setExpanded] = useState(hasRunning);
+  const [expandedRunIds, setExpandedRunIds] = useState<Record<string, boolean>>({});
 
   React.useEffect(() => {
     if (hasRunning) {
@@ -190,6 +194,13 @@ export const SubagentRunsPanel: React.FC<{ runs: SubagentRunRecord[] }> = ({ run
   if (!runs || runs.length === 0) return null;
 
   const names = runs.map((r) => r.subagentName || `@${r.subagentId}`).join(', ');
+
+  const toggleRun = (runId: string) => {
+    setExpandedRunIds((prev) => ({
+      ...prev,
+      [runId]: !prev[runId],
+    }));
+  };
 
   return (
     <div className="my-1.5 max-w-2xl text-xs">
@@ -207,48 +218,94 @@ export const SubagentRunsPanel: React.FC<{ runs: SubagentRunRecord[] }> = ({ run
 
       {expanded && (
         <div className="mt-1 pl-2.5 border-l border-zinc-200 dark:border-zinc-800 space-y-1.5">
-          {runs.map((run) => (
-            <div key={run.id} className="text-[11px] font-mono space-y-0.5">
-              <div className="flex items-center gap-2 text-zinc-600 dark:text-zinc-300">
-                <span className="font-semibold text-zinc-800 dark:text-zinc-200">
-                  {run.subagentName || `@${run.subagentId}`}
-                </span>
-                {run.phase && (
-                  <span className="text-zinc-400 dark:text-zinc-500">[{run.phase}]</span>
-                )}
-                {typeof run.durationMs === 'number' && (
-                  <span className="text-zinc-400 dark:text-zinc-500">
-                    {formatDuration(run.durationMs)}
+          {runs.map((run) => {
+            const isCompleted = run.status !== 'running';
+            const isPreviewOpen = Boolean(expandedRunIds[run.id]);
+
+            return (
+              <div
+                key={run.id}
+                role={isCompleted ? 'button' : undefined}
+                tabIndex={isCompleted ? 0 : undefined}
+                onClick={isCompleted ? () => toggleRun(run.id) : undefined}
+                onKeyDown={
+                  isCompleted
+                    ? (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          toggleRun(run.id);
+                        }
+                      }
+                    : undefined
+                }
+                className={`text-[11px] font-mono space-y-0.5 ${
+                  isCompleted
+                    ? 'cursor-pointer hover:bg-zinc-50/80 dark:hover:bg-zinc-800/40 -mx-1 px-1 py-0.5 rounded transition-colors'
+                    : ''
+                }`}
+              >
+                <div className="flex items-center gap-2 text-zinc-600 dark:text-zinc-300">
+                  {isCompleted && (
+                    <span className="text-[10px] text-zinc-400 dark:text-zinc-500 select-none">
+                      {isPreviewOpen ? '▾' : '▸'}
+                    </span>
+                  )}
+                  <span className="font-semibold text-zinc-800 dark:text-zinc-200">
+                    {run.subagentName || `@${run.subagentId}`}
                   </span>
-                )}
-                {run.status === 'running' && (
-                  <span className="text-zinc-400">running...</span>
-                )}
-                {run.status === 'error' && (
-                  <span className="text-rose-500">error</span>
-                )}
-                {run.childSessionId && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      window.location.hash = `#?s=${run.childSessionId}`;
-                    }}
-                    className="text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200 underline cursor-pointer ml-auto"
-                  >
-                    view →
-                  </button>
-                )}
-              </div>
-              <div className="text-zinc-500 dark:text-zinc-400 font-sans truncate">
-                {run.task}
-              </div>
-              {run.replyPreview && (
-                <div className="text-zinc-400 dark:text-zinc-500 text-[11px] font-sans line-clamp-2">
-                  {run.replyPreview}
+                  {run.phase && (
+                    <span className="text-zinc-400 dark:text-zinc-500">[{run.phase}]</span>
+                  )}
+                  {typeof run.durationMs === 'number' && (
+                    <span className="text-zinc-400 dark:text-zinc-500">
+                      {formatDuration(run.durationMs)}
+                    </span>
+                  )}
+                  {run.status === 'running' && (
+                    <span className="text-zinc-400">running...</span>
+                  )}
+                  {run.status === 'error' && (
+                    <span className="text-rose-500">error</span>
+                  )}
+                  {run.childSessionId && onSelectSession && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSelectSession(run.childSessionId!);
+                      }}
+                      className="text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200 underline cursor-pointer ml-auto"
+                    >
+                      查看会话
+                    </button>
+                  )}
                 </div>
-              )}
-            </div>
-          ))}
+
+                {!isPreviewOpen ? (
+                  <div className="text-zinc-500 dark:text-zinc-400 font-sans truncate">
+                    {run.task}
+                  </div>
+                ) : (
+                  <div className="mt-1 pl-2 border-l-2 border-zinc-200 dark:border-zinc-700 space-y-1.5 font-sans">
+                    <div>
+                      <span className="text-zinc-400 dark:text-zinc-500 text-[10px] font-mono block">Task</span>
+                      <div className="text-zinc-600 dark:text-zinc-300 whitespace-pre-wrap break-words">
+                        {run.task}
+                      </div>
+                    </div>
+                    {run.replyPreview && (
+                      <div>
+                        <span className="text-zinc-400 dark:text-zinc-500 text-[10px] font-mono block">Reply</span>
+                        <div className="text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap break-words max-h-60 overflow-y-auto">
+                          {run.replyPreview}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -487,6 +544,13 @@ export const ToolSignatureView: React.FC<{ tool: Extract<TurnBlock, { type: 'too
 
 export const ToolStatusBadge: React.FC<{ tool: Extract<TurnBlock, { type: 'tool' }> }> = ({ tool }) => {
   const isError = tool.status === 'error' || Boolean(tool.isError);
+  if (tool.status === 'cancelled') {
+    return (
+      <span className="shrink-0 text-zinc-400 dark:text-zinc-500 font-mono">
+        cancelled{typeof tool.durationMs === 'number' && ` · ${formatDuration(tool.durationMs)}`}
+      </span>
+    );
+  }
   if (tool.status === 'running') {
     return <span className="shrink-0 text-zinc-400 font-mono">running...</span>;
   }
@@ -714,6 +778,7 @@ export const ToolGroupView: React.FC<{
 }> = ({ tools, initialExpanded }) => {
   const hasError = tools.some((t) => t.status === 'error' || t.isError);
   const isRunning = tools.some((t) => t.status === 'running');
+  const hasCancelled = tools.some((t) => t.status === 'cancelled');
   const totalMs = tools.reduce((sum, t) => sum + (t.durationMs || 0), 0);
   const errorCount = tools.filter((t) => t.status === 'error' || t.isError).length;
   const breakdown = computeToolBreakdown(tools);
@@ -764,6 +829,7 @@ export const ToolGroupView: React.FC<{
         {errorCount > 0 && (
           <span className="text-rose-500 font-semibold">· {errorCount} error</span>
         )}
+        {hasCancelled && !isRunning && <span className="text-zinc-400">· cancelled</span>}
         {isRunning && <span className="text-zinc-400">· running...</span>}
       </button>
 
@@ -1063,6 +1129,8 @@ interface MessageItemProps {
   onStartEdit?: (message: MessageRecord) => void;
   /** 从该消息（含）分叉出新会话并自动切换（MessageItem 不感知 sessionId，由上层闭包绑定） */
   onForkMessage?: (messageId: string) => Promise<void>;
+  /** 外部会话切换回调 */
+  onSelectSession?: (sessionId: string) => void;
 }
 
 export const MessageItem: React.FC<MessageItemProps> = ({
@@ -1074,6 +1142,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   isEditing = false,
   onStartEdit,
   onForkMessage,
+  onSelectSession,
 }) => {
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
@@ -1260,6 +1329,9 @@ export const MessageItem: React.FC<MessageItemProps> = ({
           <span>· whisper {message.whisperTargetBotIds.map((id) => '@' + id).join(' ')}</span>
         )}
         {shortModel && <span>· {shortModel}</span>}
+        {message.aborted && (
+          <span className="italic text-amber-600/90 dark:text-amber-500/90">· 已中止</span>
+        )}
       </div>
 
       {/* 协作排期卡 */}
@@ -1269,7 +1341,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
 
       {/* 分身协同面板 */}
       {message.subagentRuns && message.subagentRuns.length > 0 && (
-        <SubagentRunsPanel runs={message.subagentRuns} />
+        <SubagentRunsPanel runs={message.subagentRuns} onSelectSession={onSelectSession} />
       )}
 
       {/* 统一交错时间线渲染器 */}
@@ -1309,6 +1381,7 @@ function areMessageItemPropsEqual(prev: MessageItemProps, next: MessageItemProps
     prev.isEditing !== next.isEditing ||
     prev.onStartEdit !== next.onStartEdit ||
     prev.onForkMessage !== next.onForkMessage ||
+    prev.onSelectSession !== next.onSelectSession ||
     prev.memberRoles !== next.memberRoles
   ) {
     return false;

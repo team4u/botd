@@ -13,7 +13,12 @@ import {
 import type { BotConfig, ChatCommand } from '@botd/protocol';
 import { assertSafeId, ensureDir, getBotDir, writeAtomicFile } from './storage.js';
 import subagentsExtension from '@tintinweb/pi-subagents/dist/index.js';
-import { setDefaultsDisabled, registerAgents } from '@tintinweb/pi-subagents/dist/agent-types.js';
+import {
+  setDefaultsDisabled,
+  setFallbackSubagent,
+  NO_FALLBACK,
+  registerAgents,
+} from '@tintinweb/pi-subagents/dist/agent-types.js';
 import { loadCustomAgents } from '@tintinweb/pi-subagents/dist/custom-agents.js';
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
 
@@ -60,14 +65,14 @@ export async function loadBotResources(
   // 分身不挂载（防套娃：分身不能再派分身），扩展内部另有 inChildSessionContext 防重入双保险。
   let extensionFactories: ExtensionFactory[] = [];
   if (options?.enableSubagents && !bot.parentBotId) {
-    const piDir = path.join(workspaceDir, '.pi');
-    await ensureDir(piDir);
+    await ensureDir(path.join(botDir, 'agents'));
     await writeAtomicFile(
-      path.join(piDir, 'subagents.json'),
+      path.join(botDir, 'subagents.json'),
       JSON.stringify(
         {
           disableDefaultAgents: true,
           disableDefaults: true,
+          fallbackSubagent: 'none',
           backgroundByDefault: false,
           packageAgents: false,
         },
@@ -77,18 +82,24 @@ export async function loadBotResources(
     );
 
     const wrappedSubagentsFactory: ExtensionFactory = async (pi) => {
-      process.env.PI_CODING_AGENT_DIR = path.join(workspaceDir, '.pi');
+      process.env.PI_CODING_AGENT_DIR = botDir;
       setDefaultsDisabled(true);
+      setFallbackSubagent(NO_FALLBACK);
       await subagentsExtensionFactory(pi);
       setDefaultsDisabled(true);
-      registerAgents(loadCustomAgents(workspaceDir));
+      setFallbackSubagent(NO_FALLBACK);
+      registerAgents(loadCustomAgents(botDir));
       pi.on('session_start', () => {
+        process.env.PI_CODING_AGENT_DIR = botDir;
         setDefaultsDisabled(true);
-        registerAgents(loadCustomAgents(workspaceDir));
+        setFallbackSubagent(NO_FALLBACK);
+        registerAgents(loadCustomAgents(botDir));
       });
       pi.on('before_agent_start', () => {
+        process.env.PI_CODING_AGENT_DIR = botDir;
         setDefaultsDisabled(true);
-        registerAgents(loadCustomAgents(workspaceDir));
+        setFallbackSubagent(NO_FALLBACK);
+        registerAgents(loadCustomAgents(botDir));
       });
     };
 

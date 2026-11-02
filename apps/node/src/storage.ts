@@ -233,13 +233,11 @@ export async function saveBot(dataDir: string, bot: BotConfig, systemMd?: string
     await writeAtomicFile(memoryPath, '');
   }
 
-  // If bot.parentBotId is set, also sync <parentWorkspaceDir>/.pi/agents/${bot.id}.md
-  // and ensure <parentWorkspaceDir>/.pi/subagents.json disables defaults.
-  // Otherwise, ensure primary bot's <workspaceDir>/.pi/subagents.json disables defaults.
   const subagentsJsonContent = JSON.stringify(
     {
       disableDefaultAgents: true,
       disableDefaults: true,
+      fallbackSubagent: 'none',
       backgroundByDefault: false,
       packageAgents: false,
     },
@@ -249,9 +247,8 @@ export async function saveBot(dataDir: string, bot: BotConfig, systemMd?: string
 
   if (bot.parentBotId) {
     assertSafeId(bot.parentBotId, 'Parent Bot ID');
-    const parentWorkspaceDir = getBotWorkspaceDir(dataDir, bot.parentBotId);
-    const parentPiDir = path.join(parentWorkspaceDir, '.pi');
-    const parentAgentsDir = path.join(parentPiDir, 'agents');
+    const parentBotDir = getBotDir(dataDir, bot.parentBotId);
+    const parentAgentsDir = path.join(parentBotDir, 'agents');
     await ensureDir(parentAgentsDir);
 
     const frontmatterLines = [
@@ -275,13 +272,10 @@ export async function saveBot(dataDir: string, bot: BotConfig, systemMd?: string
     const agentMdContent = `${frontmatterLines.join('\n')}\n\n${systemMd ?? ''}`;
 
     await writeAtomicFile(path.join(parentAgentsDir, `${bot.id}.md`), agentMdContent);
-
-    const subagentsJsonPath = path.join(parentWorkspaceDir, '.pi', 'subagents.json');
-    await writeAtomicFile(subagentsJsonPath, subagentsJsonContent);
+    await writeAtomicFile(path.join(parentBotDir, 'subagents.json'), subagentsJsonContent);
   } else {
-    const piDir = path.join(workspaceDir, '.pi');
-    await ensureDir(piDir);
-    await writeAtomicFile(path.join(piDir, 'subagents.json'), subagentsJsonContent);
+    await ensureDir(path.join(botDir, 'agents'));
+    await writeAtomicFile(path.join(botDir, 'subagents.json'), subagentsJsonContent);
   }
 }
 
@@ -289,8 +283,8 @@ export async function deleteBot(dataDir: string, botId: string): Promise<void> {
   assertSafeId(botId, 'Bot ID');
   const existing = await readBot(dataDir, botId).catch(() => null);
   if (existing?.bot.parentBotId) {
-    const parentWorkspaceDir = getBotWorkspaceDir(dataDir, existing.bot.parentBotId);
-    const agentMd = path.join(parentWorkspaceDir, '.pi', 'agents', `${botId}.md`);
+    const parentBotDir = getBotDir(dataDir, existing.bot.parentBotId);
+    const agentMd = path.join(parentBotDir, 'agents', `${botId}.md`);
     await fs.rm(agentMd, { force: true }).catch(() => {});
   }
   const botDir = getBotDir(dataDir, botId);

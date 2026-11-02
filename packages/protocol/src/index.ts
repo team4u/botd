@@ -11,7 +11,7 @@ export interface ToolCallRecord {
   name: string;
   args?: Record<string, unknown>;
   summary?: string;
-  status: 'running' | 'done' | 'error';
+  status: 'running' | 'done' | 'error' | 'cancelled';
   durationMs?: number;
   outputPreview?: string;
   isError?: boolean;
@@ -34,7 +34,7 @@ export type TurnBlock =
       name: string;
       args?: Record<string, unknown>;
       summary?: string;
-      status: 'running' | 'done' | 'error';
+      status: 'running' | 'done' | 'error' | 'cancelled';
       durationMs?: number;
       outputPreview?: string;
       isError?: boolean;
@@ -407,6 +407,8 @@ export interface MessageRecord {
   blocks?: TurnBlock[];
   usage?: TurnUsage;
   attachments?: MessageAttachment[];
+  /** 本回合被用户手动中止时为 true：保留已产生的部分输出，不再继续路由 */
+  aborted?: boolean;
   createdAt: string;
 }
 
@@ -587,6 +589,8 @@ export interface NodeRpcFunctions {
     blocks?: TurnBlock[];
     usage?: TurnUsage;
     subagentRuns?: SubagentRunRecord[];
+    /** 回合被用户中止时为 true：调用方应持久化已收集的部分输出而非当作失败丢弃 */
+    aborted?: boolean;
   }>;
   cancelTurn(sessionId: string, botId: string): Promise<void>;
   /** 删除该 BOT 在指定会话的本地 Pi 会话文件（.jsonl），下一回合将从 Hub 历史全量重建上下文 */

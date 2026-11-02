@@ -157,6 +157,8 @@ export const App: React.FC = () => {
 
   // Epoch counter for session changes to protect against race conditions
   const sessionEpochRef = useRef<number>(0);
+  // idle 后延迟清理流式状态的定时器：等待取消场景下晚到的部分输出消息落位
+  const pendingCleanupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Snapshot sequence number for out-of-order & truncation invalidation protection
   const snapshotSeqRef = useRef<number>(0);
   // 本地发起的历史截断锚点记录（防止 HTTP 与 SSE 竞态误切新回复）
@@ -555,6 +557,11 @@ export const App: React.FC = () => {
       botId: string,
       updater: (prev: StreamingAssistantState | undefined) => StreamingAssistantState | null
     ) => {
+      // 新流式活动到达：取消 idle 后的延迟清理，避免误删正在进行的状态
+      if (pendingCleanupTimerRef.current) {
+        clearTimeout(pendingCleanupTimerRef.current);
+        pendingCleanupTimerRef.current = null;
+      }
       setStreamingStatesMap((prevMap) => updateStreamingMap(prevMap, botId, updater));
     };
 
@@ -690,6 +697,11 @@ export const App: React.FC = () => {
         }
 
         case 'message_created': {
+          // 消息已落位，取消待执行的延迟清理（取消场景的部分输出已持久化，可立即接管）
+          if (pendingCleanupTimerRef.current) {
+            clearTimeout(pendingCleanupTimerRef.current);
+            pendingCleanupTimerRef.current = null;
+          }
           setMessages((prev) => {
             if (prev.some((m) => m.id === event.message.id)) {
               return prev;
@@ -752,7 +764,21 @@ export const App: React.FC = () => {
           );
 
           if (event.status === 'idle' || event.status === 'failed') {
-            setStreamingStatesMap(clearStreamingMap());
+            // 取消场景：cancelSession 立即广播 idle，但节点随后才返回部分输出（message_created）。
+            // 立即清空会闪空屏；延迟一拍清理，若期间部分输出/新流式事件到达则自然接管。
+            setStreamingStatesMap((prevMap) => {
+              if (Object.keys(prevMap).length === 0) return prevMap;
+              if (pendingCleanupTimerRef.current) clearTimeout(pendingCleanupTimerRef.current);
+              pendingCleanupTimerRef.current = setTimeout(() => {
+                pendingCleanupTimerRef.current = null;
+                setStreamingStatesMap((prev) => {
+                  // 仅当仍是同一会话且无新流式活动时才清空
+                  if (activeSessionIdRef.current === event.sessionId) return clearStreamingMap();
+                  return prev;
+                });
+              }, 600);
+              return prevMap;
+            });
             setSubagentRunsMap({});
             // 不区分当前/其他会话：全局同一时刻只有一个取消动作在飞行中，任一会话结束即复位
             setCancelling(false);

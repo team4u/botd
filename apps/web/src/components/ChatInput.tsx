@@ -423,8 +423,11 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         const hasSpecificBot = slashMatch.targetBotIds.length === 1;
         const targetId = hasSpecificBot ? slashMatch.targetBotIds[0] : (leadBotId || '');
 
-        // 仅允许限制为 memberBots 或 leadBotId
-        const isMember = memberBots.some((b) => b.id === targetId) || targetId === leadBotId;
+        // 仅允许限制为 memberBots 或 leadBotId 或有效 bot
+        const isMember =
+          memberBots.some((b) => b.id === targetId) ||
+          targetId === leadBotId ||
+          Boolean(botMap?.has(targetId));
 
         if (hasSpecificBot && !isMember) {
           // 无效前置 @ 展示明确错误且不请求目录
@@ -443,6 +446,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
         const target =
           memberBots.find((b) => b.id === targetId) ||
+          botMap?.get(targetId) ||
           (targetId === leadBotId && botMap && leadBotId ? botMap.get(leadBotId) : undefined) ||
           (targetId ? { id: targetId, name: targetId } : null);
 
@@ -607,10 +611,27 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       return;
     }
 
-    // 4. Ctrl+Enter / Command+Enter 发送消息（编辑态下为提交编辑）；普通 Enter 保持默认换行
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    // 4. Enter 直接发送消息（编辑态下为提交编辑）；Shift+Enter / Ctrl+Enter / Command+Enter 换行
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       handleSubmit();
+      return;
+    }
+
+    // Ctrl+Enter / Command+Enter / Shift+Enter 插入换行（保持默认行为，显式声明意图）
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || e.shiftKey)) {
+      e.preventDefault();
+      const el = textareaRef.current;
+      if (el) {
+        const cursor = el.selectionStart;
+        const next = `${content.slice(0, cursor)}\n${content.slice(el.selectionEnd)}`;
+        setContent(next);
+        setTimeout(() => {
+          el.focus();
+          el.setSelectionRange(cursor + 1, cursor + 1);
+          adjustHeight();
+        }, 0);
+      }
     }
   };
 
@@ -1306,7 +1327,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             }}
             placeholder={
               editingMessage
-                ? '编辑消息，Ctrl+Enter 保存，Esc 取消...'
+                ? '编辑消息，Enter 保存，Esc 取消...'
                 : '输入 / 命令，@ 提及成员...'
             }
             rows={1}
@@ -1340,7 +1361,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               onClick={handleSubmit}
               disabled={!canSubmit}
               aria-label="保存并重新生成"
-              title="保存并重新生成（Ctrl+Enter）"
+              title="保存并重新生成（Enter）"
               className="p-2 sm:p-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-200 dark:disabled:bg-zinc-800 disabled:text-zinc-400 dark:disabled:text-zinc-600 text-white shadow-xs transition-colors shrink-0 flex items-center justify-center cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               {sending ? (
@@ -1370,7 +1391,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               onClick={handleSubmit}
               disabled={!canSubmit}
               aria-label="发送消息"
-              title="发送消息（Ctrl+Enter）"
+              title="发送消息（Enter）"
               className="p-2 sm:p-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-200 dark:disabled:bg-zinc-800 disabled:text-zinc-400 dark:disabled:text-zinc-600 text-white shadow-xs transition-colors shrink-0 flex items-center justify-center cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               {sending ? (
@@ -1383,9 +1404,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         </div>
 
         {/* 仅在桌面端显示的极简小提示 */}
-        <div className="hidden sm:flex items-center justify-between text-[11px] text-zinc-400 dark:text-zinc-500 px-2 mt-1">
-          <span>支持 / 调用命令与技能</span>
-          <span>Ctrl+Enter 发送 · Enter 换行</span>
+        <div className="hidden sm:flex items-center justify-end text-[11px] text-zinc-400 dark:text-zinc-500 px-2 mt-1">
+          <span>Enter 发送 · Shift+Enter 换行</span>
         </div>
       </div>
     </div>

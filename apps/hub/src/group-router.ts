@@ -484,24 +484,38 @@ export class GroupRouter {
 
   canRunBot(sessionId: string, botId: string): boolean {
     const session = this.db.getSession(sessionId);
+    if (!session) return false;
     const bot = this.db.getBot(botId);
-    if (!session || !bot) return false;
+    if (!bot) return false;
     const sessionMembers = [session.leadBotId, ...session.memberBotIds];
-    let isMember = sessionMembers.includes(botId);
-    if (!isMember && bot.parentBotId && sessionMembers.includes(bot.parentBotId)) {
-      isMember = true;
-    }
-    if (!isMember) return false;
+    if (sessionMembers.includes(botId)) return true;
+    if (bot.parentBotId && sessionMembers.includes(bot.parentBotId)) return true;
+    // 单聊中允许 owner 随手 @ 自己可用的具他 BOT/分身接力；
+    // 群聊严格按成员资格（被移出群即失去运行权）
+    if (session.mode !== 'direct') return false;
     const ownerId = this.getSessionOwner(sessionId, session);
     return ownerId !== undefined && this.db.canUserUseBot(botId, ownerId);
   }
 
   getValidBotIds(session: SessionRecord): Set<string> {
     const valid = new Set<string>([session.leadBotId, ...session.memberBotIds]);
+    const ownerId = this.getSessionOwner(session.id, session);
     const allBots = this.db.getAllBots();
     for (const b of allBots) {
       if (b.parentBotId && valid.has(b.parentBotId)) {
         valid.add(b.id);
+      }
+      // 单聊中 owner 可用的具他 BOT/分身也可被 @ 接力；群聊仅限成员及其分身
+      if (
+        session.mode === 'direct' &&
+        ownerId &&
+        !b.parentBotId &&
+        this.db.canUserUseBot(b.id, ownerId)
+      ) {
+        valid.add(b.id);
+        for (const sub of allBots) {
+          if (sub.parentBotId === b.id) valid.add(sub.id);
+        }
       }
     }
     return valid;
@@ -633,7 +647,7 @@ export class GroupRouter {
 
   handleNativeSubagentStreamEvent(
     sessionId: string,
-    parentBotId: string,
+    _parentBotId: string,
     subEvent: {
       id: string;
       subagentId: string;
@@ -648,91 +662,36 @@ export class GroupRouter {
     const session = this.db.getSession(sessionId);
     if (!session) return undefined;
     const subBot = this.db.getBot(subEvent.subagentId);
-    const sessionOwner = this.getSessionOwner(sessionId, session) ?? 'user_admin';
 
     let entry = this.mirroredSubagentRuns.get(subEvent.id);
     if (!entry) {
-      let directSession = subBot
-        ? this.db
-            .getAllSessions(sessionOwner)
-            .find(
-              (s) =>
-                s.mode === 'direct' &&
-                s.leadBotId === subBot.id &&
-                !s.archived &&
-                s.memberBotIds.length === 1 &&
-                s.memberBotIds[0] === subBot.id
-            )
-        : undefined;
-      if (!directSession && subBot) {
-        directSession = this.db.createSession({
-          id: `sess_${randomUUID()}`,
-          title: `${subBot.name}（分身会话）`,
-          mode: 'direct',
-          leadBotId: subBot.id,
-          memberBotIds: [subBot.id],
-          ownerId: sessionOwner,
-        });
-      }
       const run: SubagentRunRecord = {
         id: subEvent.id,
         subagentId: subEvent.subagentId,
         subagentName: subBot?.name || subEvent.subagentId,
         task: subEvent.task,
         status: subEvent.status,
-        ...(directSession ? { childSessionId: directSession.id } : {}),
       };
       entry = {
         sessionId,
-        directSessionId: directSession?.id || '',
+        directSessionId: '',
         run,
       };
       this.mirroredSubagentRuns.set(subEvent.id, entry);
-
-      if (directSession) {
-        const mirrorPrompt = `📋 [来自 @${parentBotId} 的派单]\n${subEvent.task}`;
-        const mirrorUserMsg = this.db.createMessage({
-          id: `msg_${randomUUID()}`,
-          sessionId: directSession.id,
-          role: 'user',
-          content: mirrorPrompt,
-        });
-        this.sseHub.broadcast(directSession.id, {
-          type: 'message_created',
-          message: mirrorUserMsg.message,
-        });
-      }
     }
-
     entry.run.status = subEvent.status;
     if (typeof subEvent.durationMs === 'number') entry.run.durationMs = subEvent.durationMs;
     if (typeof subEvent.toolUses === 'number') entry.run.toolCount = subEvent.toolUses;
     if (subEvent.status !== 'running') {
       const replyContent = subEvent.result || subEvent.error || '（已完成执行）';
-      entry.run.replyPreview = replyContent.slice(0, 200);
-      if (entry.directSessionId && subBot) {
-        const mirrorAssistantMsg = this.db.createMessage({
-          id: `msg_${randomUUID()}`,
-          sessionId: entry.directSessionId,
-          role: 'assistant',
-          senderBotId: subBot.id,
-          modelBadge: `${subBot.modelProvider}/${subBot.modelId}`,
-          content: replyContent,
-        });
-        this.sseHub.broadcast(entry.directSessionId, {
-          type: 'message_created',
-          message: mirrorAssistantMsg.message,
-        });
-      }
+      entry.run.replyPreview = replyContent.slice(0, 500);
     }
-
     this.sseHub.broadcast(sessionId, {
       type: 'subagent_status',
       sessionId,
       botId: subEvent.subagentId,
       run: { ...entry.run },
     });
-
     return entry.run;
   }
 
@@ -1256,34 +1215,9 @@ export class GroupRouter {
     const isDispatchedSubagent =
       isSubagent && (session.leadBotId === prep.bot.parentBotId || Boolean(item.dispatchedByBotId));
     let subagentRun: SubagentRunRecord | undefined;
-    let directSessionId: string | undefined;
     const turnStartTime = Date.now();
 
     if (isDispatchedSubagent) {
-      const parentBotId = item.dispatchedByBotId || prep.bot.parentBotId!;
-      const sessionOwner = this.getSessionOwner(sessionId, session) ?? 'user_admin';
-      let directSession = this.db
-        .getAllSessions(sessionOwner)
-        .find(
-          (s) =>
-            s.mode === 'direct' &&
-            s.leadBotId === prep.bot.id &&
-            !s.archived &&
-            s.memberBotIds.length === 1 &&
-            s.memberBotIds[0] === prep.bot.id
-        );
-      if (!directSession) {
-        directSession = this.db.createSession({
-          id: `sess_${randomUUID()}`,
-          title: `${prep.bot.name}（分身会话）`,
-          mode: 'direct',
-          leadBotId: prep.bot.id,
-          memberBotIds: [prep.bot.id],
-          ownerId: sessionOwner,
-        });
-      }
-      directSessionId = directSession.id;
-
       subagentRun = {
         id: `run_${randomUUID()}`,
         subagentId: prep.bot.id,
@@ -1291,7 +1225,6 @@ export class GroupRouter {
         color: prep.bot.color,
         task: prep.incrementalText.trim().slice(0, 120) || 'Task execution',
         status: 'running',
-        childSessionId: directSession.id,
       };
 
       this.sseHub.broadcast(sessionId, {
@@ -1299,18 +1232,6 @@ export class GroupRouter {
         sessionId,
         botId: prep.bot.id,
         run: subagentRun,
-      });
-
-      const mirrorPrompt = `📋 [来自 @${parentBotId} 的派单]\n${prep.incrementalText}`;
-      const mirrorUserMsg = this.db.createMessage({
-        id: `msg_${randomUUID()}`,
-        sessionId: directSession.id,
-        role: 'user',
-        content: mirrorPrompt,
-      });
-      this.sseHub.broadcast(directSession.id, {
-        type: 'message_created',
-        message: mirrorUserMsg.message,
       });
     }
 
@@ -1321,6 +1242,7 @@ export class GroupRouter {
       blocks?: TurnBlock[];
       usage?: TurnUsage;
       subagentRuns?: SubagentRunRecord[];
+      aborted?: boolean;
     };
     try {
       turnResult = await rpc.runTurn({
@@ -1342,6 +1264,25 @@ export class GroupRouter {
           botId: prep.bot.id,
           run: subagentRun,
         });
+      }
+      // 用户中止（取消到达前回合已在飞行）：尽力保留已产生的部分输出，不当作失败丢弃。
+      // 此时 generation 已递增，但部分输出消息仍应持久化并广播，屏幕上已展示的内容才能落盘。
+      // 用户中止：取消到达时回合可能在任意阶段，节点抛出 cancelled/aborted。
+      // 无论 generation 是否已递增，都补一条「已中止」占位消息，避免用户点击通知后内容突兀消失。
+      const isCancel = String(err?.message || '').includes('cancelled') || String(err?.message || '').includes('aborted');
+      if (isCancel) {
+        const partialMsg = this.db.createMessage({
+          id: `msg_${randomUUID()}`,
+          sessionId,
+          role: 'assistant',
+          senderBotId: item.botId,
+          modelBadge: `${prep.bot.modelProvider}/${prep.bot.modelId}`,
+          content: '',
+          aborted: true,
+        });
+        this.sseHub.broadcast(sessionId, { type: 'message_created', message: partialMsg.message });
+        if (isParallel) state.activeBotIds.delete(item.botId);
+        return 'cancelled';
       }
       if (turnGen !== state.generation) return 'cancelled';
       const errorText = err?.message || String(err);
@@ -1380,7 +1321,10 @@ export class GroupRouter {
       return 'failed';
     }
 
-    if (turnGen !== state.generation) return 'cancelled';
+    // 用户中止：node 正常返回 aborted=true + 部分输出。generation 已变（队列已清），
+    // 但已产生的 thinking/工具/文本必须落盘——跳过后续路由，只走持久化路径。
+    if (turnGen !== state.generation && !turnResult.aborted) return 'cancelled';
+    const wasAborted = Boolean(turnResult.aborted);
 
     if (isDispatchedSubagent && subagentRun) {
       subagentRun.status = 'done';
@@ -1394,27 +1338,38 @@ export class GroupRouter {
         botId: prep.bot.id,
         run: subagentRun,
       });
-
-      if (directSessionId) {
-        const mirrorAssistantMsg = this.db.createMessage({
-          id: `msg_${randomUUID()}`,
-          sessionId: directSessionId,
-          role: 'assistant',
-          senderBotId: prep.bot.id,
-          modelBadge: turnResult.modelBadge,
-          content: turnResult.replyText,
-          toolCalls: turnResult.toolCalls,
-          blocks: turnResult.blocks,
-          usage: turnResult.usage,
-        });
-        this.sseHub.broadcast(directSessionId, {
-          type: 'message_created',
-          message: mirrorAssistantMsg.message,
-        });
-      }
     }
 
-    // 1. Blackboard extraction
+    // 1. Blackboard extraction（中止的部分输出不参与黑板/路由）
+    if (wasAborted) {
+      // 落盘部分输出并广播，然后直接结束，不再提取黑板与派发后续 BOT
+      const abortedMsg = this.db.createMessage({
+        id: `msg_${randomUUID()}`,
+        sessionId,
+        role: 'assistant',
+        senderBotId: item.botId,
+        modelBadge: turnResult.modelBadge,
+        content: turnResult.replyText,
+        toolCalls: turnResult.toolCalls,
+        blocks: turnResult.blocks,
+        usage: turnResult.usage,
+        aborted: true,
+      });
+      this.sseHub.broadcast(sessionId, {
+        type: 'message_created',
+        message: {
+          ...abortedMsg.message,
+          ...(turnResult.toolCalls ? { toolCalls: turnResult.toolCalls } : {}),
+          ...(turnResult.blocks ? { blocks: turnResult.blocks } : {}),
+          ...(turnResult.usage ? { usage: turnResult.usage } : {}),
+          aborted: true,
+        },
+      });
+      if (isParallel) {
+        state.activeBotIds.delete(item.botId);
+      }
+      return 'cancelled';
+    }
     const bbMatch = turnResult.replyText.match(/```blackboard[^\n]*\r?\n([\s\S]*?)```/);
     if (bbMatch) {
       const blackboard = bbMatch[1].trim();
@@ -1524,7 +1479,6 @@ export class GroupRouter {
       // Explicit directive suppresses prose @mentions
     } else if (!isPass) {
       // 5. Fallback prose @mentions
-      const isSubagentBot = Boolean(prep.bot.parentBotId);
       if (item.replyToBotId && !replyMentions.includes(item.replyToBotId)) {
         if (item.chainBudget.consumeRelay()) {
           state.queue.push({
@@ -1535,7 +1489,7 @@ export class GroupRouter {
         }
       }
 
-      if (!isSubagentBot && replyMentions.length > 0) {
+      if (replyMentions.length > 0) {
         for (const nextBotId of replyMentions) {
           const alreadyUpcoming = state.queue.some((q) => q.botId === nextBotId);
           if (alreadyUpcoming) continue;

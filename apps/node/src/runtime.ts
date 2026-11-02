@@ -14,6 +14,7 @@ import {
   getBotWorkspaceDir,
   readBot,
   readBotEnv,
+  readNodeIdentity,
   readSkill,
 } from './storage.js';
 import { createRuntimeForProvider, configureProviderAuth } from './models.js';
@@ -152,6 +153,7 @@ export function buildBotShellEnv(
     sessionId: string;
     botId: string;
     botEnv: Record<string, string>;
+    turnEnv?: Record<string, string | undefined>;
   }
 ): Record<string, string | undefined> {
   const isWin = isWindows;
@@ -173,6 +175,7 @@ export function buildBotShellEnv(
     BOTD_SESSION_ID: options.sessionId,
     BOTD_BOT_ID: options.botId,
     BOTD_DATA_DIR: options.dataDir,
+    ...options.turnEnv,
   };
 }
 
@@ -514,6 +517,13 @@ export async function executeBotTurn(
     //    PATH with the POSIX delimiter while preserving the platform's Path casing.
     const isWin = isWindows;
     const shellPath = isWin ? resolveWindowsBash(dataDir) : undefined;
+    const nodeIdentity = await readNodeIdentity(dataDir);
+
+    const turnEnv: Record<string, string | undefined> = {
+      BOTD_NODE_ID: bot.nodeId || nodeIdentity?.nodeId || '',
+      ...(nodeIdentity?.hubUrl ? { BOTD_HUB_URL: nodeIdentity.hubUrl } : {}),
+      PI_CODING_AGENT_DIR: bot.parentBotId ? getBotDir(dataDir, bot.parentBotId) : botDir,
+    };
 
     const rawBashDef = createBashToolDefinition(workspaceDir, {
       ...(shellPath ? { shellPath } : {}),
@@ -525,6 +535,7 @@ export async function executeBotTurn(
           sessionId: input.sessionId,
           botId: bot.id,
           botEnv,
+          turnEnv,
         }),
       }),
     });
@@ -547,6 +558,7 @@ export async function executeBotTurn(
                 sessionId: input.sessionId,
                 botId: bot.id,
                 botEnv,
+                turnEnv,
               }),
             }),
           });
@@ -564,7 +576,6 @@ export async function executeBotTurn(
     if (cancelledRuns.has(runKey)) {
       throw new Error('Turn was cancelled');
     }
-
     let sessionTools: string[] | undefined;
     if (bot.toolScope === 'readonly') {
       sessionTools = ['read', 'grep', 'find', 'ls'];
@@ -973,14 +984,35 @@ export async function executeBotTurn(
 
     closeActiveThinking();
     if (extensionErrors.length) throw new Error(extensionErrors.join('\n'));
-    if (cancelledRuns.has(runKey)) throw new Error('Turn was cancelled');
+
+    // 用户中止：不再地丢弃已产生的 thinking/工具/文本，标记取消后继续走统一的 blocks 落盘返回路径。
+    // 等待中的 running 工具标记为 cancelled，Hub 侧据此持久化部分输出。
+    const wasCancelled = cancelledRuns.has(runKey);
+    if (wasCancelled) {
+      for (const tc of toolCalls) {
+        if (tc.status === 'running') tc.status = 'cancelled';
+      }
+      for (const b of blocks) {
+        if (b.type === 'tool' && b.status === 'running') b.status = 'cancelled';
+      }
+      for (const [key, running] of runningToolStarts.entries()) {
+        const tc = toolCalls[running.index];
+        if (tc && tc.status === 'cancelled' && tc.durationMs === undefined) {
+          tc.durationMs = Math.max(0, Date.now() - running.startMs);
+        }
+        const block = blocks[running.blockIndex];
+        if (block && block.type === 'tool' && block.status === 'cancelled' && block.durationMs === undefined) {
+          block.durationMs = Math.max(0, Date.now() - running.startMs);
+        }
+        runningToolStarts.delete(key);
+      }
+    }
 
     // A handled extension command may not create an assistant message. Inspect only
     // this run's messages so previous replies/errors never become the command result.
     const turnAssistants = session.messages.slice(messageCountBefore).filter(message => message.role === 'assistant');
     const lastAssistant = turnAssistants.at(-1);
     if (lastAssistant?.stopReason === 'error') throw new Error(lastAssistant.errorMessage || 'Model inference failed');
-    if (lastAssistant?.stopReason === 'aborted') throw new Error(lastAssistant.errorMessage || 'Turn was cancelled');
 
     const assistantTexts: string[] = [];
     for (const msg of turnAssistants) {
@@ -993,10 +1025,13 @@ export async function executeBotTurn(
       }
     }
 
+    // 中止且无任何文本输出时不用「已完成执行」占位；空文本由 Hub 侧标记 aborted
     const replyText = assistantTexts.join('\n\n')
-      || (isCompactCommand
-        ? (isCompactSmall ? '（无需压缩：当前会话上下文尚未达到压缩阈值）' : '（已完成会话上下文压缩）')
-        : '（已完成执行，无文本输出）');
+      || (wasCancelled
+        ? ''
+        : (isCompactCommand
+          ? (isCompactSmall ? '（无需压缩：当前会话上下文尚未达到压缩阈值）' : '（已完成会话上下文压缩）')
+          : '（已完成执行，无文本输出）'));
 
     let usage: TurnUsage | undefined;
     let inputTokens = 0;
@@ -1102,6 +1137,7 @@ export async function executeBotTurn(
       ...(blocks.length > 0 ? { blocks } : {}),
       ...(usage ? { usage } : {}),
       ...(subagentRunsMap.size > 0 ? { subagentRuns: Array.from(subagentRunsMap.values()) } : {}),
+      ...(wasCancelled ? { aborted: true } : {}),
     };
   } finally {
     if (unsubscribe) {

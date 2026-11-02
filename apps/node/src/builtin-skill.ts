@@ -95,7 +95,7 @@ botd bots update reviewer --desc "只读代码审计专家" --tool-scope readonl
 botd bots delete reviewer
 \`\`\`
 
-As soon as \`botd bots create\` returns, the subagent is synced to \`<workspace>/.pi/agents/<subId>.md\` and can be invoked via \`Agent\` **immediately in the same turn**.
+As soon as \`botd bots create\` returns, the subagent is synced to \`~/.botd/bots/<parentBotId>/agents/<subId>.md\` and can be invoked via \`Agent\` **immediately in the same turn**.
 
 ### 2. Dispatch subagents (ALWAYS use \`Agent\` / \`SubagentWorkflow\` tools, NOT \`@\`)
 
