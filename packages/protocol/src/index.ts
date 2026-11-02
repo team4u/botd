@@ -362,6 +362,8 @@ export interface DelegateSessionResult {
 
 export type NotificationChannelKind = 'webhook' | 'feishu' | 'slack' | 'telegram';
 export type NotificationEventKind = 'assistant_reply' | 'ask_request' | 'wakeup';
+/** 按需通知策略：always 全量推送；needed 仅异常与人工审批推送；never 静默不推送 */
+export type NotificationTellPolicy = 'always' | 'needed' | 'never';
 
 export interface NotificationChannelRecord {
   id: string;
@@ -371,6 +373,7 @@ export interface NotificationChannelRecord {
   targetUrl: string;
   secret?: string;
   events: NotificationEventKind[];
+  tellPolicy?: NotificationTellPolicy;
   enabled: boolean;
   lastTriggeredAt?: string;
   createdAt: string;
@@ -382,7 +385,22 @@ export interface CreateNotificationChannelInput {
   targetUrl: string;
   secret?: string;
   events?: NotificationEventKind[];
+  tellPolicy?: NotificationTellPolicy;
   enabled?: boolean;
+}
+
+/** 通知出站队列记录：持久化发送队列，失败后按指数退避重试，超过上限标记 dead */
+export interface NotificationOutboxRecord {
+  id: string;
+  channelId: string;
+  sessionId: string;
+  eventKind: NotificationEventKind;
+  status: 'pending' | 'sent' | 'dead';
+  attemptCount: number;
+  nextRetryAt?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface MessageRecord {
