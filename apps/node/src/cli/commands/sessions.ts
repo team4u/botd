@@ -35,7 +35,7 @@ export function registerSessionsCommands(program: Command): void {
     .option('--member <ids...>', 'Member bot IDs')
     .addOption(
       new Option('--mode <mode>', 'Session mode')
-        .choices(['direct', 'lead', 'roundtable'])
+        .choices(['direct', 'lead'])
         .default('direct'),
     )
     .action(
@@ -74,7 +74,7 @@ export function registerSessionsCommands(program: Command): void {
     .option('--member <ids...>', 'Member bot IDs')
     .option('--archive <boolean>', 'Archive (true) or restore (false) the session', (v: string) => v !== 'false')
     .addOption(
-      new Option('--mode <mode>', 'Session mode').choices(['direct', 'lead', 'roundtable']),
+      new Option('--mode <mode>', 'Session mode').choices(['direct', 'lead']),
     )
     .action((sessionId: string, options: Record<string, unknown>, command: Command) =>
       cliAction(async (_opts, cmd) => {
@@ -267,7 +267,7 @@ export function registerSessionsCommands(program: Command): void {
     .requiredOption('--prompt <prompt>', 'Task prompt for the sub-session')
     .option('--title <title>', 'Sub-session title')
     .addOption(
-      new Option('--mode <mode>', 'Session mode').choices(['direct', 'lead', 'roundtable']),
+      new Option('--mode <mode>', 'Session mode').choices(['direct', 'lead']),
     )
     .action((parentSessionId: string, options: Record<string, unknown>, command: Command) =>
       cliAction(async (_opts, cmd) => {

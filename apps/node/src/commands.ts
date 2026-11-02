@@ -11,7 +11,14 @@ import {
   type ResourceLoader,
 } from '@earendil-works/pi-coding-agent';
 import type { BotConfig, ChatCommand } from '@botd/protocol';
-import { assertSafeId, getBotDir } from './storage.js';
+import { assertSafeId, ensureDir, getBotDir, writeAtomicFile } from './storage.js';
+import subagentsExtension from '@tintinweb/pi-subagents/dist/index.js';
+import { setDefaultsDisabled, registerAgents } from '@tintinweb/pi-subagents/dist/agent-types.js';
+import { loadCustomAgents } from '@tintinweb/pi-subagents/dist/custom-agents.js';
+import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
+
+/** pi-subagents 扩展工厂：为主 BOT 提供 Agent / SubagentWorkflow 编排底座。 */
+const subagentsExtensionFactory: ExtensionFactory = subagentsExtension as unknown as ExtensionFactory;
 
 async function resolveExtensionPaths(dataDir: string, ids: string[]): Promise<string[]> {
   const paths: string[] = [];
@@ -40,15 +47,55 @@ export async function loadBotResources(
   bot: BotConfig,
   settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } }),
   appendSystemPrompt: () => string[] = () => [],
+  options?: { enableSubagents?: boolean },
 ): Promise<DefaultResourceLoader> {
   const botDir = getBotDir(dataDir, bot.id);
+  const workspaceDir = path.join(botDir, 'workspace');
   const promptsDir = path.join(botDir, 'prompts');
   const skillPaths = (bot.enabledSkills ?? []).map(id => {
     assertSafeId(id, 'Skill ID');
     return path.join(dataDir, 'skills', id);
   });
+  // 主 BOT 挂载 pi-subagents 底座（Agent / SubagentWorkflow 编排工具 + 分身调度）；
+  // 分身不挂载（防套娃：分身不能再派分身），扩展内部另有 inChildSessionContext 防重入双保险。
+  let extensionFactories: ExtensionFactory[] = [];
+  if (options?.enableSubagents && !bot.parentBotId) {
+    const piDir = path.join(workspaceDir, '.pi');
+    await ensureDir(piDir);
+    await writeAtomicFile(
+      path.join(piDir, 'subagents.json'),
+      JSON.stringify(
+        {
+          disableDefaultAgents: true,
+          disableDefaults: true,
+          backgroundByDefault: false,
+          packageAgents: false,
+        },
+        null,
+        2
+      )
+    );
+
+    const wrappedSubagentsFactory: ExtensionFactory = async (pi) => {
+      process.env.PI_CODING_AGENT_DIR = path.join(workspaceDir, '.pi');
+      setDefaultsDisabled(true);
+      await subagentsExtensionFactory(pi);
+      setDefaultsDisabled(true);
+      registerAgents(loadCustomAgents(workspaceDir));
+      pi.on('session_start', () => {
+        setDefaultsDisabled(true);
+        registerAgents(loadCustomAgents(workspaceDir));
+      });
+      pi.on('before_agent_start', () => {
+        setDefaultsDisabled(true);
+        registerAgents(loadCustomAgents(workspaceDir));
+      });
+    };
+
+    extensionFactories = [wrappedSubagentsFactory];
+  }
   const loader = new DefaultResourceLoader({
-    cwd: path.join(botDir, 'workspace'),
+    cwd: workspaceDir,
     agentDir: botDir,
     settingsManager,
     noSkills: true,
@@ -59,6 +106,7 @@ export async function loadBotResources(
     additionalSkillPaths: skillPaths,
     additionalExtensionPaths: await resolveExtensionPaths(dataDir, bot.enabledExtensions ?? []),
     additionalPromptTemplatePaths: existsSync(promptsDir) ? [promptsDir] : [],
+    extensionFactories,
     systemPromptOverride: () => undefined,
     appendSystemPromptOverride: appendSystemPrompt,
   });

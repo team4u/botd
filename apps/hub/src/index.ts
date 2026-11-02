@@ -73,7 +73,7 @@ export interface StartHubResult extends HubInstance {
   port: number;
 }
 
-const VALID_MODES = new Set<SessionMode>(['direct', 'lead', 'roundtable']);
+const VALID_MODES = new Set<SessionMode>(['direct', 'lead']);
 const USERNAME_REGEX = /^[a-zA-Z0-9_-]{2,32}$/;
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isText = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
@@ -124,10 +124,23 @@ function validateSessionMembers(
     if (!db.canUserUseBot(mid, userId)) {
       return { ok: false, error: 'Forbidden', status: 403 };
     }
+    if (mode === 'lead' && memberBot.parentBotId) {
+      if (!dedupedMembers.includes(memberBot.parentBotId) && memberBot.parentBotId !== leadBotIdInput) {
+        return {
+          ok: false,
+          error: `Subagent ${mid} requires its parent bot ${memberBot.parentBotId} to be in the session members or lead`,
+          status: 400,
+        };
+      }
+    }
   }
 
   if (!dedupedMembers.includes(leadBotIdInput) || (mode === 'direct' && dedupedMembers.length !== 1)) {
     return { ok: false, error: 'Lead BOT must be a member; direct sessions have exactly one member', status: 400 };
+  }
+
+  if (mode === 'lead' && dedupedMembers.length < 2) {
+    return { ok: false, error: 'Lead mode requires at least 2 members', status: 400 };
   }
 
   return { ok: true, leadBotId: leadBotIdInput, memberBotIds: dedupedMembers };
@@ -614,6 +627,15 @@ export function createHub(options?: HubOptions): HubInstance {
       return c.json({ error: `Bot id "${body.id}" already owned by node "${existing.nodeId}"` }, 409);
     }
 
+    const isPrimary = !body.parentBotId;
+    if (isPrimary) {
+      const existingBots = db.getBotsForNode(body.nodeId);
+      const hasOtherPrimary = existingBots.some(b => !b.parentBotId && b.id !== body.id);
+      if (hasOtherPrimary) {
+        return c.json({ error: '该节点已有主 BOT，如需新增角色请新建角色分身（Subagent）' }, 409);
+      }
+    }
+
     const botConfig: BotConfig = {
       id: body.id,
       nodeId: body.nodeId,
@@ -625,6 +647,13 @@ export function createHub(options?: HubOptions): HubInstance {
       enabledSkills: Array.isArray(body.enabledSkills) ? body.enabledSkills : [],
       enabledExtensions: Array.isArray(body.enabledExtensions) ? body.enabledExtensions : [],
       visibility: body.visibility === 'team' ? 'team' : 'private',
+      ...(body.parentBotId ? { parentBotId: body.parentBotId } : {}),
+      ...(body.inheritModel !== undefined ? { inheritModel: Boolean(body.inheritModel) } : {}),
+      ...(body.inheritSkills !== undefined ? { inheritSkills: Boolean(body.inheritSkills) } : {}),
+      ...(body.color ? { color: body.color } : {}),
+      ...(body.toolScope ? { toolScope: body.toolScope } : {}),
+      ...(Array.isArray(body.customTools) ? { customTools: body.customTools } : {}),
+      ...(body.isolation ? { isolation: body.isolation } : {}),
       updatedAt: new Date().toISOString(),
     };
 
@@ -652,6 +681,15 @@ export function createHub(options?: HubOptions): HubInstance {
 
     if (body.nodeId && body.nodeId !== existing.nodeId) {
       return c.json({ error: 'Cannot transfer bot to a different node' }, 409);
+    }
+
+    const nextParentBotId = body.parentBotId !== undefined ? body.parentBotId : existing.parentBotId;
+    if (!nextParentBotId) {
+      const existingBots = db.getBotsForNode(existing.nodeId);
+      const hasOtherPrimary = existingBots.some(b => !b.parentBotId && b.id !== botId);
+      if (hasOtherPrimary) {
+        return c.json({ error: '该节点已有主 BOT，如需新增角色请新建角色分身（Subagent）' }, 409);
+      }
     }
 
     const { systemMd: requestedSystem, ...botPatch } = body;
@@ -886,8 +924,9 @@ export function createHub(options?: HubOptions): HubInstance {
       leadBotId,
       memberBotIds,
       ownerId: user.id,
-      parallelRoundtable: Boolean(body.parallelRoundtable),
       parentSessionId: body.parentSessionId,
+      ...(body.memberRoles ? { memberRoles: body.memberRoles } : {}),
+      ...(body.blackboard ? { blackboard: body.blackboard } : {}),
     });
 
     return c.json(session);
@@ -904,29 +943,34 @@ export function createHub(options?: HubOptions): HubInstance {
       mode?: SessionMode;
       leadBotId?: string;
       memberBotIds?: string[];
+      memberRoles?: Record<string, string>;
+      blackboard?: string;
       archived?: boolean;
       pinned?: boolean;
-      parallelRoundtable?: boolean;
     }>().catch(() => null);
     if (!isObject(body)) return c.json({ error: 'Invalid session configuration' }, 400);
     // 归档是纯 UI 分类标记，允许在运行中修改（如「开启新话题」时旧会话仍在后台执行）；
-    // 标题/模式/负责人/成员/圆桌并发会改变调度行为，运行中仍需拒绝。
+    // 标题/模式/负责人/成员会改变调度行为，运行中仍需拒绝。
     const touchesConfig =
       body.title !== undefined ||
       body.mode !== undefined ||
       body.leadBotId !== undefined ||
-      body.memberBotIds !== undefined ||
-      body.parallelRoundtable !== undefined;
+      body.memberBotIds !== undefined;
     if (session.status === 'running' && touchesConfig) {
       return c.json({ error: 'Stop the session before changing its configuration' }, 409);
     }
     if (body.archived !== undefined && typeof body.archived !== 'boolean') return c.json({ error: 'Invalid archived flag' }, 400);
     if (body.pinned !== undefined && typeof body.pinned !== 'boolean') return c.json({ error: 'Invalid pinned flag' }, 400);
-    if (body.parallelRoundtable !== undefined && typeof body.parallelRoundtable !== 'boolean') return c.json({ error: 'Invalid parallelRoundtable flag' }, 400);
     if (body.title !== undefined && !isText(body.title)) return c.json({ error: 'Invalid session title' }, 400);
     if (body.leadBotId !== undefined && !isSafeId(body.leadBotId)) return c.json({ error: 'Invalid lead BOT' }, 400);
     if (body.memberBotIds !== undefined && (!Array.isArray(body.memberBotIds) || !body.memberBotIds.every(isSafeId))) {
       return c.json({ error: 'Invalid memberBotIds' }, 400);
+    }
+    if (body.memberRoles !== undefined && (typeof body.memberRoles !== 'object' || body.memberRoles === null || Array.isArray(body.memberRoles))) {
+      return c.json({ error: 'Invalid memberRoles' }, 400);
+    }
+    if (body.blackboard !== undefined && typeof body.blackboard !== 'string') {
+      return c.json({ error: 'Invalid blackboard' }, 400);
     }
 
     if (body.mode !== undefined && !VALID_MODES.has(body.mode)) {
@@ -966,10 +1010,19 @@ export function createHub(options?: HubOptions): HubInstance {
       mode,
       leadBotId,
       memberBotIds,
+      memberRoles: body.memberRoles,
+      blackboard: body.blackboard,
       archived: body.archived,
       pinned: body.pinned,
-      parallelRoundtable: body.parallelRoundtable,
     });
+    if (body.blackboard !== undefined || body.memberRoles !== undefined) {
+      sseHub.broadcast(id, {
+        type: 'session_updated',
+        sessionId: id,
+        blackboard: updated?.blackboard,
+        memberRoles: updated?.memberRoles,
+      });
+    }
     return c.json(updated);
   });
 
@@ -1149,6 +1202,27 @@ export function createHub(options?: HubOptions): HubInstance {
 
     await router.cancelSession(id);
     return c.json({ ok: true });
+  });
+
+  app.post('/api/sessions/:id/queue/skip', async (c) => {
+    const id = c.req.param('id');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    const body = await c.req.json<{ stageId?: string; botId?: string }>().catch(() => ({}));
+    const queuePlan = router.skipQueueStage(id, body);
+    return c.json({ ok: true, queuePlan });
+  });
+
+  app.post('/api/sessions/:id/queue/append', async (c) => {
+    const id = c.req.param('id');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    const body = await c.req.json<{ orchestration: string }>().catch(() => null);
+    if (!body || typeof body.orchestration !== 'string' || !body.orchestration.trim()) {
+      return c.json({ error: 'orchestration expression is required' }, 400);
+    }
+    const queuePlan = router.appendQueueStage(id, body.orchestration);
+    return c.json({ ok: true, queuePlan });
   });
 
   // 会话分叉：以某条消息为锚点克隆出新会话（含锚点及其之前的消息），源会话完全不动。

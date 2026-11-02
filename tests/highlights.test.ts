@@ -302,9 +302,9 @@ test('requestHumanInput surfaces a pending ask, resolves on respond and expires 
   assert.equal((await f.request(`/api/sessions/${session.id}/asks`, 'GET')).status, 200);
 });
 
-// --- 4. Parallel blind roundtable ---
+// --- 4. Parallel blind workflow ---
 
-test('parallelRoundtable runs reviewers concurrently and blind, lead summarizes after both', async t => {
+test('workflow parallel stage runs reviewers concurrently and blind, lead summarizes after both', async t => {
   const f = await fixture(t);
   const events: string[] = [];
   const turns = new Map<string, Parameters<NodeRpcFunctions['runTurn']>[0]>();
@@ -328,9 +328,8 @@ test('parallelRoundtable runs reviewers concurrently and blind, lead summarizes 
     return { replyText: 'Final verdict: ship it', modelBadge: 'test/model' };
   });
 
-  const session = await f.session(['lead', 'reviewer-a', 'reviewer-b'], 'roundtable', { parallelRoundtable: true });
-  assert.equal(session.parallelRoundtable, true);
-  await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: 'Audit the release' });
+  const session = await f.session(['lead', 'reviewer-a', 'reviewer-b'], 'lead');
+  await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: '(@reviewer-a @reviewer-b) -> @lead Audit the release' });
   const history = await waitFor(() => f.messages(session.id), list => list.filter(m => m.role === 'assistant').length === 3);
   await f.idle(session.id);
 

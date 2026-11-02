@@ -8,7 +8,6 @@ import {
   X,
   Search,
   Bot,
-  Radio,
   Trash2,
   ChevronDown,
   Archive,
@@ -38,6 +37,7 @@ interface SidebarProps {
   activeSessionId: string | null;
   onSelectSession: (id: string, messageId?: string) => void;
   onOpenBotChat: (bot: BotConfig) => void;
+  onOpenBotDirect?: (bot: BotConfig) => void;
   onCreateGroup: () => void;
   onOpenNodesView: () => void;
   onOpenSettings: () => void;
@@ -288,6 +288,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeSessionId,
   onSelectSession,
   onOpenBotChat,
+  onOpenBotDirect,
   onCreateGroup,
   onOpenNodesView,
   onOpenSettings,
@@ -432,6 +433,53 @@ export const Sidebar: React.FC<SidebarProps> = ({
       nodeName.toLowerCase().includes(query)
     );
   });
+
+  // 建立 parentBotId -> subagents 映射
+  const subagentsByParentId = useMemo(() => {
+    const map = new Map<string, BotConfig[]>();
+    for (const b of bots) {
+      if (b.parentBotId) {
+        const list = map.get(b.parentBotId) || [];
+        list.push(b);
+        map.set(b.parentBotId, list);
+      }
+    }
+    return map;
+  }, [bots]);
+
+  // 顶层主 BOT 列表：没有 parentBotId，或者 parentBotId 不在已知 bots 中的孤儿分身
+  const primaryFilteredBots = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const primaryBots = bots.filter((bot) => !bot.parentBotId || !bots.some((b) => b.id === bot.parentBotId));
+    if (!q) return primaryBots;
+
+    return primaryBots.filter((bot) => {
+      const nodeName = nodeMap.get(bot.nodeId)?.name || '';
+      const botMatch =
+        bot.name.toLowerCase().includes(q) ||
+        bot.id.toLowerCase().includes(q) ||
+        nodeName.toLowerCase().includes(q);
+      if (botMatch) return true;
+
+      const subs = subagentsByParentId.get(bot.id) || [];
+      return subs.some((s) => s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q));
+    });
+  }, [bots, nodeMap, query, subagentsByParentId]);
+
+  const openBot = onOpenBotDirect || onOpenBotChat;
+
+  const isBotRunning = useCallback(
+    (botId: string) => {
+      const currentDirect = currentDirectByBot.get(botId);
+      if (currentDirect?.status === 'running') return true;
+      return sessions.some(
+        (s) =>
+          s.status === 'running' &&
+          (s.activeBotId === botId || (Array.isArray(s.activeBotIds) && s.activeBotIds.includes(botId)))
+      );
+    },
+    [currentDirectByBot, sessions]
+  );
 
   // 分区 2：群聊（非单聊且未归档），置顶会话排前（sort 稳定，组内保持既有活跃时间序）
   const groupSessions = useMemo(
@@ -682,93 +730,158 @@ export const Sidebar: React.FC<SidebarProps> = ({
             />
             {effectiveBotsOpen && (
               <div className="space-y-0.5">
-                {filteredBots.map((bot) => {
+                {primaryFilteredBots.map((bot) => {
                   const currentDirect = currentDirectByBot.get(bot.id);
                   const isActive = !!currentDirect && currentDirect.id === activeSessionId;
-                  const isRunning = currentDirect?.status === 'running';
+                  const isRunning = isBotRunning(bot.id);
                   const node = nodeMap.get(bot.nodeId);
                   const isOnline = node?.status === 'online';
+                  const childSubagents = (subagentsByParentId.get(bot.id) || []).filter((s) => {
+                    if (!query) return true;
+                    const q = query.trim().toLowerCase();
+                    return s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q);
+                  });
 
                   return (
-                    <div
-                      key={bot.id}
-                      role="button"
-                      tabIndex={0}
-                      title={`@${bot.id}`}
-                      onClick={() => {
-                        onOpenBotChat(bot);
-                        onClose();
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          onOpenBotChat(bot);
-                          onClose();
-                        }
-                      }}
-                      className={`group w-full text-left p-2 rounded-xl text-xs transition-all flex items-center gap-2 border cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
-                        isActive
-                          ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs'
-                          : 'hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 border-transparent'
-                      }`}
-                    >
-                      {/* 圆角方块图标 */}
+                    <div key={bot.id} className="space-y-0.5">
                       <div
-                        className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 border transition-colors ${
+                        role="button"
+                        tabIndex={0}
+                        title={`@${bot.id}`}
+                        onClick={() => {
+                          openBot(bot);
+                          onClose();
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            openBot(bot);
+                            onClose();
+                          }
+                        }}
+                        className={`group w-full text-left p-2 rounded-xl text-xs transition-all flex items-center gap-2 border cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
                           isActive
-                            ? 'bg-zinc-200/80 dark:bg-zinc-700 border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200'
-                            : 'bg-zinc-100 dark:bg-zinc-800 border-zinc-200/80 dark:border-zinc-800/80 text-zinc-600 dark:text-zinc-300'
+                            ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs'
+                            : 'hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 border-transparent'
                         }`}
                       >
-                        <Bot className="w-4 h-4" />
-                      </div>
+                        {/* 圆角方块图标 */}
+                        <div
+                          className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 border transition-colors ${
+                            isActive
+                              ? 'bg-zinc-200/80 dark:bg-zinc-700 border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200'
+                              : 'bg-zinc-100 dark:bg-zinc-800 border-zinc-200/80 dark:border-zinc-800/80 text-zinc-600 dark:text-zinc-300'
+                          }`}
+                        >
+                          <Bot className="w-4 h-4" />
+                        </div>
 
-                      {/* 名称 + @id / 节点名 */}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span
-                            className={`truncate font-semibold text-zinc-900 dark:text-zinc-100`}
-                          >
-                            {bot.name}
-                          </span>
-                          {(bot.visibility === 'team' || bot.isTeamShared) && (
-                            <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 font-normal">
-                              [共享]
+                        {/* 名称 + @id / 节点名 */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className={`truncate font-semibold text-zinc-900 dark:text-zinc-100`}
+                            >
+                              {bot.name}
                             </span>
-                          )}
-                          <span
-                            className={`truncate font-mono text-[11px] ${
+                            {(bot.visibility === 'team' || bot.isTeamShared) && (
+                              <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 font-normal">
+                                [共享]
+                              </span>
+                            )}
+                            <span
+                              className={`truncate font-mono text-[11px] ${
+                                isActive ? 'text-zinc-500 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500'
+                              }`}
+                            >
+                              @{bot.id}
+                            </span>
+                          </div>
+                          <div
+                            className={`truncate text-[11px] ${
                               isActive ? 'text-zinc-500 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500'
                             }`}
                           >
-                            @{bot.id}
-                          </span>
+                            {node?.name || bot.nodeId}
+                          </div>
                         </div>
-                        <div
-                          className={`truncate text-[11px] ${
-                            isActive ? 'text-zinc-500 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500'
-                          }`}
-                        >
-                          {node?.name || bot.nodeId}
+
+                        {/* 在线 / 运行状态点 */}
+                        <div className="w-4 h-4 flex items-center justify-center shrink-0">
+                          {isRunning ? (
+                            <span
+                              className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse-dot"
+                              title="会话运行中"
+                            />
+                          ) : isOnline ? (
+                            <span className="w-2 h-2 rounded-full bg-emerald-500" title="节点在线" />
+                          ) : (
+                            <span
+                              className="w-2 h-2 rounded-full bg-zinc-300 dark:bg-zinc-600"
+                              title="节点离线"
+                            />
+                          )}
                         </div>
                       </div>
 
-                      {/* 在线 / 运行状态点 */}
-                      <div className="w-4 h-4 flex items-center justify-center shrink-0">
-                        {isRunning ? (
-                          <span
-                            className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse-dot"
-                            title="会话运行中"
-                          />
-                        ) : isOnline ? (
-                          <span className="w-2 h-2 rounded-full bg-emerald-500" title="节点在线" />
-                        ) : (
-                          <span
-                            className="w-2 h-2 rounded-full bg-zinc-300 dark:bg-zinc-600"
-                            title="节点离线"
-                          />
-                        )}
-                      </div>
+                      {/* 子分身缩进列表 */}
+                      {childSubagents.length > 0 && (
+                        <div className="space-y-0.5 ml-3 pl-2 border-l border-zinc-200 dark:border-zinc-800">
+                          {childSubagents.map((sub) => {
+                            const subDirect = currentDirectByBot.get(sub.id);
+                            const isSubActive = !!subDirect && subDirect.id === activeSessionId;
+                            const isSubRunning = isBotRunning(sub.id);
+
+                            return (
+                              <div
+                                key={sub.id}
+                                role="button"
+                                tabIndex={0}
+                                title={`@${sub.id}`}
+                                onClick={() => {
+                                  openBot(sub);
+                                  onClose();
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault();
+                                    openBot(sub);
+                                    onClose();
+                                  }
+                                }}
+                                className={`group w-full text-left py-1.5 px-2 rounded-lg text-xs transition-all flex items-center gap-2 border cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
+                                  isSubActive
+                                    ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs'
+                                    : 'hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 border-transparent'
+                                }`}
+                              >
+                                <span className="text-zinc-400 dark:text-zinc-600 font-mono text-xs select-none">└─</span>
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="truncate font-medium text-zinc-900 dark:text-zinc-100">
+                                      {sub.name}
+                                    </span>
+                                    <span
+                                      className={`truncate font-mono text-[11px] ${
+                                        isSubActive ? 'text-zinc-500 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500'
+                                      }`}
+                                    >
+                                      @{sub.id}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                {isSubRunning && (
+                                  <span className="ml-auto inline-flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400 shrink-0">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                    <span>运行中</span>
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -792,12 +905,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     const isRunning = session.status === 'running';
                     const isFailed = session.status === 'failed';
 
-                    const modeText =
-                      session.mode === 'direct'
-                        ? '单聊'
-                        : session.mode === 'lead'
-                        ? '主持'
-                        : '圆桌';
+                    const modeText = session.mode === 'direct' ? '单聊' : '群聊';
 
                     const relativeTime = formatRelativeTime(session.lastMessageAt ?? session.updatedAt);
 
@@ -832,14 +940,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                   isActive ? 'text-zinc-600 dark:text-zinc-300' : 'text-zinc-500 dark:text-zinc-400'
                                 }`}
                               />
-                            ) : session.mode === 'lead' ? (
-                              <Users
-                                className={`w-3.5 h-3.5 shrink-0 ${
-                                  isActive ? 'text-zinc-600 dark:text-zinc-300' : 'text-zinc-500 dark:text-zinc-400'
-                                }`}
-                              />
                             ) : (
-                              <Radio
+                              <Users
                                 className={`w-3.5 h-3.5 shrink-0 ${
                                   isActive ? 'text-zinc-600 dark:text-zinc-300' : 'text-zinc-500 dark:text-zinc-400'
                                 }`}

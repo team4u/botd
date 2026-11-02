@@ -149,6 +149,10 @@ export function getBotDir(dataDir: string, botId: string): string {
   return path.join(dataDir, 'bots', botId);
 }
 
+export function getBotWorkspaceDir(dataDir: string, botId: string): string {
+  return path.join(getBotDir(dataDir, botId), 'workspace');
+}
+
 export function getSkillDir(dataDir: string, skillId: string): string {
   assertSafeId(skillId, 'Skill ID');
   return path.join(dataDir, 'skills', skillId);
@@ -228,10 +232,67 @@ export async function saveBot(dataDir: string, bot: BotConfig, systemMd?: string
   if (!existsSync(memoryPath)) {
     await writeAtomicFile(memoryPath, '');
   }
+
+  // If bot.parentBotId is set, also sync <parentWorkspaceDir>/.pi/agents/${bot.id}.md
+  // and ensure <parentWorkspaceDir>/.pi/subagents.json disables defaults.
+  // Otherwise, ensure primary bot's <workspaceDir>/.pi/subagents.json disables defaults.
+  const subagentsJsonContent = JSON.stringify(
+    {
+      disableDefaultAgents: true,
+      disableDefaults: true,
+      backgroundByDefault: false,
+      packageAgents: false,
+    },
+    null,
+    2
+  );
+
+  if (bot.parentBotId) {
+    assertSafeId(bot.parentBotId, 'Parent Bot ID');
+    const parentWorkspaceDir = getBotWorkspaceDir(dataDir, bot.parentBotId);
+    const parentPiDir = path.join(parentWorkspaceDir, '.pi');
+    const parentAgentsDir = path.join(parentPiDir, 'agents');
+    await ensureDir(parentAgentsDir);
+
+    const frontmatterLines = [
+      '---',
+      `name: ${bot.id}`,
+      `display_name: ${bot.name}`,
+      `description: ${bot.description || ''}`,
+    ];
+    if (!bot.inheritModel && bot.modelProvider && bot.modelId) {
+      frontmatterLines.push(`model: ${bot.modelProvider}/${bot.modelId}`);
+    }
+    if (bot.thinkingLevel) {
+      frontmatterLines.push(`thinking: ${bot.thinkingLevel}`);
+    }
+    if (bot.toolScope === 'readonly') {
+      frontmatterLines.push('tools: read, grep, find, ls');
+    } else if (bot.toolScope === 'custom' && bot.customTools?.length) {
+      frontmatterLines.push(`tools: ${bot.customTools.join(', ')}`);
+    }
+    frontmatterLines.push('---');
+    const agentMdContent = `${frontmatterLines.join('\n')}\n\n${systemMd ?? ''}`;
+
+    await writeAtomicFile(path.join(parentAgentsDir, `${bot.id}.md`), agentMdContent);
+
+    const subagentsJsonPath = path.join(parentWorkspaceDir, '.pi', 'subagents.json');
+    await writeAtomicFile(subagentsJsonPath, subagentsJsonContent);
+  } else {
+    const piDir = path.join(workspaceDir, '.pi');
+    await ensureDir(piDir);
+    await writeAtomicFile(path.join(piDir, 'subagents.json'), subagentsJsonContent);
+  }
 }
 
 export async function deleteBot(dataDir: string, botId: string): Promise<void> {
   assertSafeId(botId, 'Bot ID');
+  const existing = await readBot(dataDir, botId).catch(() => null);
+  if (existing?.bot.parentBotId) {
+    const parentWorkspaceDir = getBotWorkspaceDir(dataDir, existing.bot.parentBotId);
+    const agentMd = path.join(parentWorkspaceDir, '.pi', 'agents', `${botId}.md`);
+    await fs.rm(agentMd, { force: true }).catch(() => {});
+  }
   const botDir = getBotDir(dataDir, botId);
   await fs.rm(botDir, { recursive: true, force: true });
 }

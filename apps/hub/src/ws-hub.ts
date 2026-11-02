@@ -9,6 +9,7 @@ import {
   isBotConfig,
   isSafeId,
   serializeRpcMessage,
+  type SubagentRunRecord,
 } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
 import type { AuthManager } from './auth.js';
@@ -25,6 +26,21 @@ export interface GroupRouterDelegate {
   ): Promise<void>;
   getActiveBotId(sessionId: string): string | undefined;
   isBotActiveInSession?(sessionId: string, botId: string): boolean;
+  canRunBot(sessionId: string, botId: string): boolean;
+  handleNativeSubagentStreamEvent(
+    sessionId: string,
+    parentBotId: string,
+    subEvent: {
+      id: string;
+      subagentId: string;
+      task: string;
+      status: 'running' | 'done' | 'error';
+      result?: string;
+      error?: string;
+      durationMs?: number;
+      toolUses?: number;
+    }
+  ): SubagentRunRecord | undefined;
   onNodeOnline?(nodeId: string): void;
   requestHumanInput?(input: {
     sessionId: string;
@@ -207,7 +223,10 @@ export class NodeConnectionManager {
           return;
         }
 
-        const isMember = session.memberBotIds.includes(event.botId) || session.leadBotId === event.botId;
+        const isMember =
+          session.memberBotIds.includes(event.botId) ||
+          session.leadBotId === event.botId ||
+          Boolean(this.router?.canRunBot(event.sessionId, event.botId));
         if (!isMember) {
           return;
         }
@@ -239,6 +258,10 @@ export class NodeConnectionManager {
             status: event.toolStatus,
             summary: event.toolSummary,
           });
+        }
+
+        if (event.subagentEvent && this.router) {
+          this.router.handleNativeSubagentStreamEvent(event.sessionId, event.botId, event.subagentEvent);
         }
       },
 

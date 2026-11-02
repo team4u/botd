@@ -162,7 +162,10 @@ test('Fix 2 & 4 — D3: multi-user message stores clean content and structured s
   const userA = ctx.adminUser;
   const { user: userB, cookie: userBCookie } = await ctx.createUser('alice_user', 'alice-pass');
 
-  ctx.registerNodeWithBots(userA.id, 'node_main', [{ id: 'lead_bot', visibility: 'team' }]);
+  ctx.registerNodeWithBots(userA.id, 'node_main', [
+    { id: 'lead_bot', visibility: 'team' },
+    { id: 'worker_bot', visibility: 'team', parentBotId: 'lead_bot' },
+  ]);
 
   const runTurnCalls: any[] = [];
   ctx.mockRpcs.set('node_main', {
@@ -181,7 +184,7 @@ test('Fix 2 & 4 — D3: multi-user message stores clean content and structured s
     title: 'Multi User Collab Session',
     mode: 'lead',
     leadBotId: 'lead_bot',
-    memberBotIds: ['lead_bot'],
+    memberBotIds: ['lead_bot', 'worker_bot'],
   }, ctx.adminCookie);
   assert.equal(sessionRes.status, 200);
   const session: SessionRecord = sessionRes.json;

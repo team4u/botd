@@ -6,11 +6,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { ToolDefinition, AgentSession } from '@earendil-works/pi-coding-agent';
 import type { BirpcReturn } from 'birpc';
-import type { HubRpcFunctions, NodeRpcFunctions, BotConfig, ToolCallRecord, TurnUsage } from '@botd/protocol';
+import type { HubRpcFunctions, NodeRpcFunctions, BotConfig, ToolCallRecord, TurnUsage, SubagentRunRecord } from '@botd/protocol';
 import {
   assertSafeId,
   ensureDir,
   getBotDir,
+  getBotWorkspaceDir,
   readBot,
   readBotEnv,
   readSkill,
@@ -260,6 +261,7 @@ export async function executeBotTurn(
   modelBadge: string;
   toolCalls?: ToolCallRecord[];
   usage?: TurnUsage;
+  subagentRuns?: SubagentRunRecord[];
 }> {
   assertSafeId(bot.id, 'Bot ID');
   assertSafeId(input.sessionId, 'Session ID');
@@ -274,8 +276,12 @@ export async function executeBotTurn(
   runKeyToDataDir.set(runKey, dataDir);
   cancelledRuns.delete(runKey);
 
+  const activeSubagentIds = new Set<string>();
+  const subagentRunsMap = new Map<string, SubagentRunRecord>();
+
   let session: AgentSession | null = null;
   let unsubscribe: (() => void) | null = null;
+  let unsubSubagentEvents: (() => void) | undefined;
 
   try {
     const { piAgent, piAiCompat, commandsMod, webCommandUiMod } = await loadTurnDeps();
@@ -290,8 +296,24 @@ export async function executeBotTurn(
     const { collectBotCommands, loadBotResources } = commandsMod;
     const { guardExtensionCommands } = webCommandUiMod;
 
+    let parentBotData: Awaited<ReturnType<typeof readBot>> = null;
+    if (bot.parentBotId) {
+      parentBotData = await readBot(dataDir, bot.parentBotId);
+    }
+    const parentBotConfig = (parentBotData as any)?.config ?? parentBotData?.bot;
+
+    const effectiveBot: BotConfig = {
+      ...bot,
+      modelProvider: bot.inheritModel && parentBotConfig ? parentBotConfig.modelProvider : bot.modelProvider,
+      modelId: bot.inheritModel && parentBotConfig ? parentBotConfig.modelId : bot.modelId,
+      enabledSkills:
+        bot.inheritSkills && parentBotConfig ? [...parentBotConfig.enabledSkills] : bot.enabledSkills || [],
+    };
+
     const botDir = getBotDir(dataDir, bot.id);
-    const workspaceDir = path.join(botDir, 'workspace');
+    const workspaceDir = bot.parentBotId
+      ? getBotWorkspaceDir(dataDir, bot.parentBotId)
+      : path.join(botDir, 'workspace');
     const sessionDir = path.join(botDir, 'sessions');
     const sessionFile = path.join(sessionDir, `${input.sessionId}.jsonl`);
 
@@ -378,39 +400,41 @@ export async function executeBotTurn(
 
     // 2. Setup isolated ModelRuntime under .agent and configure provider auth.
     //    Extension-registered providers (e.g. magpie gateway) activate on demand.
-    const modelRuntime = await createRuntimeForProvider(dataDir, bot.modelProvider);
-    await configureProviderAuth(modelRuntime, bot.modelProvider);
+    const modelRuntime = await createRuntimeForProvider(dataDir, effectiveBot.modelProvider);
+    await configureProviderAuth(modelRuntime, effectiveBot.modelProvider);
 
     // 3. Resolve model
     let model: ReturnType<typeof getModel> | undefined =
-      modelRuntime.getModel(bot.modelProvider, bot.modelId) ??
-      getModel(bot.modelProvider as any, bot.modelId as any);
+      modelRuntime.getModel(effectiveBot.modelProvider, effectiveBot.modelId) ??
+      getModel(effectiveBot.modelProvider as any, effectiveBot.modelId as any);
 
     // Extension-provider models may never have been catalogued (fresh install,
     // never opened the catalog page): fetch that provider's catalog once and retry.
-    if (!model && modelRuntime.getProvider(bot.modelProvider)) {
+    if (!model && modelRuntime.getProvider(effectiveBot.modelProvider)) {
       try {
         await modelRuntime.refresh({
           allowNetwork: true,
-          providers: [bot.modelProvider],
+          providers: [effectiveBot.modelProvider],
           force: false,
           signal: AbortSignal.timeout(8_000),
         });
       } catch {
         // Network failure falls through to the not-found error below
       }
-      model = modelRuntime.getModel(bot.modelProvider, bot.modelId);
+      model = modelRuntime.getModel(effectiveBot.modelProvider, effectiveBot.modelId);
     }
 
     if (!model) {
-      throw new Error(`Model not found in catalog: ${bot.modelProvider}/${bot.modelId}`);
+      throw new Error(`Model not found in catalog: ${effectiveBot.modelProvider}/${effectiveBot.modelId}`);
     }
 
     // 5. Read bot files and enabled skills
     const botData = await readBot(dataDir, bot.id);
     const systemMd = botData?.systemMd || '';
     const memoryMd = botData?.memoryMd || '';
-    const botEnv = await readBotEnv(dataDir, bot.id);
+    const subagentEnv = await readBotEnv(dataDir, bot.id);
+    const parentEnv = bot.parentBotId ? await readBotEnv(dataDir, bot.parentBotId) : {};
+    const botEnv = { ...parentEnv, ...subagentEnv };
     const botEnvKeys = Object.keys(botEnv);
 
     // Enabled skills are advertised natively by Pi (name + description + path in the
@@ -428,15 +452,24 @@ export async function executeBotTurn(
 
     // Use the same Pi resource configuration as command discovery.
     const settingsManager = SettingsManager.inMemory({
-      defaultProvider: bot.modelProvider,
-      defaultModel: bot.modelId,
+      defaultProvider: effectiveBot.modelProvider,
+      defaultModel: effectiveBot.modelId,
       compaction: { enabled: process.env.BOTD_AUTO_COMPACT !== '0' },
     });
-    const resourceLoader = await loadBotResources(dataDir, bot, settingsManager, () =>
-      [
-        `[系统上下文提醒]\n当前 Session ID: ${input.sessionId} | 当前 BOT: @${bot.id}\n- 如需通过后台脚本异步唤醒当前会话，请执行命令:\n  \`botd wake --session ${input.sessionId} --bot ${bot.id} --message "状态说明"\``,
-        input.groupContextPrompt,
-        attachmentNotice,
+    // 主 BOT 挂载 pi-subagents 底座：获得 Agent / SubagentWorkflow 工具，可调度 .pi/agents/ 下的角色分身。
+    // 分身（parentBotId 已设置）不挂载，防套娃；扩展内部另有 inChildSessionContext 防重入双保险。
+    const resourceLoader = await loadBotResources(
+      dataDir,
+      effectiveBot,
+      settingsManager,
+      () =>
+        [
+          `[系统上下文提醒]\n当前 Session ID: ${input.sessionId} | 当前 BOT: @${bot.id}\n- 如需通过后台脚本异步唤醒当前会话，请执行命令:\n  \`botd wake --session ${input.sessionId} --bot ${bot.id} --message "状态说明"\``,
+          input.groupContextPrompt,
+          attachmentNotice,
+        bot.toolScope === 'readonly'
+          ? `[工具权限说明]\n你当前处于只读分析模式（readonly），仅被允许使用读取与检索工具（read, grep, find, ls），严禁修改或写入任何文件。`
+          : '',
         input.commandText && input.incrementalMessages.trim()
           ? `[近期对话历史]\n${input.incrementalMessages}` : '',
         systemMd ? `[角色设定]\n${systemMd}` : '',
@@ -446,6 +479,7 @@ export async function executeBotTurn(
           : '',
         skillContents.length > 0 ? `[框架内置 Skills]\n\n${skillContents.join('\n\n')}` : '',
       ].filter(Boolean),
+      { enableSubagents: !bot.parentBotId },
     );
 
     // 8. Custom bash tool with per-turn env injection without mutating global process.env.
@@ -469,28 +503,31 @@ export async function executeBotTurn(
     });
     // Omit optional UI renderers to satisfy invariant ToolDefinition generic bounds
     const { renderCall: _rc, renderResult: _rr, ...headlessBashTool } = rawBashDef;
-    const customTools: ToolDefinition[] = [headlessBashTool as unknown as ToolDefinition];
+    const customTools: ToolDefinition[] = [];
+    if (bot.toolScope !== 'readonly') {
+      customTools.push(headlessBashTool as unknown as ToolDefinition);
 
-    // Windows: also expose the native PowerShell tool so the model can drive
-    // Windows-native workflows (registry, services, cmdlets) without bash.
-    if (isWin) {
-      try {
-        const rawPsDef = createPowerShellToolDefinition(workspaceDir, {
-          spawnHook: (ctx) => ({
-            ...ctx,
-            env: buildBotShellEnv(ctx.env, {
-              dataDir,
-              binDir,
-              sessionId: input.sessionId,
-              botId: bot.id,
-              botEnv,
+      // Windows: also expose the native PowerShell tool so the model can drive
+      // Windows-native workflows (registry, services, cmdlets) without bash.
+      if (isWin) {
+        try {
+          const rawPsDef = createPowerShellToolDefinition(workspaceDir, {
+            spawnHook: (ctx) => ({
+              ...ctx,
+              env: buildBotShellEnv(ctx.env, {
+                dataDir,
+                binDir,
+                sessionId: input.sessionId,
+                botId: bot.id,
+                botEnv,
+              }),
             }),
-          }),
-        });
-        const { renderCall: _prc, renderResult: _prr, ...headlessPsTool } = rawPsDef;
-        customTools.push(headlessPsTool as unknown as ToolDefinition);
-      } catch {
-        // PowerShell discovery failed (headless Windows core?) — bash remains.
+          });
+          const { renderCall: _prc, renderResult: _prr, ...headlessPsTool } = rawPsDef;
+          customTools.push(headlessPsTool as unknown as ToolDefinition);
+        } catch {
+          // PowerShell discovery failed (headless Windows core?) — bash remains.
+        }
       }
     }
 
@@ -501,16 +538,24 @@ export async function executeBotTurn(
       throw new Error('Turn was cancelled');
     }
 
+    let sessionTools: string[] | undefined;
+    if (bot.toolScope === 'readonly') {
+      sessionTools = ['read', 'grep', 'find', 'ls'];
+    } else if (bot.toolScope === 'custom' && bot.customTools?.length) {
+      sessionTools = bot.customTools;
+    }
+
     const created = await createAgentSession({
       cwd: workspaceDir,
       agentDir: botDir,
       model,
-      thinkingLevel: bot.thinkingLevel ?? 'medium',
+      thinkingLevel: effectiveBot.thinkingLevel ?? 'medium',
       modelRuntime,
       resourceLoader,
       customTools,
       sessionManager,
       settingsManager,
+      ...(sessionTools ? { tools: sessionTools } : {}),
     });
 
     session = created.session;
@@ -641,6 +686,67 @@ export async function executeBotTurn(
     if (extensionErrors.length) throw new Error(extensionErrors.join('\n'));
     if (cancelledRuns.has(runKey)) throw new Error('Turn was cancelled');
 
+    // pi-subagents 事件桥接：将分身生命周期事件（created/started/completed/failed）实时转发到 Hub，
+    // 供 Web 端 SubagentFleetCard 实时渲染分身协同进度。主 BOT 未挂载扩展时此处静默不生效。
+    unsubSubagentEvents = (() => {
+      try {
+        const eventBus = (resourceLoader as unknown as { eventBus?: { on: (channel: string, handler: (data: unknown) => void) => () => void } }).eventBus;
+        if (!eventBus) return undefined;
+        const handleLifecycle = (channel: string) => (data: unknown) => {
+          const d = data as {
+            id?: string; type?: string; description?: string; status?: string;
+            result?: string; error?: string; durationMs?: number; toolUses?: number;
+          };
+          if (!d || typeof d !== 'object' || !d.id) return;
+          const isDone = channel === 'subagents:completed' || channel === 'subagents:failed';
+          if (channel === 'subagents:created' || channel === 'subagents:started') {
+            activeSubagentIds.add(d.id);
+          } else if (isDone) {
+            activeSubagentIds.delete(d.id);
+          }
+
+          const prev = subagentRunsMap.get(d.id);
+          const status = isDone ? (channel === 'subagents:failed' ? 'error' : 'done') : 'running';
+          const subagentId = d.type || prev?.subagentId || 'agent';
+          const task = d.description || prev?.task || d.id;
+          const runRecord: SubagentRunRecord = {
+            id: d.id,
+            subagentId,
+            task,
+            status,
+            ...(typeof d.toolUses === 'number' ? { toolCount: d.toolUses } : {}),
+            ...(typeof d.durationMs === 'number' ? { durationMs: d.durationMs } : {}),
+            ...(isDone && (d.result || d.error) ? { replyPreview: String(d.result || d.error).slice(0, 200) } : {}),
+          };
+          subagentRunsMap.set(d.id, runRecord);
+
+          hubRpc.onSessionStream.asEvent({
+            sessionId: input.sessionId,
+            botId: bot.id,
+            toolName: `subagent:${subagentId}`,
+            toolStatus: isDone ? ('done' as const) : ('running' as const),
+            toolSummary: `${isDone ? (channel === 'subagents:failed' ? '[失败] ' : '[完成] ') : ''}${task}${isDone && d.durationMs ? ` · ${Math.round(d.durationMs / 1000)}s` : ''}`,
+            subagentEvent: {
+              id: d.id,
+              subagentId,
+              task,
+              status,
+              ...(d.result ? { result: d.result } : {}),
+              ...(d.error ? { error: d.error } : {}),
+              ...(typeof d.durationMs === 'number' ? { durationMs: d.durationMs } : {}),
+              ...(typeof d.toolUses === 'number' ? { toolUses: d.toolUses } : {}),
+            },
+          });
+        };
+        const unsubs = ['subagents:created', 'subagents:started', 'subagents:completed', 'subagents:failed'].map((ch) =>
+          eventBus.on(ch, handleLifecycle(ch)),
+        );
+        return () => unsubs.forEach((u) => u());
+      } catch {
+        return undefined;
+      }
+    })();
+
     guardExtensionCommands(resourceLoader, error => {
       if (!extensionErrors.includes(error.message)) extensionErrors.push(error.message);
     });
@@ -686,6 +792,27 @@ export async function executeBotTurn(
       }
     }
     await session.waitForIdle();
+
+    const getGlobalSubagentManager = () =>
+      (globalThis as any)[Symbol.for('pi-subagents:manager')] as
+        | { hasRunning?: () => boolean; waitForAll?: () => Promise<void> }
+        | undefined;
+    const drainDeadline = Date.now() + 120_000;
+    let drainedBackground = false;
+    while (
+      !cancelledRuns.has(runKey) &&
+      Date.now() < drainDeadline &&
+      (activeSubagentIds.size > 0 || Boolean(getGlobalSubagentManager()?.hasRunning?.()))
+    ) {
+      drainedBackground = true;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (drainedBackground && !cancelledRuns.has(runKey)) {
+      // Wait briefly for CompletionOutbox (500ms hold) to deliver follow-up turn into session
+      await new Promise((r) => setTimeout(r, 600));
+      await session.waitForIdle();
+    }
+
     if (extensionErrors.length) throw new Error(extensionErrors.join('\n'));
     if (cancelledRuns.has(runKey)) throw new Error('Turn was cancelled');
 
@@ -763,13 +890,17 @@ export async function executeBotTurn(
 
     return {
       replyText,
-      modelBadge: `${bot.modelProvider}/${bot.modelId}`,
+      modelBadge: `${effectiveBot.modelProvider}/${effectiveBot.modelId}`,
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
       ...(usage ? { usage } : {}),
+      ...(subagentRunsMap.size > 0 ? { subagentRuns: Array.from(subagentRunsMap.values()) } : {}),
     };
   } finally {
     if (unsubscribe) {
       unsubscribe();
+    }
+    if (unsubSubagentEvents) {
+      unsubSubagentEvents();
     }
     pendingRuns.delete(runKey);
     activeSessions.delete(runKey);

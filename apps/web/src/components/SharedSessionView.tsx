@@ -51,10 +51,9 @@ const sameDay = (a: string, b: string): boolean => {
   );
 };
 
-function formatModeLabel(mode: SessionMode, parallel?: boolean): string {
+function formatModeLabel(mode: SessionMode): string {
   if (mode === 'direct') return '单聊';
-  if (mode === 'lead') return '负责人群聊';
-  if (mode === 'roundtable') return parallel ? '圆桌盲评' : '圆桌讨论';
+  if (mode === 'lead') return '群聊';
   return mode;
 }
 
@@ -181,7 +180,7 @@ export const SharedSessionView: React.FC<SharedSessionViewProps> = ({ token }) =
 
               {/* 模式标签 */}
               <span className="shrink-0 px-2 py-0.5 rounded-md text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 border border-zinc-200/60 dark:border-zinc-700/60">
-                {formatModeLabel(session.mode, session.parallelRoundtable)}
+                {formatModeLabel(session.mode)}
               </span>
 
               {/* 只读分享回放标识 */}
@@ -264,6 +263,7 @@ export const SharedSessionView: React.FC<SharedSessionViewProps> = ({ token }) =
                   botMap={botMap}
                   nodeMap={emptyNodeMap}
                   canEdit={false}
+                  memberRoles={session.memberRoles}
                 />
               </React.Fragment>
             ))

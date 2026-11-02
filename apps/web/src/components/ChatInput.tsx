@@ -15,7 +15,7 @@ import {
   Paperclip,
   FileText,
 } from 'lucide-react';
-import type { BotConfig, NodeRecord, ChatCommand, MessageRecord, MessageAttachment } from '@botd/protocol';
+import type { BotConfig, NodeRecord, ChatCommand, MessageRecord, MessageAttachment, SessionMode } from '@botd/protocol';
 import { api } from '../api';
 import { formatFileSize } from './MessageItem';
 import {
@@ -37,6 +37,8 @@ interface ChatInputProps {
   sessionId?: string;
   leadBotId?: string;
   botMap?: Map<string, BotConfig>;
+  sessionMode?: SessionMode;
+  isSubagentSession?: boolean;
   disabled?: boolean;
   isRunning?: boolean;
   cancelling?: boolean;
@@ -82,6 +84,19 @@ export function parseSlashTrigger(textBefore: string): ParsedSlashTrigger | null
   };
 }
 
+const BUILTIN_SESSION_COMMANDS: ChatCommand[] = [
+  {
+    name: 'new',
+    description: '开启新话题（归档当前话题并开始新对话）',
+    source: 'builtin',
+  },
+  {
+    name: 'compact',
+    description: '压缩当前会话上下文以降低 Token 水位',
+    source: 'builtin',
+  },
+];
+
 export const ChatInput: React.FC<ChatInputProps> = ({
   onSendMessage,
   memberBots,
@@ -89,6 +104,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   sessionId,
   leadBotId,
   botMap,
+  sessionMode,
+  isSubagentSession = false,
   disabled = false,
   isRunning = false,
   cancelling = false,
@@ -160,16 +177,69 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     );
   }, [memberBots, mentionQuery]);
 
+  const allCommands = useMemo(() => {
+    const existingNames = new Set(commands.map((c) => c.name));
+    const builtins = BUILTIN_SESSION_COMMANDS.filter((b) => !existingNames.has(b.name));
+    return [...builtins, ...commands];
+  }, [commands]);
+
   // 过滤斜杠命令（统一搜索 skill/prompt/extension 的 name 与 description）
   const filteredCommands = useMemo(() => {
-    if (!slashQuery) return commands;
+    if (!slashQuery) return allCommands;
     const q = slashQuery.toLowerCase();
-    return commands.filter((cmd) => {
+    return allCommands.filter((cmd) => {
       const nameMatch = cmd.name.toLowerCase().includes(q);
       const descMatch = cmd.description ? cmd.description.toLowerCase().includes(q) : false;
       return nameMatch || descMatch;
     });
-  }, [commands, slashQuery]);
+  }, [allCommands, slashQuery]);
+
+  // 快捷协作胶囊栏（群聊且非编辑态且成员数>=2时展示）
+  const showWorkflowPills =
+    sessionMode !== 'direct' &&
+    !editingMessage &&
+    memberBots.length >= 2;
+
+  const { relayPillText, refinePillText, whisperPillText } = useMemo(() => {
+    const nonLeads = memberBots.filter((b) => b.id !== leadBotId);
+    const nonLead0 = nonLeads[0]?.id || memberBots[0]?.id;
+    const nonLead1 =
+      nonLeads[1]?.id ||
+      (memberBots[1]?.id !== nonLead0 ? memberBots[1]?.id : memberBots[0]?.id);
+    const lead = leadBotId || memberBots[memberBots.length - 1]?.id;
+
+    if (nonLeads.length >= 2) {
+      return {
+        relayPillText: `@${nonLead0} -> @${nonLead1} -> @${lead} `,
+        refinePillText: `@${nonLead0} <-> @${nonLead1} -> @${lead} `,
+        whisperPillText: `@${nonLead0} >> @${nonLead1} `,
+      };
+    } else if (nonLeads.length === 1 && lead && lead !== nonLead0) {
+      return {
+        relayPillText: `@${nonLead0} -> @${lead} `,
+        refinePillText: `@${nonLead0} <-> @${lead} `,
+        whisperPillText: `@${nonLead0} >> @${lead} `,
+      };
+    } else {
+      const b0 = memberBots[0]?.id;
+      const b1 = memberBots[1]?.id;
+      return {
+        relayPillText: `@${b0} -> @${b1} `,
+        refinePillText: `@${b0} <-> @${b1} `,
+        whisperPillText: `@${b0} >> @${b1} `,
+      };
+    }
+  }, [memberBots, leadBotId]);
+
+  const handleInsertWorkflowPill = (prefix: string) => {
+    setContent((prev) => {
+      if (prev.startsWith(prefix)) return prev;
+      return `${prefix}${prev}`;
+    });
+    setTimeout(() => {
+      textareaRef.current?.focus();
+    }, 10);
+  };
 
   // 按目标 BOT 加载命令目录（具备防竞态与异常重试）
   const fetchCommands = useCallback(async (botId: string) => {
@@ -397,9 +467,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     // 未命中斜杠命令，关闭斜杠浮层
     setShowSlashMenu(false);
 
-    // 2. 检测 @ 提及触发
+    // 2. 检测 @ 提及触发（分身/子代理会话中禁止继续 @ 其他智能体）
     const mentionMatch = /(?:^|\s)@([a-zA-Z0-9_-]*)$/.exec(textBefore);
-    if (mentionMatch && memberBots.length > 0) {
+    if (!isSubagentSession && mentionMatch && memberBots.length > 0) {
       const matchIndex = mentionMatch.index + (mentionMatch[0].startsWith('@') ? 0 : 1);
       setMentionQuery(mentionMatch[1]);
       setMentionPosition({ start: matchIndex, end: cursor });
@@ -408,7 +478,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     } else {
       setShowMentions(false);
     }
-  }, [leadBotId, botMap, memberBots, showSlashMenu, fetchCommands]);
+  }, [leadBotId, botMap, memberBots, showSlashMenu, fetchCommands, isSubagentSession]);
 
   const insertMention = (bot: BotConfig) => {
     const el = textareaRef.current;
@@ -819,6 +889,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             扩展
           </span>
         );
+      case 'builtin':
+        return (
+          <span className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800/60 text-zinc-600 dark:text-zinc-400 border border-zinc-200/50 dark:border-zinc-700/50">
+            命令
+          </span>
+        );
       default:
         return null;
     }
@@ -955,7 +1031,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                   </button>
                 )}
               </div>
-            ) : commands.length === 0 ? (
+            ) : allCommands.length === 0 ? (
               <div className="p-4 text-xs text-center text-zinc-400 dark:text-zinc-500">
                 当前智能体暂无可调用的命令
               </div>
@@ -1080,6 +1156,44 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
       {/* 现代悬浮胶囊输入框 */}
       <div className="max-w-4xl mx-auto">
+        {/* 快捷协作胶囊栏 (Workflow Quick Pills) */}
+        {showWorkflowPills && (
+          <div className="flex items-center gap-1.5 mb-1.5 overflow-x-auto no-scrollbar py-0.5">
+            <button
+              type="button"
+              onClick={() => handleInsertWorkflowPill('@all ')}
+              className="h-6 px-2 text-[11px] font-medium bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-md transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1 shrink-0"
+              title="插入各自盲评编排 (@all )"
+            >
+              <span>💡 各自盲评</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleInsertWorkflowPill(relayPillText)}
+              className="h-6 px-2 text-[11px] font-medium bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-md transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1 shrink-0"
+              title={`插入顺序接力 (${relayPillText})`}
+            >
+              <span>🔗 顺序接力</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleInsertWorkflowPill(refinePillText)}
+              className="h-6 px-2 text-[11px] font-medium bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-md transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1 shrink-0"
+              title={`插入交叉打磨 (${refinePillText})`}
+            >
+              <span>⚖️ 交叉打磨</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleInsertWorkflowPill(whisperPillText)}
+              className="h-6 px-2 text-[11px] font-medium bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-md transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1 shrink-0"
+              title={`插入耳语协商 (${whisperPillText})`}
+            >
+              <span>🤫 耳语协商</span>
+            </button>
+          </div>
+        )}
+
         {/* 待发送附件芯片：图片显示缩略图，文件显示文件名与体积，可逐个移除 */}
         {(pendingAttachments.length > 0 || uploadingFile) && (
           <div className="flex flex-wrap gap-1.5 mb-1.5 px-1">

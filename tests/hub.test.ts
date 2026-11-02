@@ -296,19 +296,22 @@ test('lead routing, cross-node @relay, public incremental context and SSE', asyn
   assert.equal(calls.at(-1)!.incrementalMessages.includes('Investigate the issue'), false);
 });
 
-test('roundtable order and bounded recursive @relay', async t => {
+test('lead mode order with workflow directive and bounded recursive @relay', async t => {
   const f = await fixture(t);
   const calls: string[] = [];
   let relay = false;
   await f.addNode(['lead', 'a', 'b'], async input => {
     calls.push(input.botId);
-    return { replyText: relay ? `next @${input.botId === 'a' ? 'b' : 'a'}` : 'A final conclusion.', modelBadge: 'test/model' };
+    if (input.botId === 'lead' && !relay) {
+      return { replyText: 'Lead dispatching -> @a -> @b', modelBadge: 'test/model' };
+    }
+    return { replyText: relay ? `next @${input.botId === 'a' ? 'b' : 'a'}` : 'A conclusion.', modelBadge: 'test/model' };
   });
-  const session = await f.session(['lead', 'a', 'b'], 'roundtable');
+  const session = await f.session(['lead', 'a', 'b'], 'lead');
   await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: 'Discuss' });
   await waitFor(() => f.messages(session.id), list => list.filter(m => m.role === 'assistant').length === 3);
   await f.idle(session.id);
-  assert.deepEqual(calls, ['a', 'b', 'lead']);
+  assert.deepEqual(calls, ['lead', 'a', 'b']);
   relay = true;
   await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: '@a relay' });
   await waitFor(() => f.messages(session.id), list => list.filter(m => m.role === 'assistant').length >= 5);
@@ -706,8 +709,8 @@ test('command routing, execution and path compatibility', async t => {
   assert.equal(calls[0].commandText, undefined);
   assert(calls[0].incrementalMessages.includes('/tmp/report.md please inspect'));
 
-  // 6. Roundtable mode: slash command only routes to lead (no broadcast)
-  const rtSession = await f.session(['lead', 'coder', 'reviewer'], 'roundtable');
+  // 6. Lead mode: slash command only routes to lead (no broadcast)
+  const rtSession = await f.session(['lead', 'coder', 'reviewer'], 'lead');
   calls.length = 0;
   await f.json(`/api/sessions/${rtSession.id}/messages`, 'POST', { content: '/skill:calc 2 + 2' });
   await f.idle(rtSession.id);
@@ -715,14 +718,12 @@ test('command routing, execution and path compatibility', async t => {
   assert.equal(calls[0].botId, 'lead');
   assert.equal(calls[0].commandText, '/skill:calc 2 + 2');
 
-  // 7. Normal messages have no regression in roundtable mode (members then lead)
+  // 7. Normal messages in lead mode route to lead only
   calls.length = 0;
-  await f.json(`/api/sessions/${rtSession.id}/messages`, 'POST', { content: 'Roundtable discussion topic' });
+  await f.json(`/api/sessions/${rtSession.id}/messages`, 'POST', { content: 'Lead discussion topic' });
   await f.idle(rtSession.id);
-  assert.equal(calls.length, 3);
-  assert.equal(calls[0].botId, 'coder');
-  assert.equal(calls[1].botId, 'reviewer');
-  assert.equal(calls[2].botId, 'lead');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].botId, 'lead');
   assert.equal(calls[0].commandText, undefined);
 });
 

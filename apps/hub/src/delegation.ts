@@ -12,7 +12,7 @@ import type { GroupRouter } from './group-router.js';
 import type { SseHub } from './sse.js';
 import { resolveOwnedSession } from './http-helpers.js';
 
-const VALID_MODES = new Set<SessionMode>(['direct', 'lead', 'roundtable']);
+const VALID_MODES = new Set<SessionMode>(['direct', 'lead']);
 
 export function registerDelegationRoutes(
   app: Hono<{ Variables: { user: UserRecord } }>,

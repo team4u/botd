@@ -109,11 +109,10 @@ test('Session share link: full lifecycle and authorization', async (t) => {
   const session = hub.db.createSession({
     id: 'sess_share_test',
     title: 'Distributed System Design Review',
-    mode: 'roundtable',
+    mode: 'lead',
     leadBotId: 'bot_lead',
     memberBotIds: ['bot_lead', 'bot_worker'],
     ownerId: adminUser.id,
-    parallelRoundtable: true,
   });
 
   // Upload an artifact into session
@@ -275,10 +274,9 @@ test('Session share link: full lifecycle and authorization', async (t) => {
   // Verify session metadata
   assert.equal(snapshot.session.id, session.id);
   assert.equal(snapshot.session.title, 'Distributed System Design Review');
-  assert.equal(snapshot.session.mode, 'roundtable');
+  assert.equal(snapshot.session.mode, 'lead');
   assert.equal(snapshot.session.leadBotId, 'bot_lead');
   assert.deepEqual(snapshot.session.memberBotIds, ['bot_lead', 'bot_worker']);
-  assert.equal(snapshot.session.parallelRoundtable, true);
 
   // Verify bot summaries (sensitive fields like prompt / env stripped)
   assert.equal(snapshot.bots.length, 2);

@@ -262,14 +262,14 @@ test('Sub-Session Delegation: 自定义标题与模式，多个子会话按 crea
   // 第二个子会话（指定 memberBotIds 与 mode）
   const sub2 = await jsonRequest(`/api/sessions/${parentSession.id}/delegate`, 'POST', {
     botId: botWorker2,
-    title: '自定义子任务二（圆桌）',
-    mode: 'roundtable',
+    title: '自定义子任务二（群聊）',
+    mode: 'lead',
     memberBotIds: [botWorker1, botWorker2],
     prompt: 'Prompt 2',
   }, adminCookie);
   assert.equal(sub2.status, 201);
-  assert.equal(sub2.json.childSession.title, '自定义子任务二（圆桌）');
-  assert.equal(sub2.json.childSession.mode, 'roundtable');
+  assert.equal(sub2.json.childSession.title, '自定义子任务二（群聊）');
+  assert.equal(sub2.json.childSession.mode, 'lead');
   assert.deepEqual(sub2.json.childSession.memberBotIds.sort(), [botWorker1, botWorker2].sort());
 
   // 验证 subsessions 包含两个且顺序正确

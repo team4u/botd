@@ -22,6 +22,8 @@ import type {
   NodeRecord,
   ToolCallRecord,
   MessageAttachment,
+  SubagentColor,
+  SubagentRunRecord,
 } from '@botd/protocol';
 import { Markdown } from './Markdown';
 import { copyText } from '../utils/clipboard';
@@ -58,10 +60,248 @@ function formatMessageTime(createdAt: string): string {
 /**
  * 辅助函数：格式化工具调用耗时，<1s 以毫秒展示，否则保留一位小数秒
  */
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
 }
+
+export const subagentColorStyles: Record<
+  SubagentColor,
+  {
+    bg: string;
+    border: string;
+    text: string;
+    darkBg: string;
+    darkBorder: string;
+    darkText: string;
+    badge: string;
+    iconBg: string;
+  }
+> = {
+  blue: {
+    bg: 'bg-blue-50',
+    border: 'border-blue-200/70',
+    text: 'text-blue-700',
+    darkBg: 'dark:bg-blue-950/40',
+    darkBorder: 'dark:border-blue-900/60',
+    darkText: 'dark:text-blue-300',
+    badge: 'bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border-blue-200/60 dark:border-blue-800/60',
+    iconBg: 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-200 dark:border-blue-800',
+  },
+  purple: {
+    bg: 'bg-purple-50',
+    border: 'border-purple-200/70',
+    text: 'text-purple-700',
+    darkBg: 'dark:bg-purple-950/40',
+    darkBorder: 'dark:border-purple-900/60',
+    darkText: 'dark:text-purple-300',
+    badge: 'bg-purple-50 dark:bg-purple-950/50 text-purple-700 dark:text-purple-300 border-purple-200/60 dark:border-purple-800/60',
+    iconBg: 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-200 dark:border-purple-800',
+  },
+  red: {
+    bg: 'bg-red-50',
+    border: 'border-red-200/70',
+    text: 'text-red-700',
+    darkBg: 'dark:bg-red-950/40',
+    darkBorder: 'dark:border-red-900/60',
+    darkText: 'dark:text-red-300',
+    badge: 'bg-red-50 dark:bg-red-950/50 text-red-700 dark:text-red-300 border-red-200/60 dark:border-red-800/60',
+    iconBg: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-200 dark:border-red-800',
+  },
+  emerald: {
+    bg: 'bg-emerald-50',
+    border: 'border-emerald-200/70',
+    text: 'text-emerald-700',
+    darkBg: 'dark:bg-emerald-950/40',
+    darkBorder: 'dark:border-emerald-900/60',
+    darkText: 'dark:text-emerald-300',
+    badge: 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border-emerald-200/60 dark:border-emerald-800/60',
+    iconBg: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800',
+  },
+  amber: {
+    bg: 'bg-amber-50',
+    border: 'border-amber-200/70',
+    text: 'text-amber-700',
+    darkBg: 'dark:bg-amber-950/40',
+    darkBorder: 'dark:border-amber-900/60',
+    darkText: 'dark:text-amber-300',
+    badge: 'bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border-amber-200/60 dark:border-amber-800/60',
+    iconBg: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800',
+  },
+  cyan: {
+    bg: 'bg-cyan-50',
+    border: 'border-cyan-200/70',
+    text: 'text-cyan-700',
+    darkBg: 'dark:bg-cyan-950/40',
+    darkBorder: 'dark:border-cyan-900/60',
+    darkText: 'dark:text-cyan-300',
+    badge: 'bg-cyan-50 dark:bg-cyan-950/50 text-cyan-700 dark:text-cyan-300 border-cyan-200/60 dark:border-cyan-800/60',
+    iconBg: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-200 dark:border-cyan-800',
+  },
+  pink: {
+    bg: 'bg-pink-50',
+    border: 'border-pink-200/70',
+    text: 'text-pink-700',
+    darkBg: 'dark:bg-pink-950/40',
+    darkBorder: 'dark:border-pink-900/60',
+    darkText: 'dark:text-pink-300',
+    badge: 'bg-pink-50 dark:bg-pink-950/50 text-pink-700 dark:text-pink-300 border-pink-200/60 dark:border-pink-800/60',
+    iconBg: 'bg-pink-500/10 text-pink-600 dark:text-pink-400 border-pink-200 dark:border-pink-800',
+  },
+  indigo: {
+    bg: 'bg-indigo-50',
+    border: 'border-indigo-200/70',
+    text: 'text-indigo-700',
+    darkBg: 'dark:bg-indigo-950/40',
+    darkBorder: 'dark:border-indigo-900/60',
+    darkText: 'dark:text-indigo-300',
+    badge: 'bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border-indigo-200/60 dark:border-indigo-800/60',
+    iconBg: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-800',
+  },
+};
+
+/**
+ * 协作排期卡片展示组件
+ */
+export const OrchestrationPlanCard: React.FC<{ plan: string }> = ({ plan }) => {
+  const steps = plan.split(/\s*(?:->|──▸)\s*/).filter(Boolean);
+
+  return (
+    <div className="my-1.5 p-2 bg-indigo-50/50 dark:bg-indigo-950/30 border border-indigo-200/60 dark:border-indigo-900/50 rounded-lg text-xs max-w-xl">
+      <div className="flex items-center gap-1.5 text-indigo-900 dark:text-indigo-200 font-medium mb-1">
+        <span>📋</span>
+        <span>协作排期</span>
+      </div>
+      <div className="flex items-center gap-1.5 flex-wrap font-mono text-[11px] text-indigo-700 dark:text-indigo-300">
+        {steps.map((step, idx) => (
+          <React.Fragment key={idx}>
+            {idx > 0 && <span className="text-indigo-400 dark:text-indigo-500">──▸</span>}
+            <span className="px-1.5 py-0.5 bg-white dark:bg-zinc-900 border border-indigo-200/80 dark:border-indigo-800 rounded">
+              {step}
+            </span>
+          </React.Fragment>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+/**
+ * 分身协同执行面板组件（支持折叠/展开与独立会话跳转）
+ */
+export const SubagentRunsPanel: React.FC<{ runs: SubagentRunRecord[] }> = ({ runs }) => {
+  const hasRunning = runs.some((r) => r.status === 'running');
+  const [expanded, setExpanded] = useState(hasRunning);
+
+  React.useEffect(() => {
+    if (hasRunning) {
+      setExpanded(true);
+    }
+  }, [hasRunning]);
+
+  if (!runs || runs.length === 0) return null;
+
+  const names = runs.map((r) => r.subagentName || `@${r.subagentId}`).join(', ');
+
+  return (
+    <div className="my-1.5 max-w-2xl">
+      {!expanded ? (
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-zinc-50 hover:bg-zinc-100 dark:bg-zinc-900 dark:hover:bg-zinc-800 border border-zinc-200/80 dark:border-zinc-800 rounded-lg text-xs text-zinc-600 dark:text-zinc-300 transition-colors cursor-pointer"
+        >
+          <span className="text-amber-500 font-semibold">⚡</span>
+          <span>已协同 {runs.length} 个分身完成 ({names})</span>
+          <ChevronRight className="w-3.5 h-3.5 text-zinc-400 ml-0.5" />
+        </button>
+      ) : (
+        <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/60 p-2.5 text-xs space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 font-medium text-zinc-800 dark:text-zinc-200">
+              <span className="text-amber-500 font-semibold">⚡</span>
+              <span>分身协同执行轨迹 ({runs.length})</span>
+            </div>
+            {!hasRunning && (
+              <button
+                type="button"
+                onClick={() => setExpanded(false)}
+                className="text-[11px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 cursor-pointer"
+              >
+                收起
+              </button>
+            )}
+          </div>
+          <div className="space-y-1.5">
+            {runs.map((run) => {
+              let statusIcon = (
+                <CircleCheck className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+              );
+              if (run.status === 'running') {
+                statusIcon = (
+                  <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin-fast shrink-0" />
+                );
+              } else if (run.status === 'error') {
+                statusIcon = (
+                  <CircleAlert className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                );
+              } else if (run.status === 'skipped') {
+                statusIcon = (
+                  <span className="text-[11px] text-zinc-400 shrink-0">⏭️</span>
+                );
+              }
+
+              return (
+                <div
+                  key={run.id}
+                  className="p-2 rounded-md bg-white dark:bg-zinc-950 border border-zinc-200/70 dark:border-zinc-800/80 space-y-1"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      {statusIcon}
+                      <span className="px-1.5 py-0.5 rounded text-[11px] font-medium border bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700">
+                        {run.subagentName || `@${run.subagentId}`}
+                      </span>
+                      {run.phase && (
+                        <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                          [{run.phase}]
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0 text-[11px] text-zinc-400">
+                      {typeof run.durationMs === 'number' && (
+                        <span className="font-mono">{formatDuration(run.durationMs)}</span>
+                      )}
+                      {run.childSessionId && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            window.location.hash = `#?s=${run.childSessionId}`;
+                          }}
+                          className="text-blue-600 dark:text-blue-400 hover:underline font-medium cursor-pointer"
+                        >
+                          查看实时对话 →
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="text-[11px] text-zinc-700 dark:text-zinc-300 truncate">
+                    {run.task}
+                  </div>
+                  {run.replyPreview && (
+                    <div className="text-[11px] text-zinc-500 dark:text-zinc-400 line-clamp-2 bg-zinc-50 dark:bg-zinc-900/50 p-1.5 rounded">
+                      {run.replyPreview}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
 /**
  * 辅助函数：格式化附件体积（KB/MB），供消息附件与输入框附件芯片共用
@@ -361,6 +601,8 @@ interface MessageItemProps {
   message: MessageRecord;
   botMap: Map<string, BotConfig>;
   nodeMap: Map<string, NodeRecord>;
+  /** 会话成员的本群角色字典（botId -> roleName） */
+  memberRoles?: Record<string, string>;
   /** 是否允许编辑（运行中的会话禁止，与后端 409 拦截对齐） */
   canEdit?: boolean;
   /** 该消息是否为止在编辑的目标（编辑由底部 ChatInput 承载） */
@@ -375,6 +617,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   message,
   botMap,
   nodeMap,
+  memberRoles,
   canEdit = true,
   isEditing = false,
   onStartEdit,
@@ -450,6 +693,32 @@ export const MessageItem: React.FC<MessageItemProps> = ({
     );
   }
 
+  // [PASS] 智能体略过发言紧凑单行展示
+  const isPassMessage =
+    isAssistant &&
+    (message.content.trim() === '[PASS]' ||
+      (message.content.trim().startsWith('[PASS]') && message.content.trim().length < 40));
+
+  if (isPassMessage) {
+    return (
+      <div
+        data-message-id={message.id}
+        className="flex items-center justify-between px-3 sm:px-6 py-1 text-xs text-zinc-400 dark:text-zinc-500"
+      >
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="shrink-0">⏭️</span>
+          <span className="font-medium text-zinc-600 dark:text-zinc-400 truncate">
+            {bot?.name || (message.senderBotId ? '@' + message.senderBotId : '智能体')}
+          </span>
+          <span>已略过本轮发言</span>
+        </div>
+        <span className="text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0" title={fullTime}>
+          {formattedTime}
+        </span>
+      </div>
+    );
+  }
+
   // 唤醒回调事件：去中英混排，轻量卡片
   if (isCallback) {
     return (
@@ -493,6 +762,10 @@ export const MessageItem: React.FC<MessageItemProps> = ({
         </div>
         {/* 附件（图片缩略图 / 文件下载芯片），与气泡同宽右对齐展示 */}
         <MessageAttachments attachments={message.attachments || []} />
+        {/* 协作排期卡片 */}
+        {message.orchestrationPlan && (
+          <OrchestrationPlanCard plan={message.orchestrationPlan} />
+        )}
         <div className="flex items-center gap-0.5 mt-0.5 mr-1 select-none opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
           <span className="text-[11px] text-zinc-400 dark:text-zinc-500" title={fullTime}>
             {formattedTime}
@@ -518,11 +791,17 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   }
 
   // AI 助手消息（Assistant）：去独立头像列、去外框气泡，Markdown 正文平铺画布，释放移动端阅读空间
+  const roleTag = message.senderBotId && memberRoles ? memberRoles[message.senderBotId] : undefined;
+  const botIconClass =
+    bot?.color && subagentColorStyles[bot.color]
+      ? subagentColorStyles[bot.color].iconBg
+      : 'bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 border-blue-200/60 dark:border-blue-900/60';
+
   return (
     <div data-message-id={message.id} className="group px-3 sm:px-6 py-2.5 sm:py-3 hover:bg-zinc-50/50 dark:hover:bg-zinc-900/50 transition-colors">
       {/* 极简单行浅灰元数据 */}
       <div className="flex items-center gap-1.5 min-w-0 text-xs flex-wrap sm:flex-nowrap">
-        <div className="w-5 h-5 rounded-md bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 border border-blue-200/60 dark:border-blue-900/60 flex items-center justify-center shrink-0">
+        <div className={`w-5 h-5 rounded-md flex items-center justify-center shrink-0 border ${botIconClass}`}>
           <Bot className="w-3.5 h-3.5" />
         </div>
         <span
@@ -531,6 +810,16 @@ export const MessageItem: React.FC<MessageItemProps> = ({
         >
           {bot?.name || message.senderBotId}
         </span>
+        {roleTag && (
+          <span className="px-1.5 py-0.5 text-[11px] font-medium bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200/60 dark:border-indigo-800/60 rounded-md">
+            {roleTag}
+          </span>
+        )}
+        {message.whisperTargetBotIds && message.whisperTargetBotIds.length > 0 && (
+          <span className="px-1.5 py-0.5 text-[11px] font-medium bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200/60 dark:border-amber-800/60 rounded-md shrink-0">
+            🤫 耳语协商 ({message.whisperTargetBotIds.map((id) => '@' + id).join(' ⇄ ')})
+          </span>
+        )}
         {shortModel && (
           <>
             <span className="text-zinc-300 dark:text-zinc-600">·</span>
@@ -540,6 +829,16 @@ export const MessageItem: React.FC<MessageItemProps> = ({
           </>
         )}
       </div>
+
+      {/* 协作排期卡 */}
+      {message.orchestrationPlan && (
+        <OrchestrationPlanCard plan={message.orchestrationPlan} />
+      )}
+
+      {/* 分身协同面板 */}
+      {message.subagentRuns && message.subagentRuns.length > 0 && (
+        <SubagentRunsPanel runs={message.subagentRuns} />
+      )}
 
       {/* 可折叠工具执行轨迹：收起时仅单行摘要，展开后逐条展示名称/摘要/状态/耗时 */}
       <ToolCallsTrace toolCalls={isAssistant ? message.toolCalls || [] : []} />
@@ -578,7 +877,8 @@ function areMessageItemPropsEqual(prev: MessageItemProps, next: MessageItemProps
     prev.canEdit !== next.canEdit ||
     prev.isEditing !== next.isEditing ||
     prev.onStartEdit !== next.onStartEdit ||
-    prev.onForkMessage !== next.onForkMessage
+    prev.onForkMessage !== next.onForkMessage ||
+    prev.memberRoles !== next.memberRoles
   ) {
     return false;
   }
