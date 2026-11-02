@@ -42,6 +42,7 @@ import { BgJobsDrawer } from './BgJobsDrawer';
 import { ShareSessionModal } from './ShareSessionModal';
 import { BotHistoryDrawer } from './BotHistoryDrawer';
 import { SubagentRunDrawer } from './SubagentRunDrawer';
+import { SubSessionDrawer } from './SubSessionDrawer';
 import { BotEditorModal } from './BotEditorModal';
 import { api } from '../api';
 import { onGlobalEvent } from '../events';
@@ -267,6 +268,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   // ===== 子会话委派任务列表 =====
   const [subSessions, setSubSessions] = useState<SessionRecord[]>([]);
+  // 内联检视的子会话 ID：点击子任务药丸 / 消息内 #?s= 链接时打开右侧 SubSessionDrawer，不离开父会话
+  const [inspectingSubSessionId, setInspectingSubSessionId] = useState<string | null>(null);
+
+  const inspectingSubSession = useMemo(
+    () => subSessions.find((s) => s.id === inspectingSubSessionId) ?? null,
+    [subSessions, inspectingSubSessionId]
+  );
 
   const loadSubSessions = useCallback(async () => {
     const capturedSessionId = session.id;
@@ -341,6 +349,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setBgJobs([]);
     setSelectedBgJobId(null);
     setSubSessions([]);
+    setInspectingSubSessionId(null);
     lastSubCallbackMsgRef.current = '';
     prevMessagesLengthRef.current = messages.length;
   }, [session.id]);
@@ -586,8 +595,32 @@ export const ChatView: React.FC<ChatViewProps> = ({
         ? [session.activeBotId]
         : [];
 
+  // 拦截消息正文内指向子会话的 #?s=sess_... 链接：目标是本会话的子任务时就地打开检视抽屉，
+  // 不跳转离开父会话；按住修饰键（新标签/窗口）时放行浏览器默认行为
+  const subSessionIds = useMemo(
+    () => new Set(subSessions.map((s) => s.id)),
+    [subSessions]
+  );
+  const handleRootClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      const anchor = target?.closest?.('a[href]') as HTMLAnchorElement | null;
+      if (!anchor) return;
+      const match = anchor.getAttribute('href')?.match(/^#\?s=(sess_[a-zA-Z0-9_-]+)$/);
+      if (!match) return;
+      if (!subSessionIds.has(match[1])) return;
+      e.preventDefault();
+      setInspectingSubSessionId(match[1]);
+    },
+    [subSessionIds]
+  );
+
   return (
-    <div className="flex-1 flex flex-col h-full bg-white dark:bg-zinc-950 overflow-hidden">
+    <div
+      className="flex-1 flex flex-col h-full bg-white dark:bg-zinc-950 overflow-hidden"
+      onClick={handleRootClick}
+    >
       {/* 极简顶栏（h-13 sm:h-14，删掉参会胶囊火车与停止按钮） */}
       <header className="h-13 sm:h-14 px-3 sm:px-4 bg-white dark:bg-zinc-950 border-b border-zinc-200/80 dark:border-zinc-800/80 flex items-center justify-between shrink-0 z-10">
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
@@ -901,7 +934,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   key={sub.id}
                   type="button"
                   onClick={() => {
-                    window.location.hash = `#?s=${sub.id}`;
+                    setInspectingSubSessionId(sub.id);
                   }}
                   className="inline-flex items-center gap-1.5 h-7 px-2.5 bg-white dark:bg-zinc-800 border border-zinc-200/90 dark:border-zinc-700/80 rounded-lg text-xs hover:border-blue-400 dark:hover:border-blue-500 hover:bg-blue-50/40 dark:hover:bg-blue-950/30 transition-colors shrink-0 cursor-pointer text-left max-w-[220px]"
                   title={`${sub.title} (@${sub.leadBotId})`}
@@ -1264,6 +1297,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
         botMap={botMap}
         nodeMap={nodeMap}
         onClose={() => onInspectSubagentRun?.(null)}
+        onToast={(type, message) => onAddToast?.(type, message)}
+      />
+
+      {/* 跨 BOT 子会话内联检视抽屉：不离开父会话就地查看/插话子任务 */}
+      <SubSessionDrawer
+        isOpen={Boolean(inspectingSubSession)}
+        subSession={inspectingSubSession}
+        botMap={botMap}
+        nodeMap={nodeMap}
+        onClose={() => setInspectingSubSessionId(null)}
+        onOpenFullSession={(sid) => {
+          setInspectingSubSessionId(null);
+          window.location.hash = `#?s=${sid}`;
+        }}
         onToast={(type, message) => onAddToast?.(type, message)}
       />
     </div>
