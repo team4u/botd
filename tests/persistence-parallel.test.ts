@@ -201,7 +201,7 @@ test('db.savePendingAsk / getPendingAsksForSession 持久化、状态更新与�
   assert.equal(db2.getPendingAsksForSession('sess_test').length, 0, 'deleteSession 应同步清理 pending_asks 行');
 });
 
-test('parallelRoundtable: true 会话执行时，session_status SSE 事件携带完整 activeBotIds 数组与动态收敛', async (t: TestContext) => {
+test('并行工作流执行时，session_status SSE 事件携带完整 activeBotIds 数组与动态收敛', async (t: TestContext) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-parallel-sse-'));
   const dbPath = path.join(dir, 'hub.sqlite');
 
@@ -328,15 +328,13 @@ test('parallelRoundtable: true 会话执行时，session_status SSE 事件携带
     extensions: [],
   });
 
-  // 创建圆桌并发盲评会话
+  // 创建并行工作流会话
   const session = await json<SessionRecord>('/api/sessions', 'POST', {
-    title: 'Parallel Blind Roundtable Session',
-    mode: 'roundtable',
+    title: 'Parallel Workflow Session',
+    mode: 'lead',
     leadBotId: 'lead-judge',
     memberBotIds: ['lead-judge', 'agent-reviewer-1', 'agent-reviewer-2'],
-    parallelRoundtable: true,
   });
-  assert.equal(session.parallelRoundtable, true);
 
   // 监听会话 SSE 事件流
   const sseEvents: SessionSseEvent[] = [];
@@ -374,7 +372,7 @@ test('parallelRoundtable: true 会话执行时，session_status SSE 事件携带
 
   // 发送触发消息
   await json(`/api/sessions/${session.id}/messages`, 'POST', {
-    content: 'Start parallel evaluation now',
+    content: '(@agent-reviewer-1 @agent-reviewer-2) -> @lead-judge Start parallel evaluation now',
   });
 
   // 等待两位评审员同时处于活跃推理中

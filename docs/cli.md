@@ -157,7 +157,7 @@ Bot 环境变量供工具使用，不负责选择模型供应商凭据。共享 
 ```text
 sessions list
 sessions create --title <title> --lead <botId>
-                [--mode direct|lead|roundtable] [--member <ids...>]
+                [--mode direct|lead] [--member <ids...>]
 sessions update <sessionId> [--title <title>] [--lead <botId>]
                 [--mode <mode>] [--member <ids...>] [--archive <boolean>]
 sessions messages <sessionId>
@@ -169,7 +169,7 @@ sessions edit <sessionId> <messageId> [words...]
 sessions fork <sessionId> --anchor <messageId>
 sessions share <sessionId> [--revoke] [--regenerate]
 sessions delegate <parentSessionId> --bot <botId> --prompt <text>
-                  [--title <title>] [--mode direct|lead|roundtable]
+                  [--title <title>] [--mode direct|lead]
 sessions subsessions <parentSessionId>
 chat send <sessionId> <message...> [--wait [seconds]]
 chat watch <sessionId> [--duration <seconds>]

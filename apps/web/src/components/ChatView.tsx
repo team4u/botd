@@ -32,9 +32,16 @@ import type {
   MessageAttachment,
   PendingAskRecord,
   BgJobRecord,
+  CreateSessionInput,
+  SubagentRunRecord,
 } from '@botd/protocol';
 import type { StreamingAssistantState } from '../types';
-import { MemoizedMessageItem, formatShortModel } from './MessageItem';
+import {
+  MemoizedMessageItem,
+  formatShortModel,
+  subagentColorStyles,
+  SubagentRunsPanel,
+} from './MessageItem';
 import { Markdown } from './Markdown';
 import { ChatInput } from './ChatInput';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -58,6 +65,8 @@ interface ChatViewProps {
   nodeMap: Map<string, NodeRecord>;
   /** 各 BOT 的流式状态；多个成员同时运行时并排展示。 */
   streamingStates: StreamingAssistantState[];
+  /** 各 BOT 当前活跃的分身协同执行轨迹 */
+  activeSubagentRuns?: Record<string, SubagentRunRecord[]>;
   onSendMessage: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
   onEditMessage: (sessionId: string, messageId: string, content: string) => Promise<void>;
   onCancelSession: () => Promise<void>;
@@ -76,6 +85,13 @@ interface ChatViewProps {
   onRespondToAsk?: (sessionId: string, askId: string, answer: string) => Promise<void>;
   /** 全局 toast 通知（供弹窗内部使用） */
   onAddToast?: (type: ToastItem['type'], message: string) => void;
+  /** 更新会话配置（如黑板/头衔） */
+  onUpdateSession?: (
+    sessionId: string,
+    input: Partial<CreateSessionInput> & { memberRoles?: Record<string, string>; blackboard?: string }
+  ) => Promise<void>;
+  /** 跳转/打开指定智能体的单聊 */
+  onOpenBotChat?: (bot: BotConfig) => void;
   /** 是否还有更早的历史消息可加载（App 负责分页） */
   hasEarlierMessages?: boolean;
   /** 正在加载更早消息 */
@@ -99,6 +115,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   botMap,
   nodeMap,
   streamingStates,
+  activeSubagentRuns = {},
   onSendMessage,
   onEditMessage,
   onCancelSession,
@@ -113,6 +130,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   pendingAsks = [],
   onRespondToAsk,
   onAddToast,
+  onUpdateSession,
+  onOpenBotChat,
   hasEarlierMessages = false,
   loadingEarlier = false,
   onLoadEarlier,
@@ -121,6 +140,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
   const keyboardInset = useKeyboardInset();
+
+  // 📌 群备忘录面板展开与编辑状态
+  const [blackboardOpen, setBlackboardOpen] = useState(false);
+  const [blackboardEditing, setBlackboardEditing] = useState(false);
+  const [blackboardDraft, setBlackboardDraft] = useState('');
+  const [savingBlackboard, setSavingBlackboard] = useState(false);
+
+  // 临时点名下拉菜单状态
+  const [appendDropdownOpen, setAppendDropdownOpen] = useState(false);
+  const appendDropdownRef = useRef<HTMLDivElement>(null);
 
   // 本会话参会成员（提前声明：蓝点探测/SSE/群设置等多处使用）
   // useMemo 稳定引用：下游 memberNodeIds/fetchBgJobs 等依赖链才不会每次 render 失稳
@@ -456,7 +485,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setConfirmAction(null);
     setEditingMessage(null);
     setTriggersOpen(false);
+    setBlackboardOpen(false);
+    setBlackboardEditing(false);
+    setAppendDropdownOpen(false);
   }, [session.id]);
+
+  // 临时点名菜单展开时：点击外部关闭
+  useEffect(() => {
+    if (!appendDropdownOpen) return;
+    const handlePointerDown = (e: MouseEvent) => {
+      if (appendDropdownRef.current && !appendDropdownRef.current.contains(e.target as Node)) {
+        setAppendDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+    };
+  }, [appendDropdownOpen]);
 
   // 菜单展开时：点击外部或 ESC 关闭
   useEffect(() => {
@@ -560,7 +606,55 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setEditingMessage(null);
   };
 
-  // 单个流式 BOT 输出块（并发盲评网格内复用，风格与 MessageItem Assistant 一致）
+  // 分身智能体（Subagent）单聊主控归属检测
+  const leadBot = botMap.get(session.leadBotId);
+  const isSubagentDirect = session.mode === 'direct' && Boolean(leadBot?.parentBotId);
+  const parentBotId = leadBot?.parentBotId;
+  const subagentColorStyle =
+    leadBot?.color && subagentColorStyles[leadBot.color]
+      ? subagentColorStyles[leadBot.color]
+      : subagentColorStyles.indigo;
+
+  const handleReturnToParentBot = () => {
+    if (session.parentSessionId) {
+      window.location.hash = `#?s=${session.parentSessionId}`;
+      return;
+    }
+    if (!parentBotId) return;
+    const parentBot = botMap.get(parentBotId);
+    if (parentBot && onOpenBotChat) {
+      onOpenBotChat(parentBot);
+    }
+  };
+
+  // 队列阶段控制
+  const handleSkipStage = async (stageId: string, botId?: string) => {
+    try {
+      await api.skipQueueStage(session.id, { stageId, botId });
+    } catch (err: any) {
+      onAddToast?.('error', err?.message || '跳过阶段失败');
+    }
+  };
+
+  const handleAppendStage = async (botId: string) => {
+    try {
+      setAppendDropdownOpen(false);
+      await api.appendQueueStage(session.id, `@${botId}`);
+    } catch (err: any) {
+      onAddToast?.('error', err?.message || '临时点名失败');
+    }
+  };
+
+  const hasQueuePlan = Boolean(session.queuePlan && session.queuePlan.length > 0);
+  const showQueueBar = (isRunning || hasQueuePlan) && (session.mode !== 'direct' || hasQueuePlan);
+  const activeBots =
+    session.activeBotIds && session.activeBotIds.length > 0
+      ? session.activeBotIds
+      : session.activeBotId
+        ? [session.activeBotId]
+        : [];
+
+  // 单个流式 BOT 输出块（并发网格内复用，风格与 MessageItem Assistant 一致）
   const renderStreamingBlock = (state: StreamingAssistantState) => {
     const bot = botMap.get(state.botId);
     const node = bot ? nodeMap.get(bot.nodeId) : undefined;
@@ -607,6 +701,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
             <span>正在输出...</span>
           </span>
         </div>
+
+        {/* 分身协同运行中轨迹 */}
+        {activeSubagentRuns?.[state.botId] && activeSubagentRuns[state.botId].length > 0 && (
+          <SubagentRunsPanel runs={activeSubagentRuns[state.botId]} />
+        )}
 
         {/* 类似 Claude / Cursor 的紧凑工具状态列表 */}
         {state.tools.length > 0 && (
@@ -726,14 +825,33 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <span className="text-[11px] font-normal px-1.5 py-0.5 bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 rounded-md shrink-0">
                 单聊
               </span>
-            ) : session.mode === 'lead' ? (
+            ) : (
               <span className="text-[11px] font-normal px-1.5 py-0.5 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200/60 dark:border-amber-900/60 rounded-md shrink-0">
                 主持模式
               </span>
-            ) : (
-              <span className="text-[11px] font-normal px-1.5 py-0.5 bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border border-purple-200/60 dark:border-purple-900/60 rounded-md shrink-0">
-                圆桌模式
-              </span>
+            )}
+
+            {/* 分身单聊标识与返回主控入口 */}
+            {isSubagentDirect && parentBotId && (
+              <>
+                <span
+                  className={`text-[11px] font-medium px-1.5 py-0.5 rounded-md border ${subagentColorStyle.badge} shrink-0`}
+                  title={`分身智能体，隶属于主控 @${parentBotId}`}
+                >
+                  分身 · 隶属 @{parentBotId}
+                </span>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleReturnToParentBot();
+                  }}
+                  className="inline-flex items-center gap-1 h-6 px-2 text-[11px] font-medium bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-md transition-colors cursor-pointer shrink-0"
+                  title={`返回主控 @${parentBotId} 的会话`}
+                >
+                  ← 返回主控
+                </button>
+              </>
             )}
 
             {/* 群聊成员数微标 */}
@@ -761,6 +879,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </button>
           )}
 
+          {/* 开启新话题 */}
           <button
             onClick={() => void onNewTopic(session.id)}
             className="p-2 rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
@@ -769,6 +888,35 @@ export const ChatView: React.FC<ChatViewProps> = ({
           >
             <MessageSquarePlus className="w-4 h-4" />
           </button>
+
+          {/* 📌 群备忘录入口（群聊可见） */}
+          {session.mode !== 'direct' && (
+            <button
+              type="button"
+              onClick={() => {
+                setBlackboardOpen((v) => !v);
+                if (!blackboardOpen) {
+                  setBlackboardDraft(session.blackboard || '');
+                  setBlackboardEditing(false);
+                }
+              }}
+              className={`h-8 px-2.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 ${
+                blackboardOpen
+                  ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800'
+                  : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+              }`}
+              title="群备忘录 / 共享黑板"
+              aria-label="群备忘录"
+            >
+              <span>📌 群备忘录</span>
+              {Boolean(session.blackboard?.trim()) && (
+                <span
+                  className="w-1.5 h-1.5 rounded-full bg-indigo-500 shrink-0"
+                  aria-hidden="true"
+                />
+              )}
+            </button>
+          )}
 
           {/* 会话产物抽屉入口：新产物未查看时右上角红点 */}
           <div className="relative">
@@ -941,6 +1089,93 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       </header>
 
+      {/* 📌 群聊备忘录 (Shared Blackboard) 折叠面板 */}
+      {blackboardOpen && session.mode !== 'direct' && (
+        <div className="mx-3 sm:mx-4 mt-2 px-3 py-2 bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200/80 dark:border-indigo-900/60 rounded-lg text-xs shrink-0 animate-in fade-in">
+          <div className="flex items-center justify-between gap-2 mb-1.5">
+            <div className="flex items-center gap-1.5 text-indigo-900 dark:text-indigo-200 font-medium">
+              <span>📌</span>
+              <span>群聊备忘录 (Shared Blackboard)</span>
+              <span className="text-[11px] text-indigo-600/70 dark:text-indigo-400/70 font-normal">
+                置顶注入上下文的共识与约束
+              </span>
+            </div>
+            <div className="flex items-center gap-1">
+              {!blackboardEditing ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBlackboardDraft(session.blackboard || '');
+                    setBlackboardEditing(true);
+                  }}
+                  className="h-6 px-2 text-[11px] font-medium rounded-md text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 transition-colors cursor-pointer"
+                >
+                  编辑
+                </button>
+              ) : (
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    disabled={savingBlackboard}
+                    onClick={async () => {
+                      setSavingBlackboard(true);
+                      try {
+                        await onUpdateSession?.(session.id, { blackboard: blackboardDraft });
+                        setBlackboardEditing(false);
+                      } catch {
+                        // error handled by onUpdateSession toast
+                      } finally {
+                        setSavingBlackboard(false);
+                      }
+                    }}
+                    className="h-6 px-2 text-[11px] font-medium rounded-md bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors cursor-pointer flex items-center gap-1"
+                  >
+                    {savingBlackboard ? <Loader2 className="w-3 h-3 animate-spin-fast" /> : null}
+                    <span>保存</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={savingBlackboard}
+                    onClick={() => setBlackboardEditing(false)}
+                    className="h-6 px-2 text-[11px] font-medium rounded-md text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                  >
+                    取消
+                  </button>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => setBlackboardOpen(false)}
+                className="p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 rounded-md transition-colors cursor-pointer"
+                aria-label="关闭备忘录"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {blackboardEditing ? (
+            <textarea
+              value={blackboardDraft}
+              onChange={(e) => setBlackboardDraft(e.target.value)}
+              placeholder="记录本群长期共识、全局约定、当前阶段目标（将作为系统提示注入后续各 BOT 上下文）..."
+              rows={3}
+              className="w-full p-2.5 text-xs rounded-lg border border-indigo-200 dark:border-indigo-800 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-y leading-relaxed"
+            />
+          ) : (
+            <div className="text-zinc-700 dark:text-zinc-300 leading-relaxed break-words whitespace-pre-wrap max-h-48 overflow-y-auto">
+              {session.blackboard?.trim() ? (
+                session.blackboard
+              ) : (
+                <span className="text-zinc-400 dark:text-zinc-500 italic">
+                  暂未记录备忘录。点击右上角「编辑」添加群共识与约束。
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 子任务委派状态条 */}
       {subSessions.length > 0 && (
         <div className="mx-3 sm:mx-4 mt-2.5 px-3 py-1.5 bg-zinc-50/80 dark:bg-zinc-900/60 border border-zinc-200/80 dark:border-zinc-800/80 rounded-lg flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300 shrink-0 overflow-x-auto">
@@ -1108,6 +1343,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   message={msg}
                   botMap={botMap}
                   nodeMap={nodeMap}
+                  memberRoles={session.memberRoles}
                   canEdit={canEdit}
                   isEditing={editingMessage?.id === msg.id}
                   onStartEdit={startEdit}
@@ -1116,13 +1352,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </div>
             ))}
 
-            {/* 多 BOT 并发流式（并行盲评）：网格并排展示，互不覆盖；单 BOT 保持平铺风格 */}
+            {/* 多 BOT 并发流式：网格并排展示，互不覆盖；单 BOT 保持平铺风格 */}
             {isParallelStreaming ? (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 px-3 sm:px-6 my-2">
-                <div className="col-span-full flex items-center justify-center gap-1.5 py-1.5 px-3 bg-purple-50/80 dark:bg-purple-950/40 border border-purple-200/70 dark:border-purple-900/60 rounded-full w-fit mx-auto">
-                  <Hourglass className="w-3.5 h-3.5 text-purple-500 dark:text-purple-400 shrink-0" />
-                  <span className="text-[11px] font-medium text-purple-700 dark:text-purple-300">
-                    圆桌并发盲评进行中 ({effectiveStreamingStates.length} 位智能体同步思考中...)
+                <div className="col-span-full flex items-center justify-center gap-1.5 py-1.5 px-3 bg-amber-50/80 dark:bg-amber-950/40 border border-amber-200/70 dark:border-amber-900/60 rounded-full w-fit mx-auto">
+                  <Hourglass className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400 shrink-0" />
+                  <span className="text-[11px] font-medium text-amber-700 dark:text-amber-300">
+                    多智能体并发执行中 ({effectiveStreamingStates.length} 位智能体同步处理中...)
                   </span>
                 </div>
                 {effectiveStreamingStates.map((state) => renderStreamingBlock(state))}
@@ -1226,11 +1462,95 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       )}
 
+      {/* 实时接力进度条 (Live Workflow Queue Bar) */}
+      {showQueueBar && (
+        <div className="px-3 sm:px-4 pt-1.5 max-w-4xl w-full mx-auto">
+          <div className="px-3 py-1.5 bg-zinc-50/90 dark:bg-zinc-900/80 border border-zinc-200/80 dark:border-zinc-800/80 rounded-lg text-xs flex items-center justify-between gap-2 shadow-2xs">
+            {/* 左侧：当前活跃 + 队列阶段 */}
+            <div className="flex items-center gap-1.5 min-w-0 overflow-x-auto no-scrollbar py-0.5">
+              {activeBots.length > 0 && (
+                <span className="inline-flex items-center gap-1 font-medium text-emerald-600 dark:text-emerald-400 shrink-0 font-mono text-[11px]">
+                  <span>🟢 正在执行:</span>
+                  <span>{activeBots.map((id) => `@${id}`).join(', ')}</span>
+                </span>
+              )}
+
+              {session.queuePlan && session.queuePlan.length > 0 && (
+                <>
+                  {activeBots.length > 0 && (
+                    <span className="text-zinc-300 dark:text-zinc-600 shrink-0">──▸</span>
+                  )}
+                  {session.queuePlan.map((stage, idx) => {
+                    const stageLabel = stage.parallel
+                      ? `(@${stage.botIds.join(', @')})`
+                      : `@${stage.botIds[0] || '?'}`;
+                    const loopPrefix = stage.loopGroupId ? '🔄 ' : '';
+                    const whisperPrefix = stage.whisper ? '🤫 ' : '';
+
+                    return (
+                      <React.Fragment key={stage.id || idx}>
+                        {idx > 0 && (
+                          <span className="text-zinc-300 dark:text-zinc-600 shrink-0">──▸</span>
+                        )}
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded text-[11px] text-zinc-700 dark:text-zinc-300 shrink-0 font-mono">
+                          <span>⏳ {loopPrefix}{whisperPrefix}{stageLabel}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleSkipStage(stage.id, stage.botIds[0])}
+                            className="ml-0.5 text-zinc-400 hover:text-rose-500 dark:hover:text-rose-400 font-sans cursor-pointer transition-colors"
+                            title="跳过此阶段"
+                          >
+                            × 跳过
+                          </button>
+                        </span>
+                      </React.Fragment>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+
+            {/* 右侧：临时点名 */}
+            <div className="relative shrink-0" ref={appendDropdownRef}>
+              <button
+                type="button"
+                onClick={() => setAppendDropdownOpen((v) => !v)}
+                className="h-6 px-2 text-[11px] font-medium rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 transition-colors flex items-center gap-1 cursor-pointer shrink-0"
+                title="向队列末尾追加指定智能体"
+              >
+                <span>+ 临时点名</span>
+              </button>
+
+              {appendDropdownOpen && (
+                <div className="absolute right-0 bottom-full mb-1.5 w-44 max-h-48 overflow-y-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg py-1 z-50 animate-in fade-in">
+                  <div className="px-2 py-1 text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
+                    点名成员追加接力
+                  </div>
+                  {memberBots.map((bot) => (
+                    <button
+                      key={bot.id}
+                      type="button"
+                      onClick={() => handleAppendStage(bot.id)}
+                      className="w-full text-left px-2.5 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-between text-zinc-700 dark:text-zinc-200 cursor-pointer"
+                    >
+                      <span className="truncate">{bot.name}</span>
+                      <span className="font-mono text-[11px] text-zinc-400">@{bot.id}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 底部输入框：将 isRunning, cancelling, onCancelSession 传给 ChatInput 实现发送/停止二合一；
           编辑态复用输入框（享受斜杠/提及补全、自动增高与 IME 处理） */}
       <ChatInput
         sessionId={session.id}
         leadBotId={session.leadBotId}
+        sessionMode={session.mode}
+        isSubagentSession={Boolean(session.mode === 'direct' && botMap.get(session.leadBotId)?.parentBotId)}
         botMap={botMap}
         onSendMessage={onSendMessage}
         memberBots={memberBots}

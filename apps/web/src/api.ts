@@ -419,6 +419,10 @@ export const api = {
     return request<SessionRecord[]>('/api/sessions');
   },
 
+  async listSessions(): Promise<SessionRecord[]> {
+    return request<SessionRecord[]>('/api/sessions');
+  },
+
   async createSession(input: CreateSessionInput): Promise<SessionRecord> {
     return request<SessionRecord>('/api/sessions', {
       method: 'POST',
@@ -437,10 +441,33 @@ export const api = {
     return request<SessionRecord[]>(`/api/sessions/${encodeURIComponent(sessionId)}/subsessions`);
   },
 
-  async updateSession(sessionId: string, input: Partial<CreateSessionInput>): Promise<SessionRecord> {
+  async updateSession(
+    sessionId: string,
+    input: Partial<CreateSessionInput> & { memberRoles?: Record<string, string>; blackboard?: string }
+  ): Promise<SessionRecord> {
     return request<SessionRecord>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
       method: 'PATCH',
       body: JSON.stringify(input),
+    });
+  },
+
+  async skipQueueStage(
+    sessionId: string,
+    payload: { stageId?: string; botId?: string }
+  ): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/queue/skip`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async appendQueueStage(
+    sessionId: string,
+    orchestration: string
+  ): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/queue/append`, {
+      method: 'POST',
+      body: JSON.stringify({ orchestration }),
     });
   },
 

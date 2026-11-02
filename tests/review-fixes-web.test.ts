@@ -72,7 +72,7 @@ test('2. pickCurrentDirectSession: 严格排除 parentSessionId 子会话与归�
   const groupSession: SessionRecord = {
     id: 'sess_group',
     title: '群聊',
-    mode: 'roundtable',
+    mode: 'lead',
     status: 'idle',
     leadBotId: 'bot_1',
     memberBotIds: ['bot_1', 'bot_2'],
@@ -116,7 +116,7 @@ test('3. GroupSettingsModal 模块加载冒烟与纯逻辑草稿测试', async (
   const session: SessionRecord = {
     id: 'sess_test',
     title: '测试群',
-    mode: 'roundtable',
+    mode: 'lead',
     status: 'idle',
     leadBotId: 'bot_a',
     memberBotIds: ['bot_a', 'bot_b'],

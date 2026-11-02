@@ -288,6 +288,7 @@ test('全量 7 档 ThinkingLevel 在节点 registerNode 与 HTTP /api/bots 中�
   const postRes = await f.json<BotConfig>('/api/bots', 'POST', {
     id: 'bot_http_max',
     nodeId: identity.nodeId,
+    parentBotId: 'bot_off',
     name: 'HTTP Max Bot',
     description: 'Created via HTTP with max thinking level',
     modelProvider: 'openai',
@@ -604,20 +605,19 @@ test('GroupRouter 串/并行统一管线的回合执行与错误隔离验证', a
     }
   );
 
-  // --- Part 4A: 并行盲评模式 (parallelRoundtable: true) ---
+  // --- Part 4A: 并行工作流模式 (@a @b) -> @lead ---
   failingBotId = 'member_a';
   deliveredIncremental.clear();
 
   const parallelSession = await f.json<SessionRecord>('/api/sessions', 'POST', {
     title: 'Parallel Blind Review Session',
-    mode: 'roundtable',
+    mode: 'lead',
     leadBotId: 'lead_bot',
     memberBotIds: ['lead_bot', 'member_a', 'member_b'],
-    parallelRoundtable: true,
   });
 
   await f.json(`/api/sessions/${parallelSession.id}/messages`, 'POST', {
-    content: 'User RFC proposal for blind evaluation',
+    content: '(@member_a @member_b) -> @lead_bot User RFC proposal for blind evaluation',
   });
 
   // 等待 lead_bot 汇总发言且会话重回 idle 状态
@@ -656,20 +656,19 @@ test('GroupRouter 串/并行统一管线的回合执行与错误隔离验证', a
   const finalParallelSess = (await f.json<SessionRecord[]>('/api/sessions')).find((s) => s.id === parallelSession.id);
   assert.equal(finalParallelSess?.status, 'idle', 'Parallel session must end in idle status');
 
-  // --- Part 4B: 串行圆桌模式 (parallelRoundtable: false) ---
+  // --- Part 4B: 串行流水线模式 @a -> @b -> @lead ---
   failingBotId = 'member_a';
   deliveredIncremental.clear();
 
   const serialSession = await f.json<SessionRecord>('/api/sessions', 'POST', {
     title: 'Serial Review Session',
-    mode: 'roundtable',
+    mode: 'lead',
     leadBotId: 'lead_bot',
     memberBotIds: ['lead_bot', 'member_a', 'member_b'],
-    parallelRoundtable: false,
   });
 
   await f.json(`/api/sessions/${serialSession.id}/messages`, 'POST', {
-    content: 'User RFC proposal for serial evaluation',
+    content: '@member_a -> @member_b -> @lead_bot User RFC proposal for serial evaluation',
   });
 
   // 串行模式下成员抛错，会话状态立即被置为 failed 并终止队列

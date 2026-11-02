@@ -18,6 +18,7 @@ import {
   Search,
   Lock,
   Users,
+  ShieldCheck,
 } from 'lucide-react';
 import { api } from '../api';
 import { SearchableSelect } from './SearchableSelect';
@@ -31,16 +32,48 @@ import type {
   ProviderCatalogEntry,
   ModelCatalogEntry,
   ThinkingLevel,
+  SubagentColor,
+  SubagentToolScope,
+  SubagentIsolation,
 } from '@botd/protocol';
 
-interface BotEditorModalProps {
+export interface BotEditorModalProps {
   isOpen: boolean;
   /** Owning node, fixed by the entry point — bots are created/edited in node context. */
   node: NodeWithBots | null;
   bot?: BotConfig | null;
+  parentBot?: BotConfig | null;
+  initialTab?: 'basic' | 'system' | 'memory';
   onClose: () => void;
   onSaved: () => void;
 }
+
+export interface ResolveBotEditorOpenStepParams {
+  isOpen: boolean;
+  wasOpen?: boolean;
+  bot?: BotConfig | null;
+  parentBot?: BotConfig | null;
+}
+
+export function resolveBotEditorOpenStep(params: ResolveBotEditorOpenStepParams) {
+  const isSubagent = Boolean(params.bot?.parentBotId || params.parentBot?.id);
+  const parentBotId = params.bot?.parentBotId || params.parentBot?.id;
+  return {
+    isSubagent,
+    parentBotId,
+  };
+}
+
+export const SUBAGENT_COLOR_OPTIONS: { id: SubagentColor; label: string; bg: string }[] = [
+  { id: 'blue', label: '蓝色', bg: 'bg-blue-500' },
+  { id: 'purple', label: '紫色', bg: 'bg-purple-500' },
+  { id: 'red', label: '红色', bg: 'bg-red-500' },
+  { id: 'emerald', label: '翡翠绿', bg: 'bg-emerald-500' },
+  { id: 'amber', label: '琥珀橙', bg: 'bg-amber-500' },
+  { id: 'cyan', label: '青色', bg: 'bg-cyan-500' },
+  { id: 'pink', label: '粉色', bg: 'bg-pink-500' },
+  { id: 'indigo', label: '靛蓝', bg: 'bg-indigo-500' },
+];
 
 const DEFAULT_SYSTEM_MD = `# 角色定位
 你是一个专业、严谨且遵循 UNIX 哲学的 AI 智能助手。
@@ -60,13 +93,17 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
   isOpen,
   node,
   bot,
+  parentBot,
+  initialTab,
   onClose,
   onSaved,
 }) => {
   const isEditing = Boolean(bot);
+  const isSubagent = Boolean(bot?.parentBotId || parentBot?.id);
+  const resolvedParentBotId = bot?.parentBotId || parentBot?.id || '';
 
   // Tabs
-  const [activeTab, setActiveTab] = useState<'basic' | 'system' | 'memory'>('basic');
+  const [activeTab, setActiveTab] = useState<'basic' | 'system' | 'memory'>(initialTab || 'basic');
 
   // Form fields (nodeId is fixed by the node-context entry, never edited here)
   const nodeId = node?.id ?? '';
@@ -83,6 +120,15 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
   const [visibility, setVisibility] = useState<'private' | 'team'>('private');
   const [systemMd, setSystemMd] = useState(DEFAULT_SYSTEM_MD);
   const [memoryMd, setMemoryMd] = useState('');
+
+  // Subagent-specific fields
+  const [color, setColor] = useState<SubagentColor>('blue');
+  const [inheritModel, setInheritModel] = useState<boolean>(true);
+  const [inheritSkills, setInheritSkills] = useState<boolean>(true);
+  const [toolScope, setToolScope] = useState<SubagentToolScope>('all');
+  const [customTools, setCustomTools] = useState<string[]>(['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write']);
+  const [isolation, setIsolation] = useState<SubagentIsolation>('off');
+
   // 技能搜索：实时过滤，已勾选技能始终可见
   const [skillSearch, setSkillSearch] = useState('');
 
@@ -169,7 +215,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
     let current = true;
     setError(null);
     setLoadFailed(false);
-    setActiveTab('basic');
+    setActiveTab(initialTab || 'basic');
 
     if (bot) {
       setId(bot.id);
@@ -183,6 +229,16 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       setVisibility(bot.visibility === 'team' ? 'team' : 'private');
       setIsCustomProvider(false);
       setCustomProviderInput('');
+      setColor(bot.color || 'blue');
+      setInheritModel(bot.inheritModel ?? Boolean(bot.parentBotId));
+      setInheritSkills(bot.inheritSkills ?? Boolean(bot.parentBotId));
+      setToolScope(bot.toolScope || 'all');
+      setCustomTools(
+        bot.customTools && bot.customTools.length > 0
+          ? bot.customTools
+          : ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write']
+      );
+      setIsolation(bot.isolation || 'off');
 
       // Load SYSTEM.md and MEMORY.md
       setLoadingFiles(true);
@@ -192,7 +248,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       setEnvPairs([]);
       setEnvLoaded(false);
       const envPromise =
-        node && node.status === 'online'
+        !bot.parentBotId && node && node.status === 'online'
           ? api
               .getBotEnv(bot.id)
               .then((res) => {
@@ -228,15 +284,34 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       setId('');
       setName('');
       setDescription('');
-      setModelProvider('');
-      setModelId('');
-      setThinkingLevel('medium');
+      if (parentBot) {
+        setModelProvider(parentBot.modelProvider || '');
+        setModelId(parentBot.modelId || '');
+        setThinkingLevel(parentBot.thinkingLevel || 'medium');
+        setColor('blue');
+        setInheritModel(true);
+        setInheritSkills(true);
+        setToolScope('all');
+        setCustomTools(['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write']);
+        setIsolation('off');
+        setSystemMd(`# 角色定位\n你是一个隶属于 @${parentBot.id} 的专业角色分身。\n\n## 职责与规范\n1. 专注于指派的子任务，结论清晰、要点明确。\n2. 遵循所属主 BOT 的工作规范与原则。\n`);
+      } else {
+        setModelProvider('');
+        setModelId('');
+        setThinkingLevel('medium');
+        setColor('blue');
+        setInheritModel(false);
+        setInheritSkills(false);
+        setToolScope('all');
+        setCustomTools(['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write']);
+        setIsolation('off');
+        setSystemMd(DEFAULT_SYSTEM_MD);
+      }
       setEnabledSkills([]);
       setEnabledExtensions([]);
       setVisibility('private');
       setIsCustomProvider(false);
       setCustomProviderInput('');
-      setSystemMd(DEFAULT_SYSTEM_MD);
       setMemoryMd('');
       setEnvPairs([]);
       setEnvLoaded(false);
@@ -247,7 +322,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
     return () => {
       current = false;
     };
-  }, [isOpen, bot?.id]);
+  }, [isOpen, bot?.id, parentBot?.id, initialTab]);
 
   // Providers list derived from catalog
   const catalogProviders: ProviderCatalogEntry[] = useMemo(() => {
@@ -411,9 +486,12 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       return;
     }
 
-    const effectiveProvider = isCustomProvider
-      ? customProviderInput.trim().toLowerCase()
-      : modelProvider.trim().toLowerCase();
+    const effectiveProvider =
+      isSubagent && inheritModel
+        ? (parentBot?.modelProvider || bot?.modelProvider || modelProvider || 'openai').trim().toLowerCase()
+        : isCustomProvider
+        ? customProviderInput.trim().toLowerCase()
+        : modelProvider.trim().toLowerCase();
 
     if (!effectiveProvider || !/^[a-zA-Z0-9_-]+$/.test(effectiveProvider)) {
       setError('请输入有效的模型服务商标识 (英文字母、数字、下划线及短横线)');
@@ -421,7 +499,11 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       return;
     }
 
-    const effectiveModel = modelId.trim();
+    const effectiveModel =
+      isSubagent && inheritModel
+        ? (parentBot?.modelId || bot?.modelId || modelId || 'gpt-4o').trim()
+        : modelId.trim();
+
     if (!effectiveModel) {
       setError('请输入或选择模型型号');
       setActiveTab('basic');
@@ -439,10 +521,21 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       modelProvider: effectiveProvider,
       modelId: effectiveModel,
       thinkingLevel: thinkingLevel || undefined,
-      enabledSkills,
+      enabledSkills: isSubagent && inheritSkills ? [] : enabledSkills,
       enabledExtensions,
       visibility,
       systemMd,
+      ...(isSubagent
+        ? {
+            parentBotId: resolvedParentBotId,
+            inheritModel,
+            inheritSkills,
+            color,
+            toolScope,
+            customTools: toolScope === 'custom' ? customTools : undefined,
+            isolation,
+          }
+        : {}),
     };
 
     try {
@@ -453,8 +546,8 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       }
       await api.saveBotMemory(botInput.id, memoryMd);
 
-      // Persist env vars (secrets): overwrite mode when there is content or env was loaded before
-      if (envPairs.length > 0 || (isEditing && envLoaded)) {
+      // Persist env vars (secrets): only for primary bots (not subagents)
+      if (!isSubagent && (envPairs.length > 0 || (isEditing && envLoaded))) {
         const envRecord: Record<string, string> = {};
         for (const pair of envPairs) {
           const cleanKey = pair.key.trim();
@@ -494,7 +587,13 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
             </div>
             <div>
               <h2 id="bot-editor-title" className="text-sm sm:text-base font-semibold text-zinc-900 dark:text-zinc-100">
-                {isEditing ? `编辑智能体: ${bot?.name} (@${bot?.id})` : '新建智能体'}
+                {isSubagent
+                  ? isEditing
+                    ? `编辑角色分身 · @${id}`
+                    : `新建角色分身 (隶属: ${parentBot?.name || resolvedParentBotId})`
+                  : isEditing
+                  ? `编辑智能体: ${bot?.name} (@${bot?.id})`
+                  : '新建智能体'}
               </h2>
               <p className="text-[11px] text-zinc-500 dark:text-zinc-400 font-mono truncate">
                 {node ? `${node.name} · ` : ''}~/.botd/bots/{id || '<唯一标识>'}/
@@ -576,6 +675,31 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
               {/* Tab 1: Basic Config */}
               {activeTab === 'basic' && (
                 <div className="space-y-4">
+                  {/* Subagent color picker */}
+                  {isSubagent && (
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
+                        徽标颜色
+                      </label>
+                      <div className="flex items-center gap-2">
+                        {SUBAGENT_COLOR_OPTIONS.map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => setColor(c.id)}
+                            title={c.label}
+                            aria-label={c.label}
+                            className={`w-5 h-5 rounded-full ${c.bg} transition-all cursor-pointer ${
+                              color === c.id
+                                ? 'ring-2 ring-offset-2 ring-zinc-900 dark:ring-zinc-100 ring-offset-white dark:ring-offset-zinc-950 scale-110'
+                                : 'opacity-60 hover:opacity-100 hover:scale-105'
+                            }`}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Owning node (fixed context) & Bot ID */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
@@ -707,6 +831,39 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                       )}
                     </div>
 
+                    {isSubagent && (
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setInheritModel(true)}
+                          className={`h-8 px-2.5 text-xs rounded-lg font-medium border flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                            inheritModel
+                              ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-transparent'
+                              : 'border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900'
+                          }`}
+                        >
+                          <span>✨ 跟随主 BOT 模型</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setInheritModel(false)}
+                          className={`h-8 px-2.5 text-xs rounded-lg font-medium border flex items-center justify-center transition-colors cursor-pointer ${
+                            !inheritModel
+                              ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-transparent'
+                              : 'border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900'
+                          }`}
+                        >
+                          <span>单独指定模型</span>
+                        </button>
+                      </div>
+                    )}
+
+                    {isSubagent && inheritModel ? (
+                      <div className="p-3 bg-white/70 dark:bg-zinc-950/70 border border-zinc-200 dark:border-zinc-800 rounded-xl text-xs text-zinc-600 dark:text-zinc-400">
+                        当前跟随主 BOT ({parentBot?.modelProvider || bot?.modelProvider || '—'}/{parentBot?.modelId || bot?.modelId || '—'})，无需重复配置
+                      </div>
+                    ) : (
+                      <>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {/* Provider Selector */}
                       <div className="space-y-1.5">
@@ -839,119 +996,287 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                         </div>
                       )}
                     </div>
+                      </>
+                    )}
                   </div>
+
+                  {/* Subagent Execution Boundary (Permissions & Workspace) */}
+                  {isSubagent && (
+                    <div className="p-3.5 sm:p-4 bg-zinc-50/70 dark:bg-zinc-900/70 border border-zinc-200/90 dark:border-zinc-800/90 rounded-2xl space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+                          <ShieldCheck className="w-3.5 h-3.5 text-zinc-700 dark:text-zinc-300" />
+                          <span>权限与工作区边界</span>
+                        </span>
+                      </div>
+
+                      {/* 工具权限 */}
+                      <div className="space-y-1.5">
+                        <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                          工具权限
+                        </label>
+                        <div className="grid grid-cols-3 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setToolScope('all')}
+                            className={`h-8 px-2 text-xs rounded-lg font-medium border flex items-center justify-center transition-colors cursor-pointer ${
+                              toolScope === 'all'
+                                ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-transparent'
+                                : 'border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900'
+                            }`}
+                          >
+                            全量读写
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setToolScope('readonly')}
+                            className={`h-8 px-2 text-xs rounded-lg font-medium border flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+                              toolScope === 'readonly'
+                                ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-transparent'
+                                : 'border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900'
+                            }`}
+                          >
+                            🔍 仅只读分析
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setToolScope('custom')}
+                            className={`h-8 px-2 text-xs rounded-lg font-medium border flex items-center justify-center transition-colors cursor-pointer ${
+                              toolScope === 'custom'
+                                ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-transparent'
+                                : 'border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900'
+                            }`}
+                          >
+                            自定义
+                          </button>
+                        </div>
+                        {toolScope === 'readonly' && (
+                          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                            禁止修改或写入文件，适合审稿/架构/顾问角色
+                          </p>
+                        )}
+                        {toolScope === 'custom' && (
+                          <div className="p-2.5 bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg space-y-2 mt-2">
+                            <span className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">勾选允许调用的工具：</span>
+                            <div className="flex flex-wrap gap-2.5">
+                              {['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write'].map((tool) => (
+                                <label key={tool} className="flex items-center gap-1.5 text-xs font-mono text-zinc-700 dark:text-zinc-300 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={customTools.includes(tool)}
+                                    onChange={(e) => {
+                                      if (e.target.checked) {
+                                        setCustomTools((prev) => [...prev, tool]);
+                                      } else {
+                                        setCustomTools((prev) => prev.filter((t) => t !== tool));
+                                      }
+                                    }}
+                                    className="rounded border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 focus:ring-zinc-900 w-3.5 h-3.5"
+                                  />
+                                  <span>{tool}</span>
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 并发隔离 */}
+                      <div className="space-y-1.5 pt-1">
+                        <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                          并发隔离
+                        </label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setIsolation('off')}
+                            className={`h-8 px-2 text-xs rounded-lg font-medium border flex items-center justify-center transition-colors cursor-pointer ${
+                              isolation === 'off'
+                                ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-transparent'
+                                : 'border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900'
+                            }`}
+                          >
+                            共享主工作区
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsolation('worktree')}
+                            className={`h-8 px-2 text-xs rounded-lg font-medium border flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+                              isolation === 'worktree'
+                                ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-transparent'
+                                : 'border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900'
+                            }`}
+                          >
+                            🌿 独立 Git 分支 (worktree)
+                          </button>
+                        </div>
+                        {isolation === 'worktree' && (
+                          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                            并发改代码时在独立分支运行，防文件冲突
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Enabled Skills (searchable) */}
                   <div>
-                    <div className="relative mb-1.5">
-                      <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 dark:text-zinc-500 pointer-events-none" />
-                      <input
-                        type="text"
-                        value={skillSearch}
-                        onChange={(e) => setSkillSearch(e.target.value)}
-                        placeholder="搜索技能…"
-                        aria-label="搜索技能"
-                        className="w-full h-8 pl-8 pr-7 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
-                      />
-                      {skillSearch && (
-                        <button
-                          type="button"
-                          onClick={() => setSkillSearch('')}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 text-xs p-0.5"
-                          aria-label="清空搜索"
-                        >
-                          ×
-                        </button>
-                      )}
-                    </div>
-                    <CheckList
-                      label={skillSearch.trim() ? `启用技能（已勾选始终显示）` : '启用技能'}
-                      variant="grid"
-                      countUnit="项"
-                      emptyText={
-                        skillSearch.trim()
-                          ? '未找到匹配的技能（已勾选的技能会始终显示）'
-                          : '当前节点暂无可用技能，可在节点卡片中添加。'
-                      }
-                      options={filteredSkills.map((skill) => ({ id: skill, data: skill }))}
-                      selected={enabledSkills}
-                      onChange={setEnabledSkills}
-                      renderItem={(skill) => <span className="font-mono truncate">{skill}</span>}
-                    />
+                    {isSubagent && (
+                      <div className="mb-2">
+                        <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                          技能配置
+                        </label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setInheritSkills(true)}
+                            className={`h-8 px-2 text-xs rounded-lg font-medium border flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+                              inheritSkills
+                                ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-transparent'
+                                : 'border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900'
+                            }`}
+                          >
+                            ✨ 继承主 BOT 全部技能
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setInheritSkills(false)}
+                            className={`h-8 px-2 text-xs rounded-lg font-medium border flex items-center justify-center transition-colors cursor-pointer ${
+                              !inheritSkills
+                                ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-transparent'
+                                : 'border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900'
+                            }`}
+                          >
+                            仅勾选专属技能
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {isSubagent && inheritSkills ? (
+                      <div className="p-3 bg-zinc-50/70 dark:bg-zinc-900/70 border border-zinc-200 dark:border-zinc-800 rounded-xl text-xs text-zinc-500 dark:text-zinc-400">
+                        当前设置继承主 BOT 的全部技能，运行子任务时自动共享主 BOT 技能库。
+                      </div>
+                    ) : (
+                      <>
+                        <div className="relative mb-1.5">
+                          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 dark:text-zinc-500 pointer-events-none" />
+                          <input
+                            type="text"
+                            value={skillSearch}
+                            onChange={(e) => setSkillSearch(e.target.value)}
+                            placeholder="搜索技能…"
+                            aria-label="搜索技能"
+                            className="w-full h-8 pl-8 pr-7 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
+                          />
+                          {skillSearch && (
+                            <button
+                              type="button"
+                              onClick={() => setSkillSearch('')}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 text-xs p-0.5"
+                              aria-label="清空搜索"
+                            >
+                              ×
+                            </button>
+                          )}
+                        </div>
+                        <CheckList
+                          label={skillSearch.trim() ? `启用技能（已勾选始终显示）` : '启用技能'}
+                          variant="grid"
+                          countUnit="项"
+                          emptyText={
+                            skillSearch.trim()
+                              ? '未找到匹配的技能（已勾选的技能会始终显示）'
+                              : '当前节点暂无可用技能，可在节点卡片中添加。'
+                          }
+                          options={filteredSkills.map((skill) => ({ id: skill, data: skill }))}
+                          selected={enabledSkills}
+                          onChange={setEnabledSkills}
+                          renderItem={(skill) => <span className="font-mono truncate">{skill}</span>}
+                        />
+                      </>
+                    )}
                   </div>
 
                   {/* Env (Secrets) editor */}
-                  <div className="p-3.5 sm:p-4 bg-zinc-50/70 dark:bg-zinc-900/70 border border-zinc-200/90 dark:border-zinc-800/90 rounded-2xl space-y-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
-                        <KeyRound className="w-3.5 h-3.5 text-zinc-700 dark:text-zinc-300" />
-                        <span>环境变量 (Secrets)</span>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={addEnvPair}
-                        className="h-7 px-2.5 text-xs font-medium rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center gap-1 transition-colors cursor-pointer"
-                      >
-                        <Plus className="w-3 h-3" />
-                        <span>添加变量</span>
-                      </button>
+                  {isSubagent ? (
+                    <div className="p-3.5 bg-zinc-50/70 dark:bg-zinc-900/70 border border-zinc-200/90 dark:border-zinc-800/90 rounded-2xl flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400">
+                      <KeyRound className="w-4 h-4 text-zinc-500 shrink-0" />
+                      <span>环境变量自动共享自所属主 BOT (@{resolvedParentBotId})</span>
                     </div>
-                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                      注入至 bash 子进程环境（0600 隔离存储），模型仅知晓变量名 $VAR，不会暴露明文到上下文
-                    </p>
-
-                    {envPairs.length === 0 ? (
-                      <p className="text-[11px] text-zinc-400 dark:text-zinc-500 bg-white/60 dark:bg-zinc-900/60 p-2 rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800">
-                        {isEditing && node?.status !== 'online'
-                          ? '节点离线时无法读取或保存环境变量，待节点上线后重试。'
-                          : '尚未配置环境变量，点击右上角「添加变量」新建。'}
+                  ) : (
+                    <div className="p-3.5 sm:p-4 bg-zinc-50/70 dark:bg-zinc-900/70 border border-zinc-200/90 dark:border-zinc-800/90 rounded-2xl space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+                          <KeyRound className="w-3.5 h-3.5 text-zinc-700 dark:text-zinc-300" />
+                          <span>环境变量 (Secrets)</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={addEnvPair}
+                          className="h-7 px-2.5 text-xs font-medium rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center gap-1 transition-colors cursor-pointer"
+                        >
+                          <Plus className="w-3 h-3" />
+                          <span>添加变量</span>
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                        注入至 bash 子进程环境（0600 隔离存储），模型仅知晓变量名 $VAR，不会暴露明文到上下文
                       </p>
-                    ) : (
-                      <div className="space-y-1.5">
-                        {envPairs.map((pair, index) => (
-                          <div key={index} className="flex items-center gap-1.5">
-                            <input
-                              type="text"
-                              value={pair.key}
-                              aria-label={`环境变量名 ${index + 1}`}
-                              onChange={(e) => updateEnvPair(index, { key: sanitizeEnvKey(e.target.value) })}
-                              placeholder="GITHUB_TOKEN"
-                              className="w-2/5 h-8 px-2.5 text-xs font-mono bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
-                            />
-                            <div className="relative flex-1">
+
+                      {envPairs.length === 0 ? (
+                        <p className="text-[11px] text-zinc-400 dark:text-zinc-500 bg-white/60 dark:bg-zinc-900/60 p-2 rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800">
+                          {isEditing && node?.status !== 'online'
+                            ? '节点离线时无法读取或保存环境变量，待节点上线后重试。'
+                            : '尚未配置环境变量，点击右上角「添加变量」新建。'}
+                        </p>
+                      ) : (
+                        <div className="space-y-1.5">
+                          {envPairs.map((pair, index) => (
+                            <div key={index} className="flex items-center gap-1.5">
                               <input
-                                type={pair.visible ? 'text' : 'password'}
-                                value={pair.value}
-                                aria-label={`环境变量值 ${index + 1}`}
-                                onChange={(e) => updateEnvPair(index, { value: e.target.value })}
-                                placeholder="••••••••"
-                                autoComplete="off"
-                                className="w-full h-8 pl-2.5 pr-8 text-xs font-mono bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                                type="text"
+                                value={pair.key}
+                                aria-label={`环境变量名 ${index + 1}`}
+                                onChange={(e) => updateEnvPair(index, { key: sanitizeEnvKey(e.target.value) })}
+                                placeholder="GITHUB_TOKEN"
+                                className="w-2/5 h-8 px-2.5 text-xs font-mono bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
                               />
+                              <div className="relative flex-1">
+                                <input
+                                  type={pair.visible ? 'text' : 'password'}
+                                  value={pair.value}
+                                  aria-label={`环境变量值 ${index + 1}`}
+                                  onChange={(e) => updateEnvPair(index, { value: e.target.value })}
+                                  placeholder="••••••••"
+                                  autoComplete="off"
+                                  className="w-full h-8 pl-2.5 pr-8 text-xs font-mono bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => updateEnvPair(index, { visible: !pair.visible })}
+                                  className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 rounded transition-colors cursor-pointer"
+                                  aria-label={pair.visible ? '隐藏明文' : '显示明文'}
+                                  title={pair.visible ? '隐藏明文' : '显示明文'}
+                                >
+                                  {pair.visible ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                                </button>
+                              </div>
                               <button
                                 type="button"
-                                onClick={() => updateEnvPair(index, { visible: !pair.visible })}
-                                className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 rounded transition-colors cursor-pointer"
-                                aria-label={pair.visible ? '隐藏明文' : '显示明文'}
-                                title={pair.visible ? '隐藏明文' : '显示明文'}
+                                onClick={() => setEnvDeleteIndex(index)}
+                                className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 rounded-lg transition-colors cursor-pointer shrink-0"
+                                aria-label={`删除变量 ${index + 1}`}
+                                title="删除变量"
                               >
-                                {pair.visible ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                                <Trash2 className="w-3.5 h-3.5" />
                               </button>
                             </div>
-                            <button
-                              type="button"
-                              onClick={() => setEnvDeleteIndex(index)}
-                              className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 rounded-lg transition-colors cursor-pointer shrink-0"
-                              aria-label={`删除变量 ${index + 1}`}
-                              title="删除变量"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Enabled Extensions */}
                   <CheckList
@@ -1044,7 +1369,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
               ) : (
                 <Save className="w-3.5 h-3.5" />
               )}
-              <span>{isEditing ? '保存修改' : '创建智能体'}</span>
+              <span>{isEditing ? '保存修改' : (isSubagent ? '创建角色分身' : '创建智能体')}</span>
             </button>
           </div>
         </form>

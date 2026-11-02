@@ -129,7 +129,7 @@ test('1. POST/PATCH 跨 user 拒绝', async (t) => {
   // 1b: POST with members containing other user bot -> 403
   const post2 = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Cross member',
-    mode: 'roundtable',
+    mode: 'lead',
     leadBotId: 'bot_admin',
     memberBotIds: ['bot_admin', 'bot_user2'],
   }, adminCookie);
@@ -318,13 +318,12 @@ test('3. 离线 clear 保留 pending mark，下一 runTurn 前 reset 成功才 r
   assert.equal(sRunTurnCalled, true);
   assert.equal(ctx.hub.db.hasPendingSessionReset(sId, 'bot_s'), false);
 
-  // --- Part 2: Parallel mode (Roundtable) ---
+  // --- Part 2: Parallel mode (Workflow stage) ---
   const pRes = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Parallel Reset Test',
-    mode: 'roundtable',
+    mode: 'lead',
     leadBotId: 'bot_lead',
     memberBotIds: ['bot_p1', 'bot_p2', 'bot_lead'],
-    parallelRoundtable: true,
   }, cookie);
   const pId = pRes.json.id;
 
@@ -353,7 +352,7 @@ test('3. 离线 clear 保留 pending mark，下一 runTurn 前 reset 成功才 r
     runTurn: async () => ({ replyText: 'lead summary', modelBadge: 'b' }),
   });
 
-  await ctx.jsonRequest(`/api/sessions/${pId}/messages`, 'POST', { content: 'roundtable parallel question' }, cookie);
+  await ctx.jsonRequest(`/api/sessions/${pId}/messages`, 'POST', { content: '(@bot_p1 @bot_p2) -> @bot_lead parallel question' }, cookie);
   await new Promise((r) => setTimeout(r, 120));
 
   assert.equal(p1RunTurnCalled, false);
@@ -392,13 +391,13 @@ test('4. 持久 db 重新打开 pending mark 仍在', async () => {
 test('5. remove 成员后 trigger disabled/webhook 403/直接 handleWakeup 拒绝、调度阶段不 run 移除成员', async (t) => {
   const ctx = await createTestContext(t);
   const { user, cookie } = ctx;
-  ctx.registerNodeWithBots(user.id, 'node_rem', ['bot_lead', 'bot_rem']);
+  ctx.registerNodeWithBots(user.id, 'node_rem', ['bot_lead', 'bot_stay', 'bot_rem']);
 
   const sRes = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Trigger Remove Test',
     mode: 'lead',
     leadBotId: 'bot_lead',
-    memberBotIds: ['bot_lead', 'bot_rem'],
+    memberBotIds: ['bot_lead', 'bot_stay', 'bot_rem'],
   }, cookie);
   const sessionId = sRes.json.id;
 
@@ -418,7 +417,7 @@ test('5. remove 成员后 trigger disabled/webhook 403/直接 handleWakeup 拒�
 
   // Remove bot_rem from session members via PATCH
   const patchRes = await ctx.jsonRequest(`/api/sessions/${sessionId}`, 'PATCH', {
-    memberBotIds: ['bot_lead'],
+    memberBotIds: ['bot_lead', 'bot_stay'],
   }, cookie);
   assert.equal(patchRes.status, 200);
 

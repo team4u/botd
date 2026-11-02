@@ -17,6 +17,7 @@
     "@botd/protocol": "workspace:*",
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-coding-agent": "1.4.0",
+    "@tintinweb/pi-subagents": "0.22.1",
     "birpc": "^2.9.0",
     "commander": "^15.0.0",
     "partysocket": "^1.1.1",

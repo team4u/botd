@@ -2,7 +2,7 @@ export * from './cron.js';
 export * from './ui-catalog.js';
 
 export type PlatformType = 'darwin' | 'linux' | 'win32';
-export type SessionMode = 'direct' | 'lead' | 'roundtable';
+export type SessionMode = 'direct' | 'lead';
 export type SessionStatus = 'idle' | 'running' | 'queued' | 'failed';
 export type MessageRole = 'user' | 'assistant' | 'callback' | 'system';
 
@@ -190,6 +190,34 @@ export interface NodeUpgradeResult {
   pid?: number;
 }
 
+export type SubagentColor = 'blue' | 'purple' | 'red' | 'emerald' | 'amber' | 'cyan' | 'pink' | 'indigo';
+export type SubagentToolScope = 'all' | 'readonly' | 'custom';
+export type SubagentIsolation = 'off' | 'worktree';
+
+export interface SubagentRunRecord {
+  id: string;
+  subagentId: string;
+  subagentName?: string;
+  color?: SubagentColor;
+  task: string;
+  phase?: string;
+  status: 'running' | 'done' | 'error' | 'skipped';
+  toolCount?: number;
+  currentTool?: string;
+  durationMs?: number;
+  replyPreview?: string;
+  /** 对应的分身独立会话 ID（点击可直接跳转到该分身会话查看完整实时记录） */
+  childSessionId?: string;
+}
+
+export interface QueueStageSummary {
+  id: string;
+  botIds: string[];
+  parallel?: boolean;
+  loopGroupId?: string;
+  whisper?: boolean;
+}
+
 export interface BotConfig {
   id: string;
   nodeId: string;
@@ -205,6 +233,20 @@ export interface BotConfig {
   ownerName?: string;
   isTeamShared?: boolean;
   updatedAt: string;
+  /** 若为角色分身（Subagent），指向所属主 BOT ID；为空则表示节点主 BOT */
+  parentBotId?: string;
+  /** 分身是否跟随主 BOT 模型 */
+  inheritModel?: boolean;
+  /** 分身是否继承主 BOT 全部技能 */
+  inheritSkills?: boolean;
+  /** 分身徽标颜色 */
+  color?: SubagentColor;
+  /** 分身工具权限范围：all（全量读写）| readonly（只读分析）| custom（自定义工具） */
+  toolScope?: SubagentToolScope;
+  /** 当 toolScope === 'custom' 时允许调用的工具名列表 */
+  customTools?: string[];
+  /** 分身工作区隔离模式：off（共享主工作区）| worktree（独立 Git 分支） */
+  isolation?: SubagentIsolation;
 }
 
 /** Discoverable Pi commands. Names preserve Pi syntax, including the skill: prefix. */
@@ -221,10 +263,16 @@ export interface SessionRecord {
   mode: SessionMode;
   leadBotId: string;
   memberBotIds: string[];
+  /** 群成员在本会话中的本群头衔 / 临时角色（botId -> roleText） */
+  memberRoles?: Record<string, string>;
+  /** 群聊备忘录 / 共享黑板（置顶注入上下文的共识、约束与进度） */
+  blackboard?: string;
   status: SessionStatus;
   activeBotId?: string;
-  /** 圆桌并发盲评时同时处于活跃推理中的 BOT ID 列表 */
+  /** 圆桌并发盲评或并行工作流阶段同时处于活跃推理中的 BOT ID 列表 */
   activeBotIds?: string[];
+  /** 当前排队中的工作流阶段摘要（实时队列可视化） */
+  queuePlan?: QueueStageSummary[];
   /** 若由父会话派生的子会话，记录父会话 ID */
   parentSessionId?: string;
   createdAt: string;
@@ -239,8 +287,6 @@ export interface SessionRecord {
   archived?: boolean;
   /** 是否置顶（会话列表顶部固定展示的纯 UI 标记） */
   pinned?: boolean;
-  /** 圆桌模式下是否开启独立并发盲评（所有成员并发独立作答，最后由 Lead 总结） */
-  parallelRoundtable?: boolean;
   /** 会话创建者 ID */
   ownerId?: string;
   /** 多人协同会话参与者列表 */
@@ -267,7 +313,7 @@ export interface SharedSessionSnapshot {
   share: SessionShareRecord;
   session: Pick<
     SessionRecord,
-    'id' | 'title' | 'mode' | 'leadBotId' | 'memberBotIds' | 'parallelRoundtable' | 'createdAt' | 'updatedAt'
+    'id' | 'title' | 'mode' | 'leadBotId' | 'memberBotIds' | 'memberRoles' | 'blackboard' | 'createdAt' | 'updatedAt'
   >;
   bots: SharedBotSummary[];
   messages: MessageRecord[];
@@ -326,6 +372,12 @@ export interface MessageRecord {
   modelBadge?: string;
   content: string;
   mentions: string[];
+  /** 耳语/子线程隔离目标 BOT 列表（非空时对其他旁观 BOT 隐藏增量上下文） */
+  whisperTargetBotIds?: string[];
+  /** 本条消息触发或声明的轻量工作流编排表达式（如 "(@a @b) -> @lead"） */
+  orchestrationPlan?: string;
+  /** 主 BOT 调用分身协同的执行轨迹列表（用于渲染分身协同折叠面板） */
+  subagentRuns?: SubagentRunRecord[];
   toolCalls?: ToolCallRecord[];
   usage?: TurnUsage;
   attachments?: MessageAttachment[];
@@ -333,7 +385,26 @@ export interface MessageRecord {
 }
 
 export type SessionSseEvent =
-  | { type: 'session_status'; sessionId: string; status: SessionStatus; activeBotId?: string; activeBotIds?: string[] }
+  | {
+      type: 'session_status';
+      sessionId: string;
+      status: SessionStatus;
+      activeBotId?: string;
+      activeBotIds?: string[];
+      queuePlan?: QueueStageSummary[];
+    }
+  | {
+      type: 'session_updated';
+      sessionId: string;
+      blackboard?: string;
+      memberRoles?: Record<string, string>;
+    }
+  | {
+      type: 'subagent_status';
+      sessionId: string;
+      botId: string;
+      run: SubagentRunRecord;
+    }
   | { type: 'text_delta'; sessionId: string; botId: string; delta: string }
   | { type: 'tool_status'; sessionId: string; botId: string; toolName: string; status: 'running' | 'done'; summary?: string }
   | { type: 'message_created'; message: MessageRecord }
@@ -372,6 +443,16 @@ export interface HubRpcFunctions {
     toolName?: string;
     toolStatus?: 'running' | 'done';
     toolSummary?: string;
+    subagentEvent?: {
+      id: string;
+      subagentId: string;
+      task: string;
+      status: 'running' | 'done' | 'error';
+      result?: string;
+      error?: string;
+      durationMs?: number;
+      toolUses?: number;
+    };
   }): void;
   requestWakeupTurn(input: {
     sessionId: string;
@@ -450,6 +531,7 @@ export interface NodeRpcFunctions {
     modelBadge: string;
     toolCalls?: ToolCallRecord[];
     usage?: TurnUsage;
+    subagentRuns?: SubagentRunRecord[];
   }>;
   cancelTurn(sessionId: string, botId: string): Promise<void>;
   /** 删除该 BOT 在指定会话的本地 Pi 会话文件（.jsonl），下一回合将从 Hub 历史全量重建上下文 */
@@ -467,7 +549,8 @@ export interface CreateSessionInput {
   mode: SessionMode;
   leadBotId: string;
   memberBotIds: string[];
-  parallelRoundtable?: boolean;
+  memberRoles?: Record<string, string>;
+  blackboard?: string;
   parentSessionId?: string;
 }
 export interface NodeIdentity { nodeId: string; name: string; hubUrl: string; token: string }
@@ -531,7 +614,14 @@ export const isBotConfig = (value: unknown): value is BotConfig => {
     Array.isArray(v.enabledSkills) &&
     v.enabledSkills.every(isSafeId) &&
     (v.enabledExtensions === undefined || (Array.isArray(v.enabledExtensions) && v.enabledExtensions.every(isSafeId))) &&
-    (v.visibility === undefined || v.visibility === 'private' || v.visibility === 'team')
+    (v.visibility === undefined || v.visibility === 'private' || v.visibility === 'team') &&
+    (v.parentBotId === undefined || v.parentBotId === '' || isSafeId(v.parentBotId)) &&
+    (v.inheritModel === undefined || typeof v.inheritModel === 'boolean') &&
+    (v.inheritSkills === undefined || typeof v.inheritSkills === 'boolean') &&
+    (v.color === undefined || typeof v.color === 'string') &&
+    (v.toolScope === undefined || v.toolScope === 'all' || v.toolScope === 'readonly' || v.toolScope === 'custom') &&
+    (v.customTools === undefined || (Array.isArray(v.customTools) && v.customTools.every((t) => typeof t === 'string'))) &&
+    (v.isolation === undefined || v.isolation === 'off' || v.isolation === 'worktree')
   );
 };
 

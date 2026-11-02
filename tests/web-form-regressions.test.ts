@@ -216,7 +216,6 @@ test('CreateSessionModal: 首次打开等待异步 bots 到达时能初始化一
     groupMode: 'lead',
     groupLeadBotId: '',
     groupMemberBotIds: [],
-    parallelRoundtable: false,
     error: null,
   };
 
@@ -250,10 +249,9 @@ test('CreateSessionModal: 后台 10 秒轮询新 bots 数组不能冲掉用户�
   // 用户编辑过的草稿
   const userEditingDraft: CreateSessionDraft = {
     groupTitle: '我的自定义敏捷开发讨论组',
-    groupMode: 'roundtable',
+    groupMode: 'lead',
     groupLeadBotId: 'bot-2',
     groupMemberBotIds: ['bot-1', 'bot-2'],
-    parallelRoundtable: true,
     error: null,
   };
 
@@ -270,19 +268,17 @@ test('CreateSessionModal: 后台 10 秒轮询新 bots 数组不能冲掉用户�
 
   assert.equal(step.shouldUpdate, false, '后台数据相同刷新不更新组件草稿');
   assert.equal(step.nextDraft.groupTitle, '我的自定义敏捷开发讨论组', '草稿标题未被冲掉');
-  assert.equal(step.nextDraft.groupMode, 'roundtable', '草稿协作模式未被冲掉');
+  assert.equal(step.nextDraft.groupMode, 'lead', '草稿协作模式未被冲掉');
   assert.equal(step.nextDraft.groupLeadBotId, 'bot-2', '草稿主持人未被冲掉');
-  assert.equal(step.nextDraft.parallelRoundtable, true, '并发选项未被冲掉');
   assert.deepEqual(step.nextDraft.groupMemberBotIds, ['bot-1', 'bot-2'], '草稿已选成员未被冲掉');
 });
 
 test('CreateSessionModal: 关后重开应该正确重新初始化', () => {
   const userDraft: CreateSessionDraft = {
     groupTitle: '旧草稿',
-    groupMode: 'roundtable',
+    groupMode: 'lead',
     groupLeadBotId: 'bot-2',
     groupMemberBotIds: ['bot-2'],
-    parallelRoundtable: true,
     error: null,
   };
 
@@ -307,16 +303,14 @@ test('CreateSessionModal: 关后重开应该正确重新初始化', () => {
   assert.equal(stepReopen.shouldUpdate, true, '重新打开应触发初始化');
   assert.equal(stepReopen.nextDraft.groupTitle, 'AI 协同群聊', '恢复默认标题');
   assert.equal(stepReopen.nextDraft.groupLeadBotId, 'bot-1', '恢复默认主持人');
-  assert.equal(stepReopen.nextDraft.parallelRoundtable, false, '恢复默认非并发');
 });
 
 test('CreateSessionModal: 后台刷新时若有 BOT 被删，只合理剔除被删成员，不重设整份草稿', () => {
   const userDraft: CreateSessionDraft = {
     groupTitle: '特定项目群',
-    groupMode: 'roundtable',
+    groupMode: 'lead',
     groupLeadBotId: 'bot-1',
     groupMemberBotIds: ['bot-1', 'bot-deleted', 'bot-2'],
-    parallelRoundtable: true,
     error: null,
   };
 
@@ -331,8 +325,7 @@ test('CreateSessionModal: 后台刷新时若有 BOT 被删，只合理剔除被�
 
   assert.equal(step.shouldUpdate, true, '检测到已删成员需要局部更新');
   assert.equal(step.nextDraft.groupTitle, '特定项目群', '标题绝不被冲掉');
-  assert.equal(step.nextDraft.groupMode, 'roundtable', '协作模式绝不被冲掉');
-  assert.equal(step.nextDraft.parallelRoundtable, true, '并发选项绝不被冲掉');
+  assert.equal(step.nextDraft.groupMode, 'lead', '协作模式绝不被冲掉');
   assert.deepEqual(step.nextDraft.groupMemberBotIds, ['bot-1', 'bot-2'], '合理剔除 bot-deleted');
 });
 
@@ -347,7 +340,6 @@ const mockSession: SessionRecord = {
   mode: 'lead',
   leadBotId: 'bot-1',
   memberBotIds: ['bot-1', 'bot-2'],
-  parallelRoundtable: false,
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 };
@@ -362,7 +354,6 @@ test('GroupSettingsModal: 打开时以 session.id 为边界初始化', () => {
       mode: 'lead',
       leadBotId: '',
       memberBotIds: [],
-      parallelRoundtable: false,
       error: null,
     },
     bots: mockBots,
@@ -378,10 +369,9 @@ test('GroupSettingsModal: 打开时以 session.id 为边界初始化', () => {
 test('GroupSettingsModal: SSE 产生新 session 对象时绝不冲掉用户草稿', () => {
   const userEditingDraft: GroupSettingsDraft = {
     title: '用户正在修改的标题...',
-    mode: 'roundtable',
+    mode: 'lead',
     leadBotId: 'bot-2',
     memberBotIds: ['bot-1', 'bot-2', 'bot-3'],
-    parallelRoundtable: true,
     error: null,
   };
 
@@ -401,9 +391,8 @@ test('GroupSettingsModal: SSE 产生新 session 对象时绝不冲掉用户草�
 
   assert.equal(step.shouldUpdate, false, '相同 session.id 的 SSE 对象更新绝不重写草稿');
   assert.equal(step.nextDraft.title, '用户正在修改的标题...');
-  assert.equal(step.nextDraft.mode, 'roundtable');
+  assert.equal(step.nextDraft.mode, 'lead');
   assert.equal(step.nextDraft.leadBotId, 'bot-2');
-  assert.equal(step.nextDraft.parallelRoundtable, true);
 });
 
 test('GroupSettingsModal: 切换 session 必须重新初始化', () => {
@@ -411,10 +400,9 @@ test('GroupSettingsModal: 切换 session 必须重新初始化', () => {
     id: 'session-202',
     title: '财务审计专项群',
     status: 'idle',
-    mode: 'roundtable',
+    mode: 'lead',
     leadBotId: 'bot-3',
     memberBotIds: ['bot-2', 'bot-3'],
-    parallelRoundtable: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -428,7 +416,6 @@ test('GroupSettingsModal: 切换 session 必须重新初始化', () => {
       mode: 'lead',
       leadBotId: 'bot-1',
       memberBotIds: ['bot-1'],
-      parallelRoundtable: false,
       error: null,
     },
     bots: mockBots,
@@ -437,7 +424,7 @@ test('GroupSettingsModal: 切换 session 必须重新初始化', () => {
   assert.equal(step.shouldUpdate, true, '切换编辑对象 ID 应当触发初始化');
   assert.equal(step.nextInitializedSessionId, 'session-202');
   assert.equal(step.nextDraft.title, '财务审计专项群');
-  assert.equal(step.nextDraft.mode, 'roundtable');
+  assert.equal(step.nextDraft.mode, 'lead');
   assert.equal(step.nextDraft.leadBotId, 'bot-3');
   assert.deepEqual(step.nextDraft.memberBotIds, ['bot-2', 'bot-3']);
 });
@@ -450,10 +437,9 @@ test('GroupSettingsModal: 关后重开同一 session 应当重新初始化', () 
     currentSession: mockSession,
     currentDraft: {
       title: '未保存的草稿',
-      mode: 'roundtable',
+      mode: 'lead',
       leadBotId: 'bot-2',
       memberBotIds: ['bot-2'],
-      parallelRoundtable: true,
       error: null,
     },
     bots: mockBots,
@@ -467,10 +453,9 @@ test('GroupSettingsModal: 关后重开同一 session 应当重新初始化', () 
     currentSession: mockSession,
     currentDraft: {
       title: '未保存的草稿',
-      mode: 'roundtable',
+      mode: 'lead',
       leadBotId: 'bot-2',
       memberBotIds: ['bot-2'],
-      parallelRoundtable: true,
       error: null,
     },
     bots: mockBots,

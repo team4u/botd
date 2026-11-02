@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Users, Sparkles, Loader2, Save, UserPlus, Trash2 } from 'lucide-react';
+import { X, Users, Loader2, Save, UserPlus, Trash2 } from 'lucide-react';
 import type { SessionRecord, SessionMode, BotConfig, CreateSessionInput, SessionParticipantRecord } from '@botd/protocol';
 import { CheckList } from './CheckList.js';
 import { api } from '../api.js';
@@ -9,8 +9,9 @@ export interface GroupSettingsDraft {
   mode: SessionMode;
   leadBotId: string;
   memberBotIds: string[];
-  parallelRoundtable: boolean;
   error: string | null;
+  memberRoles?: Record<string, string>;
+  blackboard?: string;
 }
 
 export function initGroupSettingsDraft(
@@ -20,11 +21,12 @@ export function initGroupSettingsDraft(
   const leadBotId = session.leadBotId || (bots[0]?.id ?? '');
   return {
     title: session.title,
-    mode: session.mode,
+    mode: 'lead',
     leadBotId,
     memberBotIds: session.memberBotIds || (leadBotId ? [leadBotId] : []),
-    parallelRoundtable: session.parallelRoundtable ?? false,
     error: null,
+    memberRoles: session.memberRoles ? { ...session.memberRoles } : {},
+    blackboard: session.blackboard || '',
   };
 }
 
@@ -147,10 +149,13 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
   onUpdateSession,
 }) => {
   const [title, setTitle] = useState(session.title);
-  const [mode, setMode] = useState<SessionMode>(session.mode);
+  const [mode, setMode] = useState<SessionMode>('lead');
   const [leadBotId, setLeadBotId] = useState(session.leadBotId);
   const [memberBotIds, setMemberBotIds] = useState<string[]>(session.memberBotIds || []);
-  const [parallelRoundtable, setParallelRoundtable] = useState(session.parallelRoundtable ?? false);
+  const [memberRoles, setMemberRoles] = useState<Record<string, string>>(
+    session.memberRoles ? { ...session.memberRoles } : {}
+  );
+  const [blackboard, setBlackboard] = useState<string>(session.blackboard || '');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [participants, setParticipants] = useState<SessionParticipantRecord[]>([]);
@@ -164,19 +169,22 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
     mode,
     leadBotId,
     memberBotIds,
-    parallelRoundtable,
     error,
+    memberRoles,
+    blackboard,
   });
   draftRef.current = {
     title,
     mode,
     leadBotId,
     memberBotIds,
-    parallelRoundtable,
     error,
+    memberRoles,
+    blackboard,
   };
 
   useEffect(() => {
+    const isNewSession = lastInitializedSessionIdRef.current !== session.id;
     const step = resolveGroupSettingsStep({
       isOpen,
       lastInitializedSessionId: lastInitializedSessionIdRef.current,
@@ -192,8 +200,11 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
       setMode(step.nextDraft.mode);
       setLeadBotId(step.nextDraft.leadBotId);
       setMemberBotIds(step.nextDraft.memberBotIds);
-      setParallelRoundtable(step.nextDraft.parallelRoundtable);
       setError(step.nextDraft.error);
+      if (isNewSession) {
+        setMemberRoles(step.nextDraft.memberRoles || {});
+        setBlackboard(step.nextDraft.blackboard || '');
+      }
     }
   }, [isOpen, session.id, session, bots]);
 
@@ -257,10 +268,11 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
     try {
       await onUpdateSession(session.id, {
         title: trimmedTitle,
-        mode,
+        mode: 'lead',
         leadBotId: leadBotId || finalMembers[0],
         memberBotIds: finalMembers,
-        parallelRoundtable: mode === 'roundtable' ? parallelRoundtable : false,
+        memberRoles,
+        blackboard: blackboard.trim() ? blackboard.trim() : undefined,
       });
       onClose();
     } catch (err: any) {
@@ -321,76 +333,12 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
           </div>
 
           <div>
-            <span className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5">
-              协作模式
-            </span>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => setMode('lead')}
-                className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                  mode === 'lead'
-                    ? 'bg-amber-50/80 dark:bg-amber-950/40 border-amber-400 dark:border-amber-500 text-amber-950 dark:text-amber-100 ring-1 ring-amber-300 dark:ring-amber-900/60'
-                    : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800'
-                }`}
-              >
-                <div className="font-semibold text-xs flex items-center gap-1.5 mb-1">
-                  <Sparkles className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
-                  <span>主持模式</span>
-                </div>
-                <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                  指定主持人统筹，支持 @ 传麦接力。
-                </p>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setMode('roundtable')}
-                className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                  mode === 'roundtable'
-                    ? 'bg-purple-50/80 dark:bg-purple-950/40 border-purple-400 dark:border-purple-500 text-purple-950 dark:text-purple-100 ring-1 ring-purple-300 dark:ring-purple-900/60'
-                    : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800'
-                }`}
-              >
-                <div className="font-semibold text-xs flex items-center gap-1.5 mb-1">
-                  <Users className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
-                  <span>圆桌模式</span>
-                </div>
-                <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                  群成员按序依次发言，最后由总结人统一归纳陈词。
-                </p>
-              </button>
-            </div>
-          </div>
-
-          {mode === 'roundtable' && (
-            <div className="p-3 bg-purple-50/50 dark:bg-purple-950/20 border border-purple-200/70 dark:border-purple-900/50 rounded-xl">
-              <label className="flex items-start gap-2.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={parallelRoundtable}
-                  onChange={(e) => setParallelRoundtable(e.target.checked)}
-                  className="mt-0.5 rounded border-zinc-300 dark:border-zinc-600 dark:bg-zinc-800 text-purple-600 focus:ring-purple-500 w-3.5 h-3.5 shrink-0"
-                />
-                <div>
-                  <span className="block text-xs font-medium text-zinc-900 dark:text-zinc-100">
-                    独立盲评并发模式（Parallel Blind Review）
-                  </span>
-                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                    开启后所有成员将并发独立作答（互不可见本轮草稿），最后由主持人汇总裁决
-                  </p>
-                </div>
-              </label>
-            </div>
-          )}
-
-          <div>
             <label
               id="edit-group-lead-label"
               htmlFor="edit-group-lead-select"
               className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5"
             >
-              {mode === 'lead' ? '主持人' : '总结人'}
+              主持人
             </label>
             <select
               id="edit-group-lead-select"
@@ -412,9 +360,7 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
               ))}
             </select>
             <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1">
-              {mode === 'lead'
-                ? '默认由该成员先行响应并统筹分工'
-                : '所有成员按顺序依次发言后，由该成员最后总结陈词'}
+              默认由该成员先行响应并统筹分工
             </p>
           </div>
 
@@ -427,32 +373,69 @@ export const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({
             onChange={setMemberBotIds}
             lockedIds={leadBotId ? [leadBotId] : []}
             getAriaLabel={(bot: BotConfig) => `选择成员 ${bot.name}`}
-            renderItem={(bot: BotConfig) => {
+            renderItem={(bot: BotConfig, checked: boolean) => {
               const node = nodeMap.get(bot.nodeId);
               const isLead = bot.id === leadBotId;
+              const isSelected = checked || isLead || memberBotIds.includes(bot.id);
               return (
-                <div className="flex items-center justify-between min-w-0 flex-1">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 min-w-0 flex-1">
                   <div className="flex items-center gap-2 min-w-0">
                     <div className="min-w-0">
                       <span className="font-semibold text-xs mr-1 truncate text-zinc-900 dark:text-zinc-100">{bot.name}</span>
                       <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500">@{bot.id}</span>
                       {isLead && (
                         <span className="ml-1.5 px-1.5 py-0.2 bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 text-[11px] font-semibold rounded shrink-0">
-                          {mode === 'lead' ? '主持人' : '总结人'}
+                          主持人
                         </span>
                       )}
                     </div>
                   </div>
-                  <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0 ml-2">
-                    {node && <span>{node.name}</span>}
-                    <span className="font-mono bg-zinc-100 dark:bg-zinc-800 px-1 py-0.2 rounded text-zinc-500 dark:text-zinc-400">
-                      {bot.modelId}
-                    </span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {isSelected && (
+                      <input
+                        type="text"
+                        value={memberRoles[bot.id] || ''}
+                        onClick={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => e.stopPropagation()}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setMemberRoles((prev) => ({ ...prev, [bot.id]: val }));
+                        }}
+                        placeholder="本群头衔 (如: 初稿主笔 / 挑刺审稿)"
+                        className="h-7 px-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 w-44 sm:w-52"
+                      />
+                    )}
+                    <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0">
+                      {node && <span className="hidden sm:inline">{node.name}</span>}
+                      <span className="font-mono bg-zinc-100 dark:bg-zinc-800 px-1 py-0.2 rounded text-zinc-500 dark:text-zinc-400">
+                        {bot.modelId}
+                      </span>
+                    </div>
                   </div>
                 </div>
               );
             }}
           />
+
+          {/* 📌 群备忘录 (Shared Blackboard) */}
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label htmlFor="edit-group-blackboard" className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                📌 群备忘录 (Shared Blackboard)
+              </label>
+              <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                置顶注入所有成员上下文的共识与约束
+              </span>
+            </div>
+            <textarea
+              id="edit-group-blackboard"
+              rows={3}
+              value={blackboard}
+              onChange={(e) => setBlackboard(e.target.value)}
+              placeholder="记录本群共识、输出规范、核心约束与待办清单（对群内所有 BOT 全局生效）..."
+              className="w-full p-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder-zinc-400 dark:placeholder-zinc-500 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 leading-relaxed font-mono"
+            />
+          </div>
 
           {/* 团队协同成员 (Session Participants) */}
           <div className="pt-2 border-t border-zinc-100 dark:border-zinc-800/60">

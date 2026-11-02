@@ -493,7 +493,7 @@ test('Task 1.4: Cross-node incomingArtifacts passed into rpc.runTurn', async (t)
 
   const session = await f.json<SessionRecord>('/api/sessions', 'POST', {
     title: 'Cross Node Artifacts',
-    mode: 'roundtable',
+    mode: 'lead',
     leadBotId: 'bot-alice',
     memberBotIds: ['bot-alice', 'bot-bob'],
   });

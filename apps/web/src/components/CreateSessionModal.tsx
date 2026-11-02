@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Bot, Users, Sparkles, Loader2 } from 'lucide-react';
+import { X, Bot, Loader2 } from 'lucide-react';
 import type { BotConfig, SessionMode, CreateSessionInput } from '@botd/protocol';
 import { CheckList } from './CheckList.js';
 
@@ -8,8 +8,9 @@ export interface CreateSessionDraft {
   groupMode: SessionMode;
   groupLeadBotId: string;
   groupMemberBotIds: string[];
-  parallelRoundtable: boolean;
   error: string | null;
+  memberRoles?: Record<string, string>;
+  blackboard?: string;
 }
 
 export function createDefaultSessionDraft(bots: BotConfig[]): CreateSessionDraft {
@@ -19,8 +20,9 @@ export function createDefaultSessionDraft(bots: BotConfig[]): CreateSessionDraft
     groupMode: 'lead',
     groupLeadBotId: firstBot ? firstBot.id : '',
     groupMemberBotIds: bots.slice(0, 3).map((b) => b.id),
-    parallelRoundtable: false,
     error: null,
+    memberRoles: {},
+    blackboard: '',
   };
 }
 
@@ -117,7 +119,7 @@ interface CreateSessionModalProps {
 }
 
 // 单聊不走弹窗：侧边栏「智能体」通讯录点击即静默创建/进入默认单聊会话。
-// 本弹窗仅负责群聊（主持/圆桌）创建。
+// 本弹窗负责群聊（主持统筹）创建。
 export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
   isOpen,
   bots,
@@ -130,7 +132,8 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
   const [groupMode, setGroupMode] = useState<SessionMode>('lead');
   const [groupLeadBotId, setGroupLeadBotId] = useState<string>('');
   const [groupMemberBotIds, setGroupMemberBotIds] = useState<string[]>([]);
-  const [parallelRoundtable, setParallelRoundtable] = useState(false);
+  const [memberRoles, setMemberRoles] = useState<Record<string, string>>({});
+  const [blackboard, setBlackboard] = useState<string>('');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -143,16 +146,18 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
     groupMode,
     groupLeadBotId,
     groupMemberBotIds,
-    parallelRoundtable,
     error,
+    memberRoles,
+    blackboard,
   });
   draftRef.current = {
     groupTitle,
     groupMode,
     groupLeadBotId,
     groupMemberBotIds,
-    parallelRoundtable,
     error,
+    memberRoles,
+    blackboard,
   };
 
   useEffect(() => {
@@ -164,6 +169,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
       bots,
     });
 
+    const isReopen = !wasOpenRef.current && isOpen;
     wasOpenRef.current = isOpen;
     initializedRef.current = step.nextInitialized;
 
@@ -172,8 +178,11 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
       setGroupMode(step.nextDraft.groupMode);
       setGroupLeadBotId(step.nextDraft.groupLeadBotId);
       setGroupMemberBotIds(step.nextDraft.groupMemberBotIds);
-      setParallelRoundtable(step.nextDraft.parallelRoundtable);
       setError(step.nextDraft.error);
+      if (isReopen || !initializedRef.current) {
+        setMemberRoles(step.nextDraft.memberRoles || {});
+        setBlackboard(step.nextDraft.blackboard || '');
+      }
     }
   }, [isOpen, bots]);
 
@@ -193,7 +202,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
       return;
     }
     if (!groupLeadBotId) {
-      setError(groupMode === 'lead' ? '主持模式下必须指定主持人' : '圆桌模式下必须指定总结人');
+      setError('主持模式下必须指定主持人');
       return;
     }
 
@@ -203,10 +212,11 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
     try {
       await onCreateSession({
         title: trimmedTitle,
-        mode: groupMode,
+        mode: 'lead',
         leadBotId: groupLeadBotId || finalMembers[0],
         memberBotIds: finalMembers,
-        ...(groupMode === 'roundtable' ? { parallelRoundtable } : {}),
+        memberRoles: Object.keys(memberRoles).length > 0 ? memberRoles : undefined,
+        blackboard: blackboard.trim() ? blackboard.trim() : undefined,
       });
       onClose();
     } catch (err: any) {
@@ -271,78 +281,14 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
                 />
               </div>
 
-              <div>
-                <span className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5">
-                  协作模式
-                </span>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setGroupMode('lead')}
-                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                      groupMode === 'lead'
-                        ? 'bg-amber-50/70 dark:bg-amber-950/40 border-amber-400 dark:border-amber-500 text-amber-950 dark:text-amber-100 ring-1 ring-amber-300 dark:ring-amber-900/60'
-                        : 'bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800'
-                    }`}
-                  >
-                    <div className="font-semibold text-xs flex items-center gap-1.5 mb-1">
-                      <Sparkles className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
-                      <span>主持模式</span>
-                    </div>
-                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                      由指定主持人优先响应，正文中可通过 @ 指定其他成员接力协作。
-                    </p>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setGroupMode('roundtable')}
-                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                      groupMode === 'roundtable'
-                        ? 'bg-purple-50/70 dark:bg-purple-950/40 border-purple-400 dark:border-purple-500 text-purple-950 dark:text-purple-100 ring-1 ring-purple-300 dark:ring-purple-900/60'
-                        : 'bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800'
-                    }`}
-                  >
-                    <div className="font-semibold text-xs flex items-center gap-1.5 mb-1">
-                      <Users className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
-                      <span>圆桌模式</span>
-                    </div>
-                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                      群成员按序依次发言，最后由总结人统一归纳陈词。
-                    </p>
-                  </button>
-                </div>
-              </div>
-
-              {groupMode === 'roundtable' && (
-                <div className="p-3 bg-purple-50/50 dark:bg-purple-950/20 border border-purple-200/70 dark:border-purple-900/50 rounded-xl">
-                  <label className="flex items-start gap-2.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={parallelRoundtable}
-                      onChange={(e) => setParallelRoundtable(e.target.checked)}
-                      className="mt-0.5 rounded border-zinc-300 dark:border-zinc-600 dark:bg-zinc-800 text-purple-600 focus:ring-purple-500 w-3.5 h-3.5 shrink-0"
-                    />
-                    <div>
-                      <span className="block text-xs font-medium text-zinc-900 dark:text-zinc-100">
-                        独立盲评并发模式（Parallel Blind Review）
-                      </span>
-                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                        开启后所有成员将并发独立作答（互不可见本轮草稿），最后由主持人汇总裁决
-                      </p>
-                    </div>
-                  </label>
-                </div>
-              )}
-
-              {/* 主持人 / 总结人选择 */}
+              {/* 主持人选择 */}
               <div>
                 <label
                   id="create-group-lead-label"
                   htmlFor="create-group-lead-select"
                   className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5"
                 >
-                  {groupMode === 'lead' ? '主持人' : '总结人'}
+                  主持人
                 </label>
                 <select
                   id="create-group-lead-select"
@@ -364,9 +310,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
                   ))}
                 </select>
                 <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1">
-                  {groupMode === 'lead'
-                    ? '默认由该成员先行响应并统筹分工'
-                    : '所有成员按顺序依次发言后，由该成员最后总结陈词'}
+                  默认由该成员先行响应并统筹分工
                 </p>
               </div>
 
@@ -380,32 +324,69 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
                 onChange={setGroupMemberBotIds}
                 lockedIds={groupLeadBotId ? [groupLeadBotId] : []}
                 getAriaLabel={(bot: BotConfig) => `选择成员 ${bot.name}`}
-                renderItem={(bot: BotConfig) => {
+                renderItem={(bot: BotConfig, checked: boolean) => {
                   const node = nodeMap.get(bot.nodeId);
                   const isLead = bot.id === groupLeadBotId;
+                  const isSelected = checked || isLead || groupMemberBotIds.includes(bot.id);
                   return (
-                    <div className="flex items-center justify-between min-w-0 flex-1">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 min-w-0 flex-1">
                       <div className="flex items-center gap-2 min-w-0">
                         <div className="min-w-0">
                           <span className="font-semibold text-xs mr-1 truncate text-zinc-900 dark:text-zinc-100">{bot.name}</span>
                           <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500">@{bot.id}</span>
                           {isLead && (
                             <span className="ml-1.5 px-1.5 py-0.2 bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 text-[11px] font-semibold rounded shrink-0">
-                              {groupMode === 'lead' ? '主持人' : '总结人'}
+                              主持人
                             </span>
                           )}
                         </div>
                       </div>
-                      <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0 ml-2">
-                        {node && <span>{node.name}</span>}
-                        <span className="font-mono bg-zinc-100 dark:bg-zinc-800 px-1 py-0.2 rounded text-zinc-500 dark:text-zinc-400">
-                          {bot.modelId}
-                        </span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {isSelected && (
+                          <input
+                            type="text"
+                            value={memberRoles[bot.id] || ''}
+                            onClick={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => e.stopPropagation()}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setMemberRoles((prev) => ({ ...prev, [bot.id]: val }));
+                            }}
+                            placeholder="本群头衔 (如: 初稿主笔 / 挑刺审稿)"
+                            className="h-7 px-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-amber-500 w-44 sm:w-52"
+                          />
+                        )}
+                        <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0">
+                          {node && <span className="hidden sm:inline">{node.name}</span>}
+                          <span className="font-mono bg-zinc-100 dark:bg-zinc-800 px-1 py-0.2 rounded text-zinc-500 dark:text-zinc-400">
+                            {bot.modelId}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   );
                 }}
               />
+
+              {/* 📌 群备忘录 (Shared Blackboard) */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label htmlFor="create-group-blackboard" className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                    📌 群备忘录 (Shared Blackboard)
+                  </label>
+                  <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                    置顶注入群内共识与约束
+                  </span>
+                </div>
+                <textarea
+                  id="create-group-blackboard"
+                  rows={2}
+                  value={blackboard}
+                  onChange={(e) => setBlackboard(e.target.value)}
+                  placeholder="记录本群共识、输出规范、核心约束与待办清单（对群内所有 BOT 全局生效）..."
+                  className="w-full p-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-amber-500 leading-relaxed font-mono"
+                />
+              </div>
             </>
           )}
 

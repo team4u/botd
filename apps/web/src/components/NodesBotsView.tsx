@@ -18,8 +18,21 @@ import {
   PowerOff,
   Share2,
   ArrowUpCircle,
+  MessageSquare,
+  Sparkles,
 } from 'lucide-react';
 import type { NodeWithBots, BotConfig, NodeUpgradeCheckResult } from '@botd/protocol';
+
+const SUBAGENT_COLOR_DOT: Record<string, string> = {
+  blue: 'bg-blue-500',
+  purple: 'bg-purple-500',
+  red: 'bg-red-500',
+  emerald: 'bg-emerald-500',
+  amber: 'bg-amber-500',
+  cyan: 'bg-cyan-500',
+  pink: 'bg-pink-500',
+  indigo: 'bg-indigo-500',
+};
 import { PairingModal } from './PairingModal';
 import { SkillEditorModal } from './SkillEditorModal';
 import { ExtensionEditorModal } from './ExtensionEditorModal';
@@ -99,6 +112,8 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
   const [botEditorOpen, setBotEditorOpen] = useState(false);
   const [selectedNodeForBot, setSelectedNodeForBot] = useState<NodeWithBots | null>(null);
   const [selectedBot, setSelectedBot] = useState<BotConfig | null>(null);
+  const [selectedParentBot, setSelectedParentBot] = useState<BotConfig | null>(null);
+  const [initialBotTab, setInitialBotTab] = useState<'basic' | 'system' | 'memory'>('basic');
 
   // Deleting bot ID tracking
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
@@ -191,15 +206,68 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
   };
 
   const handleOpenCreateBot = (node: NodeWithBots) => {
+    const primaryBot = (node.bots || []).find((b: BotConfig) => !b.parentBotId);
+    if (primaryBot) {
+      handleOpenCreateSubagent(node, primaryBot);
+      return;
+    }
     setSelectedNodeForBot(node);
     setSelectedBot(null);
+    setSelectedParentBot(null);
+    setInitialBotTab('basic');
     setBotEditorOpen(true);
   };
 
-  const handleOpenEditBot = (node: NodeWithBots, bot: BotConfig) => {
+  const handleOpenCreateSubagent = (node: NodeWithBots, parentBot: BotConfig) => {
+    setSelectedNodeForBot(node);
+    setSelectedBot(null);
+    setSelectedParentBot(parentBot);
+    setInitialBotTab('basic');
+    setBotEditorOpen(true);
+  };
+
+  const handleOpenEditBot = (
+    node: NodeWithBots,
+    bot: BotConfig,
+    tab: 'basic' | 'system' | 'memory' = 'basic'
+  ) => {
     setSelectedNodeForBot(node);
     setSelectedBot(bot);
+    const parent = bot.parentBotId
+      ? (node.bots || []).find((b) => b.id === bot.parentBotId) || null
+      : null;
+    setSelectedParentBot(parent);
+    setInitialBotTab(tab);
     setBotEditorOpen(true);
+  };
+
+  const handleStartChat = async (bot: BotConfig) => {
+    try {
+      const sessions = await api.listSessions();
+      const existing = sessions.find(
+        (s) =>
+          s.mode === 'direct' &&
+          !s.archived &&
+          !s.parentSessionId &&
+          s.memberBotIds?.length === 1 &&
+          s.memberBotIds[0] === bot.id
+      );
+      if (existing) {
+        window.location.hash = `#?s=${existing.id}&v=chat`;
+        onBackToChat();
+        return;
+      }
+      const created = await api.createSession({
+        title: bot.name || bot.id,
+        mode: 'direct',
+        leadBotId: bot.id,
+        memberBotIds: [bot.id],
+      });
+      window.location.hash = `#?s=${created.id}&v=chat`;
+      onBackToChat();
+    } catch (err: any) {
+      onAddToast('error', err?.message || '发起对话失败');
+    }
   };
 
   const handleDeleteBot = async () => {
@@ -736,142 +804,378 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                       <Bot className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" />
                       <span>智能体 ({nodeBots.length})</span>
                     </span>
-                    <button
-                      onClick={() => handleOpenCreateBot(node)}
-                      disabled={!isOnline}
-                      className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                      title={!isOnline ? '节点离线，无法创建智能体' : '在该节点上创建智能体'}
-                    >
-                      <Plus className="w-3 h-3" />
-                      <span>新建智能体</span>
-                    </button>
+                    {(() => {
+                      const primaryBot = nodeBots.find((b) => !b.parentBotId);
+                      return (
+                        <button
+                          onClick={() => handleOpenCreateBot(node)}
+                          disabled={!isOnline}
+                          className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                          title={
+                            !isOnline
+                              ? '节点离线'
+                              : primaryBot
+                              ? '在该节点主 BOT 下新建角色分身'
+                              : '在该节点上创建主 BOT'
+                          }
+                        >
+                          <Plus className="w-3 h-3" />
+                          <span>{primaryBot ? '新建角色分身' : '新建主 BOT'}</span>
+                        </button>
+                      );
+                    })()}
                   </div>
 
                   {nodeBots.length === 0 ? (
                     <p className="px-4 py-4 text-xs text-zinc-400 dark:text-zinc-500">
-                      暂无智能体。{isOnline ? '点击右上角「新建智能体」创建。' : '节点恢复在线后可创建。'}
+                      暂无智能体。{isOnline ? '点击右上角「新建主 BOT」创建。' : '节点恢复在线后可创建。'}
                     </p>
                   ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-zinc-100 dark:divide-zinc-800/60 border-t border-zinc-100 dark:border-zinc-800/60">
-                      {nodeBots.map((bot) => {
-                        const isDeleting = deletingBotId === bot.id;
-                        const shortModel = getShortModelId(bot.modelId);
-                        const thinkingText = formatThinkingLevel(bot.thinkingLevel);
-
-                        // Collect enabled skills and extensions compactly
-                        const enabledItems = [
-                          ...(bot.enabledSkills || []).map((s) => ({ type: 'skill' as const, name: s })),
-                          ...(bot.enabledExtensions || []).map((e) => ({ type: 'ext' as const, name: e })),
-                        ];
+                      {(() => {
+                        const primaryBots = nodeBots.filter((b) => !b.parentBotId);
+                        const subagentMap = new Map<string, BotConfig[]>();
+                        for (const b of nodeBots) {
+                          if (b.parentBotId) {
+                            const list = subagentMap.get(b.parentBotId) || [];
+                            list.push(b);
+                            subagentMap.set(b.parentBotId, list);
+                          }
+                        }
+                        const orphanSubagents = nodeBots.filter(
+                          (b) => b.parentBotId && !primaryBots.some((p) => p.id === b.parentBotId)
+                        );
 
                         return (
-                          <div key={bot.id} className="p-4 flex flex-col justify-between gap-3 min-w-0">
-                            {/* Bot identity */}
-                            <div className="flex items-start justify-between gap-2 min-w-0">
-                              <div className="flex items-center gap-2.5 min-w-0">
-                                <div
-                                  className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 border ${
-                                    isOnline
-                                      ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border-zinc-200/70 dark:border-zinc-700/70'
-                                      : 'bg-zinc-50 dark:bg-zinc-900 text-zinc-400 dark:text-zinc-600 border-zinc-200/70 dark:border-zinc-800/70'
-                                  }`}
-                                >
-                                  <Bot className="w-4 h-4" />
-                                </div>
-                                <div className="min-w-0">
-                                  <div
-                                    className={`font-semibold text-sm truncate ${
-                                      isOnline
-                                        ? 'text-zinc-900 dark:text-zinc-100'
-                                        : 'text-zinc-500 dark:text-zinc-400'
-                                    }`}
-                                  >
-                                    {bot.name}
+                          <>
+                            {primaryBots.map((bot) => {
+                              const isDeleting = deletingBotId === bot.id;
+                              const shortModel = getShortModelId(bot.modelId);
+                              const thinkingText = formatThinkingLevel(bot.thinkingLevel);
+                              const subagents = subagentMap.get(bot.id) || [];
+
+                              // Collect enabled skills and extensions compactly
+                              const enabledItems = [
+                                ...(bot.enabledSkills || []).map((s) => ({ type: 'skill' as const, name: s })),
+                                ...(bot.enabledExtensions || []).map((e) => ({ type: 'ext' as const, name: e })),
+                              ];
+
+                              return (
+                                <div key={bot.id} className="p-4 flex flex-col justify-between gap-3 min-w-0">
+                                  {/* Bot identity & + 分身 action */}
+                                  <div className="flex items-start justify-between gap-2 min-w-0">
+                                    <div className="flex items-center gap-2.5 min-w-0">
+                                      <div
+                                        className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 border ${
+                                          isOnline
+                                            ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border-zinc-200/70 dark:border-zinc-700/70'
+                                            : 'bg-zinc-50 dark:bg-zinc-900 text-zinc-400 dark:text-zinc-600 border-zinc-200/70 dark:border-zinc-800/70'
+                                        }`}
+                                      >
+                                        <Bot className="w-4 h-4" />
+                                      </div>
+                                      <div className="min-w-0">
+                                        <div
+                                          className={`font-semibold text-sm truncate ${
+                                            isOnline
+                                              ? 'text-zinc-900 dark:text-zinc-100'
+                                              : 'text-zinc-500 dark:text-zinc-400'
+                                          }`}
+                                        >
+                                          {bot.name}
+                                        </div>
+                                        <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400 block truncate">
+                                          @{bot.id}
+                                        </span>
+                                      </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-1 shrink-0">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenCreateSubagent(node, bot)}
+                                        disabled={!isOnline}
+                                        className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 dark:text-indigo-400 dark:hover:text-indigo-300 dark:hover:bg-indigo-950/40 rounded-lg transition-colors border border-indigo-200/80 dark:border-indigo-800/80 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                                        title="新建角色分身"
+                                      >
+                                        <Plus className="w-3 h-3" />
+                                        <span>分身</span>
+                                      </button>
+                                      {!isOnline && (
+                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded text-[11px] text-zinc-500 dark:text-zinc-400 shrink-0">
+                                          <PowerOff className="w-2.5 h-2.5" />
+                                          <span>离线</span>
+                                        </span>
+                                      )}
+                                    </div>
                                   </div>
-                                  <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400 block truncate">
-                                    @{bot.id}
-                                  </span>
+
+                                  {/* Description */}
+                                  <p className="text-xs text-zinc-600 dark:text-zinc-400 line-clamp-2 min-h-[32px] leading-relaxed">
+                                    {bot.description || '暂无角色描述'}
+                                  </p>
+
+                                  {/* Metadata chips */}
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <span
+                                      className="font-mono text-[11px] text-zinc-700 bg-zinc-100 dark:text-zinc-300 dark:bg-zinc-800 px-1.5 py-0.5 rounded border border-zinc-200/60 dark:border-zinc-700/60 truncate max-w-[140px]"
+                                      title={bot.modelId}
+                                    >
+                                      {shortModel}
+                                    </span>
+
+                                    {thinkingText && (
+                                      <span className="text-[11px] text-zinc-600 bg-zinc-100 dark:text-zinc-400 dark:bg-zinc-800 px-1.5 py-0.5 rounded border border-zinc-200 dark:border-zinc-700 font-medium">
+                                        {thinkingText}
+                                      </span>
+                                    )}
+
+                                    {enabledItems.slice(0, 2).map((item) => (
+                                      <span
+                                        key={`${item.type}-${item.name}`}
+                                        className="inline-flex items-center gap-1 text-[11px] font-mono text-zinc-600 bg-zinc-50 dark:text-zinc-400 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800/80 px-1.5 py-0.5 rounded truncate max-w-[110px]"
+                                        title={item.type === 'skill' ? `技能: ${item.name}` : `扩展: ${item.name}`}
+                                      >
+                                        {item.type === 'skill' ? (
+                                          <Wrench className="w-2.5 h-2.5 text-zinc-400 dark:text-zinc-500 shrink-0" />
+                                        ) : (
+                                          <Blocks className="w-2.5 h-2.5 text-zinc-400 dark:text-zinc-500 shrink-0" />
+                                        )}
+                                        <span className="truncate">{item.name}</span>
+                                      </span>
+                                    ))}
+                                    {enabledItems.length > 2 && (
+                                      <span className="text-[11px] font-mono text-zinc-400 bg-zinc-50 dark:text-zinc-500 dark:bg-zinc-900 px-1 py-0.5 rounded border border-zinc-200/60 dark:border-zinc-800/60">
+                                        +{enabledItems.length - 2}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  {/* Actions: read-only while the owning node is offline */}
+                                  <div className="pt-2 border-t border-zinc-100 dark:border-zinc-800/60 flex items-center justify-between">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleStartChat(bot)}
+                                        disabled={!isOnline}
+                                        className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                                        title={!isOnline ? '节点离线，无法发起对话' : '发起对话'}
+                                      >
+                                        <MessageSquare className="w-3 h-3 text-zinc-500" />
+                                        <span>对话</span>
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenEditBot(node, bot, 'basic')}
+                                        disabled={!isOnline}
+                                        className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed"
+                                        title={!isOnline ? '节点离线，无法编辑该智能体' : '编辑智能体配置'}
+                                      >
+                                        <Edit className="w-3 h-3" />
+                                        <span>配置</span>
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenEditBot(node, bot, 'system')}
+                                        disabled={!isOnline}
+                                        className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed"
+                                        title={!isOnline ? '节点离线，无法编辑提示词与记忆' : '查看/编辑提示词与长期记忆'}
+                                      >
+                                        <Sparkles className="w-3 h-3 text-amber-500" />
+                                        <span>人设/记忆</span>
+                                      </button>
+                                    </div>
+
+                                    <button
+                                      onClick={() => setBotToDelete(bot)}
+                                      disabled={!isOnline || isDeleting}
+                                      className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:text-zinc-500 dark:hover:text-rose-400 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                                      title={!isOnline ? '节点离线，无法删除该智能体' : '删除该智能体'}
+                                      aria-label="删除"
+                                    >
+                                      {isDeleting ? (
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin-fast text-rose-500 dark:text-rose-400" />
+                                      ) : (
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      )}
+                                    </button>
+                                  </div>
+
+                                  {/* Subagents indented tree list underneath parent bot */}
+                                  {subagents.length > 0 && (
+                                    <div className="mt-2 pt-2.5 border-t border-dashed border-zinc-200 dark:border-zinc-800 space-y-2">
+                                      <div className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400 flex items-center justify-between">
+                                        <span>角色分身 ({subagents.length})</span>
+                                      </div>
+                                      <div className="space-y-1.5">
+                                        {subagents.map((sub) => {
+                                          const subDeleting = deletingBotId === sub.id;
+                                          const colorDot = SUBAGENT_COLOR_DOT[sub.color || 'blue'] || 'bg-blue-500';
+                                          return (
+                                            <div
+                                              key={sub.id}
+                                              className="p-2.5 bg-zinc-50/80 dark:bg-zinc-900/60 rounded-xl border border-zinc-200/70 dark:border-zinc-800/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                                            >
+                                              <div className="flex items-center gap-2 min-w-0 flex-wrap sm:flex-nowrap">
+                                                <span className="text-zinc-400 dark:text-zinc-600 font-mono text-xs select-none">└─</span>
+                                                <span className={`w-2 h-2 rounded-full shrink-0 ${colorDot}`} />
+                                                <span className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 truncate">{sub.name}</span>
+                                                <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate">@{sub.id}</span>
+
+                                                {/* Capability badges */}
+                                                <div className="flex items-center gap-1 shrink-0 flex-wrap">
+                                                  {sub.inheritModel ? (
+                                                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-purple-50 dark:bg-purple-950/60 text-purple-600 dark:text-purple-400 border border-purple-200/60 dark:border-purple-800/60 font-medium">
+                                                      ✨ 跟随主模型
+                                                    </span>
+                                                  ) : (
+                                                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700">
+                                                      {getShortModelId(sub.modelId)}
+                                                    </span>
+                                                  )}
+                                                  {sub.toolScope === 'readonly' && (
+                                                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 border border-amber-200/60 dark:border-amber-800/60 font-medium">
+                                                      🔍 只读
+                                                    </span>
+                                                  )}
+                                                  {sub.isolation === 'worktree' && (
+                                                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 border border-emerald-200/60 dark:border-emerald-800/60 font-medium">
+                                                      🌿 worktree
+                                                    </span>
+                                                  )}
+                                                </div>
+                                              </div>
+
+                                              {/* Quick actions for subagent */}
+                                              <div className="flex items-center gap-1 shrink-0 self-end sm:self-center">
+                                                <button
+                                                  type="button"
+                                                  onClick={() => handleStartChat(sub)}
+                                                  disabled={!isOnline}
+                                                  className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                                                  title={!isOnline ? '节点离线' : '发起对话'}
+                                                  aria-label={`与分身 ${sub.name} 对话`}
+                                                >
+                                                  <MessageSquare className="w-3 h-3" />
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => handleOpenEditBot(node, sub, 'basic')}
+                                                  disabled={!isOnline}
+                                                  className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                                                  title={!isOnline ? '节点离线' : '编辑分身配置'}
+                                                  aria-label={`编辑分身 ${sub.name}`}
+                                                >
+                                                  <Edit className="w-3 h-3" />
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => handleOpenEditBot(node, sub, 'system')}
+                                                  disabled={!isOnline}
+                                                  className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                                                  title={!isOnline ? '节点离线' : '提示词与记忆'}
+                                                  aria-label={`分身 ${sub.name} 提示词与记忆`}
+                                                >
+                                                  <Sparkles className="w-3 h-3 text-amber-500" />
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => setBotToDelete(sub)}
+                                                  disabled={!isOnline || subDeleting}
+                                                  className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:text-zinc-500 dark:hover:text-rose-400 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                                                  title={!isOnline ? '节点离线' : '删除分身'}
+                                                  aria-label={`删除分身 ${sub.name}`}
+                                                >
+                                                  {subDeleting ? (
+                                                    <Loader2 className="w-3.5 h-3.5 animate-spin-fast text-rose-500" />
+                                                  ) : (
+                                                    <Trash2 className="w-3.5 h-3.5" />
+                                                  )}
+                                                </button>
+                                              </div>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+
+                            {orphanSubagents.length > 0 && (
+                              <div className="col-span-full p-4 border-t border-zinc-100 dark:border-zinc-800/60 bg-zinc-50/50 dark:bg-zinc-900/30">
+                                <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 mb-2">
+                                  独立/无归属分身 ({orphanSubagents.length})
+                                </div>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                  {orphanSubagents.map((sub) => {
+                                    const subDeleting = deletingBotId === sub.id;
+                                    const colorDot = SUBAGENT_COLOR_DOT[sub.color || 'blue'] || 'bg-blue-500';
+                                    return (
+                                      <div
+                                        key={sub.id}
+                                        className="p-3 bg-white dark:bg-zinc-950 rounded-xl border border-zinc-200/80 dark:border-zinc-800/80 flex items-center justify-between gap-2"
+                                      >
+                                        <div className="flex items-center gap-2 min-w-0">
+                                          <span className={`w-2 h-2 rounded-full shrink-0 ${colorDot}`} />
+                                          <div className="min-w-0">
+                                            <span className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 truncate block">
+                                              {sub.name}
+                                            </span>
+                                            <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate block">
+                                              @{sub.id} (隶属 @{sub.parentBotId})
+                                            </span>
+                                          </div>
+                                        </div>
+
+                                        <div className="flex items-center gap-1 shrink-0">
+                                          <button
+                                            type="button"
+                                            onClick={() => handleStartChat(sub)}
+                                            disabled={!isOnline}
+                                            className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
+                                            title="发起对话"
+                                            aria-label={`与分身 ${sub.name} 对话`}
+                                          >
+                                            <MessageSquare className="w-3 h-3" />
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => handleOpenEditBot(node, sub, 'basic')}
+                                            disabled={!isOnline}
+                                            className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
+                                            title="编辑分身配置"
+                                            aria-label={`编辑分身 ${sub.name}`}
+                                          >
+                                            <Edit className="w-3 h-3" />
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => setBotToDelete(sub)}
+                                            disabled={!isOnline || subDeleting}
+                                            className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:text-zinc-500 dark:hover:text-rose-400 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
+                                            title="删除分身"
+                                            aria-label={`删除分身 ${sub.name}`}
+                                          >
+                                            {subDeleting ? (
+                                              <Loader2 className="w-3.5 h-3.5 animate-spin-fast text-rose-500" />
+                                            ) : (
+                                              <Trash2 className="w-3.5 h-3.5" />
+                                            )}
+                                          </button>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
                                 </div>
                               </div>
-
-                              {!isOnline && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded text-[11px] text-zinc-500 dark:text-zinc-400 shrink-0">
-                                  <PowerOff className="w-2.5 h-2.5" />
-                                  <span>离线</span>
-                                </span>
-                              )}
-                            </div>
-
-                            {/* Description */}
-                            <p className="text-xs text-zinc-600 dark:text-zinc-400 line-clamp-2 min-h-[32px] leading-relaxed">
-                              {bot.description || '暂无角色描述'}
-                            </p>
-
-                            {/* Metadata chips */}
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <span
-                                className="font-mono text-[11px] text-zinc-700 bg-zinc-100 dark:text-zinc-300 dark:bg-zinc-800 px-1.5 py-0.5 rounded border border-zinc-200/60 dark:border-zinc-700/60 truncate max-w-[140px]"
-                                title={bot.modelId}
-                              >
-                                {shortModel}
-                              </span>
-
-                              {thinkingText && (
-                                <span className="text-[11px] text-zinc-600 bg-zinc-100 dark:text-zinc-400 dark:bg-zinc-800 px-1.5 py-0.5 rounded border border-zinc-200 dark:border-zinc-700 font-medium">
-                                  {thinkingText}
-                                </span>
-                              )}
-
-                              {enabledItems.slice(0, 2).map((item) => (
-                                <span
-                                  key={`${item.type}-${item.name}`}
-                                  className="inline-flex items-center gap-1 text-[11px] font-mono text-zinc-600 bg-zinc-50 dark:text-zinc-400 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800/80 px-1.5 py-0.5 rounded truncate max-w-[110px]"
-                                  title={item.type === 'skill' ? `技能: ${item.name}` : `扩展: ${item.name}`}
-                                >
-                                  {item.type === 'skill' ? (
-                                    <Wrench className="w-2.5 h-2.5 text-zinc-400 dark:text-zinc-500 shrink-0" />
-                                  ) : (
-                                    <Blocks className="w-2.5 h-2.5 text-zinc-400 dark:text-zinc-500 shrink-0" />
-                                  )}
-                                  <span className="truncate">{item.name}</span>
-                                </span>
-                              ))}
-                              {enabledItems.length > 2 && (
-                                <span className="text-[11px] font-mono text-zinc-400 bg-zinc-50 dark:text-zinc-500 dark:bg-zinc-900 px-1 py-0.5 rounded border border-zinc-200/60 dark:border-zinc-800/60">
-                                  +{enabledItems.length - 2}
-                                </span>
-                              )}
-                            </div>
-
-                            {/* Actions: read-only while the owning node is offline */}
-                            <div className="pt-2 border-t border-zinc-100 dark:border-zinc-800/60 flex items-center justify-between">
-                              <button
-                                onClick={() => handleOpenEditBot(node, bot)}
-                                disabled={!isOnline}
-                                className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed"
-                                title={!isOnline ? '节点离线，无法编辑该智能体' : '编辑智能体配置'}
-                              >
-                                <Edit className="w-3 h-3" />
-                                <span>配置</span>
-                              </button>
-
-                              <button
-                                onClick={() => setBotToDelete(bot)}
-                                disabled={!isOnline || isDeleting}
-                                className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:text-zinc-500 dark:hover:text-rose-400 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                title={!isOnline ? '节点离线，无法删除该智能体' : '删除该智能体'}
-                                aria-label="删除"
-                              >
-                                {isDeleting ? (
-                                  <Loader2 className="w-3.5 h-3.5 animate-spin-fast text-rose-500 dark:text-rose-400" />
-                                ) : (
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                )}
-                              </button>
-                            </div>
-                          </div>
+                            )}
+                          </>
                         );
-                      })}
+                      })()}
                     </div>
                   )}
                 </div>
@@ -1208,9 +1512,23 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
         isOpen={botEditorOpen}
         node={selectedNodeForBot}
         bot={selectedBot}
-        onClose={() => setBotEditorOpen(false)}
+        parentBot={selectedParentBot}
+        initialTab={initialBotTab}
+        onClose={() => {
+          setBotEditorOpen(false);
+          setSelectedParentBot(null);
+        }}
         onSaved={async () => {
-          onAddToast('success', selectedBot ? '智能体配置已成功更新' : '新智能体创建成功');
+          onAddToast(
+            'success',
+            selectedBot
+              ? selectedBot.parentBotId
+                ? '角色分身配置已成功更新'
+                : '智能体配置已成功更新'
+              : selectedParentBot
+              ? '新角色分身创建成功'
+              : '新智能体创建成功'
+          );
           await onRefresh();
         }}
       />

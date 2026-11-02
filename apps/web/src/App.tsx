@@ -10,6 +10,7 @@ import type {
   GlobalSseEvent,
   MessageAttachment,
   PendingAskRecord,
+  SubagentRunRecord,
 } from '@botd/protocol';
 import { api, AuthRequiredError, subscribeGlobalEvents } from './api';
 import { emitGlobalEvent } from './events';
@@ -128,6 +129,8 @@ export const App: React.FC = () => {
 
   // 多 BOT 并发流式状态（按 botId 隔离索引，互不覆盖）
   const [streamingStatesMap, setStreamingStatesMap] = useState<Record<string, StreamingAssistantState>>({});
+  // 活跃分身执行轨迹（按主 BOT ID 隔离索引，供 ChatView 展示实时分身协同）
+  const [subagentRunsMap, setSubagentRunsMap] = useState<Record<string, SubagentRunRecord[]>>({});
   const [cancelling, setCancelling] = useState(false);
 
   // 当前会话待处理的人机协同交互请求（botd ask）
@@ -649,13 +652,23 @@ export const App: React.FC = () => {
           setSessions((prev) =>
             prev.map((s) =>
               s.id === event.sessionId
-                ? { ...s, status: event.status, activeBotId: event.activeBotId, activeBotIds: event.activeBotIds }
+                ? {
+                    ...s,
+                    status: event.status,
+                    activeBotId: event.activeBotId,
+                    activeBotIds: event.activeBotIds,
+                    queuePlan:
+                      event.status === 'idle' || event.status === 'failed'
+                        ? []
+                        : event.queuePlan ?? s.queuePlan ?? [],
+                  }
                 : s
             )
           );
 
           if (event.status === 'idle' || event.status === 'failed') {
             setStreamingStatesMap(clearStreamingMap());
+            setSubagentRunsMap({});
             // 不区分当前/其他会话：全局同一时刻只有一个取消动作在飞行中，任一会话结束即复位
             setCancelling(false);
           } else if (event.status === 'running' && event.activeBotIds && event.activeBotIds.length > 1) {
@@ -671,6 +684,37 @@ export const App: React.FC = () => {
               return updated ? nextMap : prevMap;
             });
           }
+          break;
+        }
+
+        case 'session_updated': {
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === event.sessionId
+                ? {
+                    ...s,
+                    blackboard: event.blackboard !== undefined ? event.blackboard : s.blackboard,
+                    memberRoles: event.memberRoles !== undefined ? event.memberRoles : s.memberRoles,
+                  }
+                : s
+            )
+          );
+          break;
+        }
+
+        case 'subagent_status': {
+          setSubagentRunsMap((prev) => {
+            const list = prev[event.botId] || [];
+            const idx = list.findIndex((r) => r.id === event.run.id);
+            let nextList: SubagentRunRecord[];
+            if (idx >= 0) {
+              nextList = [...list];
+              nextList[idx] = event.run;
+            } else {
+              nextList = [...list, event.run];
+            }
+            return { ...prev, [event.botId]: nextList };
+          });
           break;
         }
       }
@@ -742,7 +786,16 @@ export const App: React.FC = () => {
           setSessions((prev) =>
             prev.map((s) =>
               s.id === eventSessionId
-                ? { ...s, status: event.status, activeBotId: event.activeBotId, activeBotIds: event.activeBotIds }
+                ? {
+                    ...s,
+                    status: event.status,
+                    activeBotId: event.activeBotId,
+                    activeBotIds: event.activeBotIds,
+                    queuePlan:
+                      event.status === 'idle' || event.status === 'failed'
+                        ? []
+                        : event.queuePlan ?? s.queuePlan ?? [],
+                  }
                 : s
             )
           );
@@ -750,12 +803,29 @@ export const App: React.FC = () => {
           if (event.status === 'idle' || event.status === 'failed') {
             setCancelling(false);
           }
+          return;
+        }
+
+        if (event.type === 'session_updated') {
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === eventSessionId
+                ? {
+                    ...s,
+                    blackboard: event.blackboard !== undefined ? event.blackboard : s.blackboard,
+                    memberRoles: event.memberRoles !== undefined ? event.memberRoles : s.memberRoles,
+                  }
+                : s
+            )
+          );
+          return;
         }
       },
       onOpen: () => {
         // 重连建立后先清空流式状态：断线期间回合完成时 message_created/idle 已永久丢失，
         // 半截 streaming 气泡不清理会残留；若回合仍在进行，后续 text_delta 会自然重建
         setStreamingStatesMap(clearStreamingMap());
+        setSubagentRunsMap({});
         // 连接（含断线重连）建立后重拉当前会话最新快照，补齐断线期间丢失的事件
         const sid = activeSessionIdRef.current;
         if (sid) loadMessagesForSession(sid, sessionEpochRef.current);
@@ -1033,7 +1103,7 @@ export const App: React.FC = () => {
 
   const handleUpdateSession = async (
     sessionId: string,
-    input: Partial<CreateSessionInput>
+    input: Partial<CreateSessionInput> & { memberRoles?: Record<string, string>; blackboard?: string }
   ) => {
     try {
       const updated = await api.updateSession(sessionId, input);
@@ -1241,6 +1311,7 @@ export const App: React.FC = () => {
             botMap={botMap}
             nodeMap={nodeMap}
             streamingStates={Object.values(streamingStatesMap)}
+            activeSubagentRuns={subagentRunsMap}
             onSendMessage={handleSendMessage}
             onEditMessage={handleEditMessage}
             onCancelSession={handleCancelSession}
@@ -1259,6 +1330,8 @@ export const App: React.FC = () => {
             highlightMessageId={route.messageId}
             onRespondToAsk={handleRespondToAsk}
             onAddToast={addToast}
+            onUpdateSession={handleUpdateSession}
+            onOpenBotChat={handleOpenBotChat}
           />
         ) : (
           /* Mobile startup header with accessible menu when no active session */

@@ -5,7 +5,9 @@ import {
   type IncomingArtifactRef,
   type MessageRecord,
   type PendingAskRecord,
+  type QueueStageSummary,
   type SessionRecord,
+  type SubagentRunRecord,
   type ToolCallRecord,
   type TurnUsage,
 } from '@botd/protocol';
@@ -37,6 +39,10 @@ export interface QueueItem {
   commandMessageId?: string;
   parallelGroupId?: string;
   replyToBotId?: string;
+  stageId?: string;
+  loopGroupId?: string;
+  whisperTargetBotIds?: string[];
+  dispatchedByBotId?: string;
 }
 
 export interface PreparedTurnItem {
@@ -137,6 +143,182 @@ export function extractMentions(text: string, validBotIds: Set<string>): string[
   return result;
 }
 
+export function extractBotRoutingDirective(text: string): { directive: string; plan: string } | null {
+  const lines = text.trimEnd().split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const match = line.match(/^(?:->|ROUTE:)\s*(.*)$/);
+    if (match) {
+      return {
+        directive: line,
+        plan: match[1].trim(),
+      };
+    }
+    break;
+  }
+  return null;
+}
+
+export function parseOrchestrationPlan(
+  plan: string,
+  validBotIds: Set<string>,
+  session: SessionRecord,
+  options?: {
+    chainBudget?: ChainBudget;
+    generation?: number;
+    dispatchedByBotId?: string;
+  }
+): QueueItem[] {
+  const trimmed = plan.trim();
+  if (!trimmed || trimmed === '@none' || trimmed.startsWith('@none')) return [];
+
+  // Split by -> but not <->
+  const rawStages = trimmed.split(/(?<!<)->/).map((s) => s.trim()).filter(Boolean);
+  if (rawStages.length === 0) return [];
+
+  const items: QueueItem[] = [];
+  const generation = options?.generation ?? 0;
+  const chainBudget = options?.chainBudget ?? new ChainBudget(MAX_RELAY_TURNS);
+
+  for (const rawStage of rawStages) {
+    const stageId = `stage_${randomUUID()}`;
+
+    // 1. Check for @all
+    if (rawStage === '@all') {
+      const nonLeadMembers = session.memberBotIds.filter((id) => id !== session.leadBotId && validBotIds.has(id));
+      if (nonLeadMembers.length > 0) {
+        const parallelGroupId = `pg_${randomUUID()}`;
+        for (const botId of nonLeadMembers) {
+          items.push({
+            botId,
+            chainBudget,
+            generation,
+            parallelGroupId,
+            stageId,
+            ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
+          });
+        }
+      }
+      if (validBotIds.has(session.leadBotId)) {
+        items.push({
+          botId: session.leadBotId,
+          chainBudget,
+          generation,
+          stageId: `stage_${randomUUID()}`,
+          ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
+        });
+      }
+      continue;
+    }
+
+    // 2. Parallel group: (@botA @botB ...)
+    const parenMatch = rawStage.match(/^\(([^)]+)\)$/);
+    if (parenMatch) {
+      const inner = parenMatch[1];
+      const botMentions = extractMentions(inner, validBotIds);
+      if (botMentions.length > 0) {
+        const parallelGroupId = `pg_${randomUUID()}`;
+        for (const botId of botMentions) {
+          items.push({
+            botId,
+            chainBudget,
+            generation,
+            parallelGroupId,
+            stageId,
+            ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
+          });
+        }
+      }
+      continue;
+    }
+
+    // 3. Maker-Checker loop: @botA <-> @botB [* N]
+    if (rawStage.includes('<->')) {
+      const parts = rawStage.split('<->').map((p) => p.trim());
+      if (parts.length >= 2) {
+        const botAMentions = extractMentions(parts[0], validBotIds);
+        let roundCount = 2;
+        const starMatch = parts[1].match(/\*\s*(\d+)/);
+        if (starMatch) {
+          roundCount = Math.min(Math.max(1, parseInt(starMatch[1], 10) || 2), 4);
+        }
+        const botBMentions = extractMentions(parts[1].replace(/\*\s*\d+/, ''), validBotIds);
+
+        const botA = botAMentions[0];
+        const botB = botBMentions[0];
+        if (botA && botB) {
+          const loopGroupId = `loop_${randomUUID()}`;
+          for (let r = 0; r < roundCount; r++) {
+            items.push({
+              botId: botA,
+              chainBudget,
+              generation,
+              loopGroupId,
+              stageId,
+              ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
+            });
+            items.push({
+              botId: botB,
+              chainBudget,
+              generation,
+              loopGroupId,
+              stageId,
+              ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
+            });
+          }
+        }
+      }
+      continue;
+    }
+
+    // 4. Whisper sub-thread: @botA >> @botB
+    if (rawStage.includes('>>')) {
+      const parts = rawStage.split('>>').map((p) => p.trim());
+      if (parts.length >= 2) {
+        const botAMentions = extractMentions(parts[0], validBotIds);
+        const botBMentions = extractMentions(parts[1], validBotIds);
+        const botA = botAMentions[0];
+        const botB = botBMentions[0];
+        if (botA && botB) {
+          const whisperTargetBotIds = [botA, botB];
+          items.push({
+            botId: botA,
+            chainBudget,
+            generation,
+            whisperTargetBotIds,
+            stageId,
+            ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
+          });
+          items.push({
+            botId: botB,
+            chainBudget,
+            generation,
+            whisperTargetBotIds,
+            stageId,
+            ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
+          });
+        }
+      }
+      continue;
+    }
+
+    // 5. Single or multiple serial mentions
+    const botMentions = extractMentions(rawStage, validBotIds);
+    for (const botId of botMentions) {
+      items.push({
+        botId,
+        chainBudget,
+        generation,
+        stageId,
+        ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
+      });
+    }
+  }
+
+  return items;
+}
+
 export function formatIncrementalMessages(messages: MessageRecord[]): string {
   return messages
     .map((msg) => {
@@ -146,16 +328,75 @@ export function formatIncrementalMessages(messages: MessageRecord[]): string {
     .join('\n\n');
 }
 
-export function buildGroupContextPrompt(session: SessionRecord): string {
+export function buildGroupContextPrompt(
+  session: SessionRecord,
+  db?: HubDatabase,
+  currentBotId?: string
+): string {
+  let prompt = '';
+  if (session.blackboard && session.blackboard.trim().length > 0) {
+    prompt += `## 📌 群备忘录 (Shared Blackboard)\n${session.blackboard.trim()}\n\n`;
+  }
   const members = session.memberBotIds.map((id) => `@${id}`).join(', ');
-  let prompt = `## 群聊上下文\n- 会话标题: ${session.title}\n- 会话模式: ${session.mode}\n- 群负责人: @${session.leadBotId}\n- 参与成员: ${members}\n`;
+  prompt += `## 群聊上下文\n- 会话标题: ${session.title}\n- 会话模式: ${session.mode}\n- 群负责人: @${session.leadBotId}\n- 参与成员: ${members}\n`;
+
+  if (db) {
+    prompt += '\n### 成员列表与角色\n';
+    const allMemberIds = [session.leadBotId, ...session.memberBotIds.filter((id) => id !== session.leadBotId)];
+    for (const memberId of allMemberIds) {
+      const bot = db.getBot(memberId);
+      const role = session.memberRoles?.[memberId];
+      const roleStr = role ? ` | 本群头衔: 【${role}】` : '';
+      const desc = bot?.description ? ` - ${bot.description}` : '';
+      const skills = bot?.enabledSkills?.length ? ` (技能: ${bot.enabledSkills.join(', ')})` : '';
+      prompt += `- @${memberId} (${bot?.name || memberId}${roleStr})${desc}${skills}\n`;
+    }
+  }
+
+  if (currentBotId && session.memberRoles?.[currentBotId]) {
+    prompt += `\n🎭 你在本群的专属头衔/角色是：【${session.memberRoles[currentBotId]}】，请严格代入该视角发言。\n`;
+  }
+
+  // 分身感知：列出当前 BOT 麾下的角色分身（单聊与群聊均注入），让主 BOT 知道自己能调度谁。
+  const mySubagents = db && currentBotId
+    ? db.getAllBots().filter((b) => b.parentBotId === currentBotId)
+    : [];
+  if (mySubagents.length > 0) {
+    prompt += '\n### ⚡ 你的角色分身 (Subagents)\n';
+    for (const sub of mySubagents) {
+      const tags: string[] = [];
+      if (sub.inheritModel) tags.push('跟随主模型');
+      else if (sub.modelId) tags.push(sub.modelId);
+      if (sub.toolScope === 'readonly') tags.push('只读');
+      if (sub.isolation === 'worktree') tags.push('worktree隔离');
+      prompt += `- @${sub.id} (${sub.name}${sub.description ? ` - ${sub.description}` : ''}${tags.length ? ` [${tags.join(' · ')}]` : ''})\n`;
+    }
+    prompt +=
+      '你可以用 Agent 工具（subagent_type 填分身 id）或 SubagentWorkflow 工具调度上述分身并发/串行干活；\n' +
+      '也可以在群聊回复尾部输出单行编排指令 \'-> ...\' 让 Hub 跨会话接力调度。\n';
+  }
+
   if (session.mode === 'lead') {
     prompt += `\n你当前处于 Lead 群聊模式。群负责人（@${session.leadBotId}）负责协调对话。如需交由其他成员发言，请在回复中使用 @<botId> 呼叫对方。`;
-  } else if (session.mode === 'roundtable') {
-    prompt += `\n你当前处于 Roundtable 圆桌讨论模式。如需交由特定成员接力，请在回复中使用 @<botId> 呼叫对方。`;
   } else {
     prompt += `\n你当前处于单聊模式。`;
   }
+
+  const isLead = currentBotId === session.leadBotId;
+  const hasSubagents = mySubagents.length > 0;
+  if (session.mode !== 'direct' && (isLead || hasSubagents)) {
+    prompt +=
+      `\n\n### 编排指令与共享黑板说明\n` +
+      `你可以通过在回复尾部输出单行编排指令来调度工作流（将覆盖默认的 @mention 转发）：\n` +
+      `- 并行聚合: \`-> (@botA @botB) -> @${session.leadBotId}\`\n` +
+      `- 串行流水线: \`-> @botA -> @botB -> @${session.leadBotId}\`\n` +
+      `- 双人对抗/审查循环: \`-> @botA <-> @botB -> @${session.leadBotId}\` (或 \`*N\` 次循环)\n` +
+      `- 私密子线程耳语: \`-> @botA >> @botB -> @${session.leadBotId}\`\n` +
+      `- 终止唤醒: \`-> @none\`\n` +
+      `如需更新共享备忘录，请在回复中包含如下代码块：\n` +
+      `\`\`\`blackboard\n[最新共识/进展/待办]\n\`\`\``;
+  }
+
   return prompt;
 }
 
@@ -233,9 +474,114 @@ export class GroupRouter {
   canRunBot(sessionId: string, botId: string): boolean {
     const session = this.db.getSession(sessionId);
     const bot = this.db.getBot(botId);
-    if (!session || !bot || ![session.leadBotId, ...session.memberBotIds].includes(botId)) return false;
+    if (!session || !bot) return false;
+    const sessionMembers = [session.leadBotId, ...session.memberBotIds];
+    let isMember = sessionMembers.includes(botId);
+    if (!isMember && bot.parentBotId && sessionMembers.includes(bot.parentBotId)) {
+      isMember = true;
+    }
+    if (!isMember) return false;
     const ownerId = this.getSessionOwner(sessionId, session);
     return ownerId !== undefined && this.db.canUserUseBot(botId, ownerId);
+  }
+
+  getValidBotIds(session: SessionRecord): Set<string> {
+    const valid = new Set<string>([session.leadBotId, ...session.memberBotIds]);
+    const allBots = this.db.getAllBots();
+    for (const b of allBots) {
+      if (b.parentBotId && valid.has(b.parentBotId)) {
+        valid.add(b.id);
+      }
+    }
+    return valid;
+  }
+
+  getQueuePlan(sessionId: string): QueueStageSummary[] {
+    const state = this.states.get(sessionId);
+    if (!state || state.queue.length === 0) return [];
+    const stages: QueueStageSummary[] = [];
+    let i = 0;
+    while (i < state.queue.length) {
+      const item = state.queue[i];
+      if (item.parallelGroupId) {
+        const pId = item.parallelGroupId;
+        const botIds: string[] = [];
+        const stageId = item.stageId || pId;
+        const loopGroupId = item.loopGroupId;
+        const whisper = Boolean(item.whisperTargetBotIds && item.whisperTargetBotIds.length > 0);
+        while (i < state.queue.length && state.queue[i].parallelGroupId === pId) {
+          botIds.push(state.queue[i].botId);
+          i++;
+        }
+        stages.push({
+          id: stageId,
+          botIds,
+          parallel: true,
+          ...(loopGroupId ? { loopGroupId } : {}),
+          ...(whisper ? { whisper } : {}),
+        });
+      } else {
+        stages.push({
+          id: item.stageId || `stage_${i}_${item.botId}`,
+          botIds: [item.botId],
+          ...(item.loopGroupId ? { loopGroupId: item.loopGroupId } : {}),
+          ...(item.whisperTargetBotIds && item.whisperTargetBotIds.length > 0 ? { whisper: true } : {}),
+        });
+        i++;
+      }
+    }
+    return stages;
+  }
+
+  skipQueueStage(sessionId: string, target: { stageId?: string; botId?: string }): QueueStageSummary[] {
+    const state = this.getOrCreateState(sessionId);
+    if (target.stageId) {
+      state.queue = state.queue.filter(
+        (item) => item.stageId !== target.stageId && item.parallelGroupId !== target.stageId
+      );
+    } else if (target.botId) {
+      const idx = state.queue.findIndex((item) => item.botId === target.botId);
+      if (idx !== -1) {
+        state.queue.splice(idx, 1);
+      }
+    }
+    const queuePlan = this.getQueuePlan(sessionId);
+    this.sseHub.broadcast(sessionId, {
+      type: 'session_status',
+      sessionId,
+      status: state.isRunning ? 'running' : 'idle',
+      activeBotId: state.activeBotId,
+      activeBotIds: Array.from(state.activeBotIds),
+      queuePlan,
+    });
+    return queuePlan;
+  }
+
+  appendQueueStage(sessionId: string, orchestration: string): QueueStageSummary[] {
+    const session = this.db.getSession(sessionId);
+    if (!session) return [];
+    const state = this.getOrCreateState(sessionId);
+    const validBotIds = this.getValidBotIds(session);
+    const compiled = parseOrchestrationPlan(orchestration, validBotIds, session, {
+      chainBudget: new ChainBudget(MAX_RELAY_TURNS),
+      generation: state.generation,
+    });
+    if (compiled.length > 0) {
+      state.queue.push(...compiled);
+    }
+    const queuePlan = this.getQueuePlan(sessionId);
+    this.sseHub.broadcast(sessionId, {
+      type: 'session_status',
+      sessionId,
+      status: state.isRunning ? 'running' : 'idle',
+      activeBotId: state.activeBotId,
+      activeBotIds: Array.from(state.activeBotIds),
+      queuePlan,
+    });
+    if (!state.isRunning) {
+      this.processQueue(sessionId).catch(() => {});
+    }
+    return queuePlan;
   }
 
   private getOrCreateState(sessionId: string): SessionRuntimeState {
@@ -476,7 +822,7 @@ export class GroupRouter {
     if (!session) return;
 
     const state = this.getOrCreateState(sessionId);
-    const validBotIds = new Set([session.leadBotId, ...session.memberBotIds]);
+    const validBotIds = this.getValidBotIds(session);
 
     const parsedCommand = commandInfo ?? (() => {
       const parsed = parseSlashCommand(content, validBotIds);
@@ -493,36 +839,26 @@ export class GroupRouter {
       const target = parsedCommand.targetBotId ?? session.leadBotId;
       botIdsToQueue = [target];
     } else {
+      // Check if content has workflow DSL operators: ->, <->, >>, @all, or parenthesized parallel (@a @b)
+      const hasWorkflow = /(?<!<)->|<->|>>|@all|\([@\w\s-]+\)/.test(content);
+      if (hasWorkflow) {
+        const compiled = parseOrchestrationPlan(content, validBotIds, session, {
+          chainBudget: new ChainBudget(MAX_RELAY_TURNS),
+          generation: state.generation,
+        });
+        if (compiled.length > 0) {
+          this.db.updateMessageOrchestrationPlan(messageId, content.trim());
+          state.queue.push(...compiled);
+          this.processQueue(sessionId).catch(() => {});
+          return;
+        }
+      }
+
       const mentions = extractMentions(content, validBotIds);
       if (mentions.length > 0) {
         botIdsToQueue = mentions;
       } else {
-        if (session.mode === 'direct' || session.mode === 'lead') {
-          botIdsToQueue = [session.leadBotId];
-        } else {
-          // roundtable: members except leadBotId first, then leadBotId at the end
-          const others = session.memberBotIds.filter((id) => id !== session.leadBotId);
-          if (Boolean(session.parallelRoundtable) && others.length > 0) {
-            const parallelGroupId = `pg_${randomUUID()}`;
-            const chainBudget = new ChainBudget(MAX_RELAY_TURNS);
-            for (const botId of others) {
-              state.queue.push({
-                botId,
-                chainBudget,
-                generation: state.generation,
-                parallelGroupId,
-              });
-            }
-            state.queue.push({
-              botId: session.leadBotId,
-              chainBudget: new ChainBudget(MAX_RELAY_TURNS),
-              generation: state.generation,
-            });
-            this.processQueue(sessionId).catch(() => {});
-            return;
-          }
-          botIdsToQueue = [...others, session.leadBotId];
-        }
+        botIdsToQueue = [session.leadBotId];
       }
     }
 
@@ -553,7 +889,7 @@ export class GroupRouter {
     const session = this.db.getSession(sessionId);
     if (!session) return;
 
-    const validBotIds = new Set([session.leadBotId, ...session.memberBotIds]);
+    const validBotIds = this.getValidBotIds(session);
     if (!this.canRunBot(sessionId, botId)) {
       throw new Error(`Forbidden: bot @${botId} cannot run in session ${sessionId}`);
     }
@@ -638,6 +974,7 @@ export class GroupRouter {
       status: 'idle',
       activeBotId: undefined,
       activeBotIds: [],
+      queuePlan: [],
     });
 
     for (const botId of activeBotsToCancel) {
@@ -701,11 +1038,21 @@ export class GroupRouter {
   } {
     const lastRowid = session.cursorMap[item.botId] ?? 0;
     const rawIncResult = this.db.getIncrementalMessages(session.id, lastRowid);
-    const incResult = rawIncResult.filter(
-      (r) =>
-        !(r.message.role === 'assistant' && r.message.senderBotId === item.botId) &&
-        !(item.commandMessageId && r.message.id === item.commandMessageId)
-    );
+    const incResult = rawIncResult.filter((r) => {
+      const msg = r.message;
+      if (msg.role === 'assistant' && msg.senderBotId === item.botId) return false;
+      if (item.commandMessageId && msg.id === item.commandMessageId) return false;
+      if (msg.whisperTargetBotIds && msg.whisperTargetBotIds.length > 0) {
+        if (
+          item.botId !== session.leadBotId &&
+          msg.senderBotId !== item.botId &&
+          !msg.whisperTargetBotIds.includes(item.botId)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
     const incrementalText = formatIncrementalMessages(incResult.map((r) => r.message));
     const deliveredSnapshotRowid =
       rawIncResult.length > 0 ? Math.max(...rawIncResult.map((r) => r.rowid)) : lastRowid;
@@ -766,6 +1113,7 @@ export class GroupRouter {
             status: 'failed',
             activeBotId: undefined,
             activeBotIds: [],
+            queuePlan: this.getQueuePlan(sessionId),
           });
           state.queue = [];
         } else {
@@ -778,6 +1126,7 @@ export class GroupRouter {
               status: 'running',
               activeBotId: state.activeBotId,
               activeBotIds: Array.from(state.activeBotIds),
+              queuePlan: this.getQueuePlan(sessionId),
             });
           }
         }
@@ -786,6 +1135,68 @@ export class GroupRouter {
     }
 
     if (turnGen !== state.generation) return 'cancelled';
+
+    const isSubagent = Boolean(prep.bot.parentBotId);
+    const isDispatchedSubagent =
+      isSubagent && (session.leadBotId === prep.bot.parentBotId || Boolean(item.dispatchedByBotId));
+    let subagentRun: SubagentRunRecord | undefined;
+    let directSessionId: string | undefined;
+    const turnStartTime = Date.now();
+
+    if (isDispatchedSubagent) {
+      const parentBotId = item.dispatchedByBotId || prep.bot.parentBotId!;
+      const sessionOwner = this.getSessionOwner(sessionId, session) ?? 'user_admin';
+      let directSession = this.db
+        .getAllSessions(sessionOwner)
+        .find(
+          (s) =>
+            s.mode === 'direct' &&
+            s.leadBotId === prep.bot.id &&
+            !s.archived &&
+            s.memberBotIds.length === 1 &&
+            s.memberBotIds[0] === prep.bot.id
+        );
+      if (!directSession) {
+        directSession = this.db.createSession({
+          id: `sess_${randomUUID()}`,
+          title: `${prep.bot.name}（分身会话）`,
+          mode: 'direct',
+          leadBotId: prep.bot.id,
+          memberBotIds: [prep.bot.id],
+          ownerId: sessionOwner,
+        });
+      }
+      directSessionId = directSession.id;
+
+      subagentRun = {
+        id: `run_${randomUUID()}`,
+        subagentId: prep.bot.id,
+        subagentName: prep.bot.name,
+        color: prep.bot.color,
+        task: prep.incrementalText.trim().slice(0, 120) || 'Task execution',
+        status: 'running',
+        childSessionId: directSession.id,
+      };
+
+      this.sseHub.broadcast(sessionId, {
+        type: 'subagent_status',
+        sessionId,
+        botId: prep.bot.id,
+        run: subagentRun,
+      });
+
+      const mirrorPrompt = `📋 [来自 @${parentBotId} 的派单]\n${prep.incrementalText}`;
+      const mirrorUserMsg = this.db.createMessage({
+        id: `msg_${randomUUID()}`,
+        sessionId: directSession.id,
+        role: 'user',
+        content: mirrorPrompt,
+      });
+      this.sseHub.broadcast(directSession.id, {
+        type: 'message_created',
+        message: mirrorUserMsg.message,
+      });
+    }
 
     let turnResult: { replyText: string; modelBadge: string; toolCalls?: ToolCallRecord[]; usage?: TurnUsage };
     try {
@@ -799,6 +1210,16 @@ export class GroupRouter {
         ...(prep.incomingArtifacts.length > 0 ? { incomingArtifacts: prep.incomingArtifacts } : {}),
       });
     } catch (err: any) {
+      if (isDispatchedSubagent && subagentRun) {
+        subagentRun.status = 'error';
+        subagentRun.durationMs = Date.now() - turnStartTime;
+        this.sseHub.broadcast(sessionId, {
+          type: 'subagent_status',
+          sessionId,
+          botId: prep.bot.id,
+          run: subagentRun,
+        });
+      }
       if (turnGen !== state.generation) return 'cancelled';
       const errorText = err?.message || String(err);
       const sysMsg = this.db.createMessage({
@@ -816,6 +1237,7 @@ export class GroupRouter {
           status: 'failed',
           activeBotId: undefined,
           activeBotIds: [],
+          queuePlan: this.getQueuePlan(sessionId),
         });
         state.queue = [];
       } else {
@@ -828,6 +1250,7 @@ export class GroupRouter {
             status: 'running',
             activeBotId: state.activeBotId,
             activeBotIds: Array.from(state.activeBotIds),
+            queuePlan: this.getQueuePlan(sessionId),
           });
         }
       }
@@ -835,6 +1258,62 @@ export class GroupRouter {
     }
 
     if (turnGen !== state.generation) return 'cancelled';
+
+    if (isDispatchedSubagent && subagentRun) {
+      subagentRun.status = 'done';
+      subagentRun.durationMs = Date.now() - turnStartTime;
+      subagentRun.toolCount = turnResult.toolCalls?.length ?? 0;
+      subagentRun.replyPreview = turnResult.replyText.slice(0, 200);
+
+      this.sseHub.broadcast(sessionId, {
+        type: 'subagent_status',
+        sessionId,
+        botId: prep.bot.id,
+        run: subagentRun,
+      });
+
+      if (directSessionId) {
+        const mirrorAssistantMsg = this.db.createMessage({
+          id: `msg_${randomUUID()}`,
+          sessionId: directSessionId,
+          role: 'assistant',
+          senderBotId: prep.bot.id,
+          modelBadge: turnResult.modelBadge,
+          content: turnResult.replyText,
+          toolCalls: turnResult.toolCalls,
+          usage: turnResult.usage,
+        });
+        this.sseHub.broadcast(directSessionId, {
+          type: 'message_created',
+          message: mirrorAssistantMsg.message,
+        });
+      }
+    }
+
+    // 1. Blackboard extraction
+    const bbMatch = turnResult.replyText.match(/```blackboard[^\n]*\r?\n([\s\S]*?)```/);
+    if (bbMatch) {
+      const blackboard = bbMatch[1].trim();
+      this.db.updateSession(sessionId, { blackboard });
+      this.sseHub.broadcast(sessionId, {
+        type: 'session_updated',
+        sessionId,
+        blackboard,
+      });
+    }
+
+    // 2. Loop pruning on [LGTM] or [PASS]
+    if (item.loopGroupId && (turnResult.replyText.includes('[LGTM]') || turnResult.replyText.includes('[PASS]'))) {
+      state.queue = state.queue.filter((q) => q.loopGroupId !== item.loopGroupId);
+    }
+
+    // 3. Pass check
+    const trimmedReply = turnResult.replyText.trim();
+    const isPass = trimmedReply === '[PASS]' || trimmedReply.startsWith('[PASS]');
+
+    // 4. Trailing routing directive
+    const routingDirective = extractBotRoutingDirective(turnResult.replyText);
+    const orchestrationPlan = routingDirective?.directive;
 
     const replyMentions = extractMentions(turnResult.replyText, validBotIds);
     const maxRowidBeforeInsert = this.db.getMaxMessageRowid(sessionId);
@@ -847,6 +1326,11 @@ export class GroupRouter {
       modelBadge: turnResult.modelBadge,
       content: turnResult.replyText,
       mentions: replyMentions,
+      ...(item.whisperTargetBotIds && item.whisperTargetBotIds.length > 0
+        ? { whisperTargetBotIds: item.whisperTargetBotIds }
+        : {}),
+      ...(orchestrationPlan ? { orchestrationPlan } : {}),
+      ...(subagentRun ? { subagentRuns: [subagentRun] } : {}),
       toolCalls: turnResult.toolCalls,
       usage: turnResult.usage,
     });
@@ -876,28 +1360,52 @@ export class GroupRouter {
           status: 'running',
           activeBotId: state.activeBotId,
           activeBotIds: Array.from(state.activeBotIds),
+          queuePlan: this.getQueuePlan(sessionId),
         });
       }
     }
 
-    if (item.replyToBotId && !replyMentions.includes(item.replyToBotId)) {
-      if (item.chainBudget.consumeRelay()) {
-        state.queue.push({
-          botId: item.replyToBotId,
+    if (routingDirective) {
+      if (routingDirective.plan !== '@none' && !routingDirective.plan.startsWith('@none')) {
+        if (item.botId === session.leadBotId) {
+          item.chainBudget = new ChainBudget(8);
+        }
+        const compiled = parseOrchestrationPlan(routingDirective.plan, validBotIds, session, {
           chainBudget: item.chainBudget,
           generation: state.generation,
+          dispatchedByBotId: item.botId,
         });
+        for (const nextItem of compiled) {
+          if (item.chainBudget.consumeRelay()) {
+            state.queue.push(nextItem);
+          }
+        }
       }
-    }
-
-    if (replyMentions.length > 0) {
-      for (const nextBotId of replyMentions) {
+      // Explicit directive suppresses prose @mentions
+    } else if (!isPass) {
+      // 5. Fallback prose @mentions
+      const isSubagentBot = Boolean(prep.bot.parentBotId);
+      if (item.replyToBotId && !replyMentions.includes(item.replyToBotId)) {
         if (item.chainBudget.consumeRelay()) {
           state.queue.push({
-            botId: nextBotId,
+            botId: item.replyToBotId,
             chainBudget: item.chainBudget,
             generation: state.generation,
           });
+        }
+      }
+
+      if (!isSubagentBot && replyMentions.length > 0) {
+        for (const nextBotId of replyMentions) {
+          const alreadyUpcoming = state.queue.some((q) => q.botId === nextBotId);
+          if (alreadyUpcoming) continue;
+          if (item.chainBudget.consumeRelay()) {
+            state.queue.push({
+              botId: nextBotId,
+              chainBudget: item.chainBudget,
+              generation: state.generation,
+            });
+          }
         }
       }
     }
@@ -931,7 +1439,7 @@ export class GroupRouter {
         const session = this.db.getSession(sessionId);
         if (!session) break;
 
-        const validBotIds = new Set([session.leadBotId, ...session.memberBotIds]);
+        const validBotIds = this.getValidBotIds(session);
         const sessionOwner = this.getSessionOwner(sessionId, session);
 
         const activeBatch: QueueItem[] = [];
@@ -951,7 +1459,14 @@ export class GroupRouter {
             });
             this.sseHub.broadcast(sessionId, { type: 'message_created', message: sysMsg.message });
             this.db.updateSessionStatus(sessionId, 'failed', undefined);
-            this.sseHub.broadcast(sessionId, { type: 'session_status', sessionId, status: 'failed', activeBotId: undefined, activeBotIds: [] });
+            this.sseHub.broadcast(sessionId, {
+              type: 'session_status',
+              sessionId,
+              status: 'failed',
+              activeBotId: undefined,
+              activeBotIds: [],
+              queuePlan: this.getQueuePlan(sessionId),
+            });
             state.queue = [];
             break;
           }
@@ -1011,6 +1526,7 @@ export class GroupRouter {
             status: 'queued',
             activeBotId: undefined,
             activeBotIds: [],
+            queuePlan: this.getQueuePlan(sessionId),
           });
           break;
         }
@@ -1025,6 +1541,7 @@ export class GroupRouter {
             status: 'running',
             activeBotId: state.activeBotId,
             activeBotIds: Array.from(state.activeBotIds),
+            queuePlan: this.getQueuePlan(sessionId),
           });
         } else {
           const item = activeBatch[0];
@@ -1037,10 +1554,10 @@ export class GroupRouter {
             status: 'running',
             activeBotId: item.botId,
             activeBotIds: [item.botId],
+            queuePlan: this.getQueuePlan(sessionId),
           });
         }
 
-        const groupContextPrompt = buildGroupContextPrompt(session);
         const turnGen = state.generation;
 
         const preparedItems: PreparedTurnItem[] = activeBatch.map((item) => {
@@ -1058,7 +1575,15 @@ export class GroupRouter {
         if (isParallel) {
           await Promise.all(
             preparedItems.map((prep) =>
-              this.executeTurn(session, state, prep, groupContextPrompt, validBotIds, turnGen, true)
+              this.executeTurn(
+                session,
+                state,
+                prep,
+                buildGroupContextPrompt(session, this.db, prep.item.botId),
+                validBotIds,
+                turnGen,
+                true
+              )
             )
           );
         } else {
@@ -1066,7 +1591,7 @@ export class GroupRouter {
             session,
             state,
             preparedItems[0],
-            groupContextPrompt,
+            buildGroupContextPrompt(session, this.db, preparedItems[0].item.botId),
             validBotIds,
             turnGen,
             false
@@ -1103,6 +1628,7 @@ export class GroupRouter {
             status: 'idle',
             activeBotId: undefined,
             activeBotIds: [],
+            queuePlan: [],
           });
         }
       }

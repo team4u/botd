@@ -22,6 +22,10 @@ import type {
   SessionParticipantRecord,
   SessionRecord,
   SessionStatus,
+  SubagentColor,
+  SubagentIsolation,
+  SubagentRunRecord,
+  SubagentToolScope,
   ThinkingLevel,
   ToolCallRecord,
   TriggerKind,
@@ -40,7 +44,7 @@ export interface IncrementalMessageResult {
   rowid: number;
 }
 
-export const HUB_SCHEMA_VERSION = 2;
+export const HUB_SCHEMA_VERSION = 3;
 
 const PREVIEW_MAX_LENGTH = 60;
 
@@ -83,6 +87,9 @@ type MessageRow = {
   model_badge: string | null;
   content: string;
   mentions_json: string;
+  whisper_target_bot_ids_json?: string | null;
+  orchestration_plan?: string | null;
+  subagent_runs_json?: string | null;
   tool_calls_json: string | null;
   usage_json: string | null;
   attachments_json: string | null;
@@ -93,6 +100,8 @@ const mapMessageRow = (row: MessageRow): MessageRecord => {
   const toolCalls = parseOptionalJson<ToolCallRecord[]>(row.tool_calls_json);
   const usage = parseOptionalJson<TurnUsage>(row.usage_json);
   const attachments = parseOptionalJson<MessageAttachment[]>(row.attachments_json);
+  const whisperTargetBotIds = parseOptionalJson<string[]>(row.whisper_target_bot_ids_json);
+  const subagentRuns = parseOptionalJson<SubagentRunRecord[]>(row.subagent_runs_json);
   return {
     id: row.id,
     sessionId: row.session_id,
@@ -103,12 +112,18 @@ const mapMessageRow = (row: MessageRow): MessageRecord => {
     modelBadge: row.model_badge ?? undefined,
     content: row.content,
     mentions: parseOptionalJson<string[]>(row.mentions_json) ?? [],
+    ...(whisperTargetBotIds && whisperTargetBotIds.length > 0 ? { whisperTargetBotIds } : {}),
+    ...(row.orchestration_plan ? { orchestrationPlan: row.orchestration_plan } : {}),
+    ...(subagentRuns && subagentRuns.length > 0 ? { subagentRuns } : {}),
     ...(toolCalls ? { toolCalls } : {}),
     ...(usage ? { usage } : {}),
     ...(attachments ? { attachments } : {}),
     createdAt: row.created_at,
   };
 };
+
+const MESSAGE_SELECT_COLUMNS =
+  'id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, usage_json, attachments_json, created_at';
 
 const ARTIFACT_COLUMNS = 'id, session_id, filename, mime_type, size_bytes, sender_bot_id, created_at';
 
@@ -191,6 +206,13 @@ type BotRow = {
   enabled_extensions_json: string;
   visibility?: string | null;
   updated_at: string;
+  parent_bot_id?: string | null;
+  inherit_model?: number | null;
+  inherit_skills?: number | null;
+  color?: string | null;
+  tool_scope?: string | null;
+  custom_tools_json?: string | null;
+  isolation?: string | null;
 };
 
 const mapBotRow = (row: BotRow): BotConfig => ({
@@ -205,12 +227,19 @@ const mapBotRow = (row: BotRow): BotConfig => ({
   enabledExtensions: parseOptionalJson<string[]>(row.enabled_extensions_json) ?? [],
   visibility: (row.visibility === 'team' ? 'team' : 'private') as ResourceVisibility,
   updatedAt: row.updated_at,
+  ...(row.parent_bot_id ? { parentBotId: row.parent_bot_id } : {}),
+  ...(row.inherit_model !== undefined && row.inherit_model !== null ? { inheritModel: Boolean(row.inherit_model) } : {}),
+  ...(row.inherit_skills !== undefined && row.inherit_skills !== null ? { inheritSkills: Boolean(row.inherit_skills) } : {}),
+  ...(row.color ? { color: row.color as SubagentColor } : {}),
+  ...(row.tool_scope ? { toolScope: row.tool_scope as SubagentToolScope } : {}),
+  ...(row.custom_tools_json ? { customTools: parseOptionalJson<string[]>(row.custom_tools_json) } : {}),
+  ...(row.isolation ? { isolation: row.isolation as SubagentIsolation } : {}),
 });
 
 type BotRowWithOwner = BotRow & { owner_id: string | null; owner_name: string | null };
 
 const BOT_WITH_OWNER_COLUMNS =
-  'b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id, b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json, b.visibility, b.updated_at, n.owner_id, u.username AS owner_name';
+  'b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id, b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json, b.visibility, b.updated_at, b.parent_bot_id, b.inherit_model, b.inherit_skills, b.color, b.tool_scope, b.custom_tools_json, b.isolation, n.owner_id, u.username AS owner_name';
 
 function mapBotRowWithOwner(row: BotRowWithOwner, currentUserId?: string): BotConfig {
   return {
@@ -372,7 +401,6 @@ export class HubDatabase {
         status TEXT NOT NULL DEFAULT 'idle',
         active_bot_id TEXT,
         archived INTEGER NOT NULL DEFAULT 0,
-        parallel_roundtable INTEGER NOT NULL DEFAULT 0,
         parent_session_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -491,7 +519,6 @@ export class HubDatabase {
       `ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE nodes ADD COLUMN owner_id TEXT`,
       `ALTER TABLE sessions ADD COLUMN owner_id TEXT`,
-      `ALTER TABLE sessions ADD COLUMN parallel_roundtable INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE messages ADD COLUMN tool_calls_json TEXT`,
       `ALTER TABLE messages ADD COLUMN usage_json TEXT`,
@@ -505,6 +532,18 @@ export class HubDatabase {
       `ALTER TABLE messages ADD COLUMN sender_user_id TEXT`,
       `ALTER TABLE messages ADD COLUMN sender_username TEXT`,
       `ALTER TABLE users ADD COLUMN token_epoch INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE bots ADD COLUMN parent_bot_id TEXT`,
+      `ALTER TABLE bots ADD COLUMN inherit_model INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE bots ADD COLUMN inherit_skills INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE bots ADD COLUMN color TEXT`,
+      `ALTER TABLE bots ADD COLUMN tool_scope TEXT`,
+      `ALTER TABLE bots ADD COLUMN custom_tools_json TEXT`,
+      `ALTER TABLE bots ADD COLUMN isolation TEXT`,
+      `ALTER TABLE sessions ADD COLUMN member_roles_json TEXT NOT NULL DEFAULT '{}'`,
+      `ALTER TABLE sessions ADD COLUMN blackboard TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE messages ADD COLUMN whisper_target_bot_ids_json TEXT`,
+      `ALTER TABLE messages ADD COLUMN orchestration_plan TEXT`,
+      `ALTER TABLE messages ADD COLUMN subagent_runs_json TEXT`,
     ];
 
     for (const sql of migrations) {
@@ -1112,8 +1151,8 @@ export class HubDatabase {
 
   saveBot(bot: BotConfig): void {
     const stmt = this.db.prepare(`
-      INSERT INTO bots (id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, visibility, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO bots (id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, visibility, updated_at, parent_bot_id, inherit_model, inherit_skills, color, tool_scope, custom_tools_json, isolation)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         node_id = excluded.node_id,
         name = excluded.name,
@@ -1124,7 +1163,14 @@ export class HubDatabase {
         enabled_skills_json = excluded.enabled_skills_json,
         enabled_extensions_json = excluded.enabled_extensions_json,
         visibility = excluded.visibility,
-        updated_at = excluded.updated_at
+        updated_at = excluded.updated_at,
+        parent_bot_id = excluded.parent_bot_id,
+        inherit_model = excluded.inherit_model,
+        inherit_skills = excluded.inherit_skills,
+        color = excluded.color,
+        tool_scope = excluded.tool_scope,
+        custom_tools_json = excluded.custom_tools_json,
+        isolation = excluded.isolation
     `);
     stmt.run(
       bot.id,
@@ -1137,7 +1183,14 @@ export class HubDatabase {
       JSON.stringify(bot.enabledSkills || []),
       JSON.stringify(bot.enabledExtensions || []),
       bot.visibility === 'team' ? 'team' : 'private',
-      bot.updatedAt || new Date().toISOString()
+      bot.updatedAt || new Date().toISOString(),
+      bot.parentBotId ?? null,
+      bot.inheritModel ? 1 : 0,
+      bot.inheritSkills ? 1 : 0,
+      bot.color ?? null,
+      bot.toolScope ?? null,
+      bot.customTools ? JSON.stringify(bot.customTools) : null,
+      bot.isolation ?? null
     );
   }
 
@@ -1154,15 +1207,15 @@ export class HubDatabase {
     leadBotId: string;
     memberBotIds: string[];
     ownerId: string;
-    parallelRoundtable?: boolean;
     parentSessionId?: string;
+    memberRoles?: Record<string, string>;
+    blackboard?: string;
   }): SessionRecord {
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
-      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parallel_roundtable, parent_session_id)
-      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?, ?)
+      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id, member_roles_json, blackboard)
+      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?, ?, ?)
     `);
-    const parallelRoundtable = input.parallelRoundtable ?? false;
     stmt.run(
       input.id,
       input.title,
@@ -1172,8 +1225,9 @@ export class HubDatabase {
       now,
       now,
       input.ownerId,
-      parallelRoundtable ? 1 : 0,
-      input.parentSessionId ?? null
+      input.parentSessionId ?? null,
+      JSON.stringify(input.memberRoles || {}),
+      input.blackboard || ''
     );
     return {
       id: input.id,
@@ -1185,13 +1239,14 @@ export class HubDatabase {
       activeBotId: undefined,
       createdAt: now,
       updatedAt: now,
-      ...(parallelRoundtable ? { parallelRoundtable } : {}),
       ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
+      ...(input.memberRoles && Object.keys(input.memberRoles).length > 0 ? { memberRoles: input.memberRoles } : {}),
+      ...(input.blackboard ? { blackboard: input.blackboard } : {}),
     };
   }
 
   getSession(id: string): (SessionRecord & { cursorMap: Record<string, number> }) | undefined {
-    const stmt = this.db.prepare('SELECT id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, archived, pinned, parallel_roundtable, parent_session_id, owner_id, created_at, updated_at FROM sessions WHERE id = ?');
+    const stmt = this.db.prepare('SELECT id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, archived, pinned, parent_session_id, owner_id, member_roles_json, blackboard, created_at, updated_at FROM sessions WHERE id = ?');
     const row = stmt.get(id) as {
       id: string;
       title: string;
@@ -1203,13 +1258,15 @@ export class HubDatabase {
       active_bot_id: string | null;
       archived: number;
       pinned: number;
-      parallel_roundtable: number;
       parent_session_id: string | null;
       owner_id: string | null;
+      member_roles_json?: string | null;
+      blackboard?: string | null;
       created_at: string;
       updated_at: string;
     } | undefined;
     if (!row) return undefined;
+    const memberRoles = parseOptionalJson<Record<string, string>>(row.member_roles_json);
     return {
       id: row.id,
       title: row.title,
@@ -1221,9 +1278,10 @@ export class HubDatabase {
       activeBotId: row.active_bot_id ?? undefined,
       archived: Boolean(row.archived),
       pinned: Boolean(row.pinned),
-      parallelRoundtable: Boolean(row.parallel_roundtable),
       parentSessionId: row.parent_session_id ?? undefined,
       ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+      ...(memberRoles && Object.keys(memberRoles).length > 0 ? { memberRoles } : {}),
+      ...(row.blackboard ? { blackboard: row.blackboard } : {}),
       participants: this.listSessionParticipants(row.id),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -1232,7 +1290,7 @@ export class HubDatabase {
 
   getAllSessions(ownerId: string): SessionRecord[] {
     const stmt = this.db.prepare(`
-      SELECT DISTINCT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.pinned, s.parallel_roundtable, s.parent_session_id, s.owner_id, s.created_at, s.updated_at,
+      SELECT DISTINCT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.pinned, s.parent_session_id, s.owner_id, s.member_roles_json, s.blackboard, s.created_at, s.updated_at,
         (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
         (SELECT m.content FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_content,
         (SELECT m.created_at FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_at
@@ -1251,34 +1309,39 @@ export class HubDatabase {
       active_bot_id: string | null;
       archived: number;
       pinned: number;
-      parallel_roundtable: number;
       parent_session_id: string | null;
       owner_id: string | null;
+      member_roles_json?: string | null;
+      blackboard?: string | null;
       created_at: string;
       updated_at: string;
       message_count: number | bigint;
       last_message_content: string | null;
       last_message_at: string | null;
     }[];
-    return rows.map((row) => ({
-      id: row.id,
-      title: row.title,
-      mode: row.mode as SessionMode,
-      leadBotId: row.lead_bot_id,
-      memberBotIds: JSON.parse(row.member_bot_ids_json || '[]'),
-      status: row.status as SessionStatus,
-      activeBotId: row.active_bot_id ?? undefined,
-      archived: Boolean(row.archived),
-      pinned: Boolean(row.pinned),
-      parallelRoundtable: Boolean(row.parallel_roundtable),
-      parentSessionId: row.parent_session_id ?? undefined,
-      ...(row.owner_id ? { ownerId: row.owner_id } : {}),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      messageCount: Number(row.message_count),
-      lastMessagePreview: buildPreview(row.last_message_content ?? ''),
-      lastMessageAt: row.last_message_at ?? undefined,
-    }));
+    return rows.map((row) => {
+      const memberRoles = parseOptionalJson<Record<string, string>>(row.member_roles_json);
+      return {
+        id: row.id,
+        title: row.title,
+        mode: row.mode as SessionMode,
+        leadBotId: row.lead_bot_id,
+        memberBotIds: JSON.parse(row.member_bot_ids_json || '[]'),
+        status: row.status as SessionStatus,
+        activeBotId: row.active_bot_id ?? undefined,
+        archived: Boolean(row.archived),
+        pinned: Boolean(row.pinned),
+        parentSessionId: row.parent_session_id ?? undefined,
+        ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+        ...(memberRoles && Object.keys(memberRoles).length > 0 ? { memberRoles } : {}),
+        ...(row.blackboard ? { blackboard: row.blackboard } : {}),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        messageCount: Number(row.message_count),
+        lastMessagePreview: buildPreview(row.last_message_content ?? ''),
+        lastMessageAt: row.last_message_at ?? undefined,
+      };
+    });
   }
 
   /** 兼容别名：多用户可访问会话查询入口（含参与者） */
@@ -1288,7 +1351,7 @@ export class HubDatabase {
 
   listSubSessions(parentSessionId: string): SessionRecord[] {
     const stmt = this.db.prepare(`
-      SELECT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.pinned, s.parallel_roundtable, s.parent_session_id, s.created_at, s.updated_at,
+      SELECT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.pinned, s.parent_session_id, s.member_roles_json, s.blackboard, s.created_at, s.updated_at,
         (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
         (SELECT m.content FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_content,
         (SELECT m.created_at FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_at
@@ -1306,32 +1369,37 @@ export class HubDatabase {
       active_bot_id: string | null;
       archived: number;
       pinned: number;
-      parallel_roundtable: number;
       parent_session_id: string | null;
+      member_roles_json?: string | null;
+      blackboard?: string | null;
       created_at: string;
       updated_at: string;
       message_count: number | bigint;
       last_message_content: string | null;
       last_message_at: string | null;
     }[];
-    return rows.map((row) => ({
-      id: row.id,
-      title: row.title,
-      mode: row.mode as SessionMode,
-      leadBotId: row.lead_bot_id,
-      memberBotIds: JSON.parse(row.member_bot_ids_json || '[]'),
-      status: row.status as SessionStatus,
-      activeBotId: row.active_bot_id ?? undefined,
-      archived: Boolean(row.archived),
-      pinned: Boolean(row.pinned),
-      parallelRoundtable: Boolean(row.parallel_roundtable),
-      parentSessionId: row.parent_session_id ?? undefined,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      messageCount: Number(row.message_count),
-      lastMessagePreview: buildPreview(row.last_message_content ?? ''),
-      lastMessageAt: row.last_message_at ?? undefined,
-    }));
+    return rows.map((row) => {
+      const memberRoles = parseOptionalJson<Record<string, string>>(row.member_roles_json);
+      return {
+        id: row.id,
+        title: row.title,
+        mode: row.mode as SessionMode,
+        leadBotId: row.lead_bot_id,
+        memberBotIds: JSON.parse(row.member_bot_ids_json || '[]'),
+        status: row.status as SessionStatus,
+        activeBotId: row.active_bot_id ?? undefined,
+        archived: Boolean(row.archived),
+        pinned: Boolean(row.pinned),
+        parentSessionId: row.parent_session_id ?? undefined,
+        ...(memberRoles && Object.keys(memberRoles).length > 0 ? { memberRoles } : {}),
+        ...(row.blackboard ? { blackboard: row.blackboard } : {}),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        messageCount: Number(row.message_count),
+        lastMessagePreview: buildPreview(row.last_message_content ?? ''),
+        lastMessageAt: row.last_message_at ?? undefined,
+      };
+    });
   }
 
   /** 返回会话归属用户 id；会话不存在返回 undefined */
@@ -1606,12 +1674,12 @@ export class HubDatabase {
     const now = new Date().toISOString();
     const newSessionId = `sess_${randomUUID()}`;
     const insertSession = this.db.prepare(`
-      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parallel_roundtable, parent_session_id)
-      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?, ?)
+      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id, member_roles_json, blackboard)
+      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?, ?, ?)
     `);
 
     const rows = this.db.prepare(`
-      SELECT role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
+      SELECT role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, usage_json, attachments_json, created_at
       FROM messages
       WHERE session_id = ? AND rowid <= ?
       ORDER BY rowid ASC
@@ -1623,6 +1691,9 @@ export class HubDatabase {
       model_badge: string | null;
       content: string;
       mentions_json: string;
+      whisper_target_bot_ids_json?: string | null;
+      orchestration_plan?: string | null;
+      subagent_runs_json?: string | null;
       tool_calls_json: string | null;
       usage_json: string | null;
       attachments_json: string | null;
@@ -1630,8 +1701,8 @@ export class HubDatabase {
     }[];
     // 逐行 INSERT（新 msg id、新 session_id），created_at 保留原值以保真时间线
     const insertMessage = this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, usage_json, attachments_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertArtifact = this.db.prepare(`
       INSERT INTO artifacts (id, session_id, filename, mime_type, size_bytes, sender_bot_id, storage_path, created_at)
@@ -1650,8 +1721,9 @@ export class HubDatabase {
         now,
         now,
         ownerId,
-        source.parallelRoundtable ? 1 : 0,
-        source.parentSessionId ?? null
+        source.parentSessionId ?? null,
+        JSON.stringify(source.memberRoles || {}),
+        source.blackboard || ''
       );
 
       for (const row of rows) {
@@ -1705,6 +1777,9 @@ export class HubDatabase {
           row.model_badge,
           row.content,
           row.mentions_json,
+          row.whisper_target_bot_ids_json ?? null,
+          row.orchestration_plan ?? null,
+          row.subagent_runs_json ?? null,
           row.tool_calls_json,
           row.usage_json,
           attachmentsJson,
@@ -1723,11 +1798,12 @@ export class HubDatabase {
       mode?: SessionMode;
       leadBotId?: string;
       memberBotIds?: string[];
+      memberRoles?: Record<string, string>;
+      blackboard?: string;
       status?: SessionStatus;
       activeBotId?: string;
       archived?: boolean;
       pinned?: boolean;
-      parallelRoundtable?: boolean;
       parentSessionId?: string;
     }
   ): SessionRecord | undefined {
@@ -1738,16 +1814,17 @@ export class HubDatabase {
     const mode = patch.mode ?? session.mode;
     const leadBotId = patch.leadBotId ?? session.leadBotId;
     const memberBotIds = patch.memberBotIds ?? session.memberBotIds;
+    const memberRoles = patch.memberRoles !== undefined ? patch.memberRoles : session.memberRoles;
+    const blackboard = patch.blackboard !== undefined ? patch.blackboard : session.blackboard;
     const status = patch.status ?? session.status;
     const activeBotId = patch.activeBotId !== undefined ? patch.activeBotId : session.activeBotId;
     const archived = patch.archived ?? session.archived ?? false;
     const pinned = patch.pinned ?? session.pinned ?? false;
-    const parallelRoundtable = patch.parallelRoundtable ?? session.parallelRoundtable ?? false;
     const parentSessionId = patch.parentSessionId !== undefined ? patch.parentSessionId : session.parentSessionId;
 
     const stmt = this.db.prepare(`
       UPDATE sessions
-      SET title = ?, mode = ?, lead_bot_id = ?, member_bot_ids_json = ?, status = ?, active_bot_id = ?, archived = ?, pinned = ?, parallel_roundtable = ?, parent_session_id = ?, updated_at = ?
+      SET title = ?, mode = ?, lead_bot_id = ?, member_bot_ids_json = ?, status = ?, active_bot_id = ?, archived = ?, pinned = ?, parent_session_id = ?, member_roles_json = ?, blackboard = ?, updated_at = ?
       WHERE id = ?
     `);
     stmt.run(
@@ -1759,8 +1836,9 @@ export class HubDatabase {
       activeBotId ?? null,
       archived ? 1 : 0,
       pinned ? 1 : 0,
-      parallelRoundtable ? 1 : 0,
       parentSessionId ?? null,
+      JSON.stringify(memberRoles || {}),
+      blackboard || '',
       now,
       id
     );
@@ -1775,8 +1853,9 @@ export class HubDatabase {
       activeBotId: activeBotId ?? undefined,
       archived,
       pinned,
-      parallelRoundtable,
       parentSessionId: parentSessionId ?? undefined,
+      ...(memberRoles && Object.keys(memberRoles).length > 0 ? { memberRoles } : {}),
+      ...(blackboard ? { blackboard } : {}),
       createdAt: session.createdAt,
       updatedAt: now,
     };
@@ -1811,6 +1890,9 @@ export class HubDatabase {
     modelBadge?: string;
     content: string;
     mentions?: string[];
+    whisperTargetBotIds?: string[];
+    orchestrationPlan?: string;
+    subagentRuns?: SubagentRunRecord[];
     toolCalls?: ToolCallRecord[];
     usage?: TurnUsage;
     attachments?: MessageAttachment[];
@@ -1820,9 +1902,11 @@ export class HubDatabase {
     const toolCallsJson = msg.toolCalls ? JSON.stringify(msg.toolCalls) : null;
     const usageJson = msg.usage ? JSON.stringify(msg.usage) : null;
     const attachmentsJson = msg.attachments ? JSON.stringify(msg.attachments) : null;
+    const whisperTargetBotIdsJson = msg.whisperTargetBotIds && msg.whisperTargetBotIds.length > 0 ? JSON.stringify(msg.whisperTargetBotIds) : null;
+    const subagentRunsJson = msg.subagentRuns && msg.subagentRuns.length > 0 ? JSON.stringify(msg.subagentRuns) : null;
     const stmt = this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, usage_json, attachments_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       msg.id,
@@ -1834,6 +1918,9 @@ export class HubDatabase {
       msg.modelBadge ?? null,
       msg.content,
       JSON.stringify(msg.mentions || []),
+      whisperTargetBotIdsJson,
+      msg.orchestrationPlan ?? null,
+      subagentRunsJson,
       toolCallsJson,
       usageJson,
       attachmentsJson,
@@ -1852,6 +1939,9 @@ export class HubDatabase {
         modelBadge: msg.modelBadge ?? undefined,
         content: msg.content,
         mentions: msg.mentions || [],
+        ...(msg.whisperTargetBotIds && msg.whisperTargetBotIds.length > 0 ? { whisperTargetBotIds: msg.whisperTargetBotIds } : {}),
+        ...(msg.orchestrationPlan ? { orchestrationPlan: msg.orchestrationPlan } : {}),
+        ...(msg.subagentRuns && msg.subagentRuns.length > 0 ? { subagentRuns: msg.subagentRuns } : {}),
         ...(msg.senderUserId ? { senderUserId: msg.senderUserId } : {}),
         ...(msg.senderUsername ? { senderUsername: msg.senderUsername } : {}),
         ...(msg.toolCalls ? { toolCalls: msg.toolCalls } : {}),
@@ -1862,9 +1952,19 @@ export class HubDatabase {
     };
   }
 
+  updateMessageSubagentRuns(messageId: string, subagentRuns: SubagentRunRecord[]): void {
+    const stmt = this.db.prepare('UPDATE messages SET subagent_runs_json = ? WHERE id = ?');
+    stmt.run(JSON.stringify(subagentRuns), messageId);
+  }
+
+  updateMessageOrchestrationPlan(messageId: string, orchestrationPlan: string): void {
+    const stmt = this.db.prepare('UPDATE messages SET orchestration_plan = ? WHERE id = ?');
+    stmt.run(orchestrationPlan, messageId);
+  }
+
   getMessages(sessionId: string): MessageRecord[] {
     const stmt = this.db.prepare(`
-      SELECT id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
+      SELECT ${MESSAGE_SELECT_COLUMNS}
       FROM messages
       WHERE session_id = ?
       ORDER BY rowid ASC
@@ -1884,7 +1984,7 @@ export class HubDatabase {
     opts: { beforeRowid?: number; aroundRowid?: number; limit?: number }
   ): { messages: MessageRecord[]; hasMore: boolean } {
     const limit = opts.limit && Number.isFinite(opts.limit) && opts.limit > 0 ? Math.min(Math.floor(opts.limit), 200) : 60;
-    const columns = 'rowid, id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at';
+    const columns = `rowid, ${MESSAGE_SELECT_COLUMNS}`;
 
     if (opts.aroundRowid !== undefined) {
       const around = Math.floor(opts.aroundRowid);
@@ -1934,7 +2034,7 @@ export class HubDatabase {
 
   getIncrementalMessages(sessionId: string, afterRowid: number): IncrementalMessageResult[] {
     const stmt = this.db.prepare(`
-      SELECT rowid, id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
+      SELECT rowid, ${MESSAGE_SELECT_COLUMNS}
       FROM messages
       WHERE session_id = ? AND rowid > ?
       ORDER BY rowid ASC
@@ -1978,7 +2078,7 @@ export class HubDatabase {
 
   getMessageById(messageId: string): { rowid: number; message: MessageRecord } | undefined {
     const stmt = this.db.prepare(`
-      SELECT rowid, id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, tool_calls_json, usage_json, attachments_json, created_at
+      SELECT rowid, ${MESSAGE_SELECT_COLUMNS}
       FROM messages
       WHERE id = ?
     `);
@@ -2001,8 +2101,9 @@ export class HubDatabase {
     const escaped = query.trim().replace(/[\\%_]/g, (ch) => `\\${ch}`);
     const pattern = `%${escaped}%`;
     const params: (string | number)[] = [ownerId];
+    const selectCols = MESSAGE_SELECT_COLUMNS.split(', ').map(c => `m.${c}`).join(', ');
     let sql = `
-      SELECT m.id, m.session_id, m.role, m.sender_bot_id, m.sender_user_id, m.sender_username, m.model_badge, m.content, m.mentions_json, m.tool_calls_json, m.usage_json, m.attachments_json, m.created_at,
+      SELECT ${selectCols},
         s.title AS session_title, s.mode AS session_mode, s.archived AS session_archived
       FROM messages m JOIN sessions s ON m.session_id = s.id
       WHERE s.owner_id = ?
