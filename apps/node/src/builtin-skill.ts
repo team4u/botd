@@ -6,7 +6,7 @@ import { readSkill, writeSkill } from './storage.js';
  * survive until the framework ships a newer version.
  */
 export const BUILTIN_SKILL_ID = 'botd-cli';
-export const BUILTIN_SKILL_VERSION = 8;
+export const BUILTIN_SKILL_VERSION = 9;
 const VERSION_MARKER = `<!-- botd-skill: ${BUILTIN_SKILL_ID} v${BUILTIN_SKILL_VERSION} -->`;
 
 export const BUILTIN_SKILL_MD = `${VERSION_MARKER}
@@ -37,6 +37,13 @@ everything: this machine's daemon and, after login, the Hub (nodes/bots/sessions
   - \`--no-turn\` — silent progress report: the message appears on the session screen without
     consuming an LLM inference turn.
 - \`botd ask "<prompt>" [--options "确认,取消"] [--timeout 300] [--ui] [--file <path> | --stdin]\` — human-in-the-loop interactive card in Web chat; prints the user's selected option, text answer, or Generative UI form result JSON to stdout.
+  - \`botd ask "<prompt>" --risk low|medium|high [--reason "<why>"] [--resource "<target>"] [--file <path>] [--options "批准,拒绝"]\`
+    — one-shot structured risk approval card: auto-builds a Generative UI card (risk callout,
+    target resource list, optional diff/content preview accordion, approve/reject buttons).
+    Without \`--json\` the chosen decision (e.g. \`批准\`) prints as plain text, so
+    \`choice=$(botd ask ... --risk high ...)\` works directly in shell scripts. Custom
+    \`--options "A,B,C"\` replace the default 批准/拒绝 buttons; a hand-written spec via
+    \`--ui\` takes precedence over the auto-generated card.
 - \`botd artifact put <filePath> [--message "<description>"]\` — upload a local file from this node to the session as a shared artifact (visible in Web UI and downloadable by bots on other nodes).
 - \`botd artifact pull <artifactId> [-o <outputPath>]\` — pull a shared artifact from the session into this node's workspace.
 - \`botd artifact list\` — list shared artifacts in the current session.

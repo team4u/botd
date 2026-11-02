@@ -498,8 +498,8 @@ test('skill sync copies a skill between nodes', async t => {
 // --- 7. Builtin skill creator meta-skill ---
 
 test('builtin skill documents the skill creator and botd reload', () => {
-  assert.equal(BUILTIN_SKILL_VERSION, 8, 'version marker bumped to v8');
-  assert.match(BUILTIN_SKILL_MD, /<!-- botd-skill: botd-cli v8 -->/);
+  assert.equal(BUILTIN_SKILL_VERSION, 9, 'version marker bumped to v9');
+  assert.match(BUILTIN_SKILL_MD, /<!-- botd-skill: botd-cli v9 -->/);
   assert.match(BUILTIN_SKILL_MD, /## Subagents/);
   assert.match(BUILTIN_SKILL_MD, /botd bots create reviewer/);
   assert.match(BUILTIN_SKILL_MD, /subagent_type/);
@@ -511,6 +511,9 @@ test('builtin skill documents the skill creator and botd reload', () => {
   assert.match(BUILTIN_SKILL_MD, /--delay/);
   assert.match(BUILTIN_SKILL_MD, /~\/\.botd\/skills\/<skill-id>\/SKILL\.md/);
   assert.match(BUILTIN_SKILL_MD, /\*\*When to use\*\*.*\*\*Gotchas\*\*/);
+  // v9: one-shot risk approval card syntax
+  assert.match(BUILTIN_SKILL_MD, /--risk low\|medium\|high/);
+  assert.match(BUILTIN_SKILL_MD, /--resource/);
 });
 
 // --- 8. Atomic primitives: no-turn wake, delayed wake / once trigger, bot env secrets, bg jobs, search & node-credential proxy ---
