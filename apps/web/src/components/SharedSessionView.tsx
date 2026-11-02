@@ -17,39 +17,14 @@ import type {
   SessionMode,
 } from '@botd/protocol';
 import { api } from '../api';
-import { MessageItem, formatShortModel } from './MessageItem';
+import { MessageItem, formatShortModel, formatChatDayLabel, isSameCalendarDay } from './MessageItem';
 import ThemeToggle from './ThemeToggle';
 
 interface SharedSessionViewProps {
   token: string;
 }
 
-const dayLabel = (iso: string): string => {
-  const d = new Date(iso);
-  const now = new Date();
-  const sameCalendarDay = (a: Date, b: Date) =>
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate();
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  if (sameCalendarDay(d, now)) return '今天';
-  if (sameCalendarDay(d, yesterday)) return '昨天';
-  const sameYear = d.getFullYear() === now.getFullYear();
-  return sameYear
-    ? `${d.getMonth() + 1}月${d.getDate()}日`
-    : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
-};
-
-const sameDay = (a: string, b: string): boolean => {
-  const da = new Date(a);
-  const db = new Date(b);
-  return (
-    da.getFullYear() === db.getFullYear() &&
-    da.getMonth() === db.getMonth() &&
-    da.getDate() === db.getDate()
-  );
-};
+const sameDay = isSameCalendarDay;
 
 function formatModeLabel(_mode: SessionMode): string {
   return '单聊';
@@ -253,7 +228,7 @@ export const SharedSessionView: React.FC<SharedSessionViewProps> = ({ token }) =
                 {/* 日期分隔线：相邻消息跨自然日时插入 */}
                 {(idx === 0 || !sameDay(messages[idx - 1].createdAt, msg.createdAt)) && (
                   <div className="sticky top-1 z-[5] mx-auto my-2 w-fit px-2.5 py-0.5 rounded-full bg-zinc-100/90 dark:bg-zinc-800/90 text-[11px] text-zinc-500 backdrop-blur-sm">
-                    {dayLabel(msg.createdAt)}
+                    {formatChatDayLabel(msg.createdAt)}
                   </div>
                 )}
                 <MessageItem

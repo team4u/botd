@@ -884,7 +884,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   });
 
   return (
-    <div className="chat-input-container relative border-t border-zinc-200/80 dark:border-zinc-800/80 bg-white/95 dark:bg-zinc-950/95 backdrop-blur-xs p-2.5 sm:p-3 shrink-0 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))]">
+    <div className="chat-input-container relative bg-gradient-to-t from-white via-white/95 to-transparent dark:from-zinc-950 dark:via-zinc-950/95 px-3 sm:px-4 pt-3 shrink-0 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))]">
       {/* 校验错误提示条 */}
       {validationNotice && (
         <div className="max-w-4xl mx-auto mb-2 px-3 py-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/50 text-xs text-amber-800 dark:text-amber-300 flex items-center justify-between animate-in fade-in">
@@ -1187,7 +1187,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           </div>
         )}
 
-        <div className="relative flex items-center gap-2 bg-zinc-50 dark:bg-zinc-900 border border-zinc-300/80 dark:border-zinc-700/80 rounded-2xl p-1.5 sm:p-2 focus-within:bg-white dark:focus-within:bg-zinc-900 focus-within:border-zinc-400 dark:focus-within:border-zinc-600 focus-within:ring-2 focus-within:ring-zinc-100 dark:focus-within:ring-zinc-800 transition-all shadow-xs">
+        {/* 输入胶囊：悬浮式命令台，focus 时边框与阴影同步加深 */}
+        <div className="relative flex items-center gap-2 bg-white dark:bg-zinc-900 border border-zinc-300/80 dark:border-zinc-700/80 rounded-2xl p-1.5 sm:p-2 focus-within:bg-white dark:focus-within:bg-zinc-900 focus-within:border-zinc-400 dark:focus-within:border-zinc-600 focus-within:ring-2 focus-within:ring-zinc-100 dark:focus-within:ring-zinc-800 focus-within:shadow-md transition-all shadow-xs">
           {/* 附件上传：编辑态不提供（编辑仅重写文本），选择后立即上传为会话产物 */}
           {!editingMessage && (
             <>
@@ -1314,11 +1315,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               )}
             </button>
           )}
-        </div>
-
-        {/* 仅在桌面端显示的极简小提示 */}
-        <div className="hidden sm:flex items-center justify-end text-[11px] text-zinc-400 dark:text-zinc-500 px-2 mt-1">
-          <span>Enter 发送 · Shift+Enter 换行</span>
         </div>
       </div>
     </div>

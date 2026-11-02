@@ -8,6 +8,17 @@ import {
   Pencil,
   GitFork,
   FileText,
+  ChevronRight,
+  Loader2,
+  Brain,
+  Terminal,
+  FileSearch,
+  FileDiff,
+  FilePen,
+  Wrench,
+  Search,
+  X,
+  Users,
 } from 'lucide-react';
 import type {
   MessageRecord,
@@ -22,6 +33,9 @@ import type {
 import { Markdown } from './Markdown';
 import { copyText } from '../utils/clipboard';
 import { AttachmentPreviewModal } from './AttachmentPreviewModal';
+
+/** 单个工具块类型别名 */
+type ToolBlock = Extract<TurnBlock, { type: 'tool' }>;
 
 /**
  * 辅助函数：提取模型简称，截取斜杠后的核心模型标识
@@ -49,6 +63,31 @@ function formatMessageTime(createdAt: string): string {
   const mm = String(date.getMonth() + 1).padStart(2, '0');
   const dd = String(date.getDate()).padStart(2, '0');
   return `${mm}-${dd} ${hm}`;
+}
+
+/** 判断两个 ISO 时间是否落在同一自然日 */
+export function isSameCalendarDay(aIso: string, bIso: string): boolean {
+  const a = new Date(aIso);
+  const b = new Date(bIso);
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
+/** 聊天流日期分隔标签：今天 / 昨天 / M月D日（跨年带年份） */
+export function formatChatDayLabel(iso: string): string {
+  const d = new Date(iso);
+  const now = new Date();
+  if (isSameCalendarDay(iso, now.toISOString())) return '今天';
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (isSameCalendarDay(iso, yesterday.toISOString())) return '昨天';
+  const sameYear = d.getFullYear() === now.getFullYear();
+  return sameYear
+    ? `${d.getMonth() + 1}月${d.getDate()}日`
+    : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
 }
 
 /**
@@ -154,8 +193,59 @@ export const subagentColorStyles: Record<
   },
 };
 
+/** 智能体微徽章取色序列（主 BOT 无 color 时按 ID 哈希稳定取色） */
+const BOT_ACCENT_ORDER: SubagentColor[] = ['blue', 'indigo', 'purple', 'cyan', 'emerald', 'amber', 'pink', 'red'];
+
+export function botAccentFor(key: string): SubagentColor {
+  let h = 5381;
+  for (let i = 0; i < key.length; i++) {
+    h = ((h << 5) + h + key.charCodeAt(i)) >>> 0;
+  }
+  return BOT_ACCENT_ORDER[h % BOT_ACCENT_ORDER.length];
+}
+
 /**
- * 分身协同执行面板组件（Pi TUI 纯文本折叠组风格）
+ * 行内智能体微徽章（20px 圆角色块 + 首字母）：
+ * 分身优先用自身 color，主 BOT 按 ID 哈希稳定取色，群聊中扫一眼颜色即可分辨发言者
+ */
+export const BotAvatarBadge: React.FC<{
+  botId?: string;
+  name?: string;
+  color?: SubagentColor;
+  className?: string;
+}> = ({ botId, name, color, className = '' }) => {
+  const accent = color && subagentColorStyles[color] ? color : botAccentFor(botId || name || 'bot');
+  const letter = (name || botId || 'B').trim().charAt(0).toUpperCase() || 'B';
+  return (
+    <span
+      className={`w-5 h-5 rounded-md border flex items-center justify-center text-[10px] font-bold shrink-0 select-none ${subagentColorStyles[accent].iconBg} ${className}`}
+      aria-hidden="true"
+    >
+      {letter}
+    </span>
+  );
+};
+
+/** 流式生成中的三点呼吸指示（Web 原生动效，替代终端式 "running..." 文案） */
+export const TypingDots: React.FC<{ className?: string }> = ({ className = '' }) => (
+  <span className={`inline-flex items-center gap-0.5 ${className}`} aria-hidden="true">
+    <span
+      className="w-1 h-1 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-bounce"
+      style={{ animationDelay: '0ms' }}
+    />
+    <span
+      className="w-1 h-1 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-bounce"
+      style={{ animationDelay: '150ms' }}
+    />
+    <span
+      className="w-1 h-1 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-bounce"
+      style={{ animationDelay: '300ms' }}
+    />
+  </span>
+);
+
+/**
+ * 分身协同执行面板（Web 时间轴步骤流风格）
  */
 export const SubagentRunsPanel: React.FC<{
   runs: SubagentRunRecord[];
@@ -173,7 +263,7 @@ export const SubagentRunsPanel: React.FC<{
 
   if (!runs || runs.length === 0) return null;
 
-  const names = runs.map((r) => r.subagentName || `@${r.subagentId}`).join(', ');
+  const names = runs.map((r) => r.subagentName || `@${r.subagentId}`).join('、');
 
   const toggleRun = (runId: string) => {
     setExpandedRunIds((prev) => ({
@@ -183,109 +273,136 @@ export const SubagentRunsPanel: React.FC<{
   };
 
   return (
-    <div className="my-1.5 max-w-2xl text-xs">
+    <div className="my-2 max-w-2xl">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex items-center gap-1 text-[11px] font-mono text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors cursor-pointer select-none"
+        className="flex items-center gap-1.5 text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors cursor-pointer select-none min-w-0"
+        title={names}
       >
-        <span>{expanded ? '▾' : '▸'}</span>
-        <span>
-          {runs.length} subagents ({names})
+        <Users className="w-3.5 h-3.5 shrink-0" />
+        <span className="font-medium shrink-0">分身协同</span>
+        <span className="text-zinc-400 dark:text-zinc-500 truncate">
+          {runs.length} 个分身 · {names}
         </span>
-        {hasRunning && <span>· running...</span>}
+        {hasRunning && (
+          <span className="inline-flex items-center gap-1 text-blue-500 dark:text-blue-400 shrink-0">
+            <span className="w-1 h-1 rounded-full bg-blue-500 animate-pulse" />
+            <span>运行中</span>
+          </span>
+        )}
+        <ChevronRight
+          className={`w-3.5 h-3.5 shrink-0 text-zinc-400 transition-transform duration-200 ${
+            expanded ? 'rotate-90' : ''
+          }`}
+        />
       </button>
 
       {expanded && (
-        <div className="mt-1 pl-2.5 border-l border-zinc-200 dark:border-zinc-800 space-y-1.5">
-          {runs.map((run) => {
-            const isCompleted = run.status !== 'running';
-            const isPreviewOpen = Boolean(expandedRunIds[run.id]);
+        <div className="mt-2 relative">
+          {runs.length > 1 && (
+            <span
+              className="absolute left-[11px] top-2 bottom-2 w-px bg-zinc-200 dark:bg-zinc-800"
+              aria-hidden="true"
+            />
+          )}
+          <div className="space-y-2">
+            {runs.map((run) => {
+              const isCompleted = run.status !== 'running';
+              const isPreviewOpen = Boolean(expandedRunIds[run.id]);
 
-            return (
-              <div
-                key={run.id}
-                role={isCompleted ? 'button' : undefined}
-                tabIndex={isCompleted ? 0 : undefined}
-                onClick={isCompleted ? () => toggleRun(run.id) : undefined}
-                onKeyDown={
-                  isCompleted
-                    ? (e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          toggleRun(run.id);
-                        }
-                      }
-                    : undefined
-                }
-                className={`text-[11px] font-mono space-y-0.5 ${
-                  isCompleted
-                    ? 'cursor-pointer hover:bg-zinc-50/80 dark:hover:bg-zinc-800/40 -mx-1 px-1 py-0.5 rounded transition-colors'
-                    : ''
-                }`}
-              >
-                <div className="flex items-center gap-2 text-zinc-600 dark:text-zinc-300">
-                  {isCompleted && (
-                    <span className="text-[10px] text-zinc-400 dark:text-zinc-500 select-none">
-                      {isPreviewOpen ? '▾' : '▸'}
-                    </span>
-                  )}
-                  <span className="font-semibold text-zinc-800 dark:text-zinc-200">
-                    {run.subagentName || `@${run.subagentId}`}
+              return (
+                <div key={run.id} className="relative flex gap-2">
+                  {/* 状态节点：运行中旋转 / 失败叉 / 完成勾 */}
+                  <span className="z-10 w-6 h-6 rounded-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 flex items-center justify-center shrink-0">
+                    {run.status === 'running' ? (
+                      <Loader2 className="w-3 h-3 text-blue-500 animate-spin-fast" />
+                    ) : run.status === 'error' ? (
+                      <X className="w-3 h-3 text-rose-500" />
+                    ) : (
+                      <Check className="w-3 h-3 text-emerald-500" />
+                    )}
                   </span>
-                  {run.phase && (
-                    <span className="text-zinc-400 dark:text-zinc-500">[{run.phase}]</span>
-                  )}
-                  {typeof run.durationMs === 'number' && (
-                    <span className="text-zinc-400 dark:text-zinc-500">
-                      {formatDuration(run.durationMs)}
-                    </span>
-                  )}
-                  {run.status === 'running' && (
-                    <span className="text-zinc-400">running...</span>
-                  )}
-                  {run.status === 'error' && (
-                    <span className="text-rose-500">error</span>
-                  )}
-                  {run.childSessionId && onSelectSession && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onSelectSession(run.childSessionId!);
-                      }}
-                      className="text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200 underline cursor-pointer ml-auto"
-                    >
-                      查看会话
-                    </button>
-                  )}
-                </div>
 
-                {!isPreviewOpen ? (
-                  <div className="text-zinc-500 dark:text-zinc-400 font-sans truncate">
-                    {run.task}
-                  </div>
-                ) : (
-                  <div className="mt-1 pl-2 border-l-2 border-zinc-200 dark:border-zinc-700 space-y-1.5 font-sans">
-                    <div>
-                      <span className="text-zinc-400 dark:text-zinc-500 text-[10px] font-mono block">Task</span>
-                      <div className="text-zinc-600 dark:text-zinc-300 whitespace-pre-wrap break-words">
-                        {run.task}
-                      </div>
+                  <div
+                    role={isCompleted ? 'button' : undefined}
+                    tabIndex={isCompleted ? 0 : undefined}
+                    onClick={isCompleted ? () => toggleRun(run.id) : undefined}
+                    onKeyDown={
+                      isCompleted
+                        ? (e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              toggleRun(run.id);
+                            }
+                          }
+                        : undefined
+                    }
+                    className={`flex-1 min-w-0 ${isCompleted ? 'cursor-pointer' : ''}`}
+                  >
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="font-medium text-zinc-800 dark:text-zinc-200 text-xs">
+                        {run.subagentName || `@${run.subagentId}`}
+                      </span>
+                      {run.phase && (
+                        <span className="px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
+                          {run.phase}
+                        </span>
+                      )}
+                      {typeof run.durationMs === 'number' && (
+                        <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500">
+                          {formatDuration(run.durationMs)}
+                        </span>
+                      )}
+                      {run.status === 'running' && (
+                        <span className="text-[11px] text-blue-500 dark:text-blue-400">运行中</span>
+                      )}
+                      {run.status === 'error' && (
+                        <span className="text-[11px] text-rose-500 dark:text-rose-400">失败</span>
+                      )}
+                      {run.childSessionId && onSelectSession && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSelectSession(run.childSessionId!);
+                          }}
+                          className="ml-auto text-[11px] text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 underline underline-offset-2 cursor-pointer shrink-0"
+                        >
+                          查看会话
+                        </button>
+                      )}
                     </div>
-                    {run.replyPreview && (
-                      <div>
-                        <span className="text-zinc-400 dark:text-zinc-500 text-[10px] font-mono block">Reply</span>
-                        <div className="text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap break-words max-h-60 overflow-y-auto">
-                          {run.replyPreview}
+
+                    {!isPreviewOpen ? (
+                      <div className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400 truncate">{run.task}</div>
+                    ) : (
+                      <div className="mt-1.5 rounded-lg border border-zinc-200/60 dark:border-zinc-800/70 bg-zinc-50/70 dark:bg-zinc-900/40 px-3 py-2 space-y-1.5">
+                        <div>
+                          <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wide">
+                            任务
+                          </span>
+                          <div className="text-xs text-zinc-600 dark:text-zinc-300 whitespace-pre-wrap break-words">
+                            {run.task}
+                          </div>
                         </div>
+                        {run.replyPreview && (
+                          <div>
+                            <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wide">
+                              回复
+                            </span>
+                            <div className="text-xs text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap break-words max-h-60 overflow-y-auto">
+                              {run.replyPreview}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
-                )}
-              </div>
-            );
-          })}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
@@ -382,7 +499,7 @@ export function formatReadLineRange(args?: Record<string, unknown>): string {
 /**
  * 聚合工具出现频次：read ×2, edit ×1, bash ×1
  */
-export function computeToolBreakdown(tools: Extract<TurnBlock, { type: 'tool' }>[]): string {
+export function computeToolBreakdown(tools: ToolBlock[]): string {
   const counts = new Map<string, number>();
   for (const t of tools) {
     counts.set(t.name, (counts.get(t.name) || 0) + 1);
@@ -453,97 +570,132 @@ export function formatToolSignature(tool: {
   return `${tool.name}${genericArgs ? ` ${genericArgs}` : ''}`;
 }
 
-export const ToolSignatureView: React.FC<{ tool: Extract<TurnBlock, { type: 'tool' }> }> = ({ tool }) => {
+// ===== 工具语义化元信息（Web 原生图标 + 中文动词标签 + 主题色） =====
+
+type ToolIcon = React.ComponentType<{ className?: string }>;
+
+interface ToolMetaEntry {
+  icon: ToolIcon;
+  label: string;
+  /** 小色块底 + 文字色（用于 20px 图标方块） */
+  chip: string;
+  /** 纯文字色（用于时间轴节点图标） */
+  tint: string;
+}
+
+const TOOL_META: Record<string, ToolMetaEntry> = {
+  read: { icon: FileSearch, label: '读取', chip: 'bg-blue-500/10 text-blue-600 dark:text-blue-400', tint: 'text-blue-500' },
+  edit: { icon: FileDiff, label: '修改', chip: 'bg-amber-500/10 text-amber-600 dark:text-amber-400', tint: 'text-amber-500' },
+  write: { icon: FilePen, label: '写入', chip: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400', tint: 'text-emerald-500' },
+  bash: { icon: Terminal, label: '命令', chip: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400', tint: 'text-cyan-500' },
+  search: { icon: Search, label: '搜索', chip: 'bg-violet-500/10 text-violet-600 dark:text-violet-400', tint: 'text-violet-500' },
+  grep: { icon: Search, label: '搜索', chip: 'bg-violet-500/10 text-violet-600 dark:text-violet-400', tint: 'text-violet-500' },
+};
+
+const DEFAULT_TOOL_META: ToolMetaEntry = {
+  icon: Wrench,
+  label: '调用',
+  chip: 'bg-zinc-500/10 text-zinc-500 dark:text-zinc-400',
+  tint: 'text-zinc-400',
+};
+
+export function getToolMeta(name: string): ToolMetaEntry {
+  return TOOL_META[name] || DEFAULT_TOOL_META;
+}
+
+/** 提取工具头部主参数（命令首行 / 文件路径 / 泛化参数），用于一行式展示 */
+export function getToolPrimaryArg(tool: {
+  name: string;
+  args?: Record<string, unknown>;
+  summary?: string;
+}): string {
   if (tool.name === 'bash') {
-    const rawCmd =
+    const raw =
       typeof tool.args?.command === 'string'
         ? tool.args.command.trim()
-        : tool.summary?.trim() || '...';
-    const firstLine = rawCmd.split('\n')[0];
-    const displayCmd = firstLine.length > 70 ? `${firstLine.slice(0, 70)}...` : firstLine;
-    const timeout = typeof tool.args?.timeout === 'number' ? tool.args.timeout : undefined;
-    return (
-      <span className="truncate">
-        <span className="font-bold text-zinc-800 dark:text-zinc-200">$ {displayCmd}</span>
-        {timeout !== undefined && (
-          <span className="text-zinc-400 dark:text-zinc-500 font-normal"> (timeout {timeout}s)</span>
-        )}
-      </span>
-    );
+        : tool.summary?.trim() || '';
+    return raw.split('\n')[0];
   }
-
-  if (tool.name === 'read') {
-    const path =
+  if (tool.name === 'read' || tool.name === 'edit' || tool.name === 'write') {
+    const p =
       typeof tool.args?.path === 'string'
         ? tool.args.path
         : typeof tool.args?.file_path === 'string'
           ? tool.args.file_path
           : tool.summary || '';
-    const range = formatReadLineRange(tool.args);
-    return (
-      <span className="truncate">
-        <span className="font-bold text-zinc-800 dark:text-zinc-200">read</span>
-        {path && <span className="text-zinc-600 dark:text-zinc-300 font-mono"> {path}{range}</span>}
-      </span>
-    );
+    return p;
   }
+  return formatGenericToolArgs(tool) || tool.summary || '';
+}
 
-  if (tool.name === 'edit') {
-    const path = typeof tool.args?.path === 'string' ? tool.args.path : tool.summary || '';
-    const edits = Array.isArray(tool.args?.edits) ? tool.args.edits : [];
-    const editSummary = edits.length > 0 ? ` (${edits.length} edit${edits.length > 1 ? 's' : ''})` : '';
-    return (
-      <span className="truncate">
-        <span className="font-bold text-zinc-800 dark:text-zinc-200">edit</span>
-        {path && <span className="text-zinc-600 dark:text-zinc-300 font-mono"> {path}</span>}
-        {editSummary && <span className="text-zinc-400 dark:text-zinc-500 font-normal">{editSummary}</span>}
-      </span>
-    );
+/** 统计 edit 工具增删行数，渲染 +n -n 徽标（比 "2 edits" 更直观） */
+export function countEditDiffStats(edits: unknown): { added: number; removed: number } {
+  if (!Array.isArray(edits)) return { added: 0, removed: 0 };
+  let added = 0;
+  let removed = 0;
+  for (const e of edits as Array<{ oldText?: unknown; newText?: unknown }>) {
+    if (typeof e?.oldText === 'string') removed += e.oldText.split('\n').length;
+    if (typeof e?.newText === 'string') added += e.newText.split('\n').length;
   }
+  return { added, removed };
+}
 
-  if (tool.name === 'write') {
-    const path = typeof tool.args?.path === 'string' ? tool.args.path : tool.summary || '';
-    return (
-      <span className="truncate">
-        <span className="font-bold text-zinc-800 dark:text-zinc-200">write</span>
-        {path && <span className="text-zinc-600 dark:text-zinc-300 font-mono"> {path}</span>}
-      </span>
-    );
+/** edit 工具的原始 edits 数组归一化（兼容单编辑 oldText/newText 形态） */
+function normalizeEditEntries(args?: Record<string, unknown>): Array<{ oldText?: unknown; newText?: unknown }> | undefined {
+  if (Array.isArray(args?.edits)) return args.edits as Array<{ oldText?: unknown; newText?: unknown }>;
+  if (typeof args?.oldText === 'string' && typeof args?.newText === 'string') {
+    return [{ oldText: args.oldText, newText: args.newText }];
   }
+  return undefined;
+}
 
-  const genericArgs = formatGenericToolArgs(tool);
-  return (
-    <span className="truncate">
-      <span className="font-bold text-zinc-800 dark:text-zinc-200">{tool.name}</span>
-      {genericArgs && (
-        <span className="text-zinc-400 dark:text-zinc-500 font-normal"> {genericArgs}</span>
-      )}
-    </span>
-  );
-};
+const DiffStatsBadge: React.FC<{ added: number; removed: number }> = ({ added, removed }) => (
+  <span className="inline-flex items-center gap-1 shrink-0 font-mono text-[10px] leading-none tabular-nums">
+    <span className="text-emerald-600 dark:text-emerald-400">+{added}</span>
+    <span className="text-rose-500 dark:text-rose-400">-{removed}</span>
+  </span>
+);
 
-export const ToolStatusBadge: React.FC<{ tool: Extract<TurnBlock, { type: 'tool' }> }> = ({ tool }) => {
+const LineRangeChip: React.FC<{ range: string }> = ({ range }) => (
+  <span className="shrink-0 px-1 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 font-mono text-[10px] leading-none text-zinc-400 dark:text-zinc-500">
+    {range}
+  </span>
+);
+
+export const ToolStatusBadge: React.FC<{ tool: ToolBlock }> = ({ tool }) => {
   const isError = tool.status === 'error' || Boolean(tool.isError);
   if (tool.status === 'cancelled') {
     return (
-      <span className="shrink-0 text-zinc-400 dark:text-zinc-500 font-mono">
-        cancelled{typeof tool.durationMs === 'number' && ` · ${formatDuration(tool.durationMs)}`}
+      <span className="shrink-0 inline-flex items-center gap-1 text-[11px] text-zinc-400 dark:text-zinc-500">
+        <span>已取消</span>
+        {typeof tool.durationMs === 'number' && (
+          <span className="font-mono">{formatDuration(tool.durationMs)}</span>
+        )}
       </span>
     );
   }
   if (tool.status === 'running') {
-    return <span className="shrink-0 text-zinc-400 font-mono">running...</span>;
+    return (
+      <span className="shrink-0 inline-flex items-center gap-1 text-[11px] text-zinc-400 dark:text-zinc-500">
+        <Loader2 className="w-3 h-3 animate-spin-fast" />
+        <span>执行中</span>
+      </span>
+    );
   }
   if (isError) {
     return (
-      <span className="shrink-0 text-rose-500 font-medium font-mono">
-        error{typeof tool.durationMs === 'number' && ` · ${formatDuration(tool.durationMs)}`}
+      <span className="shrink-0 inline-flex items-center gap-1 text-[11px] font-medium text-rose-500 dark:text-rose-400">
+        <X className="w-3 h-3" />
+        <span>失败</span>
+        {typeof tool.durationMs === 'number' && (
+          <span className="font-mono font-normal">{formatDuration(tool.durationMs)}</span>
+        )}
       </span>
     );
   }
   if (typeof tool.durationMs === 'number') {
     return (
-      <span className="shrink-0 text-zinc-400 dark:text-zinc-500 tabular-nums font-mono">
+      <span className="shrink-0 font-mono text-[11px] text-zinc-400 dark:text-zinc-500 tabular-nums">
         {formatDuration(tool.durationMs)}
       </span>
     );
@@ -551,21 +703,17 @@ export const ToolStatusBadge: React.FC<{ tool: Extract<TurnBlock, { type: 'tool'
   return null;
 };
 
-export const ToolDetailPanel: React.FC<{ tool: Extract<TurnBlock, { type: 'tool' }> }> = ({ tool }) => {
+export const ToolDetailPanel: React.FC<{ tool: ToolBlock }> = ({ tool }) => {
   const [showFullWrite, setShowFullWrite] = useState(false);
 
   // 1. Edit tool: unified diff
   if (tool.name === 'edit') {
-    const rawEdits = Array.isArray(tool.args?.edits)
-      ? tool.args.edits
-      : typeof tool.args?.oldText === 'string' && typeof tool.args?.newText === 'string'
-        ? [{ oldText: tool.args.oldText, newText: tool.args.newText }]
-        : [];
+    const rawEdits = normalizeEditEntries(tool.args) || [];
 
     return (
       <div className="space-y-1.5 font-mono text-[11px]">
         {rawEdits.length > 0 ? (
-          <div className="rounded bg-zinc-100/80 dark:bg-zinc-950/80 p-2 overflow-x-auto space-y-2 border border-zinc-200/60 dark:border-zinc-800/60">
+          <div className="rounded-lg bg-zinc-100/80 dark:bg-zinc-950/80 p-2 overflow-x-auto space-y-2 border border-zinc-200/60 dark:border-zinc-800/60">
             {rawEdits.map((edit: any, idx: number) => {
               const oldLines = typeof edit.oldText === 'string' ? edit.oldText.split('\n') : [];
               const newLines = typeof edit.newText === 'string' ? edit.newText.split('\n') : [];
@@ -574,7 +722,7 @@ export const ToolDetailPanel: React.FC<{ tool: Extract<TurnBlock, { type: 'tool'
                   {oldLines.map((line: string, lIdx: number) => (
                     <div
                       key={`old-${lIdx}`}
-                      className="bg-rose-500/10 text-rose-700 dark:text-rose-300 px-1 py-0.5 rounded whitespace-pre break-all"
+                      className="bg-rose-500/10 text-rose-700 dark:text-rose-300 px-1.5 py-0.5 rounded whitespace-pre break-all"
                     >
                       - {line}
                     </div>
@@ -582,7 +730,7 @@ export const ToolDetailPanel: React.FC<{ tool: Extract<TurnBlock, { type: 'tool'
                   {newLines.map((line: string, lIdx: number) => (
                     <div
                       key={`new-${lIdx}`}
-                      className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 px-1 py-0.5 rounded whitespace-pre break-all"
+                      className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 px-1.5 py-0.5 rounded whitespace-pre break-all"
                     >
                       + {line}
                     </div>
@@ -594,7 +742,7 @@ export const ToolDetailPanel: React.FC<{ tool: Extract<TurnBlock, { type: 'tool'
         ) : null}
         {(rawEdits.length === 0 || tool.isError || tool.status === 'error') && tool.outputPreview && (
           <pre
-            className={`px-2.5 py-2 text-[11px] font-mono whitespace-pre-wrap break-all border rounded max-h-64 overflow-y-auto ${
+            className={`px-2.5 py-2 text-[11px] font-mono whitespace-pre-wrap break-all border rounded-lg max-h-64 overflow-y-auto ${
               tool.isError || tool.status === 'error'
                 ? 'bg-rose-50/80 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border-rose-200/60 dark:border-rose-900/60'
                 : 'bg-zinc-100/80 dark:bg-zinc-950/60 text-zinc-600 dark:text-zinc-300 border-zinc-200/60 dark:border-zinc-800/60'
@@ -615,13 +763,13 @@ export const ToolDetailPanel: React.FC<{ tool: Extract<TurnBlock, { type: 'tool'
     return (
       <div className="space-y-1.5 font-mono text-[11px]">
         {isMultilineOrLong && (
-          <pre className="p-2 rounded bg-zinc-100/80 dark:bg-zinc-950/80 text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all border border-zinc-200/60 dark:border-zinc-800/60 max-h-48 overflow-y-auto">
+          <pre className="p-2 rounded-lg bg-zinc-100/80 dark:bg-zinc-950/80 text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all border border-zinc-200/60 dark:border-zinc-800/60 max-h-48 overflow-y-auto">
             $ {rawCmd}
           </pre>
         )}
         {tool.outputPreview ? (
           <pre
-            className={`px-2.5 py-2 text-[11px] font-mono whitespace-pre-wrap break-all border rounded max-h-64 overflow-y-auto ${
+            className={`px-2.5 py-2 text-[11px] font-mono whitespace-pre-wrap break-all border rounded-lg max-h-64 overflow-y-auto ${
               tool.isError || tool.status === 'error'
                 ? 'bg-rose-50/80 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border-rose-200/60 dark:border-rose-900/60'
                 : 'bg-zinc-100/80 dark:bg-zinc-950/60 text-zinc-600 dark:text-zinc-300 border-zinc-200/60 dark:border-zinc-800/60'
@@ -649,7 +797,7 @@ export const ToolDetailPanel: React.FC<{ tool: Extract<TurnBlock, { type: 'tool'
       <div className="space-y-1.5 font-mono text-[11px]">
         {content !== undefined && (
           <div className="space-y-1">
-            <pre className="p-2 rounded bg-zinc-100/80 dark:bg-zinc-950/80 text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all border border-zinc-200/60 dark:border-zinc-800/60 max-h-64 overflow-y-auto">
+            <pre className="p-2 rounded-lg bg-zinc-100/80 dark:bg-zinc-950/80 text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all border border-zinc-200/60 dark:border-zinc-800/60 max-h-64 overflow-y-auto">
               {displayedContent}
             </pre>
             {lines.length > 30 && (
@@ -658,14 +806,14 @@ export const ToolDetailPanel: React.FC<{ tool: Extract<TurnBlock, { type: 'tool'
                 onClick={() => setShowFullWrite((v) => !v)}
                 className="text-[11px] text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200 underline cursor-pointer"
               >
-                {showFullWrite ? 'Show less' : `Show all (${lines.length} lines)`}
+                {showFullWrite ? '收起' : `展开全部（${lines.length} 行）`}
               </button>
             )}
           </div>
         )}
         {tool.outputPreview && (
           <pre
-            className={`px-2.5 py-2 text-[11px] font-mono whitespace-pre-wrap break-all border rounded max-h-48 overflow-y-auto ${
+            className={`px-2.5 py-2 text-[11px] font-mono whitespace-pre-wrap break-all border rounded-lg max-h-48 overflow-y-auto ${
               tool.isError || tool.status === 'error'
                 ? 'bg-rose-50/80 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border-rose-200/60 dark:border-rose-900/60'
                 : 'bg-zinc-100/80 dark:bg-zinc-950/60 text-zinc-600 dark:text-zinc-300 border-zinc-200/60 dark:border-zinc-800/60'
@@ -683,7 +831,7 @@ export const ToolDetailPanel: React.FC<{ tool: Extract<TurnBlock, { type: 'tool'
   return (
     <div className="space-y-1.5 font-mono text-[11px]">
       {hasArgs && (
-        <div className="p-2 rounded bg-zinc-100/60 dark:bg-zinc-950/60 text-zinc-500 dark:text-zinc-400 space-y-0.5 border border-zinc-200/50 dark:border-zinc-800/50">
+        <div className="p-2 rounded-lg bg-zinc-100/60 dark:bg-zinc-950/60 text-zinc-500 dark:text-zinc-400 space-y-0.5 border border-zinc-200/50 dark:border-zinc-800/50">
           {Object.entries(tool.args!).map(([k, v]) => (
             <div key={k} className="flex gap-1.5 truncate">
               <span className="font-semibold text-zinc-600 dark:text-zinc-300 shrink-0">{k}:</span>
@@ -694,7 +842,7 @@ export const ToolDetailPanel: React.FC<{ tool: Extract<TurnBlock, { type: 'tool'
       )}
       {tool.outputPreview ? (
         <pre
-          className={`px-2.5 py-2 text-[11px] font-mono whitespace-pre-wrap break-all border rounded max-h-64 overflow-y-auto ${
+          className={`px-2.5 py-2 text-[11px] font-mono whitespace-pre-wrap break-all border rounded-lg max-h-64 overflow-y-auto ${
             tool.isError || tool.status === 'error'
               ? 'bg-rose-50/80 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border-rose-200/60 dark:border-rose-900/60'
               : 'bg-zinc-100/80 dark:bg-zinc-950/60 text-zinc-600 dark:text-zinc-300 border-zinc-200/60 dark:border-zinc-800/60'
@@ -712,10 +860,55 @@ export const ToolDetailPanel: React.FC<{ tool: Extract<TurnBlock, { type: 'tool'
 };
 
 /**
- * Case 1B: 单个工具调用直接单行渲染，无外层汇总头
+ * 工具卡片头部内容（单工具卡片与时间轴步骤行共用）：
+ * 展开箭头 + 语义图标 + 动词标签 + 主参数 + 增删/行号徽标
+ */
+const ToolHeaderContent: React.FC<{
+  tool: ToolBlock;
+  showChevron: boolean;
+  showIcon: boolean;
+  expanded: boolean;
+}> = ({ tool, showChevron, showIcon, expanded }) => {
+  const meta = getToolMeta(tool.name);
+  const Icon = meta.icon;
+  const primary = getToolPrimaryArg(tool);
+  const readRange = tool.name === 'read' ? formatReadLineRange(tool.args) : '';
+  const editEntries = tool.name === 'edit' ? normalizeEditEntries(tool.args) : undefined;
+  const diffStats = editEntries ? countEditDiffStats(editEntries) : null;
+
+  return (
+    <>
+      {showChevron && (
+        <ChevronRight
+          className={`w-3.5 h-3.5 text-zinc-400 shrink-0 transition-transform duration-200 ${
+            expanded ? 'rotate-90' : ''
+          }`}
+        />
+      )}
+      {showIcon && (
+        <span className={`w-5 h-5 rounded-md flex items-center justify-center shrink-0 ${meta.chip}`}>
+          <Icon className="w-3 h-3" />
+        </span>
+      )}
+      <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 shrink-0">{meta.label}</span>
+      {primary && (
+        <span className="font-mono text-[11px] text-zinc-600 dark:text-zinc-300 truncate min-w-0">
+          {primary}
+        </span>
+      )}
+      {diffStats && (diffStats.added > 0 || diffStats.removed > 0) && (
+        <DiffStatsBadge added={diffStats.added} removed={diffStats.removed} />
+      )}
+      {readRange && <LineRangeChip range={`L${readRange.slice(1)}`} />}
+    </>
+  );
+};
+
+/**
+ * Case 1B: 单个工具调用渲染为独立语义卡片
  */
 export const SingleToolView: React.FC<{
-  tool: Extract<TurnBlock, { type: 'tool' }>;
+  tool: ToolBlock;
   initialExpanded?: boolean;
 }> = ({ tool, initialExpanded }) => {
   const isError = tool.status === 'error' || Boolean(tool.isError);
@@ -728,32 +921,33 @@ export const SingleToolView: React.FC<{
   }, [isError]);
 
   return (
-    <div className="my-1 max-w-2xl select-none">
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="w-full flex items-center justify-between text-[11px] font-mono text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 py-0.5 cursor-pointer text-left transition-colors"
-      >
-        <div className="flex items-center gap-1.5 min-w-0">
-          <span className="text-zinc-400">{expanded ? '▾' : '▸'}</span>
-          <ToolSignatureView tool={tool} />
-        </div>
-        <ToolStatusBadge tool={tool} />
-      </button>
-      {expanded && (
-        <div className="mt-1 pl-2.5 border-l border-zinc-200 dark:border-zinc-800">
-          <ToolDetailPanel tool={tool} />
-        </div>
-      )}
+    <div className="my-1.5 max-w-2xl select-none">
+      <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/40 overflow-hidden shadow-xs">
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="w-full flex items-center gap-1.5 pl-2 pr-2.5 h-9 text-left hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors cursor-pointer"
+        >
+          <ToolHeaderContent tool={tool} showChevron showIcon expanded={expanded} />
+          <span className="ml-auto flex items-center gap-2 shrink-0 pl-2">
+            <ToolStatusBadge tool={tool} />
+          </span>
+        </button>
+        {expanded && (
+          <div className="border-t border-zinc-100 dark:border-zinc-800/70 px-2.5 py-2 bg-zinc-50/60 dark:bg-zinc-950/40">
+            <ToolDetailPanel tool={tool} />
+          </div>
+        )}
+      </div>
     </div>
   );
 };
 
 /**
- * Case 2B: 连续工具聚合外层折叠组
+ * Case 2B: 连续工具聚合为时间轴步骤卡（收起态显示摘要，展开态为带竖向导轨的步骤流）
  */
 export const ToolGroupView: React.FC<{
-  tools: Extract<TurnBlock, { type: 'tool' }>[];
+  tools: ToolBlock[];
   initialExpanded?: boolean;
 }> = ({ tools, initialExpanded }) => {
   const hasError = tools.some((t) => t.status === 'error' || t.isError);
@@ -761,7 +955,6 @@ export const ToolGroupView: React.FC<{
   const hasCancelled = tools.some((t) => t.status === 'cancelled');
   const totalMs = tools.reduce((sum, t) => sum + (t.durationMs || 0), 0);
   const errorCount = tools.filter((t) => t.status === 'error' || t.isError).length;
-  const breakdown = computeToolBreakdown(tools);
 
   const [groupExpanded, setGroupExpanded] = useState<boolean>(initialExpanded ?? hasError);
   const [expandedIndices, setExpandedIndices] = useState<Set<number>>(() => {
@@ -794,51 +987,107 @@ export const ToolGroupView: React.FC<{
     });
   };
 
-  return (
-    <div className="my-1.5 max-w-2xl select-none">
-      <button
-        type="button"
-        onClick={() => setGroupExpanded((v) => !v)}
-        className="flex items-center gap-1.5 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 py-0.5 cursor-pointer transition-colors"
-      >
-        <span>{groupExpanded ? '▾' : '▸'}</span>
-        <span className="font-medium text-zinc-700 dark:text-zinc-300">
-          {tools.length} tool calls ({breakdown})
-        </span>
-        {totalMs > 0 && <span className="tabular-nums">· {formatDuration(totalMs)}</span>}
-        {errorCount > 0 && (
-          <span className="text-rose-500 font-semibold">· {errorCount} error</span>
-        )}
-        {hasCancelled && !isRunning && <span className="text-zinc-400">· cancelled</span>}
-        {isRunning && <span className="text-zinc-400">· running...</span>}
-      </button>
+  // 摘要行的去重工具类型图标（最多 3 个，一眼看出这组操作的性质）
+  const metaIcons: ToolMetaEntry[] = [];
+  const seenLabels = new Set<string>();
+  for (const t of tools) {
+    const m = getToolMeta(t.name);
+    if (!seenLabels.has(m.label)) {
+      seenLabels.add(m.label);
+      metaIcons.push(m);
+    }
+  }
 
-      {groupExpanded && (
-        <div className="mt-1 rounded-lg border border-zinc-200/70 dark:border-zinc-800 bg-zinc-50/60 dark:bg-zinc-900/50 divide-y divide-zinc-100 dark:divide-zinc-800/60 overflow-hidden">
-          {tools.map((tool, idx) => {
-            const isOpen = expandedIndices.has(idx);
-            return (
-              <div key={tool.id || `${tool.name}-${idx}`} className="text-[11px] font-mono">
-                <div
-                  onClick={() => toggleTool(idx)}
-                  className="px-2.5 py-1.5 flex items-center justify-between hover:bg-zinc-100/60 dark:hover:bg-zinc-800/40 cursor-pointer transition-colors"
-                >
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-zinc-400">{isOpen ? '▾' : '▸'}</span>
-                    <ToolSignatureView tool={tool} />
-                  </div>
-                  <ToolStatusBadge tool={tool} />
-                </div>
-                {isOpen && (
-                  <div className="px-2.5 py-2 border-t border-zinc-100 dark:border-zinc-800/60 bg-white/50 dark:bg-zinc-950/50">
-                    <ToolDetailPanel tool={tool} />
-                  </div>
-                )}
+  const summaryText = isRunning ? `正在执行 ${tools.length} 项操作` : `已执行 ${tools.length} 项操作`;
+  const breakdown = computeToolBreakdown(tools);
+
+  return (
+    <div className="my-2 max-w-2xl select-none">
+      <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/40 overflow-hidden shadow-xs">
+        <button
+          type="button"
+          onClick={() => setGroupExpanded((v) => !v)}
+          className="w-full flex items-center gap-2 px-2.5 h-9 text-left hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors cursor-pointer"
+        >
+          <ChevronRight
+            className={`w-3.5 h-3.5 text-zinc-400 shrink-0 transition-transform duration-200 ${
+              groupExpanded ? 'rotate-90' : ''
+            }`}
+          />
+          <span className="flex items-center gap-0.5 shrink-0">
+            {metaIcons.slice(0, 3).map((m) => {
+              const I = m.icon;
+              return <I key={m.label} className={`w-3 h-3 ${m.tint}`} />;
+            })}
+          </span>
+          <span className="text-[11px] font-medium text-zinc-600 dark:text-zinc-300 shrink-0">
+            {summaryText}
+          </span>
+          {totalMs > 0 && (
+            <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 tabular-nums shrink-0">
+              {formatDuration(totalMs)}
+            </span>
+          )}
+          <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate hidden sm:inline">
+            {breakdown}
+          </span>
+          {errorCount > 0 && (
+            <span className="text-[11px] font-medium text-rose-500 dark:text-rose-400 shrink-0">
+              · {errorCount} 项失败
+            </span>
+          )}
+          {hasCancelled && !isRunning && (
+            <span className="text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0">· 已取消</span>
+          )}
+          <span className="ml-auto flex items-center gap-2 shrink-0">
+            {isRunning && <Loader2 className="w-3 h-3 text-zinc-400 animate-spin-fast" />}
+          </span>
+        </button>
+
+        {groupExpanded && (
+          <div className="border-t border-zinc-100 dark:border-zinc-800/70 px-2.5 py-2.5 bg-zinc-50/60 dark:bg-zinc-950/40">
+            <div className="relative">
+              {tools.length > 1 && (
+                <span
+                  className="absolute left-[13px] top-2 bottom-2 w-px bg-zinc-200 dark:bg-zinc-800"
+                  aria-hidden="true"
+                />
+              )}
+              <div className="space-y-1">
+                {tools.map((tool, idx) => {
+                  const isOpen = expandedIndices.has(idx);
+                  const meta = getToolMeta(tool.name);
+                  const StepIcon = meta.icon;
+                  return (
+                    <div key={tool.id || `${tool.name}-${idx}`} className="relative flex gap-2">
+                      <span className="z-10 w-6 h-6 rounded-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 flex items-center justify-center shrink-0">
+                        <StepIcon className={`w-3 h-3 ${meta.tint}`} />
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <button
+                          type="button"
+                          onClick={() => toggleTool(idx)}
+                          className="w-full flex items-center gap-1.5 py-0.5 text-left hover:opacity-80 transition-opacity cursor-pointer"
+                        >
+                          <ToolHeaderContent tool={tool} showChevron showIcon={false} expanded={isOpen} />
+                          <span className="ml-auto flex items-center gap-2 shrink-0 pl-2">
+                            <ToolStatusBadge tool={tool} />
+                          </span>
+                        </button>
+                        {isOpen && (
+                          <div className="mt-1 mb-1 pl-5">
+                            <ToolDetailPanel tool={tool} />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            );
-          })}
-        </div>
-      )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 };
@@ -851,7 +1100,7 @@ export const ToolCallsTrace: React.FC<{ toolCalls: ToolCallRecord[]; initialExpa
   initialExpanded = false,
 }) => {
   if (!toolCalls || toolCalls.length === 0) return null;
-  const toolBlocks: Extract<TurnBlock, { type: 'tool' }>[] = toolCalls.map((tc, idx) => ({
+  const toolBlocks: ToolBlock[] = toolCalls.map((tc, idx) => ({
     type: 'tool',
     id: tc.id || `${tc.name}_${idx}`,
     name: tc.name,
@@ -872,14 +1121,14 @@ export const ToolCallsTrace: React.FC<{ toolCalls: ToolCallRecord[]; initialExpa
   }
 
   return (
-    <div className="my-1.5 max-w-2xl">
+    <div className="my-2 max-w-2xl">
       <ToolGroupView tools={toolBlocks} initialExpanded={initialExpanded} />
     </div>
   );
 };
 
 /**
- * Pi TUI 极简 Thinking 轨迹组件（Choice 3B）
+ * 深度思考轨迹（Thinking）：收起态为紫色呼吸胶囊，展开态为柔和卡片
  */
 export const ThinkingTrace: React.FC<{ block: Extract<TurnBlock, { type: 'thinking' }> }> = ({ block }) => {
   const isRunning = block.status === 'running';
@@ -898,25 +1147,27 @@ export const ThinkingTrace: React.FC<{ block: Extract<TurnBlock, { type: 'thinki
   if (!block.thinking && !isRunning) return null;
 
   return (
-    <div className="my-1.5 max-w-2xl select-none">
+    <div className="my-2 max-w-2xl select-none">
       <button
         type="button"
         onClick={() => setUserOverride(!isExpanded)}
-        className="text-[11px] italic text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors cursor-pointer select-none flex items-center gap-1 font-mono"
+        className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border border-violet-200/70 dark:border-violet-900/50 bg-violet-50/80 dark:bg-violet-950/30 text-[11px] font-medium text-violet-600 dark:text-violet-300 hover:bg-violet-100 dark:hover:bg-violet-900/40 transition-colors cursor-pointer"
       >
-        <span>{isExpanded ? '▾' : '▸'}</span>
+        <Brain className={`w-3.5 h-3.5 shrink-0 ${isRunning ? 'animate-pulse' : ''}`} />
         <span>
-          Thinking
           {isRunning
-            ? '...'
-            : block.durationMs
-              ? ` · ${formatDuration(block.durationMs)}`
-              : ''}
+            ? '深度思考中'
+            : `已深度思考${block.durationMs ? ` · ${formatDuration(block.durationMs)}` : ''}`}
         </span>
+        <ChevronRight
+          className={`w-3.5 h-3.5 opacity-60 transition-transform duration-200 ${
+            isExpanded ? 'rotate-90' : ''
+          }`}
+        />
       </button>
       {isExpanded && (
-        <div className="mt-1 pl-2.5 border-l border-zinc-200 dark:border-zinc-800 text-xs italic text-zinc-500 dark:text-zinc-400 prose-botd prose-botd--xs break-words">
-          <Markdown>{block.thinking || (isRunning ? '...' : '')}</Markdown>
+        <div className="mt-1.5 rounded-xl border border-zinc-200/60 dark:border-zinc-800/70 bg-zinc-50/80 dark:bg-zinc-900/40 px-3.5 py-2.5 text-zinc-500 dark:text-zinc-400 leading-relaxed prose-botd prose-botd--xs break-words">
+          <Markdown>{block.thinking || (isRunning ? '…' : '')}</Markdown>
         </div>
       )}
     </div>
@@ -926,11 +1177,11 @@ export const ThinkingTrace: React.FC<{ block: Extract<TurnBlock, { type: 'thinki
 export type TimelineItem =
   | { kind: 'thinking'; block: Extract<TurnBlock, { type: 'thinking' }>; index: number }
   | { kind: 'text'; block: Extract<TurnBlock, { type: 'text' }>; index: number }
-  | { kind: 'tool_group'; tools: Extract<TurnBlock, { type: 'tool' }>[]; index: number };
+  | { kind: 'tool_group'; tools: ToolBlock[]; index: number };
 
 export function buildTimelineItems(blocks: TurnBlock[]): TimelineItem[] {
   const items: TimelineItem[] = [];
-  let currentToolGroup: Extract<TurnBlock, { type: 'tool' }>[] = [];
+  let currentToolGroup: ToolBlock[] = [];
   let toolGroupStartIndex = 0;
 
   for (let i = 0; i < blocks.length; i++) {
@@ -1176,7 +1427,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   // 系统消息：紧凑单行胶囊居中
   if (isSystem) {
     return (
-      <div data-message-id={message.id} className="flex justify-center my-2 px-3 sm:px-6">
+      <div data-message-id={message.id} className="flex justify-center my-3">
         <div className="flex items-center gap-1.5 max-w-xl py-1 px-3 bg-zinc-100/90 dark:bg-zinc-800/90 border border-zinc-200/60 dark:border-zinc-800/60 rounded-full text-[11px] text-zinc-500 dark:text-zinc-400">
           <Info className="w-3 h-3 text-zinc-400 dark:text-zinc-500 shrink-0" />
           <div className="prose-botd prose-botd--xs text-zinc-600 dark:text-zinc-400">
@@ -1201,14 +1452,14 @@ export const MessageItem: React.FC<MessageItemProps> = ({
     return (
       <div
         data-message-id={message.id}
-        className="flex items-center justify-between px-3 sm:px-6 py-1 text-xs text-zinc-400 dark:text-zinc-500 font-mono text-[11px]"
+        className="flex items-center justify-between py-1 text-xs text-zinc-400 dark:text-zinc-500"
       >
         <div className="flex items-center gap-1.5 min-w-0">
-          <span className="text-zinc-400">pass</span>
-          <span className="font-medium text-zinc-600 dark:text-zinc-400 truncate font-sans text-xs">
+          <span className="w-1.5 h-1.5 rounded-full bg-zinc-300 dark:bg-zinc-600 shrink-0" />
+          <span className="font-medium text-zinc-500 dark:text-zinc-400 truncate text-xs">
             {bot?.name || (message.senderBotId ? '@' + message.senderBotId : '智能体')}
           </span>
-          <span>已略过本轮发言</span>
+          <span className="text-[11px]">已略过本轮发言</span>
         </div>
         <span className="text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0" title={fullTime}>
           {formattedTime}
@@ -1220,7 +1471,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   // 唤醒回调事件：去中英混排，轻量卡片
   if (isCallback) {
     return (
-      <div data-message-id={message.id} className="flex justify-center my-2.5 px-3 sm:px-6">
+      <div data-message-id={message.id} className="flex justify-center my-3">
         <div className="max-w-2xl w-full p-2.5 sm:p-3 bg-amber-50/70 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/60 rounded-xl text-xs text-amber-900 dark:text-amber-200 shadow-xs">
           <div className="flex items-center justify-between font-medium text-amber-800 dark:text-amber-300 mb-1">
             <div className="flex items-center gap-1.5">
@@ -1239,10 +1490,10 @@ export const MessageItem: React.FC<MessageItemProps> = ({
     );
   }
 
-  // 用户消息：去头像、去顶部“我+时间”，直接右对齐紧凑现代气泡
+  // 用户消息：右对齐紧凑现代气泡，轮次之间以更大的顶部留白制造呼吸感
   if (isUser) {
     return (
-      <div data-message-id={message.id} className="flex flex-col items-end my-2 px-3 sm:px-6 group">
+      <div data-message-id={message.id} className="flex flex-col items-end pt-6 pb-1 group">
         {message.senderUsername && (
           <div className="flex items-center gap-1 mb-1 mr-1 text-[11px] font-medium text-zinc-500 dark:text-zinc-400 select-none">
             <UserIcon className="w-3 h-3 text-zinc-400 dark:text-zinc-500 shrink-0" />
@@ -1250,7 +1501,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
           </div>
         )}
         <div
-          className={`bg-zinc-100 dark:bg-zinc-800 border border-zinc-200/80 dark:border-zinc-700/60 px-4 py-2.5 rounded-2xl rounded-br-sm max-w-[85%] sm:max-w-[75%] shadow-xs user-bubble ${
+          className={`bg-zinc-100 dark:bg-zinc-800 border border-zinc-200/80 dark:border-zinc-700/60 px-4 py-2.5 rounded-2xl rounded-br-md max-w-[85%] sm:max-w-[75%] shadow-xs user-bubble ${
             isEditing ? 'ring-2 ring-blue-500/60' : ''
           }`}
         >
@@ -1284,20 +1535,28 @@ export const MessageItem: React.FC<MessageItemProps> = ({
     );
   }
 
-  // AI 助手消息（Assistant）：去独立头像列、去外框气泡，Markdown 正文平铺画布，释放移动端阅读空间
+  // AI 助手消息（Assistant）：色彩微徽章身份行 + Markdown 正文平铺画布，
+  // 不再有整块 hover 底色，过程（思考/工具）与结论（正文）通过卡片层级自然分离
   return (
-    <div data-message-id={message.id} className="group px-3 sm:px-6 py-2.5 sm:py-3 hover:bg-zinc-50/50 dark:hover:bg-zinc-900/50 transition-colors">
-      {/* 极简单行浅灰元数据 */}
-      <div className="flex items-center gap-1.5 min-w-0 text-xs flex-wrap font-mono text-[11px] text-zinc-400 dark:text-zinc-500">
+    <div data-message-id={message.id} className="group py-2 sm:py-2.5">
+      {/* 身份行：微徽章 + 名称 + 模型 + 中止标记 */}
+      <div className="flex items-center gap-1.5 min-w-0 mb-0.5">
+        <BotAvatarBadge botId={message.senderBotId} name={bot?.name} color={bot?.color} />
         <span
-          className="font-semibold text-zinc-900 dark:text-zinc-100 font-sans text-xs truncate max-w-[160px]"
+          className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate max-w-[180px]"
           title={botHeaderTitle}
         >
-          {bot?.name || message.senderBotId}
+          {bot?.name || message.senderBotId || '智能体'}
         </span>
-        {shortModel && <span>· {shortModel}</span>}
+        {shortModel && (
+          <span className="text-[11px] font-mono text-zinc-400 dark:text-zinc-500 truncate">
+            {shortModel}
+          </span>
+        )}
         {message.aborted && (
-          <span className="italic text-amber-600/90 dark:text-amber-500/90">· 已中止</span>
+          <span className="text-[11px] italic text-amber-600/90 dark:text-amber-500/90 shrink-0">
+            已中止
+          </span>
         )}
       </div>
 
@@ -1316,7 +1575,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
       {/* 附件（图片缩略图 / 文件下载芯片），助手产出的文件产物同样可预览与下载 */}
       <MessageAttachments attachments={message.attachments || []} />
 
-      {/* 操作按钮与用户消息保持一致：时间 + 复制 + 分叉 + Token 用量置于正文下方，移动端常显、桌面端悬停显示 */}
+      {/* 操作行：时间 + 复制 + 分叉 + Token 用量置于正文下方，移动端常显、桌面端悬停显示 */}
       <div className="mt-1 flex items-center gap-0.5 select-none opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
         <span className="text-[11px] text-zinc-400 dark:text-zinc-500 px-1" title={fullTime}>
           {formattedTime}

@@ -120,17 +120,18 @@ body {
 .prose-botd p:last-child {
   margin-bottom: 0;
 }
+/* 代码块外层卡片由 PreBlock 组件（Tailwind）渲染，此处仅保留 pre 本体的字体与内边距 */
 .prose-botd pre {
-  background-color: #09090b;
+  background-color: #18181b;
   color: #f4f4f5;
-  padding: 0.875rem;
-  border-radius: 0.75rem;
+  padding: 0.75rem 0.875rem;
+  border-radius: 0;
   overflow-x: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   font-size: 13px;
   line-height: 1.5;
-  margin: 0.625rem 0;
-  border: 1px solid #27272a;
+  margin: 0;
+  border: none;
 }
 .prose-botd code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -304,9 +305,9 @@ body {
   border-color: #3f3f46;
 }
 .dark .prose-botd pre {
-  background-color: #09090b;
+  background-color: #18181b;
   color: #f4f4f5;
-  border-color: #27272a;
+  border-color: transparent;
 }
 .dark .prose-botd pre code {
   background-color: transparent;

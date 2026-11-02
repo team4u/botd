@@ -20,6 +20,8 @@ import {
   Package,
   SquareTerminal,
   ChevronUp,
+  ChevronRight,
+  Plus,
   Share2,
   History as HistoryIcon,
 } from 'lucide-react';
@@ -41,6 +43,10 @@ import {
   subagentColorStyles,
   SubagentRunsPanel,
   AssistantTurnContent,
+  BotAvatarBadge,
+  TypingDots,
+  formatChatDayLabel,
+  isSameCalendarDay,
 } from './MessageItem';
 import { ChatInput } from './ChatInput';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -752,20 +758,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
         key={state.botId}
         className={
           isParallelStreaming
-            ? 'p-3 bg-zinc-50/70 dark:bg-zinc-900/60 border border-zinc-200/80 dark:border-zinc-800/80 rounded-xl min-w-0'
-            : 'px-3 sm:px-6 py-2.5 sm:py-3 animate-in fade-in'
+            ? 'p-3 bg-white dark:bg-zinc-900/40 border border-zinc-200/80 dark:border-zinc-800 rounded-xl min-w-0'
+            : 'py-2 sm:py-2.5 animate-in fade-in'
         }
       >
-        {/* 极简单行浅灰元数据 */}
-        <div className="flex items-center gap-1.5 min-w-0 text-xs flex-wrap font-mono text-[11px] text-zinc-400 dark:text-zinc-500">
-          <span className="font-semibold text-zinc-900 dark:text-zinc-100 font-sans text-xs truncate">
+        {/* 身份行：微徽章 + 名称 + 模型 + 运行中呼吸指示 */}
+        <div className="flex items-center gap-1.5 min-w-0 mb-0.5">
+          <BotAvatarBadge botId={state.botId} name={bot?.name} color={bot?.color} />
+          <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate">
             {bot?.name || state.botId}
           </span>
-          {shortModel && <span>· {shortModel}</span>}
-          <span className="flex items-center gap-1">
-            <span>·</span>
-            <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
-            <span>running...</span>
+          {shortModel && (
+            <span className="text-[11px] font-mono text-zinc-400 dark:text-zinc-500 truncate">
+              {shortModel}
+            </span>
+          )}
+          <span className="inline-flex items-center gap-1.5 shrink-0">
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+            <span className="text-[11px] text-blue-500 dark:text-blue-400">生成中</span>
           </span>
         </div>
 
@@ -791,9 +801,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
             content={state.delta}
           />
         ) : (
-          <div className="flex items-center gap-2 text-zinc-400 dark:text-zinc-500 text-xs py-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-ping" />
-            <span>等待首字回复与工具调用...</span>
+          <div className="flex items-center gap-2 py-2">
+            <TypingDots />
+            <span className="text-xs text-zinc-400 dark:text-zinc-500">正在思考如何回应…</span>
           </div>
         )}
       </div>
@@ -1188,15 +1198,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       )}
 
-      {/* 消息滚动主区域（外层包裹用于定位回到底部悬浮按钮） */}
+      {/* 消息滚动主区域（外层包裹用于定位回到底部悬浮按钮；外层全宽承载滚动条，内部收敛到中轴阅读宽度与输入框对齐） */}
       <div className="relative flex-1 min-h-0">
         <div
           ref={scrollContainerRef}
           onScroll={handleScroll}
-          className="absolute inset-0 overflow-y-auto py-2 sm:py-3 space-y-1"
+          className="absolute inset-0 overflow-y-auto"
           role="log"
           aria-label="聊天消息记录"
         >
+        <div className="max-w-4xl w-full mx-auto px-3 sm:px-5 py-3">
         {loadingMessages && messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-zinc-400 dark:text-zinc-500 gap-2">
             <Loader2 className="w-5 h-5 animate-spin-fast text-blue-600 dark:text-blue-400" />
@@ -1236,9 +1247,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
               {memberBots.map((b) => (
                 <span
                   key={b.id}
-                  className="px-2 py-0.5 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800/80 rounded-md text-[11px] text-zinc-600 dark:text-zinc-400 font-mono"
+                  className="inline-flex items-center gap-1.5 px-2 py-1 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800/80 rounded-full text-[11px] text-zinc-600 dark:text-zinc-400"
+                  title={`${b.name} · @${b.id}`}
                 >
-                  @{b.id} ({b.name})
+                  <BotAvatarBadge botId={b.id} name={b.name} color={b.color} className="!w-4 !h-4 !text-[9px]" />
+                  <span className="truncate max-w-[120px]">{b.name}</span>
                 </span>
               ))}
             </div>
@@ -1269,35 +1282,44 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </div>
             )}
 
-            {messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={
-                  highlightedId === msg.id
-                    ? 'rounded-2xl ring-2 ring-blue-400/60 bg-blue-50/50 dark:bg-blue-500/5 transition-colors duration-500'
-                    : 'transition-colors duration-500'
-                }
-              >
-                <MemoizedMessageItem
-                  message={msg}
-                  botMap={botMap}
-                  nodeMap={nodeMap}
-                  canEdit={canEdit}
-                  isEditing={editingMessage?.id === msg.id}
-                  onStartEdit={startEdit}
-                  onForkMessage={handleForkMessage}
-                  onSelectSession={onSelectSession}
-                />
-              </div>
+            {messages.map((msg, idx) => (
+              <React.Fragment key={msg.id}>
+                {/* 日期分隔线：相邻消息跨自然日时插入时间锚点 */}
+                {(idx === 0 || !isSameCalendarDay(messages[idx - 1].createdAt, msg.createdAt)) && (
+                  <div className="flex justify-center my-3">
+                    <span className="px-2.5 py-0.5 rounded-full bg-zinc-100/90 dark:bg-zinc-800/90 text-[11px] text-zinc-500 dark:text-zinc-400 select-none">
+                      {formatChatDayLabel(msg.createdAt)}
+                    </span>
+                  </div>
+                )}
+                <div
+                  className={
+                    highlightedId === msg.id
+                      ? 'rounded-2xl ring-2 ring-blue-400/60 bg-blue-50/50 dark:bg-blue-500/5 transition-colors duration-500'
+                      : 'transition-colors duration-500'
+                  }
+                >
+                  <MemoizedMessageItem
+                    message={msg}
+                    botMap={botMap}
+                    nodeMap={nodeMap}
+                    canEdit={canEdit}
+                    isEditing={editingMessage?.id === msg.id}
+                    onStartEdit={startEdit}
+                    onForkMessage={handleForkMessage}
+                    onSelectSession={onSelectSession}
+                  />
+                </div>
+              </React.Fragment>
             ))}
 
             {/* 多 BOT 并发流式：网格并排展示，互不覆盖；单 BOT 保持平铺风格 */}
             {isParallelStreaming ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 px-3 sm:px-6 my-2">
-                <div className="col-span-full flex items-center justify-center gap-1.5 py-1.5 px-3 bg-amber-50/80 dark:bg-amber-950/40 border border-amber-200/70 dark:border-amber-900/60 rounded-full w-fit mx-auto">
-                  <Hourglass className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400 shrink-0" />
-                  <span className="text-[11px] font-medium text-amber-700 dark:text-amber-300">
-                    多智能体并发执行中 ({effectiveStreamingStates.length} 位智能体同步处理中...)
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 my-2">
+                <div className="col-span-full flex items-center justify-center gap-1.5 py-1.5 px-3 bg-blue-50/80 dark:bg-blue-950/40 border border-blue-200/70 dark:border-blue-900/60 rounded-full w-fit mx-auto">
+                  <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse shrink-0" />
+                  <span className="text-[11px] font-medium text-blue-700 dark:text-blue-300">
+                    {effectiveStreamingStates.length} 位智能体并发执行中
                   </span>
                 </div>
                 {effectiveStreamingStates.map((state) => renderStreamingBlock(state))}
@@ -1308,12 +1330,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </>
         )}
         </div>
+        </div>
 
-        {/* 回到底部悬浮按钮：仅在用户向上滚动离开底部时出现 */}
+        {/* 回到底部悬浮按钮：画布底部水平居中，毛玻璃质感 */}
         {userScrolledUp && (
           <button
             onClick={handleJumpToBottom}
-            className="absolute bottom-3 right-3 sm:right-6 z-20 flex items-center gap-1.5 h-9 px-3.5 rounded-full bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 shadow-lg text-xs font-medium text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors cursor-pointer animate-in fade-in"
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 h-9 px-3.5 rounded-full bg-white/90 dark:bg-zinc-800/90 backdrop-blur-md border border-zinc-200 dark:border-zinc-700 shadow-lg text-xs font-medium text-zinc-700 dark:text-zinc-200 hover:bg-white dark:hover:bg-zinc-700 transition-colors cursor-pointer animate-in fade-in"
             aria-label="回到底部"
           >
             <ArrowDown className="w-3.5 h-3.5" />
@@ -1369,7 +1392,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             className="flex items-center justify-between gap-2 px-3 py-1.5 bg-blue-50/80 dark:bg-blue-950/40 border border-blue-200/80 dark:border-blue-900/60 rounded-lg text-xs text-blue-800 dark:text-blue-300 hover:bg-blue-100/70 dark:hover:bg-blue-900/50 transition-colors cursor-pointer shadow-2xs"
           >
             <div className="flex items-center gap-2 min-w-0">
-              <span className="shrink-0">⚙️</span>
+              <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
               <span className="font-medium shrink-0">
                 {runningBgJobs.length} 个后台任务运行中
               </span>
@@ -1408,16 +1431,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
             {/* 左侧：当前活跃 + 队列阶段 */}
             <div className="flex items-center gap-1.5 min-w-0 overflow-x-auto no-scrollbar py-0.5">
               {activeBots.length > 0 && (
-                <span className="inline-flex items-center gap-1 font-medium text-emerald-600 dark:text-emerald-400 shrink-0 font-mono text-[11px]">
-                  <span>🟢 正在执行:</span>
-                  <span>{activeBots.map((id) => `@${id}`).join(', ')}</span>
+                <span className="inline-flex items-center gap-1.5 font-medium text-emerald-600 dark:text-emerald-400 shrink-0 text-[11px]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  <span className="font-mono">{activeBots.map((id) => `@${id}`).join(', ')}</span>
                 </span>
               )}
 
               {session.queuePlan && session.queuePlan.length > 0 && (
                 <>
                   {activeBots.length > 0 && (
-                    <span className="text-zinc-300 dark:text-zinc-600 shrink-0">──▸</span>
+                    <ChevronRight className="w-3.5 h-3.5 text-zinc-300 dark:text-zinc-600 shrink-0" />
                   )}
                   {session.queuePlan.map((stage, idx) => {
                     const stageLabel = stage.parallel
@@ -1427,17 +1450,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     return (
                       <React.Fragment key={stage.id || idx}>
                         {idx > 0 && (
-                          <span className="text-zinc-300 dark:text-zinc-600 shrink-0">──▸</span>
+                          <ChevronRight className="w-3.5 h-3.5 text-zinc-300 dark:text-zinc-600 shrink-0" />
                         )}
-                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded text-[11px] text-zinc-700 dark:text-zinc-300 shrink-0 font-mono">
-                          <span>⏳ {stageLabel}</span>
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md text-[11px] text-zinc-700 dark:text-zinc-300 shrink-0 font-mono">
+                          <Clock className="w-3 h-3 text-zinc-400 dark:text-zinc-500 shrink-0" />
+                          <span>{stageLabel}</span>
                           <button
                             type="button"
                             onClick={() => handleSkipStage(stage.id, stage.botIds[0])}
-                            className="ml-0.5 text-zinc-400 hover:text-rose-500 dark:hover:text-rose-400 font-sans cursor-pointer transition-colors"
+                            className="ml-0.5 inline-flex items-center gap-0.5 text-zinc-400 hover:text-rose-500 dark:hover:text-rose-400 font-sans cursor-pointer transition-colors"
                             title="跳过此阶段"
                           >
-                            × 跳过
+                            <X className="w-3 h-3" />
+                            <span>跳过</span>
                           </button>
                         </span>
                       </React.Fragment>
@@ -1455,7 +1480,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 className="h-6 px-2 text-[11px] font-medium rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 transition-colors flex items-center gap-1 cursor-pointer shrink-0"
                 title="向队列末尾追加指定智能体"
               >
-                <span>+ 临时点名</span>
+                <Plus className="w-3.5 h-3.5 shrink-0" />
+                <span>临时点名</span>
               </button>
 
               {appendDropdownOpen && (

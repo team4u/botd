@@ -497,8 +497,8 @@ test('ToolCallsTrace renders error states, auto-expands errors, and formats outp
 
   // Collapsed state
   const collapsedHtml = renderToStaticMarkup(React.createElement(ToolCallsTrace, { toolCalls: tools }));
-  assert(collapsedHtml.includes('3 tool calls'), 'Should show total tool count');
-  assert(collapsedHtml.includes('1 error'), 'Should show failure count');
+  assert(collapsedHtml.includes('已执行 3 项操作'), 'Should show total tool count');
+  assert(collapsedHtml.includes('1 项失败'), 'Should show failure count');
 
   // Expanded state
   const expandedHtml = renderToStaticMarkup(
@@ -513,7 +513,6 @@ test('ToolCallsTrace renders error states, auto-expands errors, and formats outp
   // Non-error tools
   assert(expandedHtml.includes('bash'), 'Bash tool name must be shown');
   assert(expandedHtml.includes('write'), 'Write tool name must be shown');
-
   // Empty tools
   const emptyHtml = renderToStaticMarkup(React.createElement(ToolCallsTrace, { toolCalls: [] }));
   assert.equal(emptyHtml, '');
@@ -565,7 +564,7 @@ test('Pi TUI tool signatures, breakdown, and edit diff rendering', () => {
     'write out.txt'
   );
 
-  // SingleToolView (Case 1B): renders single tool directly without outer group header
+  // SingleToolView (Case 1B): renders single tool as semantic action card without outer group header
   const singleToolHtml = renderToStaticMarkup(
     React.createElement(SingleToolView, {
       tool: {
@@ -578,8 +577,8 @@ test('Pi TUI tool signatures, breakdown, and edit diff rendering', () => {
       },
     })
   );
-  assert(!singleToolHtml.includes('tool calls'), 'Single tool view must not wrap in outer group header');
-  assert(singleToolHtml.includes('$ ls -la'), 'Must show command signature');
+  assert(!singleToolHtml.includes('项操作'), 'Single tool view must not wrap in outer group header');
+  assert(singleToolHtml.includes('ls -la'), 'Must show command signature');
   assert(singleToolHtml.includes('42ms'), 'Must show duration');
 
   // Edit diff rendering in ToolCallsTrace / SingleToolView
@@ -615,7 +614,7 @@ test('ThinkingTrace renders collapsed and expanded states', () => {
       },
     })
   );
-  assert(completedHtml.includes('Thinking · 1.3s'), 'Collapsed thinking must show duration');
+  assert(completedHtml.includes('已深度思考 · 1.3s'), 'Collapsed thinking must show duration');
   assert(!completedHtml.includes('Detailed thought process here'), 'Collapsed thinking must not show body');
 
   // Running thinking -> expanded by default
@@ -628,7 +627,7 @@ test('ThinkingTrace renders collapsed and expanded states', () => {
       },
     })
   );
-  assert(runningHtml.includes('Thinking...'), 'Running thinking must show Thinking...');
+  assert(runningHtml.includes('深度思考中'), 'Running thinking must show thinking indicator');
   assert(runningHtml.includes('Actively thinking about solution...'), 'Running thinking must show content');
 });
 
@@ -643,9 +642,9 @@ test('AssistantTurnContent interleaves thinking, tool group, and text chronologi
   ];
 
   const html = renderToStaticMarkup(React.createElement(AssistantTurnContent, { blocks }));
-  assert(html.includes('Thinking · 500ms'), 'Thinking block must be rendered');
-  assert(html.includes('2 tool calls (read ×2)'), 'Adjacent read tools must be grouped');
+  assert(html.includes('已深度思考 · 500ms'), 'Thinking block must be rendered');
+  assert(html.includes('已执行 2 项操作'), 'Adjacent read tools must be grouped');
   assert(html.includes('Midway summary'), 'Midway text must be rendered in position');
-  assert(html.includes('write') && html.includes('out.txt'), 'Single write tool must be rendered');
+  assert(html.includes('写入') && html.includes('out.txt'), 'Single write tool must be rendered');
   assert(html.includes('Final conclusion'), 'Final text must be rendered in position');
 });
