@@ -28,7 +28,7 @@ import { AssistantTurnContent } from './MessageItem';
 import type { StreamingAssistantState } from '../types';
 
 /**
- * 会话消息时间线（ChatView 主对话与 SubagentRunDrawer 分身检视共用的唯一渲染器）。
+ * 会话消息时间线（ChatView 主对话与 SubagentRunDrawer 子代理检视共用的唯一渲染器）。
  *
  * 承载：消息列表（日期分隔线 + MemoizedMessageItem + 定位高亮）、多 BOT 并发流式网格、
  * 自动贴底与「回到底部」悬浮按钮、向上分页（prepend 锚定 + IntersectionObserver 哨兵）、
@@ -63,7 +63,7 @@ export interface MessageTimelineProps {
   onLoadEarlier?: () => void;
   /** 移动端软键盘垫片高度变化时保持贴底 */
   keyboardInset?: number;
-  /** 流式块上方叠加的分身协同面板数据（主对话传入；抽屉场景不传） */
+  /** 流式块上方叠加的子代理协同面板数据（主对话传入；抽屉场景不传） */
   activeSubagentRunsFor?: Record<string, import('@botd/protocol').SubagentRunRecord[]>;
   /** 时间线容器自定义类（抽屉内收敛最大宽度） */
   className?: string;
@@ -280,7 +280,7 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
           </span>
         </div>
 
-        {/* 分身协同运行中轨迹 */}
+        {/* 子代理协同运行中轨迹 */}
         {subRuns && subRuns.length > 0 && (
           <SubagentRunsPanel runs={subRuns} onInspectSubagentRun={onInspectSubagentRun} />
         )}

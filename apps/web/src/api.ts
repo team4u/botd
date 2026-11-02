@@ -547,7 +547,7 @@ export const api = {
     });
   },
 
-  // 单独停掉某个运行中的分身（按 runId），不中断主回合与其他并发分身
+  // 单独停掉某个运行中的子代理（按 runId），不中断主回合与其他并发子代理
   async stopSubagent(sessionId: string, runId: string): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>(
       `/api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(runId)}/stop`,
@@ -555,7 +555,7 @@ export const api = {
     );
   },
 
-  // 向某个分身发送 steer（运行中插话）或 resume（结束后追问，同一 runId 上下文继续）
+  // 向某个子代理发送 steer（运行中插话）或 resume（结束后追问，同一 runId 上下文继续）
   async interactSubagent(
     sessionId: string,
     runId: string,

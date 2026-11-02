@@ -180,7 +180,7 @@ botd sessions subsessions "$BOTD_SESSION_ID"
 
 目标 Bot 必须属于调用者。当前委派接口不能直接使用其他用户共享的 Bot。子会话事件会向上继承父会话的通知通道配置。
 
-同机的多角色协同（并发盲评、流水线、对抗打磨）不需要子会话：主控 Bot 直接通过内置 `Agent` / `SubagentWorkflow` 工具调度角色分身，详见[用户指南](user-guide.md)。
+同机的多角色协同（并发盲评、流水线、对抗打磨）不需要子会话：主控 Bot 直接通过内置 `Agent` / `SubagentWorkflow` 工具调度子代理，详见[用户指南](user-guide.md)。
 
 ## 定时执行与 Webhook
 

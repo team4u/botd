@@ -1151,7 +1151,7 @@ export function createHub(options?: HubOptions): HubInstance {
     return c.json({ ok: true });
   });
 
-  // 单独停掉某个运行中的分身（按 runId），不中断主回合与其他并发分身
+  // 单独停掉某个运行中的子代理（按 runId），不中断主回合与其他并发子代理
   app.post('/api/sessions/:id/subagents/:runId/stop', async (c) => {
     const id = c.req.param('id');
     const runId = c.req.param('runId');
@@ -1169,7 +1169,7 @@ export function createHub(options?: HubOptions): HubInstance {
     }
   });
 
-  // 向某个分身发送 steer（运行中插话）或 resume（结束后追问，同一 runId 上下文继续）
+  // 向某个子代理发送 steer（运行中插话）或 resume（结束后追问，同一 runId 上下文继续）
   app.post('/api/sessions/:id/subagents/:runId/interact', async (c) => {
     const id = c.req.param('id');
     const runId = c.req.param('runId');

@@ -240,7 +240,7 @@ export class NodeConnectionManager {
         }
 
         // Enforce that this session is currently running and this bot is an active bot.
-        // 例外：分身事件（subagentEvent）允许回合结束后继续透传——后台分身完成、抽屉内
+        // 例外：子代理事件（subagentEvent）允许回合结束后继续透传——后台子代理完成、抽屉内
         // resume / stop 的状态更新都发生在主回合结束之后，不能当作杂散流丢弃。
         const isActive = this.router?.isBotActiveInSession
           ? this.router.isBotActiveInSession(event.sessionId, event.botId)

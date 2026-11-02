@@ -24,8 +24,8 @@ flowchart TB
 | --- | --- | --- |
 | Hub | 认证、资源管理、会话调度、消息和产物存储 | [index.ts](../apps/hub/src/index.ts) |
 | Node Agent | 节点注册、资源读写、模型运行、后台任务、本地控制 | [daemon.ts](../apps/node/src/daemon.ts) |
-| 模型运行时 | 创建 Pi 会话，准备提示词、工具、分身底座和工作目录 | [runtime.ts](../apps/node/src/runtime.ts) |
-| Web | 会话操作、流式展示、节点配置、确认卡片、分身运行抽屉 | [App.tsx](../apps/web/src/App.tsx) |
+| 模型运行时 | 创建 Pi 会话，准备提示词、工具、子代理底座和工作目录 | [runtime.ts](../apps/node/src/runtime.ts) |
+| Web | 会话操作、流式展示、节点配置、确认卡片、子代理运行抽屉 | [App.tsx](../apps/web/src/App.tsx) |
 | 共享协议 | HTTP 数据类型、RPC 契约、SSE 事件、输入校验 | [protocol](../packages/protocol/src/index.ts) |
 | 模型目录 | 从 Pi 模型目录提取公开元数据 | [models](../packages/models/src/index.ts) |
 
@@ -35,7 +35,7 @@ flowchart TB
 
 代码仓库、编译器和专用 CLI 往往在不同设备上。Node Agent 让 Bot 在这些设备上执行任务，减少搬运环境的需要。
 
-每个 Bot 属于固定节点。角色分身属于主控 Bot 所在节点，默认共享主控的工作区目录，可按需继承模型与技能。Hub 不负责运行 Bot 的 Bash 命令，也不自动将 Bot 迁移到其他节点；跨机器任务通过子会话委派完成。
+每个 Bot 属于固定节点。子代理属于主控 Bot 所在节点，默认共享主控的工作区目录，可按需继承模型与技能。Hub 不负责运行 Bot 的 Bash 命令，也不自动将 Bot 迁移到其他节点；跨机器任务通过子会话委派完成。
 
 技能描述操作方法，工具调用由模型决定。业务 CLI 通过 Bash 使用，不要求为每个 CLI 编写 Hub 适配器。
 
@@ -50,7 +50,7 @@ flowchart TB
 | 触发器、自动化事件、离线待发任务、待确认记录、通知 Outbox | Hub SQLite | 调度器、事件收件箱、恢复流程与重试投递读取 |
 | Bot 配置、角色、记忆、私有环境变量 | 节点 Bot 目录 | Hub 通过 RPC 转发读写 |
 | 模型凭据、自定义模型配置 | 节点 `.agent/` | Hub 转发登录输入，不维护模型凭据库 |
-| Pi 会话及工具完整记录 | 节点 `sessions/` | 每个 Bot（含角色分身）保留自己的模型上下文 |
+| Pi 会话及工具完整记录 | 节点 `sessions/` | 每个 Bot（含子代理）保留自己的模型上下文 |
 
 工具输出预览会进入公屏消息。不能把“完整日志保存在节点”理解成“工具输出不会传到 Hub”。
 
@@ -78,10 +78,10 @@ macOS 和 Linux 使用数据目录中的 Unix socket。Windows 使用根据数�
 
 1. Hub 校验用户的会话访问权限。
 2. Hub 保存用户消息，解析斜杠命令和 Bot 提及。
-3. 路由器确定本轮要执行的 Bot（默认主控 Bot，`@` 提及可指定其他可用 Bot 或分身）。
+3. 路由器确定本轮要执行的 Bot（默认主控 Bot，`@` 提及可指定其他可用 Bot 或子代理）。
 4. Hub 通过节点 RPC 派发任务。
-5. Node Agent 准备工作区、附件、角色、记忆和模型会话；主控 Bot 可在同一轮内通过 `Agent` / `SubagentWorkflow` 工具并发调度角色分身。
-6. Pi SDK 调用模型和工具，节点向 Hub 上报流式事件；分身生命周期事件实时镜像到公屏。
+5. Node Agent 准备工作区、附件、角色、记忆和模型会话；主控 Bot 可在同一轮内通过 `Agent` / `SubagentWorkflow` 工具并发调度子代理。
+6. Pi SDK 调用模型和工具，节点向 Hub 上报流式事件；子代理生命周期事件实时镜像到公屏。
 7. Hub 保存最终回复、工具轨迹和用量。
 8. 路由器继续处理 `@` 提及的后续接力。
 
@@ -93,7 +93,7 @@ macOS 和 Linux 使用数据目录中的 Unix socket。Windows 使用根据数�
 | --- | --- |
 | `direct` | 指定主控 Bot 回答 |
 
-有效 `@Bot ID` 可以选择会话成员及其角色分身；单聊中所有者可用的其他 Bot 也可被 `@` 接力。Bot 回复中的提及可以触发后续接力。
+有效 `@Bot ID` 可以选择会话成员及其子代理；单聊中所有者可用的其他 Bot 也可被 `@` 接力。Bot 回复中的提及可以触发后续接力。
 
 接力预算限制自动调用链，避免相互提及无限运行。
 
@@ -103,7 +103,7 @@ macOS 和 Linux 使用数据目录中的 Unix socket。Windows 使用根据数�
 
 ## 上下文与资源加载
 
-每个 Bot 有独立的工作目录和 Pi 会话文件。角色分身（`parentBotId` 已设置）与主控 Bot 共享同一个主工作区目录，但保留自己的模型会话。运行时显式加载启用的技能、扩展和提示词模板，不扫描宿主机 Pi 配置；分身默认不重复挂载 pi-subagents，防止套娃。
+每个 Bot 有独立的工作目录和 Pi 会话文件。子代理（`parentBotId` 已设置）与主控 Bot 共享同一个主工作区目录，但保留自己的模型会话。运行时显式加载启用的技能、扩展和提示词模板，不扫描宿主机 Pi 配置；子代理默认不重复挂载 pi-subagents，防止套娃。
 
 `SYSTEM.md` 和 `MEMORY.md` 提供角色与长期记忆。
 

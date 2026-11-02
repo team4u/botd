@@ -34,7 +34,7 @@ import { BotAvatarBadge } from './MessageItem.js';
 import { api } from '../api.js';
 
 /**
- * 分身徽章：小号彩色首字母块（用分身自身 color，与聊天区取色一致），
+ * 子代理徽章：小号彩色首字母块（用子代理自身 color，与聊天区取色一致），
  * 替代树状缩进表达归属关系。
  */
 const SubAvatarBadge: React.FC<{ botId: string; name: string; color?: string; active?: boolean }> = ({
@@ -471,7 +471,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     return map;
   }, [bots]);
 
-  // 顶层主 BOT 列表：没有 parentBotId，或者 parentBotId 不在已知 bots 中的孤儿分身
+  // 顶层主 BOT 列表：没有 parentBotId，或者 parentBotId 不在已知 bots 中的孤儿子代理
   const primaryFilteredBots = useMemo(() => {
     const q = query.trim().toLowerCase();
     const primaryBots = bots.filter((bot) => !bot.parentBotId || !bots.some((b) => b.id === bot.parentBotId));
@@ -883,7 +883,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         </div>
                       </div>
 
-                      {/* 子分身平铺列表（不缩进不树状） */}
+                      {/* 子代理平铺列表（不缩进不树状） */}
                       {childSubagents.length > 0 && (
                         <div className="space-y-0.5">
                           {childSubagents.map((sub) => {
@@ -927,7 +927,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                     >
                                       @{sub.id}
                                     </span>
-                                    <span className="shrink-0 text-[10px] text-zinc-400 dark:text-zinc-500">· 分身</span>
+                                    <span className="shrink-0 text-[10px] text-zinc-400 dark:text-zinc-500">· 子代理</span>
                                   </div>
                                 </div>
 

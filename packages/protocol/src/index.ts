@@ -285,11 +285,11 @@ export interface SubagentRunRecord {
   currentTool?: string;
   durationMs?: number;
   replyPreview?: string;
-  /** 分身完整回复或错误输出（不截断，供详情抽屉查看） */
+  /** 子代理完整回复或错误输出（不截断，供详情抽屉查看） */
   replyFull?: string;
-  /** 分身执行过程中的交错时间线（思考/工具/文本流，与主对话 blocks 同构） */
+  /** 子代理执行过程中的交错时间线（思考/工具/文本流，与主对话 blocks 同构） */
   blocks?: TurnBlock[];
-  /** 分身执行过程中的工具调用记录列表 */
+  /** 子代理执行过程中的工具调用记录列表 */
   toolCalls?: ToolCallRecord[];
   /** 运行过程中收到的 steer / resume 追加指令历史 */
   steers?: SubagentSteerRecord[];
@@ -316,19 +316,19 @@ export interface BotConfig {
   ownerName?: string;
   isTeamShared?: boolean;
   updatedAt: string;
-  /** 若为角色分身（Subagent），指向所属主 BOT ID；为空则表示节点主 BOT */
+  /** 若为子代理（Subagent），指向所属主 BOT ID；为空则表示节点主 BOT */
   parentBotId?: string;
-  /** 分身是否跟随主 BOT 模型 */
+  /** 子代理是否跟随主 BOT 模型 */
   inheritModel?: boolean;
-  /** 分身是否继承主 BOT 全部技能 */
+  /** 子代理是否继承主 BOT 全部技能 */
   inheritSkills?: boolean;
-  /** 分身徽标颜色 */
+  /** 子代理徽标颜色 */
   color?: SubagentColor;
-  /** 分身工具权限范围：all（全量读写）| readonly（只读分析）| custom（自定义工具） */
+  /** 子代理工具权限范围：all（全量读写）| readonly（只读分析）| custom（自定义工具） */
   toolScope?: SubagentToolScope;
   /** 当 toolScope === 'custom' 时允许调用的工具名列表 */
   customTools?: string[];
-  /** 分身工作区隔离模式：off（共享主工作区）| worktree（独立 Git 分支） */
+  /** 子代理工作区隔离模式：off（共享主工作区）| worktree（独立 Git 分支） */
   isolation?: SubagentIsolation;
 }
 
@@ -469,7 +469,7 @@ export interface MessageRecord {
   modelBadge?: string;
   content: string;
   mentions: string[];
-  /** 主 BOT 调用分身协同的执行轨迹列表（用于渲染分身协同折叠面板） */
+  /** 主 BOT 调用子代理协同的执行轨迹列表（用于渲染子代理协同折叠面板） */
   subagentRuns?: SubagentRunRecord[];
   toolCalls?: ToolCallRecord[];
   blocks?: TurnBlock[];
@@ -663,7 +663,7 @@ export interface NodeRpcFunctions {
     aborted?: boolean;
   }>;
   cancelTurn(sessionId: string, botId: string): Promise<void>;
-  /** 当主会话正在运行（特别是等待分身执行）时，注入用户新消息并将正在阻塞等待的分身切为后台，让主 Bot 立即接管响应 */
+  /** 当主会话正在运行（特别是等待子代理执行）时，注入用户新消息并将正在阻塞等待的子代理切为后台，让主 Bot 立即接管响应 */
   steerBotTurn?(sessionId: string, botId: string, message: string): Promise<{ accepted: boolean }>;
   /** 单独停止某一个正在运行的子代理（按 runId） */
   stopSubagent?(sessionId: string, botId: string, runId: string): Promise<{ ok: boolean; error?: string }>;

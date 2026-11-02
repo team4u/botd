@@ -320,7 +320,7 @@ test('CreateSessionModal: 后台刷新时若有 BOT 被删，只合理剔除已�
 // 4. GroupMemberPicker 三合一树状选择器纯函数测试
 // ==========================================
 
-test('GroupMemberPicker: orderBotsAsTree 将分身紧跟在所属主 BOT 后，且默认草稿选主 BOT 为主持', () => {
+test('GroupMemberPicker: orderBotsAsTree 将子代理紧跟在所属主 BOT 后，且默认草稿选主 BOT 为主持', () => {
   const unorderedBots: BotConfig[] = [
     { ...mockBots[1], id: 'sub-a', name: 'Sub A', parentBotId: 'main-1' },
     { ...mockBots[0], id: 'main-1', name: 'Main 1' },

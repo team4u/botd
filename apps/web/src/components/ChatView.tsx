@@ -32,7 +32,6 @@ import type {
   SubagentRunRecord,
 } from '@botd/protocol';
 import type { StreamingAssistantState } from '../types';
-import { subagentColorStyles } from './MessageItem';
 import { MessageTimeline } from './MessageTimeline';
 import { ChatInput } from './ChatInput';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -63,7 +62,7 @@ interface ChatViewProps {
   onRefreshNodes?: () => Promise<void>;
   /** 各 BOT 的流式状态；多个成员同时运行时并排展示。 */
   streamingStates: StreamingAssistantState[];
-  /** 各 BOT 当前活跃的分身协同执行轨迹 */
+  /** 各 BOT 当前活跃的子代理协同执行轨迹 */
   activeSubagentRuns?: Record<string, SubagentRunRecord[]>;
   onSendMessage: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
   onEditMessage: (sessionId: string, messageId: string, content: string) => Promise<void>;
@@ -84,11 +83,9 @@ interface ChatViewProps {
   onRespondToAsk?: (sessionId: string, askId: string, answer: string) => Promise<void>;
   /** 全局 toast 通知（供弹窗内部使用） */
   onAddToast?: (type: ToastItem['type'], message: string) => void;
-  /** 跳转/打开指定智能体的单聊 */
-  onOpenBotChat?: (bot: BotConfig) => void;
-  /** 点击分身运行记录打开详情抽屉（Steer / Resume / 停止控制）；传 null 关闭 */
+  /** 点击子代理运行记录打开详情抽屉（Steer / Resume / 停止控制）；传 null 关闭 */
   onInspectSubagentRun?: (run: SubagentRunRecord | null) => void;
-  /** 当前抽屉正在查看的分身运行 ID（由上层从实时状态与已落库消息中派生最新记录传入） */
+  /** 当前抽屉正在查看的子代理运行 ID（由上层从实时状态与已落库消息中派生最新记录传入） */
   inspectingRunId?: string | null;
   /** 是否还有更早的历史消息可加载（App 负责分页） */
   hasEarlierMessages?: boolean;
@@ -130,7 +127,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
   pendingAsks = [],
   onRespondToAsk,
   onAddToast,
-  onOpenBotChat,
   onInspectSubagentRun,
   inspectingRunId = null,
   hasEarlierMessages = false,
@@ -155,8 +151,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   );
 
   // 输入框 @ 可提及的智能体列表：
-  // - 单聊 (direct)：排除当前单聊对象自己（不能 @ 自己）；优先展示同门分身与主 BOT，其次展示其他可用 BOT
-  // - 群聊 (lead)：展示群内所有成员 BOT 及其麾下分身，其次展示其他可用 BOT
+  // - 单聊 (direct)：排除当前单聊对象自己（不能 @ 自己）；优先展示同门子代理与主 BOT，其次展示其他可用 BOT
+  // - 群聊 (lead)：展示群内所有成员 BOT 及其麾下子代理，其次展示其他可用 BOT
   const mentionableBots = useMemo<BotConfig[]>(() => {
     const allBots = Array.from(botMap.values());
     const result: BotConfig[] = [];
@@ -173,19 +169,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const leadBot = botMap.get(session.leadBotId);
       if (leadBot) {
         if (!leadBot.parentBotId) {
-          // 当前是主 BOT：优先展示它麾下的分身
+          // 当前是主 BOT：优先展示它麾下的子代理
           for (const b of allBots) {
             if (b.parentBotId === leadBot.id) pushBot(b);
           }
         } else {
-          // 当前是分身：优先展示它的主 BOT 及同门兄弟分身
+          // 当前是子代理：优先展示它的主 BOT 及同门兄弟子代理
           pushBot(botMap.get(leadBot.parentBotId));
           for (const b of allBots) {
             if (b.parentBotId === leadBot.parentBotId) pushBot(b);
           }
         }
       }
-      // 其余 BOT 按主从顺序追加，方便随时 @ 其他 BOT/分身接力
+      // 其余 BOT 按主从顺序追加，方便随时 @ 其他 BOT/子代理接力
       for (const b of allBots) {
         if (!b.parentBotId) {
           pushBot(b);
@@ -224,12 +220,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [triggersOpen, setTriggersOpen] = useState(false);
   // 分享对话弹窗开关
   const [shareModalOpen, setShareModalOpen] = useState(false);
-  // 智能体/分身专属历史话题抽屉开关
+  // 智能体/子代理专属历史话题抽屉开关
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
-  // 智能体/分身专属设置弹窗开关
+  // 智能体/子代理专属设置弹窗开关
   const [botEditorOpen, setBotEditorOpen] = useState(false);
 
-  // 单聊对应的目标智能体（主 BOT 或角色分身）
+  // 单聊对应的目标智能体（主 BOT 或子代理）
   const directBot = useMemo<BotConfig | undefined>(() => {
     if (session.mode !== 'direct') return undefined;
     return memberBots[0] || (session.leadBotId ? botMap.get(session.leadBotId) : undefined);
@@ -545,27 +541,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setEditingMessage(null);
   };
 
-  // 分身智能体（Subagent）单聊主控归属检测
-  const leadBot = botMap.get(session.leadBotId);
-  const isSubagentDirect = session.mode === 'direct' && Boolean(leadBot?.parentBotId);
-  const parentBotId = leadBot?.parentBotId;
-  const subagentColorStyle =
-    leadBot?.color && subagentColorStyles[leadBot.color]
-      ? subagentColorStyles[leadBot.color]
-      : subagentColorStyles.indigo;
-
-  const handleReturnToParentBot = () => {
-    if (session.parentSessionId) {
-      window.location.hash = `#?s=${session.parentSessionId}`;
-      return;
-    }
-    if (!parentBotId) return;
-    const parentBot = botMap.get(parentBotId);
-    if (parentBot && onOpenBotChat) {
-      onOpenBotChat(parentBot);
-    }
-  };
-
   // 队列阶段控制
   const handleSkipStage = async (stageId: string, botId?: string) => {
     try {
@@ -575,7 +550,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   };
 
-  // 从实时 activeSubagentRuns 或已落库 messages 中派生抽屉当前查看的最新分身运行记录：
+  // 从实时 activeSubagentRuns 或已落库 messages 中派生抽屉当前查看的最新子代理运行记录：
   // 后台完成 / resume / stop 更新时，打开的抽屉能实时热更新
   const inspectingRun = useMemo<SubagentRunRecord | null>(() => {
     if (!inspectingRunId) return null;
@@ -685,7 +660,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 directBot
                   ? isDirectNodeOnline
                     ? directBot.parentBotId
-                      ? `点击打开分身「${directBot.name}」设置`
+                      ? `点击打开子代理「${directBot.name}」设置`
                       : `点击打开智能体「${directBot.name}」设置`
                     : '节点离线'
                   : undefined
@@ -695,38 +670,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 {session.title}
               </h2>
 
-            {/* 极简模式微标 */}
-            {session.mode === 'direct' ? (
-              <span className="text-[11px] font-normal px-1.5 py-0.5 bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 rounded-md shrink-0">
-                单聊
-              </span>
-            ) : (
+            {/* 主持模式微标（仅群聊显示） */}
+            {session.mode !== 'direct' && (
               <span className="text-[11px] font-normal px-1.5 py-0.5 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200/60 dark:border-amber-900/60 rounded-md shrink-0">
                 主持模式
               </span>
-            )}
-
-            {/* 分身单聊标识与返回主控入口 */}
-            {isSubagentDirect && parentBotId && (
-              <>
-                <span
-                  className={`text-[11px] font-medium px-1.5 py-0.5 rounded-md border ${subagentColorStyle.badge} shrink-0`}
-                  title={`分身智能体，隶属于主控 @${parentBotId}`}
-                >
-                  分身 · 隶属 @{parentBotId}
-                </span>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleReturnToParentBot();
-                  }}
-                  className="inline-flex items-center gap-1 h-6 px-2 text-[11px] font-medium bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-md transition-colors cursor-pointer shrink-0"
-                  title={`返回主控 @${parentBotId} 的会话`}
-                >
-                  ← 返回主控
-                </button>
-              </>
             )}
 
             {/* 群聊成员数微标 */}
@@ -764,7 +712,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             <MessageSquarePlus className="w-4 h-4" />
           </button>
 
-          {/* 历史话题（单聊专属）：打开当前主 BOT 或分身的历史话题抽屉 */}
+          {/* 历史话题（单聊专属）：打开当前主 BOT 或子代理的历史话题抽屉 */}
           {directBot && (
             <button
               type="button"
@@ -777,7 +725,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </button>
           )}
 
-          {/* 智能体/分身设置（单聊专属）：打开自身设置界面 */}
+          {/* 智能体/子代理设置（单聊专属）：打开自身设置界面 */}
           {directBot && (
             <button
               type="button"
@@ -788,10 +736,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 !isDirectNodeOnline
                   ? '节点离线，无法编辑配置'
                   : directBot.parentBotId
-                  ? `分身设置（${directBot.name}）`
+                  ? `子代理设置（${directBot.name}）`
                   : `智能体设置（${directBot.name}）`
               }
-              aria-label={directBot.parentBotId ? '分身设置' : '智能体设置'}
+              aria-label={directBot.parentBotId ? '子代理设置' : '智能体设置'}
             >
               <SettingsIcon className="w-4 h-4" />
             </button>
@@ -999,7 +947,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       )}
 
-      {/* 消息时间线：与分身运行抽屉共用的唯一渲染器（滚动/分页/流式网格/回到底部均在内部） */}
+      {/* 消息时间线：与子代理运行抽屉共用的唯一渲染器（滚动/分页/流式网格/回到底部均在内部） */}
       <MessageTimeline
         messages={messages}
         streamingStates={streamingStates}
@@ -1259,7 +1207,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         />
       )}
 
-      {/* 单聊专属：当前主 BOT 或分身的历史话题抽屉 */}
+      {/* 单聊专属：当前主 BOT 或子代理的历史话题抽屉 */}
       {directBot && (
         <BotHistoryDrawer
           isOpen={historyDrawerOpen}
@@ -1274,7 +1222,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         />
       )}
 
-      {/* 单聊专属：当前主 BOT 或分身的设置弹窗 */}
+      {/* 单聊专属：当前主 BOT 或子代理的设置弹窗 */}
       {directBot && (
         <BotEditorModal
           isOpen={botEditorOpen}
@@ -1286,7 +1234,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           onSaved={async () => {
             onAddToast?.(
               'success',
-              directBot.parentBotId ? '角色分身配置已成功更新' : '智能体配置已成功更新'
+              directBot.parentBotId ? '子代理配置已成功更新' : '智能体配置已成功更新'
             );
             await onRefreshNodes?.();
           }}
@@ -1308,7 +1256,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onToast={(type, message) => onAddToast?.(type, message)}
       />
 
-      {/* 分身运行详情抽屉：与主对话同源的时间线 + Steer/Resume/停止控制 */}
+      {/* 子代理运行详情抽屉：与主对话同源的时间线 + Steer/Resume/停止控制 */}
       <SubagentRunDrawer
         isOpen={Boolean(inspectingRunId)}
         sessionId={session.id}

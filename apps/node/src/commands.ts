@@ -75,11 +75,11 @@ export function requestSubagentsRpc(
 }
 
 /**
- * 主会话“用户新消息接管”（steerBotTurn）时需要释放的前台分身等待句柄。
+ * 主会话“用户新消息接管”（steerBotTurn）时需要释放的前台子代理等待句柄。
  * 每个主回合开始时创建，回合结束时消费并清理。
  */
 export interface SubagentHandoffScope {
-  /** 触发前台等待解除（分身转后台继续运行，主 Bot 立即接管响应） */
+  /** 触发前台等待解除（子代理转后台继续运行，主 Bot 立即接管响应） */
   triggerHandoff(): void;
   /** 本回合是否已触发过接管 */
   wasTriggered(): boolean;
@@ -119,7 +119,7 @@ export function endSubagentHandoffScope(scope: SubagentHandoffScope | undefined)
   else activeHandoffScope = undefined;
 }
 
-/** 供 runtime 导出给 daemon 的 steerBotTurn 使用：触发当前主回合的前台分身转后台 */
+/** 供 runtime 导出给 daemon 的 steerBotTurn 使用：触发当前主回合的前台子代理转后台 */
 export function triggerActiveSubagentHandoff(): boolean {
   const scope = activeHandoffScope;
   if (!scope) return false;
@@ -128,14 +128,14 @@ export function triggerActiveSubagentHandoff(): boolean {
 }
 
 /**
- * 包装 Agent 工具 execute：主 Bot 前台等待分身时，若用户在主会话发新消息
+ * 包装 Agent 工具 execute：主 Bot 前台等待子代理时，若用户在主会话发新消息
  * （steerBotTurn → triggerActiveSubagentHandoff），等待立即解除，返回提示文本让主 Bot
- * 接管新消息并用 stop_subagent / steer_subagent / get_subagent_result 控制分身。
+ * 接管新消息并用 stop_subagent / steer_subagent / get_subagent_result 控制子代理。
  *
  * 实现方式：先以 run_in_background: true 调原 Agent.execute 拿到 agentId，
  * 再立即用扩展注册的 get_subagent_result（wait: true）等待。waitSignal 被接管触发时，
- * get_subagent_result 只退出等待、分身继续后台运行且保留完成通知；父级会话取消信号
- * （用户点了整个会话的停止）则额外停掉该分身。
+ * get_subagent_result 只退出等待、子代理继续后台运行且保留完成通知；父级会话取消信号
+ * （用户点了整个会话的停止）则额外停掉该子代理。
  */
 function wrapAgentToolForHandoff(tool: any, handoffScope: SubagentHandoffScope): any {
   const originalExecute = tool.execute?.bind(tool);
@@ -179,7 +179,7 @@ function wrapAgentToolForHandoff(tool: any, handoffScope: SubagentHandoffScope):
       return originalExecute(toolCallId, params, signal, onUpdate, ctx);
     }
 
-    // 以后台方式启动分身，拿到 agentId
+    // 以后台方式启动子代理，拿到 agentId
     const bgResult = await originalExecute(toolCallId, { ...params, run_in_background: true }, signal, onUpdate, ctx);
     const agentId = String((bgResult as any)?.details?.agentId || '').trim();
     if (!agentId) {
@@ -190,7 +190,7 @@ function wrapAgentToolForHandoff(tool: any, handoffScope: SubagentHandoffScope):
     // 组合信号：父级取消（整会话停止）或用户接管（主会话新消息）
     const combo = new AbortController();
     const onParentAbort = () => {
-      // 用户点了整个会话的停止：同时停掉该分身
+      // 用户点了整个会话的停止：同时停掉该子代理
       const manager = getGlobalSubagentManager();
       manager?.abort?.(agentId);
       combo.abort();
@@ -214,7 +214,7 @@ function wrapAgentToolForHandoff(tool: any, handoffScope: SubagentHandoffScope):
 
     try {
       // get_subagent_result(wait: true)：正常跑完会自动标记 resultConsumed 并取消完成通知，
-      // 向主 Bot 返回完整结果；信号被取消时仅退出等待，分身在后台继续运行。
+      // 向主 Bot 返回完整结果；信号被取消时仅退出等待，子代理在后台继续运行。
       const waitResult = await getResultTool.execute(
         `wait_${toolCallId}`,
         { agent_id: agentId, wait: true },
@@ -272,8 +272,8 @@ export async function loadBotResources(
     assertSafeId(id, 'Skill ID');
     return path.join(dataDir, 'skills', id);
   });
-  // 主 BOT 挂载 pi-subagents 底座（Agent / SubagentWorkflow 编排工具 + 分身调度）；
-  // 分身不挂载（防套娃：分身不能再派分身），扩展内部另有 inChildSessionContext 防重入双保险。
+  // 主 BOT 挂载 pi-subagents 底座（Agent / SubagentWorkflow 编排工具 + 子代理调度）；
+  // 子代理不挂载（防套娃：子代理不能再派子代理），扩展内部另有 inChildSessionContext 防重入双保险。
   let extensionFactories: ExtensionFactory[] = [];
   if (options?.enableSubagents && !bot.parentBotId) {
     await ensureDir(path.join(botDir, 'agents'));
@@ -301,8 +301,8 @@ export async function loadBotResources(
       setFallbackSubagent(NO_FALLBACK);
 
       // 拦截 pi.registerTool：包一层 Agent 工具包装器（Auto-background on User Message）。
-      // 主 Bot 前台等待分身时，若用户在主会话发送新消息，steerBotTurn 会触发该回合的
-      // handoffController，此时等待立即解除、分身转后台继续运行，主 Bot 马上接管响应。
+      // 主 Bot 前台等待子代理时，若用户在主会话发送新消息，steerBotTurn 会触发该回合的
+      // handoffController，此时等待立即解除、子代理转后台继续运行，主 Bot 马上接管响应。
       const realRegisterTool = pi.registerTool.bind(pi);
       const handoffScope = getActiveSubagentHandoffScope();
       const wrappedRegisterTool: typeof pi.registerTool = ((tool: any) => {
@@ -325,8 +325,8 @@ export async function loadBotResources(
       setFallbackSubagent(NO_FALLBACK);
       registerAgents(loadCustomAgents(botDir));
 
-      // 注册 stop_subagent：按 agent_id（或 handle/subagent_type）单独停掉一个运行中的分身，
-      // 不中断主回合与其他并发分身。优先直接命中 manager 记录，退化为事件总线 RPC。
+      // 注册 stop_subagent：按 agent_id（或 handle/subagent_type）单独停掉一个运行中的子代理，
+      // 不中断主回合与其他并发子代理。优先直接命中 manager 记录，退化为事件总线 RPC。
       realRegisterTool({
         name: 'stop_subagent',
         label: 'Stop Subagent',

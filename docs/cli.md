@@ -156,7 +156,7 @@ bots env unset <botId> <keys...>
 
 `system put` 和 `memory put` 默认读取 stdin。`--file -` 也表示 stdin。
 
-带 `--parent <parentBotId>` 时创建角色分身：默认继承主控 Bot 的模型与技能，共享同一工作区目录，可被主控 Bot 的 `Agent` 工具立即并发调用。`--tool-scope` 限制分身工具权限（`readonly` 为只读分析，`custom` 配合 `--custom-tools` 指定白名单）。
+带 `--parent <parentBotId>` 时创建子代理：默认继承主控 Bot 的模型与技能，共享同一工作区目录，可被主控 Bot 的 `Agent` 工具立即并发调用。`--tool-scope` 限制子代理工具权限（`readonly` 为只读分析，`custom` 配合 `--custom-tools` 指定白名单）。
 
 Bot 环境变量供工具使用，不负责选择模型供应商凭据。共享 Bot 的使用权不包含编辑权。
 
@@ -182,7 +182,7 @@ chat send <sessionId> <message...> [--wait [seconds]]
 chat watch <sessionId> [--duration <seconds>]
 ```
 
-会话为单聊模式（`direct`），`--lead` 指定主控 Bot。多角色协同由主控 Bot 的分身调度完成，不需要多成员会话。
+会话为单聊模式（`direct`），`--lead` 指定主控 Bot。多角色协同由主控 Bot 的子代理调度完成，不需要多成员会话。
 
 `chat send` 默认只发送。带 `--wait` 时先订阅事件，再发送消息，等待会话回到空闲。省略等待秒数时为 300 秒。
 

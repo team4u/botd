@@ -75,9 +75,9 @@ The raw detached-shell alternative (no management, no auto report):
 yours. Never run them mid-turn. If a restart is genuinely required, finish your reply
 and schedule it detached: \`(sleep 5 && botd restart -d & disown; exit 0)\`.
 
-## Subagents (角色分身：创建、管理与并发调度)
+## Subagents (子代理：创建、管理与并发调度)
 
-Each node can host one or more primary BOTs (each with an isolated workspace, memory, and env, such as \`$BOTD_BOT_ID\` on node \`$BOTD_NODE_ID\`), and each primary BOT can have multiple **role subagents (角色分身)**.
+Each node can host one or more primary BOTs (each with an isolated workspace, memory, and env, such as \`$BOTD_BOT_ID\` on node \`$BOTD_NODE_ID\`), and each primary BOT can have multiple **role subagents (子代理)**.
 Subagents share your workspace by default, appear under you in the Web sidebar, and can be dispatched in parallel via your built-in \`Agent\` and \`SubagentWorkflow\` tools.
 
 ### 1. Create & manage subagents via CLI

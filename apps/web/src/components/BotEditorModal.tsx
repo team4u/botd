@@ -294,7 +294,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
         setToolScope('all');
         setCustomTools(['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write']);
         setIsolation('off');
-        setSystemMd(`# 角色定位\n你是一个隶属于 @${parentBot.id} 的专业角色分身。\n\n## 职责与规范\n1. 专注于指派的子任务，结论清晰、要点明确。\n2. 遵循所属主 BOT 的工作规范与原则。\n`);
+        setSystemMd(`# 角色定位\n你是一个隶属于 @${parentBot.id} 的专业子代理。\n\n## 职责与规范\n1. 专注于指派的子任务，结论清晰、要点明确。\n2. 遵循所属主 BOT 的工作规范与原则。\n`);
       } else {
         setModelProvider('');
         setModelId('');
@@ -589,8 +589,8 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
               <h2 id="bot-editor-title" className="text-sm sm:text-base font-semibold text-zinc-900 dark:text-zinc-100">
                 {isSubagent
                   ? isEditing
-                    ? `编辑角色分身 · @${id}`
-                    : `新建角色分身 (隶属: ${parentBot?.name || resolvedParentBotId})`
+                    ? `编辑子代理 · @${id}`
+                    : `新建子代理 (隶属: ${parentBot?.name || resolvedParentBotId})`
                   : isEditing
                   ? `编辑智能体: ${bot?.name} (@${bot?.id})`
                   : '新建智能体'}
@@ -1330,7 +1330,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
               ) : (
                 <Save className="w-3.5 h-3.5" />
               )}
-              <span>{isEditing ? '保存修改' : (isSubagent ? '创建角色分身' : '创建智能体')}</span>
+              <span>{isEditing ? '保存修改' : (isSubagent ? '创建子代理' : '创建智能体')}</span>
             </button>
           </div>
         </form>

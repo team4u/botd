@@ -16,7 +16,7 @@ import { SseHub } from '../apps/hub/src/sse.js';
  * 交付物双向自动共享闭环测试：
  * 1. 子会话新产出的 Artifact 在子会话完成（idle）时自动零拷贝回传到父会话，
  *    父会话 callback 消息带有 attachments，父会话产物栏可见；
- * 2. 角色分身（设置 parentBotId 的 Bot）可在主 Bot 所属会话中正常上传产物。
+ * 2. 子代理（设置 parentBotId 的 Bot）可在主 Bot 所属会话中正常上传产物。
  */
 
 async function createDelegationContext(t: TestContext) {
@@ -205,7 +205,7 @@ test('交付物闭环: 子会话新产物在完成时零拷贝回传父会话，
   // 8. 回传闭环已由 callback 消息 attachments + 产物行 + 零拷贝 storagePath 三重校验成立
 });
 
-test('交付物闭环: 角色分身（parentBotId）可在主 Bot 所属会话上传产物', async (t) => {
+test('交付物闭环: 子代理（parentBotId）可在主 Bot 所属会话上传产物', async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-subagent-art-'));
   const dbPath = path.join(dir, 'hub.sqlite');
   const artifactsDir = path.join(dir, 'artifacts');
@@ -238,7 +238,7 @@ test('交付物闭环: 角色分身（parentBotId）可在主 Bot 所属会话�
     enabledExtensions: [],
     updatedAt: new Date().toISOString(),
   });
-  // 主 Bot 的角色分身
+  // 主 Bot 的子代理
   db.saveBot({
     id: 'bot_subagent',
     nodeId: 'node_sub',
@@ -262,7 +262,7 @@ test('交付物闭环: 角色分身（parentBotId）可在主 Bot 所属会话�
     ownerId: 'user_1',
   });
 
-  // 分身以 node 身份上传产物（botd artifact put 的实际链路）
+  // 子代理以 node 身份上传产物（botd artifact put 的实际链路）
   const artifact = service.uploadArtifactBuffer(
     { type: 'node', nodeId: 'node_sub' },
     {
@@ -282,7 +282,7 @@ test('交付物闭环: 角色分身（parentBotId）可在主 Bot 所属会话�
   assert.equal(list.length, 1);
   assert.equal(list[0].senderBotId, 'bot_subagent');
 
-  // 反向校验：无关分身（主 Bot 不在会话中）仍被 403 拒绝
+  // 反向校验：无关子代理（主 Bot 不在会话中）仍被 403 拒绝
   db.saveBot({
     id: 'bot_other_primary',
     nodeId: 'node_sub',
@@ -325,6 +325,6 @@ test('交付物闭环: 角色分身（parentBotId）可在主 Bot 所属会话�
       assert.equal(err.status, 403);
       return true;
     },
-    '主 Bot 非会话成员的分身仍应被拒绝'
+    '主 Bot 非会话成员的子代理仍应被拒绝'
   );
 });

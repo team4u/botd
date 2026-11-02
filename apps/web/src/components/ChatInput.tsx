@@ -422,7 +422,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     // 未命中斜杠命令，关闭斜杠浮层
     setShowSlashMenu(false);
 
-    // 2. 检测 @ 提及触发（分身/子代理会话中禁止继续 @ 其他智能体）
+    // 2. 检测 @ 提及触发（子代理会话中禁止继续 @ 其他智能体）
     const mentionMatch = /(?:^|\s)@([a-zA-Z0-9_-]*)$/.exec(textBefore);
     if (!isSubagentSession && mentionMatch && memberBots.length > 0) {
       const matchIndex = mentionMatch.index + (mentionMatch[0].startsWith('@') ? 0 : 1);
@@ -1118,7 +1118,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                     <span className="font-semibold text-xs truncate text-zinc-900 dark:text-zinc-100">{bot.name}</span>
                     {bot.parentBotId && (
                       <span className="text-[10px] px-1 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 shrink-0">
-                        分身
+                        子代理
                       </span>
                     )}
                     <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0">@{bot.id}</span>

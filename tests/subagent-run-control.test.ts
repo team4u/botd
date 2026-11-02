@@ -218,7 +218,7 @@ test('subagent run record protocol carries full reply / toolCalls / steers / sto
     toolCount: 2,
     durationMs: 12_345,
     replyPreview: '部分输出…',
-    replyFull: '完整的分身输出，绝不截断'.repeat(20),
+    replyFull: '完整的子代理输出，绝不截断'.repeat(20),
     toolCalls: [
       { id: 'tc_1', name: 'read', args: { path: 'a.ts' }, status: 'done', durationMs: 12 },
       { id: 'tc_2', name: 'bash', summary: 'pnpm test', status: 'running' },
@@ -228,10 +228,10 @@ test('subagent run record protocol carries full reply / toolCalls / steers / sto
       { message: '再查一下 X', timestamp: '2025-01-01T00:01:00Z', mode: 'resume' },
     ],
   };
-  // childSessionId 已删除：主会话内分身不建独立 Hub Session
+  // childSessionId 已删除：主会话内子代理不建独立 Hub Session
   assert.equal('childSessionId' in (run as unknown as Record<string, unknown>), false);
   assert.equal(run.status, 'stopped');
-  assert.equal(run.replyFull!.length, 12 * 20);
+  assert.equal(run.replyFull!.length, 13 * 20);
   assert.equal(run.toolCalls!.length, 2);
   assert.equal(run.steers![1].mode, 'resume');
   // 序列化往返保持全部字段
@@ -260,7 +260,7 @@ test('getGlobalSubagentManager tolerates an absent registry', () => {
 test('POST /api/sessions/:id/subagents/:runId/stop forwards to the owning node and mirrors status', async (t) => {
   const f = await fixture(t);
 
-  // 制造一条已落库的包含分身 run 的助手消息（父消息 sender = 主 BOT）：挂起第一回合让流事件生效
+  // 制造一条已落库的包含子代理 run 的助手消息（父消息 sender = 主 BOT）：挂起第一回合让流事件生效
   const runId = 'agent_stop_1';
   const turnGate = deferred<void>();
   let released = false;
@@ -374,7 +374,7 @@ test('user message during a running turn prefers steerBotTurn and advances the c
   const node = await f.addNode(['lead'], {
     runTurn: async () => {
       turnCount++;
-      if (turnCount === 1) await turnRelease.promise; // 第一回合挂起，模拟等待分身
+      if (turnCount === 1) await turnRelease.promise; // 第一回合挂起，模拟等待子代理
       return { replyText: `Reply ${turnCount}`, modelBadge: 'openai/test-model' };
     },
   });
@@ -438,7 +438,7 @@ test('user message falls back to queueing when steerBotTurn is not accepted', as
 
 test('native subagent stream events persist replyFull / toolCalls / steers / stopped onto the parent message', async (t) => {
   const f = await fixture(t);
-  // 第一回合挂起直到 firstTurnGate 被释放（模拟主 Bot 等待分身）
+  // 第一回合挂起直到 firstTurnGate 被释放（模拟主 Bot 等待子代理）
   const firstTurnGate = deferred<void>();
   let firstTurnReleased = false;
   const runId = 'agent_persist_1';
@@ -458,14 +458,14 @@ test('native subagent stream events persist replyFull / toolCalls / steers / sto
   });
   const s = await f.session(['lead'], 'direct');
 
-  // 用户消息 → 第一回合挂起（等分身）
+  // 用户消息 → 第一回合挂起（等子代理）
   await f.json(`/api/sessions/${s.id}/messages`, 'POST', { content: '并发审查' });
   await waitFor(
     () => f.json<SessionRecord[]>('/api/sessions'),
     (list) => list.find((x) => x.id === s.id)?.status === 'running'
   );
 
-  // 分身开始运行：携带 currentTool / toolCalls / steers 全量字段
+  // 子代理开始运行：携带 currentTool / toolCalls / steers 全量字段
   node.rpc.onSessionStream({
     sessionId: s.id,
     botId: 'lead',
@@ -483,12 +483,12 @@ test('native subagent stream events persist replyFull / toolCalls / steers / sto
     },
   });
 
-  // 主回合完成：runTurn 返回该分身 run（router 会与镜像记录合并落库到父消息）
+  // 主回合完成：runTurn 返回该子代理 run（router 会与镜像记录合并落库到父消息）
   firstTurnReleased = true;
   firstTurnGate.resolve();
   await f.idle(s.id);
 
-  // 分身在后台完成（父消息已落库）：stopped 状态 + 完整 replyFull
+  // 子代理在后台完成（父消息已落库）：stopped 状态 + 完整 replyFull
   node.rpc.onSessionStream({
     sessionId: s.id,
     botId: 'lead',

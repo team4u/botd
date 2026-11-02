@@ -171,7 +171,7 @@ export function buildGroupContextPrompt(
     }
   }
 
-  // 分身感知：主 BOT 始终注入分身引导与规范，让主 BOT 知道如何调度与创建分身
+  // 子代理感知：主 BOT 始终注入子代理引导与规范，让主 BOT 知道如何调度与创建子代理
   const currentBot = db && currentBotId ? db.getBot(currentBotId) : undefined;
   const isPrimaryBot = !currentBot?.parentBotId;
   const mySubagents = db && currentBotId
@@ -179,7 +179,7 @@ export function buildGroupContextPrompt(
     : [];
 
   if (isPrimaryBot) {
-    prompt += '\n### ⚡ 你的角色分身 (Subagents)\n';
+    prompt += '\n### ⚡ 你的子代理 (Subagents)\n';
     if (mySubagents.length > 0) {
       for (const sub of mySubagents) {
         const tags: string[] = [];
@@ -189,13 +189,13 @@ export function buildGroupContextPrompt(
         prompt += `- ${sub.id} (${sub.name}${sub.description ? ` - ${sub.description}` : ''}${tags.length ? ` [${tags.join(' · ')}]` : ''})\n`;
       }
       prompt +=
-        '【调度分身规范】：\n' +
-        '1. 调度你麾下的分身时，请直接调用 `Agent` 工具（`subagent_type` 填分身 id，传入 `run_in_background: false`；在同一轮回复中同时发出多个 `Agent` 工具调用即可原生并发执行并在本回合汇总结果），或使用 `SubagentWorkflow` 工具编排多阶段流水线。不要在文本末尾用 `@分身` 呼叫你自己的分身。\n' +
-        '2. 默认情况下分身与你共享同一个主工作空间目录（不传 `isolation`）；仅当需要多个分身并发修改同一个 Git 仓库代码、或用户明确要求在独立分支/worktree 试验时，才在调用 `Agent` / `SubagentWorkflow` 时传入 `isolation: "worktree"`。\n' +
-        '3. 如需新建更多分身或修改分身配置，可在 bash 中运行：`botd bots create <subId> --node "$BOTD_NODE_ID" --parent "$BOTD_BOT_ID" --name "<名称>" --desc "<职责>" --tool-scope <all|readonly> --system-file -`（创建后同一回合即可立即通过 `Agent` 工具调用）。\n';
+        '【调度子代理规范】：\n' +
+        '1. 调度你麾下的子代理时，请直接调用 `Agent` 工具（`subagent_type` 填子代理 id，传入 `run_in_background: false`；在同一轮回复中同时发出多个 `Agent` 工具调用即可原生并发执行并在本回合汇总结果），或使用 `SubagentWorkflow` 工具编排多阶段流水线。不要在文本末尾用 `@子代理` 呼叫你自己的子代理。\n' +
+        '2. 默认情况下子代理与你共享同一个主工作空间目录（不传 `isolation`）；仅当需要多个子代理并发修改同一个 Git 仓库代码、或用户明确要求在独立分支/worktree 试验时，才在调用 `Agent` / `SubagentWorkflow` 时传入 `isolation: "worktree"`。\n' +
+        '3. 如需新建更多子代理或修改子代理配置，可在 bash 中运行：`botd bots create <subId> --node "$BOTD_NODE_ID" --parent "$BOTD_BOT_ID" --name "<名称>" --desc "<职责>" --tool-scope <all|readonly> --system-file -`（创建后同一回合即可立即通过 `Agent` 工具调用）。\n';
     } else {
       prompt +=
-        '当前你麾下暂无角色分身。当用户要求创建子代理/分身、或需要多角色并发协同（如编码、审查、测试、调研分工）时，你可直接在 bash 中运行以下命令创建分身（默认继承你的模型与技能，创建后在当前回合即可立即通过 `Agent` 工具并发调用）：\n' +
+        '当前你麾下暂无子代理。当用户要求创建子代理、或需要多角色并发协同（如编码、审查、测试、调研分工）时，你可直接在 bash 中运行以下命令创建子代理（默认继承你的模型与技能，创建后在当前回合即可立即通过 `Agent` 工具并发调用）：\n' +
         '`botd bots create <subId> --node "$BOTD_NODE_ID" --parent "$BOTD_BOT_ID" --name "<展示名称>" --desc "<职责说明>" --tool-scope <all|readonly> --system-file -`\n';
     }
   }
@@ -296,7 +296,7 @@ export class GroupRouter {
       if (b.parentBotId && valid.has(b.parentBotId)) {
         valid.add(b.id);
       }
-      // 单聊中 owner 可用的具他 BOT/分身也可被 @ 接力；群聊仅限成员及其分身
+      // 单聊中 owner 可用的具他 BOT/子代理也可被 @ 接力；群聊仅限成员及其子代理
       if (
         session.mode === 'direct' &&
         ownerId &&
@@ -505,7 +505,7 @@ export class GroupRouter {
       run: { ...entry.run },
     });
 
-    // 父消息已落库（分身后台完成 / 抽屉内 resume / stop 等）：同步持久化更新该消息的 subagentRuns
+    // 父消息已落库（子代理后台完成 / 抽屉内 resume / stop 等）：同步持久化更新该消息的 subagentRuns
     this.persistSubagentRunUpdate(sessionId, { ...entry.run });
 
     return entry.run;
@@ -535,7 +535,7 @@ export class GroupRouter {
     }
   }
 
-  /** 单独停掉某个运行中的分身（转发到对应节点，含已落库消息的状态同步） */
+  /** 单独停掉某个运行中的子代理（转发到对应节点，含已落库消息的状态同步） */
   async stopSubagent(sessionId: string, runId: string): Promise<{ ok: boolean; error?: string }> {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
@@ -580,7 +580,7 @@ export class GroupRouter {
     return result;
   }
 
-  /** 向某个分身发送 steer（运行中插话）或 resume（结束后追问） */
+  /** 向某个子代理发送 steer（运行中插话）或 resume（结束后追问） */
   async interactSubagent(
     sessionId: string,
     runId: string,
@@ -848,7 +848,7 @@ export class GroupRouter {
     })();
 
     // 主会话运行中收到用户新消息（非斜杠命令）：优先尝试 steerBotTurn ——
-    // 让正在运行的 Bot 实时接管该消息（阻塞中的前台分身自动切后台），
+    // 让正在运行的 Bot 实时接管该消息（阻塞中的前台子代理自动切后台），
     // 避免消息死锁排队到当前回合之后。接管成功则推进游标（标记已投递）并直接返回；
     // 节点不支持 / 接管失败则回落到原有入队逻辑。
     if (!parsedCommand && state.isRunning) {

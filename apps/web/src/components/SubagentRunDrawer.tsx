@@ -14,7 +14,7 @@ import type { StreamingAssistantState, ToastItem } from '../types';
 interface SubagentRunDrawerProps {
   isOpen: boolean;
   sessionId: string;
-  /** 当前查看的分身运行记录（由上层从实时 activeSubagentRuns 或已落库 messages 中派生最新值） */
+  /** 当前查看的子代理运行记录（由上层从实时 activeSubagentRuns 或已落库 messages 中派生最新值） */
   run: SubagentRunRecord | null;
   botMap: Map<string, BotConfig>;
   nodeMap: Map<string, NodeRecord>;
@@ -54,9 +54,9 @@ const statusLabel = (status: SubagentRunRecord['status']): string => {
 };
 
 /**
- * 把一次分身运行记录合成为 MessageTimeline 的标准输入：
+ * 把一次子代理运行记录合成为 MessageTimeline 的标准输入：
  * - 初始任务 + 历次 steer/resume 指令 → 右对齐用户气泡（senderUsername 标注指令类型）
- * - 分身执行过程 → 运行中映射为流式状态（思考/工具/文本实时滚动）；
+ * - 子代理执行过程 → 运行中映射为流式状态（思考/工具/文本实时滚动）；
  *   已结束映射为一条 assistant 消息（blocks 交错时间线 + toolCalls + 完整输出）
  * 零特判：时间线组件与主对话共用同一渲染路径，视觉/交互完全一致。
  */
@@ -89,7 +89,7 @@ export function subagentRunToTimeline(run: SubagentRunRecord): {
     });
   }
 
-  // 2) 分身侧
+  // 2) 子代理侧
   const baseAssistant: MessageRecord = {
     id: `${run.id}:reply`,
     sessionId: '',
@@ -122,7 +122,7 @@ export function subagentRunToTimeline(run: SubagentRunRecord): {
 }
 
 /**
- * 分身运行详情抽屉：上部为与主对话完全同源的 MessageTimeline（同一组件、同一渲染路径），
+ * 子代理运行详情抽屉：上部为与主对话完全同源的 MessageTimeline（同一组件、同一渲染路径），
  * 底部为 steer / resume 输入框与运行中停止按钮。主对话界面后续任何改进此处自动同步。
  */
 export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
@@ -141,7 +141,7 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
 
   const isRunning = run?.status === 'running';
 
-  // 合成 botMap：确保分身 id 能命中（主会话的 botMap 可能未含分身条目）
+  // 合成 botMap：确保子代理 id 能命中（主会话的 botMap 可能未含子代理条目）
   const effectiveBotMap = useMemo(() => {
     if (!run) return botMap;
     if (botMap.has(run.subagentId)) return botMap;
@@ -180,9 +180,9 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
     setStopping(true);
     try {
       await api.stopSubagent(sessionId, run.id);
-      onToast('success', `已请求停止分身 ${run.subagentName || `@${run.subagentId}`}`);
+      onToast('success', `已请求停止子代理 ${run.subagentName || `@${run.subagentId}`}`);
     } catch (err: any) {
-      onToast('error', err?.message || '停止分身失败');
+      onToast('error', err?.message || '停止子代理失败');
     } finally {
       setStopping(false);
     }
@@ -199,7 +199,7 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
         subagentId: run.subagentId,
       });
       setInputValue('');
-      onToast('success', isRunning ? '插话已发送给分身' : '已在该分身上下文继续追问');
+      onToast('success', isRunning ? '插话已发送给子代理' : '已在该子代理上下文继续追问');
     } catch (err: any) {
       onToast('error', err?.message || '发送失败');
     } finally {
@@ -227,10 +227,10 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={`分身运行详情 ${run.id}`}
+        aria-label={`子代理运行详情 ${run.id}`}
         className="fixed inset-y-0 right-0 z-40 w-[min(38rem,96vw)] bg-white dark:bg-zinc-950 border-l border-zinc-200/90 dark:border-zinc-800/90 shadow-xl flex flex-col animate-in fade-in slide-in-from-right duration-200"
       >
-        {/* 顶部栏：分身身份 + 状态徽章 + 耗时 + 停止按钮 */}
+        {/* 顶部栏：子代理身份 + 状态徽章 + 耗时 + 停止按钮 */}
         <div className="flex items-center justify-between gap-2 px-4 h-13 sm:h-14 border-b border-zinc-200/80 dark:border-zinc-800/80 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
             <BotAvatarBadge
@@ -269,14 +269,14 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
                 onClick={() => void handleStop()}
                 disabled={stopping}
                 className="inline-flex items-center gap-1 h-8 px-2.5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-xs font-medium transition-colors cursor-pointer shrink-0"
-                title="仅停止该分身，不中断主回合与其他并发分身"
+                title="仅停止该子代理，不中断主回合与其他并发子代理"
               >
                 {stopping ? (
                   <Loader2 className="w-3.5 h-3.5 animate-spin-fast" />
                 ) : (
                   <CircleStop className="w-3.5 h-3.5" />
                 )}
-                <span>停止分身</span>
+                <span>停止子代理</span>
               </button>
             )}
             <button
@@ -314,8 +314,8 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
                   void handleSend();
                 }
               }}
-              placeholder={isRunning ? '向正在运行的分身插话...' : '继续追问该分身...'}
-              aria-label={isRunning ? '向分身插话' : '向分身追问'}
+              placeholder={isRunning ? '向正在运行的子代理插话...' : '继续追问该子代理...'}
+              aria-label={isRunning ? '向子代理插话' : '向子代理追问'}
               className="flex-1 min-w-0 h-8 px-2.5 text-xs rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-blue-500 dark:focus:border-blue-400 transition-colors"
             />
             <button

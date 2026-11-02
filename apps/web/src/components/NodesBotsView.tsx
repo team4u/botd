@@ -807,7 +807,7 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
 
                               return (
                                 <div key={bot.id} className="p-4 flex flex-col justify-between gap-3 min-w-0">
-                                  {/* Bot identity & + 分身 action */}
+                                  {/* Bot identity & + 子代理 action */}
                                   <div className="flex items-start justify-between gap-2 min-w-0">
                                     <div className="flex items-center gap-2.5 min-w-0">
                                       <div
@@ -915,10 +915,10 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                         onClick={() => handleOpenCreateSubagent(node, bot)}
                                         disabled={!isOnline}
                                         className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                                        title={!isOnline ? '节点离线，无法新建角色分身' : '在该主 BOT 下新建共享工作区的角色分身'}
+                                        title={!isOnline ? '节点离线，无法新建子代理' : '在该主 BOT 下新建共享工作区的子代理'}
                                       >
                                         <Plus className="w-3 h-3 text-zinc-500" />
-                                        <span>新建分身</span>
+                                        <span>新建子代理</span>
                                       </button>
                                     </div>
 
@@ -941,7 +941,7 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                   {subagents.length > 0 && (
                                     <div className="mt-2 pt-2.5 border-t border-dashed border-zinc-200 dark:border-zinc-800 space-y-1.5">
                                       <div className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
-                                        角色分身 ({subagents.length})
+                                        子代理 ({subagents.length})
                                       </div>
                                       {subagents.map((sub) => {
                                         const subDeleting = deletingBotId === sub.id;
@@ -980,8 +980,8 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                                 onClick={() => handleOpenEditBot(node, sub)}
                                                 disabled={!isOnline}
                                                 className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                                title={!isOnline ? '节点离线' : '分身设置'}
-                                                aria-label={`分身 ${sub.name} 设置`}
+                                                title={!isOnline ? '节点离线' : '子代理设置'}
+                                                aria-label={`子代理 ${sub.name} 设置`}
                                               >
                                                 <Settings className="w-3 h-3" />
                                               </button>
@@ -990,8 +990,8 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                                 onClick={() => setBotToDelete(sub)}
                                                 disabled={!isOnline || subDeleting}
                                                 className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:text-zinc-500 dark:hover:text-rose-400 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                                title={!isOnline ? '节点离线' : '删除分身'}
-                                                aria-label={`删除分身 ${sub.name}`}
+                                                title={!isOnline ? '节点离线' : '删除子代理'}
+                                                aria-label={`删除子代理 ${sub.name}`}
                                               >
                                                 {subDeleting ? (
                                                   <Loader2 className="w-3.5 h-3.5 animate-spin-fast text-rose-500" />
@@ -1012,7 +1012,7 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                             {orphanSubagents.length > 0 && (
                               <div className="col-span-full p-4 border-t border-zinc-100 dark:border-zinc-800/60 bg-zinc-50/50 dark:bg-zinc-900/30">
                                 <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 mb-2">
-                                  独立/无归属分身 ({orphanSubagents.length})
+                                  独立/无归属子代理 ({orphanSubagents.length})
                                 </div>
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                                   {orphanSubagents.map((sub) => {
@@ -1039,8 +1039,8 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                             onClick={() => handleOpenEditBot(node, sub)}
                                             disabled={!isOnline}
                                             className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                            title={!isOnline ? '节点离线' : '分身设置'}
-                                            aria-label={`分身 ${sub.name} 设置`}
+                                            title={!isOnline ? '节点离线' : '子代理设置'}
+                                            aria-label={`子代理 ${sub.name} 设置`}
                                           >
                                             <Settings className="w-3 h-3" />
                                           </button>
@@ -1049,8 +1049,8 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                             onClick={() => setBotToDelete(sub)}
                                             disabled={!isOnline || subDeleting}
                                             className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:text-zinc-500 dark:hover:text-rose-400 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
-                                            title="删除分身"
-                                            aria-label={`删除分身 ${sub.name}`}
+                                            title="删除子代理"
+                                            aria-label={`删除子代理 ${sub.name}`}
                                           >
                                             {subDeleting ? (
                                               <Loader2 className="w-3.5 h-3.5 animate-spin-fast text-rose-500" />
@@ -1415,10 +1415,10 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
             'success',
             selectedBot
               ? selectedBot.parentBotId
-                ? '角色分身配置已成功更新'
+                ? '子代理配置已成功更新'
                 : '智能体配置已成功更新'
               : selectedParentBot
-              ? '新角色分身创建成功'
+              ? '新子代理创建成功'
               : '新智能体创建成功'
           );
           await onRefresh();

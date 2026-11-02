@@ -207,7 +207,7 @@ export function botAccentFor(key: string): SubagentColor {
 
 /**
  * 行内智能体微徽章（20px 圆角色块 + 首字母）：
- * 分身优先用自身 color，主 BOT 按 ID 哈希稳定取色，群聊中扫一眼颜色即可分辨发言者
+ * 子代理优先用自身 color，主 BOT 按 ID 哈希稳定取色，群聊中扫一眼颜色即可分辨发言者
  */
 export const BotAvatarBadge: React.FC<{
   botId?: string;
@@ -246,8 +246,8 @@ export const TypingDots: React.FC<{ className?: string }> = ({ className = '' })
 );
 
 /**
- * 分身协同执行面板（Web 时间轴步骤流风格）
- * 点击任意分身行（running / done / error / stopped）打开右侧「分身运行详情抽屉」
+ * 子代理协同执行面板（Web 时间轴步骤流风格）
+ * 点击任意子代理行（running / done / error / stopped）打开右侧「子代理运行详情抽屉」
  */
 export const SubagentRunsPanel: React.FC<{
   runs: SubagentRunRecord[];
@@ -275,9 +275,9 @@ export const SubagentRunsPanel: React.FC<{
         title={names}
       >
         <Users className="w-3.5 h-3.5 shrink-0" />
-        <span className="font-medium shrink-0">分身协同</span>
+        <span className="font-medium shrink-0">子代理协同</span>
         <span className="text-zinc-400 dark:text-zinc-500 truncate">
-          {runs.length} 个分身 · {names}
+          {runs.length} 个子代理 · {names}
         </span>
         {hasRunning && (
           <span className="inline-flex items-center gap-1 text-blue-500 dark:text-blue-400 shrink-0">
@@ -1315,7 +1315,7 @@ interface MessageItemProps {
   onStartEdit?: (message: MessageRecord) => void;
   /** 从该消息（含）分叉出新会话并自动切换（MessageItem 不感知 sessionId，由上层闭包绑定） */
   onForkMessage?: (messageId: string) => void | Promise<void>;
-  /** 点击分身运行记录打开右侧详情抽屉 */
+  /** 点击子代理运行记录打开右侧详情抽屉 */
   onInspectSubagentRun?: (run: SubagentRunRecord) => void;
 }
 
@@ -1517,7 +1517,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
         )}
       </div>
 
-      {/* 分身协同面板 */}
+      {/* 子代理协同面板 */}
       {message.subagentRuns && message.subagentRuns.length > 0 && (
         <SubagentRunsPanel runs={message.subagentRuns} onInspectSubagentRun={onInspectSubagentRun} />
       )}

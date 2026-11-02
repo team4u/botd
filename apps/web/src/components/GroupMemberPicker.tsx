@@ -3,8 +3,8 @@ import { Crown, PenLine, Check, X } from 'lucide-react';
 import type { BotConfig } from '@botd/protocol';
 
 /**
- * 将 BOT 列表按树序重排：主 BOT 保持原有相对顺序，其角色分身紧随其后。
- * 孤儿分身（parentBotId 不在列表中）视作顶层。防御性去重，保持稳定顺序。
+ * 将 BOT 列表按树序重排：主 BOT 保持原有相对顺序，其子代理紧随其后。
+ * 孤儿子代理（parentBotId 不在列表中）视作顶层。防御性去重，保持稳定顺序。
  */
 export function orderBotsAsTree(bots: BotConfig[]): BotConfig[] {
   const ids = new Set(bots.map((b) => b.id));
@@ -229,7 +229,7 @@ export function GroupMemberPicker({
                 }`}
               >
                 <div className="flex items-center justify-between gap-2 min-w-0">
-                  {/* 左区：勾选框 + 树状前缀 + 名字 + 分身徽章 + @id */}
+                  {/* 左区：勾选框 + 树状前缀 + 名字 + 子代理徽章 + @id */}
                   <label
                     title={rowTooltip}
                     className="flex items-center gap-1.5 min-w-0 flex-1 cursor-pointer select-none"
@@ -260,7 +260,7 @@ export function GroupMemberPicker({
                     </span>
                     {bot.parentBotId && (
                       <span className="text-[10px] px-1 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 shrink-0">
-                        分身
+                        子代理
                       </span>
                     )}
                     <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate">

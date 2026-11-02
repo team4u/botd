@@ -129,9 +129,9 @@ export const App: React.FC = () => {
 
   // 多 BOT 并发流式状态（按 botId 隔离索引，互不覆盖）
   const [streamingStatesMap, setStreamingStatesMap] = useState<Record<string, StreamingAssistantState>>({});
-  // 活跃分身执行轨迹（按主 BOT ID 隔离索引，供 ChatView 展示实时分身协同）
+  // 活跃子代理执行轨迹（按主 BOT ID 隔离索引，供 ChatView 展示实时子代理协同）
   const [subagentRunsMap, setSubagentRunsMap] = useState<Record<string, SubagentRunRecord[]>>({});
-  // 分身运行详情抽屉：当前查看的分身运行 ID（从实时流或已落库消息派生最新记录）
+  // 子代理运行详情抽屉：当前查看的子代理运行 ID（从实时流或已落库消息派生最新记录）
   const [inspectingRunId, setInspectingRunId] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
 
@@ -1451,7 +1451,6 @@ export const App: React.FC = () => {
             highlightMessageId={route.messageId}
             onRespondToAsk={handleRespondToAsk}
             onAddToast={addToast}
-            onOpenBotChat={handleOpenBotChat}
             onInspectSubagentRun={(run) => setInspectingRunId(run ? run.id : null)}
             inspectingRunId={inspectingRunId}
           />
