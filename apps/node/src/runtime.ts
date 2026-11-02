@@ -635,18 +635,20 @@ export async function executeBotTurn(
       activeThinkingStartMs = null;
     };
 
-    let currentAssistantMessage: any = null;
+    // 10. Subscribe to streaming events and report to Hub
+    // 跨 assistant 消息的文本补段落分隔只能依赖 message_start 事件标记边界。
+    // 严禁用 event.message 引用比较判定“新消息”——pi 每次 message_update 都会传
+    // 新快照对象（引用必然不同），会把同一条消息的相邻 chunk 误判成两条消息，
+    // 在 chunk 之间插入 \n\n，撕裂 markdown 块级结构（blockquote/表格/代码块被拦腰截断）。
     let hasPriorAssistantEmittedText = false;
     let currentAssistantEmittedText = false;
 
-    // 10. Subscribe to streaming events and report to Hub
     unsubscribe = session.subscribe((event: any) => {
       if (event.type === 'message_start') {
         if (event.message?.role === 'assistant') {
           if (currentAssistantEmittedText) {
             hasPriorAssistantEmittedText = true;
           }
-          currentAssistantMessage = event.message;
           currentAssistantEmittedText = false;
         }
       } else if (event.type === 'message_update') {
@@ -688,14 +690,9 @@ export async function executeBotTurn(
           closeActiveThinking();
         } else if (ame?.type === 'text_delta') {
           closeActiveThinking();
-          if (event.message && currentAssistantMessage && event.message !== currentAssistantMessage) {
-            if (currentAssistantEmittedText) {
-              hasPriorAssistantEmittedText = true;
-            }
-            currentAssistantMessage = event.message;
-            currentAssistantEmittedText = false;
-          }
           let delta = ame.delta;
+          // 仅在跨 assistant 消息边界（由 message_start 标记）为首个 chunk 补段落分隔；
+          // 同一消息内的 chunk 原样透传，不得插入任何字符。
           if (hasPriorAssistantEmittedText && !currentAssistantEmittedText && delta) {
             if (delta.startsWith('\n\n')) {
               // Already starts with double newline
@@ -722,10 +719,6 @@ export async function executeBotTurn(
         }
       } else if (event.type === 'tool_execution_start') {
         closeActiveThinking();
-        if (currentAssistantEmittedText) {
-          hasPriorAssistantEmittedText = true;
-          currentAssistantEmittedText = false;
-        }
         const summary = extractToolSummary(event.toolName, event.args ?? event.input);
         const sanitizedArgs = sanitizeToolArgs(event.args ?? event.input);
         const key = event.toolCallId || `${event.toolName}_${toolCalls.length}`;
@@ -1124,6 +1117,52 @@ export async function executeBotTurn(
           blocks.splice(firstTextIdx, 0, ...toolBlocks);
         } else {
           blocks.push(...toolBlocks);
+        }
+      }
+    }
+    // 落库前校准：流式阶段拼接的 text 块若与定稿消息的文本总量一致（即未被截断/中止），
+    // 按定稿顺序重建，保证 blocks 文本与 content 字段一字不差，消除任何流式期间的拼接瑕疵。
+    if (blocks.length > 0) {
+      const finalizedTexts: string[] = [];
+      for (const msg of turnAssistants) {
+        for (const part of msg.content || []) {
+          if (part.type === 'text' && typeof part.text === 'string' && part.text.length > 0) {
+            finalizedTexts.push(part.text);
+          }
+        }
+      }
+      if (finalizedTexts.length > 0) {
+        // 比较时忽略每段首尾空白（流式拼接可能在消息边界注入 \n\n 前缀）：
+        // 内容一致才重建，用定稿文本消除流式期间的任何拼接瑕疵。
+        const normalize = (parts: string[]) => parts.map(p => p.replace(/^\s+|\s+$/g, '')).join('\u0000');
+        const streamedTexts = blocks.filter(b => b.type === 'text').map(b => (b as { text: string }).text);
+        if (normalize(streamedTexts) === normalize(finalizedTexts)) {
+          // 文本完全一致：按定稿块结构重建（可能把流式期间被 tool 块分隔的多个 text 块
+          // 重新归位为模型真实的段落切分）
+          const nextBlocks: TurnBlock[] = [];
+          let textIdx = 0;
+          for (const block of blocks) {
+            if (block.type === 'text') {
+              if (textIdx < finalizedTexts.length) {
+                nextBlocks.push({ type: 'text', text: finalizedTexts[textIdx] });
+                textIdx++;
+              }
+            } else {
+              nextBlocks.push(block);
+            }
+          }
+          // 流式期间 text 块数多于定稿（如同一段文本被拆成多块）：合并多余的尾块
+          while (textIdx < finalizedTexts.length) {
+            const last = nextBlocks[nextBlocks.length - 1];
+            if (last && last.type === 'text') {
+              last.text += `\n\n${finalizedTexts[textIdx]}`;
+            } else {
+              nextBlocks.push({ type: 'text', text: finalizedTexts[textIdx] });
+            }
+            textIdx++;
+          }
+          blocks.length = 0;
+          blocks.push(...nextBlocks);
         }
       }
     }
