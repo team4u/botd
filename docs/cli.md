@@ -104,6 +104,8 @@ wake --message <text> [--session <id>] [--bot <id>]
      [--reply-to <botId>] [--no-turn] [--delay <duration>]
 ask <prompt> [--options <items>] [--timeout <seconds>]
     [--file <path>] [--diff] [--stdin] [--session <id>] [--bot <id>]
+    [--risk <low|medium|high>] [--reason <text>] [--resource <target>]
+    [--ui] [--ui-schema]
 bg run [--session <id>] [--bot <id>] [--reply-to <botId>]
        [--no-turn] -- <command...>
 bg list [--session <id>]
@@ -114,7 +116,7 @@ artifact list [--session <id>]
 
 在 Bot 工具环境中，`BOTD_SESSION_ID`、`BOTD_BOT_ID` 和 `BOTD_DATA_DIR` 自动提供目标信息。外部终端需要显式提供缺失参数。
 
-`ask` 默认等待 300 秒，`0` 表示无限等待。成功时输出答案，超时或失败时非零退出。
+`ask` 默认等待 300 秒，`0` 表示无限等待。成功时输出答案，超时或失败时非零退出。`--risk` 与 `--reason` / `--resource` 组合会自动渲染结构化风险审批卡（含差异预览与批准/拒绝按钮），详见[自动化指南](automation.md)。
 
 完整示例与任务生命周期见[自动化指南](automation.md)。
 
@@ -134,9 +136,13 @@ nodes upgrade <nodeId> [--check] [--version <ver>]
 ### Bot
 
 ```text
-bots create <botId> --node <nodeId> --name <name> --model <provider/modelId>
-            [--desc <text>] [--thinking <level>] [--skill <ids...>]
-            [--extension <ids...>] [--system-file <path>]
+bots list [--node <nodeId>] [--parent <parentBotId>]
+bots create <botId> --node <nodeId> --name <name>
+            [--model <provider/modelId>] [--desc <text>] [--thinking <level>]
+            [--skill <ids...>] [--extension <ids...>] [--system-file <path>]
+            [--parent <parentBotId>] [--inherit-model|--no-inherit-model]
+            [--inherit-skills|--no-inherit-skills]
+            [--tool-scope <all|readonly|custom>] [--custom-tools <tools...>]
 bots update <botId> [对应的配置选项]
 bots delete <botId>
 bots system get <botId>
@@ -150,6 +156,8 @@ bots env unset <botId> <keys...>
 
 `system put` 和 `memory put` 默认读取 stdin。`--file -` 也表示 stdin。
 
+带 `--parent <parentBotId>` 时创建角色分身：默认继承主控 Bot 的模型与技能，共享同一工作区目录，可被主控 Bot 的 `Agent` 工具立即并发调用。`--tool-scope` 限制分身工具权限（`readonly` 为只读分析，`custom` 配合 `--custom-tools` 指定白名单）。
+
 Bot 环境变量供工具使用，不负责选择模型供应商凭据。共享 Bot 的使用权不包含编辑权。
 
 ### 会话与聊天
@@ -157,9 +165,8 @@ Bot 环境变量供工具使用，不负责选择模型供应商凭据。共享 
 ```text
 sessions list
 sessions create --title <title> --lead <botId>
-                [--mode direct|lead] [--member <ids...>]
 sessions update <sessionId> [--title <title>] [--lead <botId>]
-                [--mode <mode>] [--member <ids...>] [--archive <boolean>]
+                 [--archive <boolean>]
 sessions messages <sessionId>
 sessions search <query...> [--session <sessionId>] [--limit <n>]
 sessions cancel <sessionId>
@@ -169,11 +176,13 @@ sessions edit <sessionId> <messageId> [words...]
 sessions fork <sessionId> --anchor <messageId>
 sessions share <sessionId> [--revoke] [--regenerate]
 sessions delegate <parentSessionId> --bot <botId> --prompt <text>
-                  [--title <title>] [--mode direct|lead]
+                  [--title <title>]
 sessions subsessions <parentSessionId>
 chat send <sessionId> <message...> [--wait [seconds]]
 chat watch <sessionId> [--duration <seconds>]
 ```
+
+会话为单聊模式（`direct`），`--lead` 指定主控 Bot。多角色协同由主控 Bot 的分身调度完成，不需要多成员会话。
 
 `chat send` 默认只发送。带 `--wait` 时先订阅事件，再发送消息，等待会话回到空闲。省略等待秒数时为 300 秒。
 
@@ -186,10 +195,12 @@ triggers list <sessionId>
 triggers create <sessionId> --name <name> --bot <botId> --prompt <text>
                 [--kind webhook|cron|once] [--cron <expr>]
                 [--delay <duration>] [--at <timestamp>]
+                [--dispatch append|subsession] [--skill <skillId>]
+                [--event-types <csv>]
 triggers delete <triggerId>
 ```
 
-Cron 使用 Hub 服务器本地时间，表达式为 5 字段。一次性触发器使用 `--delay` 或 `--at`。
+Cron 使用 Hub 服务器本地时间，表达式为 5 字段。一次性触发器使用 `--delay` 或 `--at`。Webhook 触发器支持 `--dispatch subsession` 派生独立子会话、`--skill` 调用技能和 `--event-types` 事件过滤，详见[自动化指南](automation.md)。
 
 ### 技能与扩展
 

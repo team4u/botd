@@ -36,7 +36,7 @@ curl --fail-with-body -sS -b "$BOTD_COOKIE_FILE" \
 
 ### 创建会话并发送消息
 
-将下方 Bot ID 换成列表中的实际值：
+将下方 Bot ID 换成列表中的实际值（当前会话模式为 `direct` 单聊，主控 Bot 即成员）：
 
 ```bash
 export BOTD_TARGET_BOT='replace-with-bot-id'
@@ -187,12 +187,16 @@ rm -f "$BOTD_COOKIE_FILE"
 | DELETE | `/api/sessions/:id/participants/:userId` | 会话所有者移除成员，或成员退出自己 |
 | GET | `/api/sessions/:id/subsessions` | 会话访问，列出子会话 |
 | POST | `/api/sessions/:id/delegate` | 会话访问，目标 Bot 还必须属于调用者 |
+| GET | `/api/sessions/:id/automation-events` | 会话访问，查询自动化事件收件箱，可带 `limit`（默认 100） |
+| GET | `/api/sessions/:id/outbox` | 会话访问，查询出站通知队列近期记录 |
 
 修改调度配置时，运行中的会话返回 `409`。归档和置顶有独立规则，不能一概视为停止执行。
 
 消息查询不带参数时返回数组。带 `limit`、`before` 或 `around` 时返回分页对象。`around` 优先于 `before`，锚点必须属于当前会话。
 
-委派输入包括 `{botId,prompt,title?,mode?,memberBotIds?,artifactIds?}`。详细行为见[自动化指南](automation.md)。
+委派输入包括 `{botId,prompt,title?,mode?,memberBotIds?,artifactIds?}`。父会话产物以零拷贝引用同步给子会话，子会话完成后新产出交付物回传父会话并回报摘要。详细行为见[自动化指南](automation.md)。
+
+自动化事件记录（`automation-events` 返回）包含 `source`、`eventType`、`dedupKey`、`summary`，以及子会话派发模式下的 `childSessionId` 和载荷产物 `payloadArtifactId`。Outbox 记录包含 `status`（`pending` / `sent` / `dead`）、`attemptCount`、`nextRetryAt` 与 `lastError`。
 
 ## SSE
 
@@ -256,9 +260,17 @@ rm -f "$BOTD_COOKIE_FILE"
 
 触发器输入包含 `{name,botId,kind,prompt}`。`cron` 使用 `cronExpr`，`once` 使用 `runAt` 或 `delaySeconds`。
 
+Webhook 触发器还支持：
+
+- `dispatchMode`：`append`（默认，唤醒目标会话）或 `subsession`（为每次事件派生独立子会话，主会话作为自动化运行账本）；
+- `skillId`：触发时在 prompt 前加 `/skill:<id>` 前缀；
+- `eventFilter`：`{source?,types?,payloadMatch?}`，全部条件需同时满足；不匹配的事件被记录后跳过。
+
 Webhook 正文可以是文本或 JSON。JSON 优先提取 `message`、`text`、`payload`。URL 令牌本身允许触发任务，请保护完整地址。
 
-通知通道支持 `webhook`、`feishu`、`slack`、`telegram`。创建输入包含 `name`、`kind`、`targetUrl` 和可选事件、密钥配置。详细字段见 [channels.ts](../apps/hub/src/channels.ts)。
+Webhook 请求处理顺序：去重（`X-Botd-Dedup` / `X-GitHub-Delivery` 头，内存短窗口 + 持久化唯一索引，跨重启生效）→ 事件过滤（不匹配记录后跳过）→ 限流（同 token 最小间隔 10 秒，超出返回 `429`）→ 事件落库与载荷文件化（`event_<id>.json` 产物投递至 `workspace/inbox/`）→ 分发。子会话派发模式下，响应体额外返回 `eventId` 与 `childSessionId`。
+
+通知通道支持 `webhook`、`feishu`、`slack`、`telegram`。创建输入包含 `name`、`kind`、`targetUrl`、可选事件、密钥配置及 `tellPolicy`（`always` | `needed` | `never`，默认 `always`；`needed` 仅在 `ask_request` 或失败回调时推送）。出站通知先写 Outbox 再投递，失败按指数退避重试、超限置 `dead`；子会话事件自动继承父会话通道（通知附带 `channelSessionId`）。`webhook` 通道配置 `secret` 后，请求携带 `X-Botd-Signature: sha256=<hmac>` 签名。详细字段见 [channels.ts](../apps/hub/src/channels.ts)。
 
 ## 错误与接口边界
 

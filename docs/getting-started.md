@@ -141,7 +141,7 @@ pnpm node status
 
 ## 下一步
 
-- [用户指南](user-guide.md)：上传文件、切换话题、组织群聊和圆桌。
-- [自动化指南](automation.md)：后台任务、确认卡片和定时触发。
+- [用户指南](user-guide.md)：上传文件、切换话题、多角色盲评与子会话协同。
+- [自动化指南](automation.md)：后台任务、确认卡片、定时触发与事件驱动子会话。
 - [部署指南](deployment.md)：长期运行、Docker 和备份。
 - [安全边界](security.md)：了解工具执行所使用的系统权限。
