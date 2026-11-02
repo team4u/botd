@@ -101,6 +101,8 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
   const prevFirstMessageIdRef = useRef<string | null>(null);
   const prevMessageCountRef = useRef(messages.length);
   const pendingPrependRef = useRef(false);
+  // 自动滚动专用：记录上次自动滚动时的消息数，用于识别首屏填充（0→N）强制瞬时
+  const prevAutoScrollCountRef = useRef(messages.length);
 
   const handleLoadEarlier = useCallback(() => {
     if (loadingEarlier || !onLoadEarlier) return;
@@ -180,17 +182,29 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
   const effectiveStreamingStates = streamingStates;
   const isParallelStreaming = effectiveStreamingStates.length > 1;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     scrollToBottom(false);
   }, [session?.id]);
 
-  useEffect(() => {
-    // prepend 加载更早消息时不触发自动滚底（视口锚定由 useLayoutEffect 补偿）。
+  useLayoutEffect(() => {
+    // prepend 加载更早消息时不触发自动滚底（视口锚定由上方 layout effect 补偿）。
     if (pendingPrependRef.current) {
       pendingPrependRef.current = false;
       return;
     }
-    scrollToBottom(true);
+    // 首屏填充（0→N）与长距离回落（切回浏览器重连补齐等）一律瞬时贴底，
+    // 避免移动端呈现「从顶滑到底」的动画；
+    // 仅已在底部附近的增量追加（流式输出、新消息）保留平滑滚动。
+    // 注意不能用「落差 < 2 屏」判断：短会话总高度本身小于 2 屏，首次填充会误走 smooth。
+    const el = scrollContainerRef.current;
+    let smooth = false;
+    if (el && el.clientHeight > 0) {
+      const isInitialFill = prevAutoScrollCountRef.current === 0;
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      smooth = !isInitialFill && distance < el.clientHeight * 2;
+    }
+    prevAutoScrollCountRef.current = messages.length;
+    scrollToBottom(smooth);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     messages.length,
