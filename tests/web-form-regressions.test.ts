@@ -17,6 +17,12 @@ import {
   batchSelectGroupMembers,
 } from '../apps/web/src/components/GroupMemberPicker.js';
 
+// Dynamically import BotEditorModal so tsc in tsconfig.tests.json does not traverse into
+// sibling web components (it uses bundler-style extensionless imports).
+const { shouldSaveBotMemory } = await import('../apps/web/src/components/BotEditorModal.js' as any) as {
+  shouldSaveBotMemory: (isEditing: boolean, memoryMd: string, initialMemoryMd: string | null) => boolean;
+};
+
 // 递归查找 ReactElement 树中的特定节点
 function findElement(tree: any, predicate: (node: any) => boolean): any {
   if (!tree || typeof tree !== 'object') return null;
@@ -315,6 +321,32 @@ test('CreateSessionModal: 后台刷新时若有 BOT 被删，只合理剔除已�
   assert.equal(step.nextDraft.title, '特定项目', '标题绝不被冲掉');
   assert.equal(step.nextDraft.leadBotId, 'bot-1', '回退到可用首选 bot');
 });
+
+// ==========================================
+// 5. BotEditorModal 记忆保存 Dirty Check
+// ==========================================
+
+test('shouldSaveBotMemory: 新建 Bot 空记忆不触发保存（后端已默认建空 MEMORY.md）', () => {
+  assert.equal(shouldSaveBotMemory(false, '', null), false);
+  assert.equal(shouldSaveBotMemory(false, '   \n  ', null), false, '仅空白字符视为空');
+});
+
+test('shouldSaveBotMemory: 新建 Bot 非空记忆触发保存', () => {
+  assert.equal(shouldSaveBotMemory(false, '## 初始记忆', null), true);
+});
+
+test('shouldSaveBotMemory: 编辑 Bot 记忆未修改不触发保存（防止旧快照冲掉后台新记忆）', () => {
+  const snapshot = '## 后台刚写入的记忆';
+  assert.equal(shouldSaveBotMemory(true, snapshot, snapshot), false);
+  assert.equal(shouldSaveBotMemory(true, 'other', 'other'), false);
+});
+
+test('shouldSaveBotMemory: 编辑 Bot 记忆被修改后触发保存', () => {
+  assert.equal(shouldSaveBotMemory(true, '## 新内容', '## 旧内容'), true);
+  // 快照未加载完成（null）时不保存，避免误写
+  assert.equal(shouldSaveBotMemory(true, '## 新内容', null), false);
+});
+
 
 // ==========================================
 // 4. GroupMemberPicker 三合一树状选择器纯函数测试

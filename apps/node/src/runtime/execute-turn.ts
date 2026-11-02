@@ -11,9 +11,11 @@ import type {
 import {
   assertSafeId,
   ensureDir,
+  listBotMemoryTopics,
   readBot,
   readBotEnv,
   readNodeIdentity,
+  readNodeMemory,
   readSkill,
 } from '../storage.js';
 import { createRuntimeForProvider, configureProviderAuth } from '../models.js';
@@ -27,6 +29,7 @@ import { loadTurnDeps } from './turn-deps.js';
 import { createHubStreamSink, type HubStream } from './hub-stream.js';
 import { runRegistry, purgeStaleSubagentManager, subagentSessionFiles } from './run-registry.js';
 import { resolveEffectiveBot, resolveBotPaths } from './bot-context.js';
+import { buildMemoryPromptSection, canBotWriteMemory } from './memory-prompt.js';
 import { ensureBotdBinWrapper } from './bin-wrapper.js';
 import { buildAutomationEventEnv } from './automation-event.js';
 import { buildShellTools, resolveSessionTools, disposeSession } from './shell-tools.js';
@@ -141,6 +144,15 @@ export async function executeBotTurn(
     const botData = await readBot(dataDir, bot.id);
     const systemMd = botData?.systemMd || '';
     const memoryMd = botData?.memoryMd || '';
+    const nodeMemoryMd = await readNodeMemory(dataDir);
+    // 主题记忆目录索引：主 Bot 读自身目录；子代理合并主 Bot 与自身目录并去重
+    const mainBotId = bot.parentBotId || bot.id;
+    const memoryTopics = Array.from(
+      new Set([
+        ...(await listBotMemoryTopics(dataDir, mainBotId)),
+        ...(bot.parentBotId ? await listBotMemoryTopics(dataDir, bot.id) : []),
+      ]),
+    );
     const subagentEnv = await readBotEnv(dataDir, bot.id);
     const parentEnv = bot.parentBotId ? await readBotEnv(dataDir, bot.parentBotId) : {};
     const botEnv = { ...parentEnv, ...subagentEnv };
@@ -182,7 +194,13 @@ export async function executeBotTurn(
           input.commandText && input.incrementalMessages.trim()
             ? `[近期对话历史]\n${input.incrementalMessages}` : '',
           systemMd ? `[角色设定]\n${systemMd}` : '',
-          `[长期记忆 (可通过 ../MEMORY.md 更新)]\n${memoryMd}\n（说明：你可以使用 edit/write 工具修改 \`../MEMORY.md\` 来更新长期记忆；当用户要求你学习某个本机 CLI 工具并保存为 Skill 时，可执行 \`<cli> --help\` 并将总结写入 \`../../../skills/<skillId>/SKILL.md\`。）`,
+          buildMemoryPromptSection({
+            memoryMd,
+            parentMemoryMd: parentBotData?.memoryMd,
+            nodeMemoryMd,
+            memoryTopics,
+            canWrite: canBotWriteMemory(bot),
+          }),
           botEnvKeys.length > 0
             ? `[已注入专属环境变量]\n当前命令执行环境已预置以下环境变量（可直接在命令或脚本中通过 $VAR 引用，请勿在公屏直接打印密钥明文）：${botEnvKeys.map((k) => `$${k}`).join(', ')}`
             : '',

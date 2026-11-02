@@ -153,6 +153,37 @@ export function getBotWorkspaceDir(dataDir: string, botId: string): string {
   return path.join(getBotDir(dataDir, botId), 'workspace');
 }
 
+/** Bot 级主题记忆目录：<dataDir>/bots/<botId>/memory（分层渐进式披露的详细归档层） */
+export function getBotMemoryDir(dataDir: string, botId: string): string {
+  return path.join(getBotDir(dataDir, botId), 'memory');
+}
+
+/** 列出 Bot 的主题记忆文件（仅 .md，字母序）；目录不存在时返回空数组 */
+export async function listBotMemoryTopics(dataDir: string, botId: string): Promise<string[]> {
+  const memoryDir = getBotMemoryDir(dataDir, botId);
+  if (!existsSync(memoryDir)) return [];
+  const entries = await fs.readdir(memoryDir, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+/** 读取节点级共享记忆 <dataDir>/MEMORY.md（不存在时返回空串） */
+export async function readNodeMemory(dataDir: string): Promise<string> {
+  try {
+    return await fs.readFile(path.join(dataDir, 'MEMORY.md'), 'utf-8');
+  } catch {
+    return '';
+  }
+}
+
+/** 原子写入节点级共享记忆 <dataDir>/MEMORY.md */
+export async function writeNodeMemory(dataDir: string, content: string): Promise<void> {
+  await ensureDir(dataDir);
+  await writeAtomicFile(path.join(dataDir, 'MEMORY.md'), content);
+}
+
 export function getSkillDir(dataDir: string, skillId: string): string {
   assertSafeId(skillId, 'Skill ID');
   return path.join(dataDir, 'skills', skillId);
@@ -220,6 +251,7 @@ export async function saveBot(dataDir: string, bot: BotConfig, systemMd?: string
 
   await ensureDir(workspaceDir);
   await ensureDir(sessionsDir);
+  await ensureDir(path.join(botDir, 'memory'));
 
   const botWithTimestamp: BotConfig = {
     ...bot,

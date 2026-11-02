@@ -89,6 +89,22 @@ const DEFAULT_MEMORY_MD = `## 核心背景与偏好记忆
 - 约定：公屏输出结构化结论，保持严谨简洁
 `;
 
+/**
+ * 记忆保存 Dirty Check：
+ * - 新建 Bot：仅当用户填了非空记忆时才额外发 PUT（后端 saveBot 已默认建空 MEMORY.md）；
+ * - 编辑 Bot：仅当用户实际改动记忆内容时才保存，避免旧快照冲掉后台新写入的记忆。
+ */
+export function shouldSaveBotMemory(
+  isEditing: boolean,
+  memoryMd: string,
+  initialMemoryMd: string | null,
+): boolean {
+  if (!isEditing) {
+    return memoryMd.trim().length > 0;
+  }
+  return initialMemoryMd !== null && memoryMd !== initialMemoryMd;
+}
+
 export const BotEditorModal: React.FC<BotEditorModalProps> = ({
   isOpen,
   node,
@@ -120,6 +136,8 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
   const [visibility, setVisibility] = useState<'private' | 'team'>('private');
   const [systemMd, setSystemMd] = useState(DEFAULT_SYSTEM_MD);
   const [memoryMd, setMemoryMd] = useState('');
+  // 打开弹窗时拉取到的记忆初始快照：保存时做 Dirty Check，未改动不回写
+  const [initialMemoryMd, setInitialMemoryMd] = useState<string | null>(null);
 
   // Subagent-specific fields
   const [color, setColor] = useState<SubagentColor>('blue');
@@ -271,6 +289,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
           if (!current) return;
           setSystemMd(sys.content);
           setMemoryMd(mem.content);
+          setInitialMemoryMd(mem.content);
         })
         .catch((err: Error) => {
           if (!current) return;
@@ -313,6 +332,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       setIsCustomProvider(false);
       setCustomProviderInput('');
       setMemoryMd('');
+      setInitialMemoryMd(null);
       setEnvPairs([]);
       setEnvLoaded(false);
       setLoadingFiles(false);
@@ -544,7 +564,9 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       } else {
         await api.createBot(botInput);
       }
-      await api.saveBotMemory(botInput.id, memoryMd);
+      if (shouldSaveBotMemory(isEditing, memoryMd, initialMemoryMd)) {
+        await api.saveBotMemory(botInput.id, memoryMd);
+      }
 
       // Persist env vars (secrets): only for primary bots (not subagents)
       if (!isSubagent && (envPairs.length > 0 || (isEditing && envLoaded))) {
@@ -1296,7 +1318,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                     </button>
                   </div>
                   <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
-                    智能体在会话中可通过文件工具自主写入更新持久记忆。你也可以在此直接查阅或修订。
+                    智能体在会话中可通过文件工具自主维护 MEMORY.md 索引与 memory/*.md 主题记忆。你也可以在此直接查阅或修订核心记忆。
                   </p>
                   <textarea
                     value={memoryMd}
