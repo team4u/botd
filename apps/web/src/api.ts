@@ -19,6 +19,8 @@ import type {
   SessionParticipantRecord,
   TriggerRecord,
   CreateTriggerInput,
+  TriggerDispatchMode,
+  TriggerEventFilter,
   MessageSearchHit,
   NodeUpgradeCheckResult,
   NodeUpgradeResult,
@@ -30,6 +32,9 @@ import type {
   CreateNotificationChannelInput,
   NotificationChannelKind,
   NotificationEventKind,
+  NotificationTellPolicy,
+  AutomationEventRecord,
+  NotificationOutboxRecord,
   SubagentRunRecord,
 } from '@botd/protocol';
 import type { UserInfo } from './types.js';
@@ -40,6 +45,11 @@ export type {
   CreateNotificationChannelInput,
   NotificationChannelKind,
   NotificationEventKind,
+  NotificationTellPolicy,
+  AutomationEventRecord,
+  NotificationOutboxRecord,
+  TriggerDispatchMode,
+  TriggerEventFilter,
   SessionParticipantRecord,
 };
 
@@ -684,7 +694,12 @@ export const api = {
 
   async createSessionTrigger(
     sessionId: string,
-    input: CreateTriggerInput
+    input: CreateTriggerInput & {
+      dispatchMode?: TriggerDispatchMode;
+      skillId?: string;
+      eventFilter?: TriggerEventFilter;
+      secret?: string;
+    }
   ): Promise<TriggerRecord> {
     return request<TriggerRecord>(
       `/api/sessions/${encodeURIComponent(sessionId)}/triggers`,
@@ -703,6 +718,10 @@ export const api = {
       prompt?: string;
       cronExpr?: string;
       runAt?: string;
+      dispatchMode?: TriggerDispatchMode;
+      skillId?: string | null;
+      eventFilter?: TriggerEventFilter | null;
+      secret?: string;
     }
   ): Promise<TriggerRecord> {
     return request<TriggerRecord>(
@@ -739,7 +758,9 @@ export const api = {
 
   async createSessionChannel(
     sessionId: string,
-    input: CreateNotificationChannelInput
+    input: CreateNotificationChannelInput & {
+      tellPolicy?: NotificationTellPolicy;
+    }
   ): Promise<NotificationChannelRecord> {
     return request<NotificationChannelRecord>(
       `/api/sessions/${encodeURIComponent(sessionId)}/channels`,
@@ -752,7 +773,9 @@ export const api = {
 
   async updateChannel(
     channelId: string,
-    patch: Partial<CreateNotificationChannelInput>
+    patch: Partial<CreateNotificationChannelInput> & {
+      tellPolicy?: NotificationTellPolicy;
+    }
   ): Promise<NotificationChannelRecord> {
     return request<NotificationChannelRecord>(
       `/api/channels/${encodeURIComponent(channelId)}`,
@@ -769,6 +792,20 @@ export const api = {
       {
         method: 'DELETE',
       }
+    );
+  },
+
+  // 会话事件收件箱：Webhook 触发器最近收到的自动化事件（倒序）
+  async listAutomationEvents(sessionId: string, limit = 50): Promise<AutomationEventRecord[]> {
+    return request<AutomationEventRecord[]>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/automation-events?limit=${limit}`
+    );
+  },
+
+  // 通知投递队列：该会话关联通道的出站通知近期投递记录
+  async listNotificationOutbox(sessionId: string): Promise<NotificationOutboxRecord[]> {
+    return request<NotificationOutboxRecord[]>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/outbox`
     );
   },
 
