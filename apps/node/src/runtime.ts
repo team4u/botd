@@ -20,6 +20,13 @@ import {
 import { createRuntimeForProvider, configureProviderAuth } from './models.js';
 import { BUILTIN_SKILL_ID } from './builtin-skill.js';
 import { resolveWindowsBash, windowsShellPathPrefix, isWindows } from './windows-shell.js';
+import {
+  beginSubagentHandoffScope,
+  endSubagentHandoffScope,
+  getGlobalSubagentManager,
+  triggerActiveSubagentHandoff,
+  type SubagentHandoffScope,
+} from './commands.js';
 
 let turnDepsPromise: Promise<{
   piAgent: typeof import('@earendil-works/pi-coding-agent');
@@ -54,6 +61,33 @@ const activeSessions = new Map<string, AgentSession>();
 const cancelledRuns = new Set<string>();
 const runKeyToDataDir = new Map<string, string>();
 
+/**
+ * 每个主回合的运行时上下文：接管作用域（steerBotTurn 触发前台分身转后台）、
+ * 分身 runId 的元数据（subagentId / task / sessionFile）与实时流推送函数。
+ * 供 steerBotTurn / stopSubagent / interactSubagent 等 RPC 在回合外部定位并操控。
+ */
+interface ActiveTurnContext {
+  runKey: string;
+  sessionId: string;
+  botId: string;
+  handoffScope: SubagentHandoffScope;
+  subagentRunsMap: Map<string, SubagentRunRecord>;
+  emitSubagentEvent: (run: SubagentRunRecord, patch?: Partial<SubagentRunRecord>) => void;
+  resourceLoader: unknown;
+}
+const activeTurns = new Map<string, ActiveTurnContext>();
+
+/** runId → 分身会话文件与身份映射（跨回合 resume 追问时重开同一上下文） */
+const subagentSessionFiles = new Map<string, { sessionFile: string; subagentId: string; task: string }>();
+
+/** 最近一次活跃回合的 hubRpc 引用：后台/resume 推流用（turn 结束后仍可能收到完成事件） */
+let lastHubRpc: BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null = null;
+
+/** 供 daemon 传入 hubRpc，使回合外的 resume / 后台完成也能推流给 Hub */
+export function setRuntimeHubRpc(rpc: BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null): void {
+  lastHubRpc = rpc;
+}
+
 let tsxLoaderUrl: string | undefined;
 try {
   if (typeof import.meta.resolve === 'function') {
@@ -77,6 +111,11 @@ export function getTsxLoaderUrl(): string | undefined {
 
 export function getActiveSessionCount(): number {
   return activeSessions.size + pendingRuns.size;
+}
+
+/** 从环境或默认路径解析 daemon 数据目录（回合外 resume 需要重建资源时使用） */
+function getDataDirSafe(): string {
+  return process.env.BOTD_DATA_DIR || path.join(process.env.HOME || process.cwd(), '.botd');
 }
 
 export function resolveCliEntry(): { cliPath: string; isTypeScript: boolean } {
@@ -307,8 +346,27 @@ export async function executeBotTurn(
   runKeyToDataDir.set(runKey, dataDir);
   cancelledRuns.delete(runKey);
 
+  // 生命周期修复：上一轮异常退出可能残留全局 manager 注册表（pi-subagents 仅在自身
+  // session_shutdown 里释放）。新回合开始前清掉陈旧注册，避免本回合 ownsManagerRegistry
+  // 判定失效、旧 manager 的后台分身孤儿化。
+  try {
+    const managerKey = Symbol.for('pi-subagents:manager');
+    const stale = (globalThis as any)[managerKey];
+    if (stale && !activeTurns.size) {
+      stale.abortAll?.();
+      delete (globalThis as any)[managerKey];
+    }
+  } catch {
+    // ignore
+  }
+
   const activeSubagentIds = new Set<string>();
   const subagentRunsMap = new Map<string, SubagentRunRecord>();
+  /** 已订阅分身 session 工具事件的取消函数（runId → unsub） */
+  const subagentToolListeners = new Map<string, () => void>();
+
+  // 主回合接管作用域：用户在主会话发新消息时（steerBotTurn），前台分身转后台、主 Bot 立即接管
+  const handoffScope = beginSubagentHandoffScope();
 
   let session: AgentSession | null = null;
   let unsubscribe: (() => void) | null = null;
@@ -601,6 +659,41 @@ export async function executeBotTurn(
     pendingRuns.delete(runKey);
     activeSessions.set(runKey, session);
 
+    // 注册活跃回合上下文：供 steerBotTurn / stopSubagent / interactSubagent 在回合外操控
+    const turnContext: ActiveTurnContext = {
+      runKey,
+      sessionId: input.sessionId,
+      botId: bot.id,
+      handoffScope,
+      subagentRunsMap,
+      resourceLoader,
+      emitSubagentEvent: (run, patch) => {
+        if (patch) Object.assign(run, patch);
+        subagentRunsMap.set(run.id, run);
+        try {
+          hubRpc.onSessionStream.asEvent({
+            sessionId: input.sessionId,
+            botId: bot.id,
+            subagentEvent: {
+              id: run.id,
+              subagentId: run.subagentId,
+              task: run.task,
+              status: run.status === 'skipped' ? 'done' : run.status,
+              ...(run.replyFull !== undefined ? { result: run.replyFull } : {}),
+              ...(run.durationMs !== undefined ? { durationMs: run.durationMs } : {}),
+              ...(run.toolCount !== undefined ? { toolUses: run.toolCount } : {}),
+              ...(run.currentTool !== undefined ? { currentTool: run.currentTool } : {}),
+              ...(run.toolCalls ? { toolCalls: run.toolCalls } : {}),
+              ...(run.steers ? { steers: run.steers } : {}),
+            },
+          });
+        } catch {
+          // 推流失败不影响回合本身
+        }
+      },
+    };
+    activeTurns.set(runKey, turnContext);
+
     if (cancelledRuns.has(runKey)) {
       throw new Error('Turn was cancelled');
     }
@@ -849,12 +942,104 @@ export async function executeBotTurn(
     if (extensionErrors.length) throw new Error(extensionErrors.join('\n'));
     if (cancelledRuns.has(runKey)) throw new Error('Turn was cancelled');
 
-    // pi-subagents 事件桥接：将分身生命周期事件（created/started/completed/failed）实时转发到 Hub，
-    // 供 Web 端 SubagentFleetCard 实时渲染分身协同进度。主 BOT 未挂载扩展时此处静默不生效。
+    // pi-subagents 事件桥接：将分身生命周期事件实时转发到 Hub，供 Web 端
+    // SubagentFleetCard / SubagentRunDrawer 实时渲染分身协同进度与控制。
+    // 主 BOT 未挂载扩展时此处静默不生效。
     unsubSubagentEvents = (() => {
       try {
         const eventBus = (resourceLoader as unknown as { eventBus?: { on: (channel: string, handler: (data: unknown) => void) => () => void } }).eventBus;
         if (!eventBus) return undefined;
+
+        /** 同步 runRecord 基础字段到本地映射（含跨回合 resume 的既有记录） */
+        const syncRecord = (d: {
+          id?: string; type?: string; description?: string;
+          toolUses?: number; durationMs?: number;
+        }): SubagentRunRecord | undefined => {
+          if (!d || typeof d !== 'object' || !d.id) return undefined;
+          const existing = subagentRunsMap.get(d.id);
+          const record: SubagentRunRecord = existing ?? {
+            id: d.id,
+            subagentId: d.type || 'agent',
+            task: d.description || d.id,
+            status: 'running',
+          };
+          if (d.type) record.subagentId = d.type;
+          if (d.description) record.task = d.description;
+          if (typeof d.toolUses === 'number') record.toolCount = d.toolUses;
+          subagentRunsMap.set(d.id, record);
+          return record;
+        };
+
+        /** 从全局 manager 取分身记录（含 session / sessionFile / abortController） */
+        const peekManagerRecord = (id: string) => {
+          try {
+            return getGlobalSubagentManager()?.getRecord?.(id) as
+              | {
+                  id: string; type: string; description: string;
+                  status: string; result?: string; error?: string;
+                  toolUses: number; startedAt: number; completedAt?: number;
+                  sessionFile?: string; session?: AgentSession;
+                }
+              | undefined;
+          } catch {
+            return undefined;
+          }
+        };
+
+        /** 订阅分身 session 的工具事件，实时收集 toolCalls / currentTool */
+        const attachToolListener = (runId: string, subSession: AgentSession) => {
+          if (subagentToolListeners.has(runId)) return;
+          const record = subagentRunsMap.get(runId);
+          if (!record) return;
+          record.toolCalls ??= [];
+          const runningStarts = new Map<string, number>();
+          const unsub = subSession.subscribe((event: any) => {
+            const current = subagentRunsMap.get(runId);
+            if (!current) return;
+            current.toolCalls ??= [];
+            if (event.type === 'tool_execution_start') {
+              const key = event.toolCallId || `${event.toolName}_${current.toolCalls.length}`;
+              runningStarts.set(key, Date.now());
+              const summary = extractToolSummary(event.toolName, event.args ?? event.input);
+              const sanitizedArgs = sanitizeToolArgs(event.args ?? event.input);
+              current.toolCalls.push({
+                id: key,
+                name: event.toolName,
+                ...(sanitizedArgs ? { args: sanitizedArgs } : {}),
+                ...(summary ? { summary } : {}),
+                status: 'running',
+              });
+              current.currentTool = event.toolName;
+              current.toolCount = current.toolCalls.length;
+              turnContext.emitSubagentEvent(current);
+            } else if (event.type === 'tool_execution_end') {
+              const key = event.toolCallId || event.toolName;
+              let entry = [...current.toolCalls].reverse().find((tc) => tc.id === key || tc.name === event.toolName);
+              if (!entry) {
+                entry = { id: key, name: event.toolName, status: 'running' };
+                current.toolCalls.push(entry);
+              }
+              const startedAt = runningStarts.get(key) ?? (entry.id !== undefined ? runningStarts.get(entry.id) : undefined);
+              runningStarts.delete(key);
+              entry.status = event.isError ? 'error' : 'done';
+              if (startedAt !== undefined) entry.durationMs = Math.max(0, Date.now() - startedAt);
+              entry.isError = Boolean(event.isError);
+              const outputPreview = extractToolOutputPreview(
+                event.result !== undefined ? event.result : event.output,
+                Boolean(event.isError),
+              );
+              if (outputPreview) entry.outputPreview = outputPreview;
+              // 仍有 running 项则保留 currentTool，否则清空
+              if (!current.toolCalls.some((tc) => tc.status === 'running')) {
+                current.currentTool = undefined;
+              }
+              current.toolCount = current.toolCalls.length;
+              turnContext.emitSubagentEvent(current);
+            }
+          });
+          subagentToolListeners.set(runId, unsub);
+        };
+
         const handleLifecycle = (channel: string) => (data: unknown) => {
           const d = data as {
             id?: string; type?: string; description?: string; status?: string;
@@ -868,43 +1053,97 @@ export async function executeBotTurn(
             activeSubagentIds.delete(d.id);
           }
 
-          const prev = subagentRunsMap.get(d.id);
-          const status = isDone ? (channel === 'subagents:failed' ? 'error' : 'done') : 'running';
-          const subagentId = d.type || prev?.subagentId || 'agent';
-          const task = d.description || prev?.task || d.id;
-          const runRecord: SubagentRunRecord = {
-            id: d.id,
-            subagentId,
-            task,
-            status,
-            ...(typeof d.toolUses === 'number' ? { toolCount: d.toolUses } : {}),
-            ...(typeof d.durationMs === 'number' ? { durationMs: d.durationMs } : {}),
-            ...(isDone && (d.result || d.error) ? { replyPreview: String(d.result || d.error).slice(0, 200) } : {}),
-          };
-          subagentRunsMap.set(d.id, runRecord);
+          const managerRecord = peekManagerRecord(d.id);
+          const record = syncRecord(d)!;
+          // 记录 sessionFile 供跨回合 resume 追问重开同一上下文
+          if (managerRecord?.sessionFile) {
+            subagentSessionFiles.set(d.id, {
+              sessionFile: managerRecord.sessionFile,
+              subagentId: record.subagentId,
+              task: record.task,
+            });
+          }
 
-          hubRpc.onSessionStream.asEvent({
-            sessionId: input.sessionId,
-            botId: bot.id,
-            toolName: `subagent:${subagentId}`,
-            toolStatus: isDone ? ('done' as const) : ('running' as const),
-            toolSummary: `${isDone ? (channel === 'subagents:failed' ? '[失败] ' : '[完成] ') : ''}${task}${isDone && d.durationMs ? ` · ${Math.round(d.durationMs / 1000)}s` : ''}`,
-            subagentEvent: {
-              id: d.id,
-              subagentId,
-              task,
-              status,
-              ...(d.result ? { result: d.result } : {}),
-              ...(d.error ? { error: d.error } : {}),
-              ...(typeof d.durationMs === 'number' ? { durationMs: d.durationMs } : {}),
-              ...(typeof d.toolUses === 'number' ? { toolUses: d.toolUses } : {}),
-            },
-          });
+          if (channel === 'subagents:started' && managerRecord?.session) {
+            attachToolListener(d.id, managerRecord.session);
+          }
+
+          // stopped/aborted 均映射为 'stopped'（用户主动停止单个分身）
+          const status: SubagentRunRecord['status'] = isDone
+            ? (channel === 'subagents:failed'
+                ? (d.status === 'stopped' || d.status === 'aborted' ? 'stopped' : 'error')
+                : 'done')
+            : 'running';
+          record.status = status;
+          if (typeof d.durationMs === 'number') record.durationMs = d.durationMs;
+          if (typeof d.toolUses === 'number') record.toolCount = d.toolUses;
+          if (isDone) {
+            const full = String(d.result || d.error || '');
+            if (full) {
+              record.replyFull = full;
+              record.replyPreview = full.slice(0, 200);
+            }
+            record.currentTool = undefined;
+            const unsubTools = subagentToolListeners.get(d.id);
+            if (unsubTools) {
+              unsubTools();
+              subagentToolListeners.delete(d.id);
+            }
+          }
+
+          // 推流给 Hub（含 toolCalls / steers / replyFull 全量字段）
+          try {
+            hubRpc.onSessionStream.asEvent({
+              sessionId: input.sessionId,
+              botId: bot.id,
+              subagentEvent: {
+                id: record.id,
+                subagentId: record.subagentId,
+                task: record.task,
+                status,
+                ...(record.replyFull !== undefined && isDone ? { result: record.replyFull } : {}),
+                ...(channel === 'subagents:failed' && d.error ? { error: d.error } : {}),
+                ...(typeof d.durationMs === 'number' ? { durationMs: d.durationMs } : {}),
+                ...(record.toolCount !== undefined ? { toolUses: record.toolCount } : {}),
+                ...(record.currentTool !== undefined ? { currentTool: record.currentTool } : {}),
+                ...(record.toolCalls ? { toolCalls: record.toolCalls } : {}),
+                ...(record.steers ? { steers: record.steers } : {}),
+              },
+            });
+            // 同步发一条 tool 状态摘要供卡片行内展示
+            hubRpc.onSessionStream.asEvent({
+              sessionId: input.sessionId,
+              botId: bot.id,
+              toolName: `subagent:${record.subagentId}`,
+              toolStatus: isDone ? ('done' as const) : ('running' as const),
+              toolSummary: `${isDone ? (record.status === 'error' ? '[失败] ' : record.status === 'stopped' ? '[已停止] ' : '[完成] ') : ''}${record.task}${isDone && typeof d.durationMs === 'number' ? ` · ${Math.round(d.durationMs / 1000)}s` : ''}`,
+            });
+          } catch {
+            // 推流失败不影响回合
+          }
         };
-        const unsubs = ['subagents:created', 'subagents:started', 'subagents:completed', 'subagents:failed'].map((ch) =>
-          eventBus.on(ch, handleLifecycle(ch)),
-        );
-        return () => unsubs.forEach((u) => u());
+
+        const handleSteered = (data: unknown) => {
+          const d = data as { id?: string; message?: string };
+          if (!d || typeof d !== 'object' || !d.id || typeof d.message !== 'string') return;
+          const record = subagentRunsMap.get(d.id);
+          if (!record) return;
+          record.steers ??= [];
+          record.steers.push({ message: d.message, timestamp: new Date().toISOString() });
+          turnContext.emitSubagentEvent(record);
+        };
+
+        const unsubs = [
+          ...['subagents:created', 'subagents:started', 'subagents:completed', 'subagents:failed'].map((ch) =>
+            eventBus.on(ch, handleLifecycle(ch)),
+          ),
+          eventBus.on('subagents:steered', handleSteered),
+        ];
+        return () => {
+          unsubs.forEach((u) => u());
+          for (const unsub of subagentToolListeners.values()) unsub();
+          subagentToolListeners.clear();
+        };
       } catch {
         return undefined;
       }
@@ -956,10 +1195,6 @@ export async function executeBotTurn(
     }
     await session.waitForIdle();
 
-    const getGlobalSubagentManager = () =>
-      (globalThis as any)[Symbol.for('pi-subagents:manager')] as
-        | { hasRunning?: () => boolean; waitForAll?: () => Promise<void> }
-        | undefined;
     const drainDeadline = Date.now() + 120_000;
     let drainedBackground = false;
     while (
@@ -1186,11 +1421,28 @@ export async function executeBotTurn(
     if (unsubSubagentEvents) {
       unsubSubagentEvents();
     }
+    for (const unsub of subagentToolListeners.values()) unsub();
+    subagentToolListeners.clear();
     pendingRuns.delete(runKey);
     activeSessions.delete(runKey);
+    activeTurns.delete(runKey);
     cancelledRuns.delete(runKey);
     runKeyToDataDir.delete(runKey);
+    endSubagentHandoffScope(handoffScope);
     if (session) {
+      // 生命周期修复：session.dispose() 不会触发扩展的 session_shutdown，
+      // pi-subagents 的 manager/后台分身会残留（globalThis 注册表泄漏、后台分身孤儿化）。
+      // 在 dispose 前显式向扩展发 session_shutdown，让扩展 abortAll + 释放注册表。
+      try {
+        const runner = (session as any).extensionRunner;
+        if (runner?.hasHandlers?.('session_shutdown')) {
+          await runner.emit({ type: 'session_shutdown', reason: 'quit' });
+        } else {
+          getGlobalSubagentManager()?.abortAll?.();
+        }
+      } catch {
+        // shutdown 事件失败不阻塞会话销毁
+      }
       session.dispose();
     }
   }
@@ -1228,6 +1480,12 @@ export async function cancelBotTurn(sessionId: string, botId: string): Promise<v
   cancelledRuns.add(runKey);
   const session = activeSessions.get(runKey);
   if (session) {
+    // 取消前先停掉全部分身（含后台），避免 dispose 只断开主会话而分身孤儿化
+    try {
+      getGlobalSubagentManager()?.abortAll?.();
+    } catch {
+      // ignore
+    }
     await session.abort();
   }
 }
@@ -1246,4 +1504,302 @@ export async function cancelAllBotTurns(dataDir?: string): Promise<void> {
     }
   }
   await Promise.all(abortPromises);
+}
+
+// =============================================================================
+// 主会话内分身（Subagent）的运行中控制 RPC：steerBotTurn / stopSubagent / interactSubagent
+// =============================================================================
+
+/** 按 sessionId 找当前活跃回合上下文（同一会话同刻只有一个主回合在跑） */
+function findActiveTurn(sessionId: string): ActiveTurnContext | undefined {
+  for (const ctx of activeTurns.values()) {
+    if (ctx.sessionId === sessionId) return ctx;
+  }
+  return undefined;
+}
+
+/**
+ * 主会话运行中收到用户新消息：将正在阻塞等待的前台分身切为后台继续运行，
+ * 并把新消息 steer 进当前主 Bot 回合，让主 Bot 马上接管响应
+ * （调用 stop_subagent / steer_subagent 控制分身）。
+ */
+export async function steerBotTurn(
+  sessionId: string,
+  botId: string,
+  message: string,
+): Promise<{ accepted: boolean }> {
+  const runKey = `${sessionId}:${botId}`;
+  const ctx = activeTurns.get(runKey) ?? findActiveTurn(sessionId);
+  if (!ctx) return { accepted: false };
+  const session = activeSessions.get(ctx.runKey);
+  if (!session) return { accepted: false };
+  if (!message.trim()) return { accepted: false };
+
+  // 1) 触发前台分身转后台（解除 Agent 工具的阻塞等待）
+  triggerActiveSubagentHandoff();
+
+  // 2) 将用户新消息注入当前主 Bot 回合
+  try {
+    await session.steer(message);
+    return { accepted: true };
+  } catch {
+    return { accepted: false };
+  }
+}
+
+/** 单独停止某一个正在运行的子代理（按 runId），不中断主回合与其他分身 */
+export async function stopSubagent(
+  sessionId: string,
+  botId: string,
+  runId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const manager = getGlobalSubagentManager();
+  const record = manager?.getRecord?.(runId);
+  if (!record) {
+    return { ok: false, error: `Subagent run "${runId}" not found on this node (it may have finished or been evicted).` };
+  }
+  const aborted = manager?.abort?.(runId) ?? false;
+  if (!aborted) {
+    return { ok: false, error: `Subagent run "${runId}" is not running (status: ${record.status}).` };
+  }
+
+  // 更新本地 runRecord 状态并推送流事件（事件桥也会收到 subagents:failed，此处立即反馈）
+  const ctx = findActiveTurn(sessionId) ?? activeTurns.get(`${sessionId}:${botId}`);
+  if (ctx) {
+    const run = ctx.subagentRunsMap.get(runId);
+    if (run) {
+      run.status = 'stopped';
+      run.currentTool = undefined;
+      if (typeof record.result === 'string' && record.result) {
+        run.replyFull = record.result;
+        run.replyPreview = record.result.slice(0, 200);
+      }
+      ctx.emitSubagentEvent(run);
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * 直接向某个子代理发送 steer（运行中插话）或 resume（结束后继续追问）。
+ * - steer：通过全局 manager.steer 将消息投递进运行中的分身会话；
+ * - resume：若 manager 记录仍在则 manager.resume 同一 runId；否则用保存的 sessionFile
+ *   重开同一分身上下文执行一轮追问（跨回合场景）。期间推送同一 runId 的
+ *   running -> done 状态、steers、toolCalls 与更新后的 replyFull。
+ */
+export async function interactSubagent(input: {
+  sessionId: string;
+  botId: string;
+  runId: string;
+  subagentId?: string;
+  message: string;
+  mode: 'steer' | 'resume';
+}): Promise<{ ok: boolean; run?: SubagentRunRecord; error?: string }> {
+  const { sessionId, botId, runId, message, mode } = input;
+  if (!message.trim()) return { ok: false, error: 'Message must be non-empty.' };
+
+  const ctx = findActiveTurn(sessionId) ?? activeTurns.get(`${sessionId}:${botId}`);
+  const manager = getGlobalSubagentManager();
+  const managerRecord = manager?.getRecord?.(runId);
+
+  // 取（或重建）runRecord
+  let run: SubagentRunRecord | undefined = ctx?.subagentRunsMap.get(runId);
+  if (!run) {
+    const meta = subagentSessionFiles.get(runId);
+    run = {
+      id: runId,
+      subagentId: input.subagentId || meta?.subagentId || managerRecord?.type || 'agent',
+      task: meta?.task || managerRecord?.description || runId,
+      status: 'running',
+    };
+  }
+  const pushEvent = (patch: Partial<SubagentRunRecord>) => {
+    Object.assign(run!, patch);
+    ctx?.emitSubagentEvent(run!);
+    // 回合已结束（后台 resume）时直接通过 lastHubRpc 推流
+    if (!ctx && lastHubRpc) {
+      try {
+        lastHubRpc.onSessionStream.asEvent({
+          sessionId,
+          botId,
+          subagentEvent: {
+            id: run!.id,
+            subagentId: run!.subagentId,
+            task: run!.task,
+            status: run!.status === 'skipped' ? 'done' : run!.status,
+            ...(run!.replyFull !== undefined ? { result: run!.replyFull } : {}),
+            ...(run!.durationMs !== undefined ? { durationMs: run!.durationMs } : {}),
+            ...(run!.toolCount !== undefined ? { toolUses: run!.toolCount } : {}),
+            ...(run!.currentTool !== undefined ? { currentTool: run!.currentTool } : {}),
+            ...(run!.toolCalls ? { toolCalls: run!.toolCalls } : {}),
+            ...(run!.steers ? { steers: run!.steers } : {}),
+          },
+        });
+      } catch {
+        // 推流失败不影响结果返回
+      }
+    }
+  };
+
+  if (mode === 'steer') {
+    if (!managerRecord || managerRecord.status !== 'running') {
+      return { ok: false, error: `Subagent run "${runId}" is not running (status: ${managerRecord?.status ?? 'unknown'}). Use resume mode instead.` };
+    }
+    const accepted = manager?.steer?.(runId, message) ?? false;
+    if (!accepted) {
+      return { ok: false, error: `Failed to steer subagent run "${runId}".` };
+    }
+    run.steers ??= [];
+    run.steers.push({ message, timestamp: new Date().toISOString(), mode: 'steer' });
+    pushEvent({});
+    return { ok: true, run };
+  }
+
+  // ---- resume：在同一 runId / 同一分身上下文继续追问 ----
+  const startedAt = Date.now();
+  run.steers ??= [];
+  run.steers.push({ message, timestamp: new Date().toISOString(), mode: 'resume' });
+  pushEvent({ status: 'running', currentTool: undefined });
+
+  try {
+    // 优先：manager 记录仍在（同回合或记录未被清理）→ manager.resume 保持同一 runId
+    if (managerRecord?.session) {
+      const record = await manager?.resume?.(runId, message, undefined, { isBackground: true });
+      if (!record) {
+        pushEvent({ status: 'error', replyFull: 'Resume was rejected (the run may still be in progress).', durationMs: Date.now() - startedAt });
+        return { ok: false, run, error: 'Resume rejected: the run may still be in progress.' };
+      }
+      const isStopped = record.status === 'stopped' || record.status === 'aborted';
+      const full = String(record.result || record.error || '');
+      pushEvent({
+        status: record.status === 'error' ? 'error' : isStopped ? 'stopped' : 'done',
+        ...(full ? { replyFull: full, replyPreview: full.slice(0, 200) } : {}),
+        durationMs: (record.completedAt ?? Date.now()) - record.startedAt,
+        currentTool: undefined,
+      });
+      return { ok: true, run };
+    }
+
+    // 跨回合：用保存的 sessionFile 重开同一分身上下文执行一轮追问
+    const meta = subagentSessionFiles.get(runId);
+    if (!meta?.sessionFile || !existsSync(meta.sessionFile)) {
+      pushEvent({ status: 'error', replyFull: `Subagent session file for "${runId}" is gone; cannot resume.`, durationMs: Date.now() - startedAt });
+      return { ok: false, run, error: `Subagent run "${runId}" has no resumable session file on this node.` };
+    }
+
+    const { piAgent } = await loadTurnDeps();
+    const { SessionManager: SM, SettingsManager: SMs } = piAgent;
+    const turnDeps = await loadTurnDeps();
+    const getModel = turnDeps.piAiCompat.getModel;
+    const botData = await readBot(getDataDirSafe(), botId);
+    const botConfig = (botData as any)?.config ?? botData?.bot;
+    if (!botConfig) {
+      pushEvent({ status: 'error', replyFull: `Bot "${botId}" not found on node; cannot resume.`, durationMs: Date.now() - startedAt });
+      return { ok: false, run, error: `Bot "${botId}" not found on node.` };
+    }
+
+    const parentDir = botConfig.parentBotId ? getBotDir(getDataDirSafe(), botConfig.parentBotId) : getBotDir(getDataDirSafe(), botConfig.id);
+    const subDir = getBotDir(getDataDirSafe(), botConfig.parentBotId || botConfig.id);
+    const workspaceDir = getBotWorkspaceDir(getDataDirSafe(), botConfig.parentBotId || botConfig.id);
+
+    const modelRuntime = await createRuntimeForProvider(getDataDirSafe(), botConfig.modelProvider);
+    await configureProviderAuth(modelRuntime, botConfig.modelProvider);
+    const model =
+      modelRuntime.getModel(botConfig.modelProvider, botConfig.modelId) ??
+      getModel(botConfig.modelProvider as any, botConfig.modelId as any);
+    if (!model) {
+      pushEvent({ status: 'error', replyFull: `Model not found: ${botConfig.modelProvider}/${botConfig.modelId}`, durationMs: Date.now() - startedAt });
+      return { ok: false, run, error: `Model not found: ${botConfig.modelProvider}/${botConfig.modelId}` };
+    }
+
+    // 分身会话文件在 subDir 下：重开同一文件继续追问
+    const sessionManager = SM.open(meta.sessionFile, path.join(subDir, 'sessions'), workspaceDir);
+    const settingsManager = SMs.inMemory({
+      defaultProvider: botConfig.modelProvider,
+      defaultModel: botConfig.modelId,
+      compaction: { enabled: false },
+    });
+    const { commandsMod } = turnDeps;
+    const resourceLoader = await commandsMod.loadBotResources(
+      getDataDirSafe(),
+      botConfig,
+      settingsManager,
+      () => [],
+      { enableSubagents: false }, // 分身不能再派分身
+    );
+    const created = await piAgent.createAgentSession({
+      cwd: workspaceDir,
+      agentDir: parentDir,
+      model,
+      modelRuntime,
+      resourceLoader,
+      sessionManager,
+      settingsManager,
+    });
+    const subSession = created.session;
+
+    // 订阅分身工具事件，实时更新 run.toolCalls
+    run.toolCalls ??= [];
+    const toolStarts = new Map<string, number>();
+    const unsubTools = subSession.subscribe((event: any) => {
+      if (event.type === 'tool_execution_start') {
+        const key = event.toolCallId || `${event.toolName}_${run!.toolCalls!.length}`;
+        toolStarts.set(key, Date.now());
+        const summary = extractToolSummary(event.toolName, event.args ?? event.input);
+        const sanitizedArgs = sanitizeToolArgs(event.args ?? event.input);
+        run!.toolCalls!.push({ id: key, name: event.toolName, ...(sanitizedArgs ? { args: sanitizedArgs } : {}), ...(summary ? { summary } : {}), status: 'running' });
+        run!.currentTool = event.toolName;
+        run!.toolCount = run!.toolCalls!.length;
+        pushEvent({});
+      } else if (event.type === 'tool_execution_end') {
+        const key = event.toolCallId || event.toolName;
+        const entry = [...run!.toolCalls!].reverse().find((tc) => tc.id === key || tc.name === event.toolName);
+        if (entry) {
+          entry.status = event.isError ? 'error' : 'done';
+          const started = toolStarts.get(key) ?? (entry.id ? toolStarts.get(entry.id) : undefined);
+          toolStarts.delete(key);
+          if (started !== undefined) entry.durationMs = Math.max(0, Date.now() - started);
+          entry.isError = Boolean(event.isError);
+          const outputPreview = extractToolOutputPreview(event.result !== undefined ? event.result : event.output, Boolean(event.isError));
+          if (outputPreview) entry.outputPreview = outputPreview;
+        }
+        if (!run!.toolCalls!.some((tc) => tc.status === 'running')) run!.currentTool = undefined;
+        run!.toolCount = run!.toolCalls!.length;
+        pushEvent({});
+      }
+    });
+
+    try {
+      await subSession.prompt(message);
+      await subSession.waitForIdle();
+    } finally {
+      unsubTools();
+    }
+
+    const assistants = subSession.messages.filter((m: any) => m.role === 'assistant');
+    const texts = assistants.flatMap((m: any) =>
+      (m.content || [])
+        .filter((p: any) => p.type === 'text' && typeof p.text === 'string' && p.text.length > 0)
+        .map((p: any) => p.text),
+    );
+    const reply = texts.join('\n\n').trim();
+    const lastError = assistants.some((m: any) => m.stopReason === 'error');
+
+    pushEvent({
+      status: lastError ? 'error' : 'done',
+      ...(reply ? { replyFull: reply, replyPreview: reply.slice(0, 200) } : {}),
+      durationMs: Date.now() - startedAt,
+      currentTool: undefined,
+    });
+    try {
+      subSession.dispose();
+    } catch {
+      // ignore
+    }
+    return { ok: true, run };
+  } catch (err: any) {
+    const errorText = err?.message || String(err);
+    pushEvent({ status: 'error', replyFull: errorText, durationMs: Date.now() - startedAt });
+    return { ok: false, run, error: errorText };
+  }
 }

@@ -132,6 +132,8 @@ export const App: React.FC = () => {
   const [streamingStatesMap, setStreamingStatesMap] = useState<Record<string, StreamingAssistantState>>({});
   // 活跃分身执行轨迹（按主 BOT ID 隔离索引，供 ChatView 展示实时分身协同）
   const [subagentRunsMap, setSubagentRunsMap] = useState<Record<string, SubagentRunRecord[]>>({});
+  // 分身运行详情抽屉：当前查看的分身运行 ID（从实时流或已落库消息派生最新记录）
+  const [inspectingRunId, setInspectingRunId] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
 
   // 当前会话待处理的人机协同交互请求（botd ask）
@@ -493,6 +495,7 @@ export const App: React.FC = () => {
   useEffect(() => {
     // 切换会话即复位取消状态：取消动作只针对原会话，切走后停止按钮不得永久卡在「正在停止...」
     setCancelling(false);
+    setInspectingRunId(null);
     if (!authenticated || !activeSessionId) {
       setStreamingStatesMap(clearStreamingMap());
       setPendingAsks([]);
@@ -825,6 +828,23 @@ export const App: React.FC = () => {
               nextList = [...list, event.run];
             }
             return { ...prev, [event.botId]: nextList };
+          });
+          // 同步更新已落库消息中的 subagentRuns 对应项：后台完成 / resume / stop 更新时，
+          // 已落库消息卡片与打开的 SubagentRunDrawer 都能实时热更新
+          setMessages((prev) => {
+            let changed = false;
+            const next = prev.map((msg) => {
+              if (!msg.subagentRuns || msg.subagentRuns.length === 0) return msg;
+              const idx = msg.subagentRuns.findIndex((r) => r.id === event.run.id);
+              if (idx < 0) return msg;
+              const runs = [...msg.subagentRuns];
+              runs[idx] = { ...runs[idx], ...event.run };
+              changed = true;
+              return { ...msg, subagentRuns: runs };
+            });
+            if (!changed) return prev;
+            messagesRef.current = next;
+            return next;
           });
           break;
         }
@@ -1474,7 +1494,6 @@ export const App: React.FC = () => {
             nodeMap={nodeMap}
             nodes={nodes}
             onRefreshNodes={handleRefreshNodes}
-            onSelectSession={(id) => navigate({ sessionId: id, view: 'chat' })}
             streamingStates={Object.values(streamingStatesMap)}
             activeSubagentRuns={subagentRunsMap}
             onSendMessage={handleSendMessage}
@@ -1498,6 +1517,8 @@ export const App: React.FC = () => {
             onAddToast={addToast}
             onUpdateSession={handleUpdateSession}
             onOpenBotChat={handleOpenBotChat}
+            onInspectSubagentRun={(run) => setInspectingRunId(run ? run.id : null)}
+            inspectingRunId={inspectingRunId}
           />
         ) : (
           /* Mobile startup header with accessible menu when no active session */

@@ -51,6 +51,7 @@ import { ArtifactsDrawer } from './ArtifactsDrawer';
 import { BgJobsDrawer } from './BgJobsDrawer';
 import { ShareSessionModal } from './ShareSessionModal';
 import { BotHistoryDrawer } from './BotHistoryDrawer';
+import { SubagentRunDrawer } from './SubagentRunDrawer';
 import { BotEditorModal } from './BotEditorModal';
 import { api } from '../api';
 import { onGlobalEvent } from '../events';
@@ -100,8 +101,10 @@ interface ChatViewProps {
   ) => Promise<void>;
   /** 跳转/打开指定智能体的单聊 */
   onOpenBotChat?: (bot: BotConfig) => void;
-  /** 点击分身运行记录跳转对应独立会话 */
-  onSelectSession?: (sessionId: string) => void;
+  /** 点击分身运行记录打开详情抽屉（Steer / Resume / 停止控制）；传 null 关闭 */
+  onInspectSubagentRun?: (run: SubagentRunRecord | null) => void;
+  /** 当前抽屉正在查看的分身运行 ID（由上层从实时状态与已落库消息中派生最新记录传入） */
+  inspectingRunId?: string | null;
   /** 是否还有更早的历史消息可加载（App 负责分页） */
   hasEarlierMessages?: boolean;
   /** 正在加载更早消息 */
@@ -145,7 +148,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onAddToast,
   onUpdateSession,
   onOpenBotChat,
-  onSelectSession,
+  onInspectSubagentRun,
+  inspectingRunId = null,
   hasEarlierMessages = false,
   loadingEarlier = false,
   onLoadEarlier,
@@ -738,6 +742,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   };
 
+  // 从实时 activeSubagentRuns 或已落库 messages 中派生抽屉当前查看的最新分身运行记录：
+  // 后台完成 / resume / stop 更新时，打开的抽屉能实时热更新
+  const inspectingRun = useMemo<SubagentRunRecord | null>(() => {
+    if (!inspectingRunId) return null;
+    // 优先实时流状态（主回合仍在跑）
+    for (const runs of Object.values(activeSubagentRuns)) {
+      const hit = runs.find((r) => r.id === inspectingRunId);
+      if (hit) return hit;
+    }
+    // 已落库消息（后台完成 / resume 更新已持久化）
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      const hit = msg.subagentRuns?.find((r) => r.id === inspectingRunId);
+      if (hit) return hit;
+    }
+    return null;
+  }, [inspectingRunId, activeSubagentRuns, messages]);
+
   const handleAppendStage = async (botId: string) => {
     try {
       setAppendDropdownOpen(false);
@@ -788,7 +810,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
         {/* 分身协同运行中轨迹 */}
         {activeSubagentRuns?.[state.botId] && activeSubagentRuns[state.botId].length > 0 && (
-          <SubagentRunsPanel runs={activeSubagentRuns[state.botId]} onSelectSession={onSelectSession} />
+          <SubagentRunsPanel runs={activeSubagentRuns[state.botId]} onInspectSubagentRun={onInspectSubagentRun} />
         )}
 
         {/* 统一交错时间线渲染器 */}
@@ -1439,7 +1461,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   isEditing={editingMessage?.id === msg.id}
                   onStartEdit={startEdit}
                   onForkMessage={handleForkMessage}
-                  onSelectSession={onSelectSession}
+                  onInspectSubagentRun={onInspectSubagentRun}
                 />
               </div>
             ))}
@@ -1720,11 +1742,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           onClose={() => setHistoryDrawerOpen(false)}
           onOpenSession={(sid) => {
             setHistoryDrawerOpen(false);
-            if (onSelectSession) {
-              onSelectSession(sid);
-            } else {
-              window.location.hash = `#?s=${sid}&v=chat`;
-            }
+            window.location.hash = `#?s=${sid}&v=chat`;
           }}
           onAddToast={(type, message) => onAddToast?.(type, message)}
           onDeleteSessions={onDeleteSessions}
@@ -1762,6 +1780,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
           setBgJobsOpen(false);
           setSelectedBgJobId(null);
         }}
+        onToast={(type, message) => onAddToast?.(type, message)}
+      />
+
+      {/* 分身运行详情抽屉：初始任务 / 交互指令 / 工具轨迹 / 完整输出 + Steer/Resume/停止控制 */}
+      <SubagentRunDrawer
+        isOpen={Boolean(inspectingRunId)}
+        sessionId={session.id}
+        run={inspectingRun}
+        onClose={() => onInspectSubagentRun?.(null)}
         onToast={(type, message) => onAddToast?.(type, message)}
       />
     </div>

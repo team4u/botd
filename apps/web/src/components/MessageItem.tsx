@@ -176,14 +176,14 @@ export const OrchestrationPlanCard: React.FC<{ plan: string }> = ({ plan }) => {
 
 /**
  * 分身协同执行面板组件（Pi TUI 纯文本折叠组风格）
+ * 点击任意分身行（running / done / error / stopped）打开右侧「分身运行详情抽屉」
  */
 export const SubagentRunsPanel: React.FC<{
   runs: SubagentRunRecord[];
-  onSelectSession?: (sessionId: string) => void;
-}> = ({ runs, onSelectSession }) => {
+  onInspectSubagentRun?: (run: SubagentRunRecord) => void;
+}> = ({ runs, onInspectSubagentRun }) => {
   const hasRunning = runs.some((r) => r.status === 'running');
   const [expanded, setExpanded] = useState(hasRunning);
-  const [expandedRunIds, setExpandedRunIds] = useState<Record<string, boolean>>({});
 
   React.useEffect(() => {
     if (hasRunning) {
@@ -194,13 +194,6 @@ export const SubagentRunsPanel: React.FC<{
   if (!runs || runs.length === 0) return null;
 
   const names = runs.map((r) => r.subagentName || `@${r.subagentId}`).join(', ');
-
-  const toggleRun = (runId: string) => {
-    setExpandedRunIds((prev) => ({
-      ...prev,
-      [runId]: !prev[runId],
-    }));
-  };
 
   return (
     <div className="my-1.5 max-w-2xl text-xs">
@@ -219,37 +212,17 @@ export const SubagentRunsPanel: React.FC<{
       {expanded && (
         <div className="mt-1 pl-2.5 border-l border-zinc-200 dark:border-zinc-800 space-y-1.5">
           {runs.map((run) => {
-            const isCompleted = run.status !== 'running';
-            const isPreviewOpen = Boolean(expandedRunIds[run.id]);
+            const isRunning = run.status === 'running';
 
             return (
-              <div
+              <button
                 key={run.id}
-                role={isCompleted ? 'button' : undefined}
-                tabIndex={isCompleted ? 0 : undefined}
-                onClick={isCompleted ? () => toggleRun(run.id) : undefined}
-                onKeyDown={
-                  isCompleted
-                    ? (e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          toggleRun(run.id);
-                        }
-                      }
-                    : undefined
-                }
-                className={`text-[11px] font-mono space-y-0.5 ${
-                  isCompleted
-                    ? 'cursor-pointer hover:bg-zinc-50/80 dark:hover:bg-zinc-800/40 -mx-1 px-1 py-0.5 rounded transition-colors'
-                    : ''
-                }`}
+                type="button"
+                onClick={() => onInspectSubagentRun?.(run)}
+                title="点击查看运行详情与控制（Steer / Resume / 停止）"
+                className="w-full text-left text-[11px] font-mono space-y-0.5 cursor-pointer hover:bg-zinc-50/80 dark:hover:bg-zinc-800/40 -mx-1 px-1 py-0.5 rounded transition-colors"
               >
                 <div className="flex items-center gap-2 text-zinc-600 dark:text-zinc-300">
-                  {isCompleted && (
-                    <span className="text-[10px] text-zinc-400 dark:text-zinc-500 select-none">
-                      {isPreviewOpen ? '▾' : '▸'}
-                    </span>
-                  )}
                   <span className="font-semibold text-zinc-800 dark:text-zinc-200">
                     {run.subagentName || `@${run.subagentId}`}
                   </span>
@@ -261,49 +234,26 @@ export const SubagentRunsPanel: React.FC<{
                       {formatDuration(run.durationMs)}
                     </span>
                   )}
-                  {run.status === 'running' && (
-                    <span className="text-zinc-400">running...</span>
+                  {isRunning && (
+                    <span className="text-zinc-400">
+                      running{run.currentTool ? ` · ${run.currentTool}` : '...'}
+                    </span>
                   )}
                   {run.status === 'error' && (
                     <span className="text-rose-500">error</span>
                   )}
-                  {run.childSessionId && onSelectSession && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onSelectSession(run.childSessionId!);
-                      }}
-                      className="text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200 underline cursor-pointer ml-auto"
-                    >
-                      查看会话
-                    </button>
+                  {run.status === 'stopped' && (
+                    <span className="text-zinc-400 dark:text-zinc-500">stopped</span>
                   )}
+                  <span className="ml-auto text-zinc-400 dark:text-zinc-500 shrink-0 font-sans">
+                    详情 / 控制 ▸
+                  </span>
                 </div>
 
-                {!isPreviewOpen ? (
-                  <div className="text-zinc-500 dark:text-zinc-400 font-sans truncate">
-                    {run.task}
-                  </div>
-                ) : (
-                  <div className="mt-1 pl-2 border-l-2 border-zinc-200 dark:border-zinc-700 space-y-1.5 font-sans">
-                    <div>
-                      <span className="text-zinc-400 dark:text-zinc-500 text-[10px] font-mono block">Task</span>
-                      <div className="text-zinc-600 dark:text-zinc-300 whitespace-pre-wrap break-words">
-                        {run.task}
-                      </div>
-                    </div>
-                    {run.replyPreview && (
-                      <div>
-                        <span className="text-zinc-400 dark:text-zinc-500 text-[10px] font-mono block">Reply</span>
-                        <div className="text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap break-words max-h-60 overflow-y-auto">
-                          {run.replyPreview}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+                <div className="text-zinc-500 dark:text-zinc-400 font-sans truncate">
+                  {run.task}
+                </div>
+              </button>
             );
           })}
         </div>
@@ -1129,8 +1079,8 @@ interface MessageItemProps {
   onStartEdit?: (message: MessageRecord) => void;
   /** 从该消息（含）分叉出新会话并自动切换（MessageItem 不感知 sessionId，由上层闭包绑定） */
   onForkMessage?: (messageId: string) => Promise<void>;
-  /** 外部会话切换回调 */
-  onSelectSession?: (sessionId: string) => void;
+  /** 点击分身运行记录打开右侧详情抽屉（Steer / Resume / 停止控制） */
+  onInspectSubagentRun?: (run: SubagentRunRecord) => void;
 }
 
 export const MessageItem: React.FC<MessageItemProps> = ({
@@ -1142,7 +1092,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   isEditing = false,
   onStartEdit,
   onForkMessage,
-  onSelectSession,
+  onInspectSubagentRun,
 }) => {
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
@@ -1341,7 +1291,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
 
       {/* 分身协同面板 */}
       {message.subagentRuns && message.subagentRuns.length > 0 && (
-        <SubagentRunsPanel runs={message.subagentRuns} onSelectSession={onSelectSession} />
+        <SubagentRunsPanel runs={message.subagentRuns} onInspectSubagentRun={onInspectSubagentRun} />
       )}
 
       {/* 统一交错时间线渲染器 */}
@@ -1381,7 +1331,7 @@ function areMessageItemPropsEqual(prev: MessageItemProps, next: MessageItemProps
     prev.isEditing !== next.isEditing ||
     prev.onStartEdit !== next.onStartEdit ||
     prev.onForkMessage !== next.onForkMessage ||
-    prev.onSelectSession !== next.onSelectSession ||
+    prev.onInspectSubagentRun !== next.onInspectSubagentRun ||
     prev.memberRoles !== next.memberRoles
   ) {
     return false;
