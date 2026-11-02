@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { ToolDefinition, AgentSession } from '@earendil-works/pi-coding-agent';
 import type { BirpcReturn } from 'birpc';
-import type { HubRpcFunctions, NodeRpcFunctions, BotConfig, ToolCallRecord, TurnUsage } from '@botd/protocol';
+import type { HubRpcFunctions, NodeRpcFunctions, BotConfig, ToolCallRecord, TurnUsage, TurnBlock } from '@botd/protocol';
 import {
   assertSafeId,
   ensureDir,
@@ -204,7 +204,7 @@ export function extractToolSummary(toolName: string, args: any): string | undefi
   return undefined;
 }
 
-export function extractToolOutputPreview(result: any, isError?: boolean): string | undefined {
+export function extractToolOutputPreview(result: any, _isError?: boolean): string | undefined {
   if (result === null || result === undefined) return undefined;
 
   let rawText = '';
@@ -242,13 +242,39 @@ export function extractToolOutputPreview(result: any, isError?: boolean): string
   const trimmed = rawText.trim();
   if (!trimmed) return undefined;
 
-  if (isError) {
-    if (trimmed.length <= 1200) return trimmed;
-    return `${trimmed.slice(0, 800)}\n...\n${trimmed.slice(-350)}`;
-  } else {
-    if (trimmed.length <= 600) return trimmed;
-    return trimmed.slice(-600);
+  if (trimmed.length <= 4000) return trimmed;
+  return `${trimmed.slice(0, 2200)}\n...\n${trimmed.slice(-1500)}`;
+}
+
+export function sanitizeToolArgs(args: any, depth = 0): Record<string, unknown> | undefined {
+  if (!args || typeof args !== 'object' || Array.isArray(args) || depth > 5) return undefined;
+  const result: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(args)) {
+    result[key] = sanitizeToolValue(val, depth + 1);
   }
+  return result;
+}
+
+function sanitizeToolValue(val: any, depth: number): unknown {
+  if (typeof val === 'string') {
+    if (val.length > 4000) {
+      return val.slice(0, 4000) + '...(truncated)';
+    }
+    return val;
+  }
+  if (Array.isArray(val)) {
+    if (depth > 5) return val.slice(0, 50);
+    return val.slice(0, 100).map((item) => sanitizeToolValue(item, depth + 1));
+  }
+  if (val !== null && typeof val === 'object') {
+    if (depth > 5) return val;
+    const obj: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(val)) {
+      obj[k] = sanitizeToolValue(v, depth + 1);
+    }
+    return obj;
+  }
+  return val;
 }
 
 export async function executeBotTurn(
@@ -260,6 +286,7 @@ export async function executeBotTurn(
   replyText: string;
   modelBadge: string;
   toolCalls?: ToolCallRecord[];
+  blocks?: TurnBlock[];
   usage?: TurnUsage;
 }> {
   assertSafeId(bot.id, 'Bot ID');
@@ -563,7 +590,35 @@ export async function executeBotTurn(
     }
 
     const toolCalls: ToolCallRecord[] = [];
-    const runningToolStarts = new Map<string, { index: number; startMs: number; summary?: string }>();
+    const blocks: TurnBlock[] = [];
+    const runningToolStarts = new Map<
+      string,
+      {
+        index: number;
+        blockIndex: number;
+        startMs: number;
+        summary?: string;
+        args?: Record<string, unknown>;
+      }
+    >();
+    let activeThinkingStartMs: number | null = null;
+    let activeThinkingBlock: Extract<TurnBlock, { type: 'thinking' }> | null = null;
+
+    const closeActiveThinking = () => {
+      if (activeThinkingBlock && activeThinkingBlock.status === 'running') {
+        activeThinkingBlock.status = 'done';
+        activeThinkingBlock.durationMs = Math.max(1, Date.now() - (activeThinkingStartMs ?? Date.now()));
+        hubRpc.onSessionStream.asEvent({
+          sessionId: input.sessionId,
+          botId: bot.id,
+          thinkingStatus: 'done',
+          thinkingDurationMs: activeThinkingBlock.durationMs,
+        });
+      }
+      activeThinkingBlock = null;
+      activeThinkingStartMs = null;
+    };
+
     let currentAssistantMessage: any = null;
     let hasPriorAssistantEmittedText = false;
     let currentAssistantEmittedText = false;
@@ -578,83 +633,186 @@ export async function executeBotTurn(
           currentAssistantMessage = event.message;
           currentAssistantEmittedText = false;
         }
-      } else if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
-        if (event.message && currentAssistantMessage && event.message !== currentAssistantMessage) {
-          if (currentAssistantEmittedText) {
-            hasPriorAssistantEmittedText = true;
+      } else if (event.type === 'message_update') {
+        const ame = event.assistantMessageEvent;
+        if (ame?.type === 'thinking_start') {
+          if (!activeThinkingBlock || activeThinkingBlock.status !== 'running') {
+            activeThinkingStartMs = Date.now();
+            activeThinkingBlock = {
+              type: 'thinking',
+              thinking: '',
+              status: 'running',
+            };
+            blocks.push(activeThinkingBlock);
           }
-          currentAssistantMessage = event.message;
-          currentAssistantEmittedText = false;
-        }
-        let delta = event.assistantMessageEvent.delta;
-        if (hasPriorAssistantEmittedText && !currentAssistantEmittedText && delta) {
-          if (delta.startsWith('\n\n')) {
-            // Already starts with double newline
-          } else if (delta.startsWith('\n')) {
-            delta = `\n${delta}`;
+          hubRpc.onSessionStream.asEvent({
+            sessionId: input.sessionId,
+            botId: bot.id,
+            thinkingStatus: 'running',
+          });
+        } else if (ame?.type === 'thinking_delta' && ame.delta) {
+          if (!activeThinkingBlock || activeThinkingBlock.status !== 'running') {
+            activeThinkingStartMs = Date.now();
+            activeThinkingBlock = {
+              type: 'thinking',
+              thinking: ame.delta,
+              status: 'running',
+            };
+            blocks.push(activeThinkingBlock);
           } else {
-            delta = `\n\n${delta}`;
+            activeThinkingBlock.thinking += ame.delta;
           }
+          hubRpc.onSessionStream.asEvent({
+            sessionId: input.sessionId,
+            botId: bot.id,
+            thinkingDelta: ame.delta,
+            thinkingStatus: 'running',
+          });
+        } else if (ame?.type === 'thinking_end') {
+          closeActiveThinking();
+        } else if (ame?.type === 'text_delta') {
+          closeActiveThinking();
+          if (event.message && currentAssistantMessage && event.message !== currentAssistantMessage) {
+            if (currentAssistantEmittedText) {
+              hasPriorAssistantEmittedText = true;
+            }
+            currentAssistantMessage = event.message;
+            currentAssistantEmittedText = false;
+          }
+          let delta = ame.delta;
+          if (hasPriorAssistantEmittedText && !currentAssistantEmittedText && delta) {
+            if (delta.startsWith('\n\n')) {
+              // Already starts with double newline
+            } else if (delta.startsWith('\n')) {
+              delta = `\n${delta}`;
+            } else {
+              delta = `\n\n${delta}`;
+            }
+          }
+          if (delta) {
+            currentAssistantEmittedText = true;
+            const lastBlock = blocks[blocks.length - 1];
+            if (lastBlock && lastBlock.type === 'text') {
+              lastBlock.text += delta;
+            } else {
+              blocks.push({ type: 'text', text: delta });
+            }
+          }
+          hubRpc.onSessionStream.asEvent({
+            sessionId: input.sessionId,
+            botId: bot.id,
+            deltaText: delta,
+          });
         }
-        if (delta) {
-          currentAssistantEmittedText = true;
-        }
-        hubRpc.onSessionStream.asEvent({
-          sessionId: input.sessionId,
-          botId: bot.id,
-          deltaText: delta,
-        });
       } else if (event.type === 'tool_execution_start') {
+        closeActiveThinking();
         if (currentAssistantEmittedText) {
           hasPriorAssistantEmittedText = true;
           currentAssistantEmittedText = false;
         }
         const summary = extractToolSummary(event.toolName, event.args ?? event.input);
-        const key = event.toolCallId || event.toolName;
+        const sanitizedArgs = sanitizeToolArgs(event.args ?? event.input);
+        const key = event.toolCallId || `${event.toolName}_${toolCalls.length}`;
         const index = toolCalls.length;
         toolCalls.push({
+          id: key,
           name: event.toolName,
+          ...(sanitizedArgs ? { args: sanitizedArgs } : {}),
           ...(summary ? { summary } : {}),
           status: 'running',
         });
-        runningToolStarts.set(key, { index, startMs: Date.now(), summary });
+        const blockIndex = blocks.length;
+        blocks.push({
+          type: 'tool',
+          id: key,
+          name: event.toolName,
+          ...(sanitizedArgs ? { args: sanitizedArgs } : {}),
+          ...(summary ? { summary } : {}),
+          status: 'running',
+        });
+        runningToolStarts.set(key, { index, blockIndex, startMs: Date.now(), summary, args: sanitizedArgs });
         hubRpc.onSessionStream.asEvent({
           sessionId: input.sessionId,
           botId: bot.id,
+          toolCallId: key,
           toolName: event.toolName,
           toolStatus: 'running',
           toolSummary: summary,
+          toolArgs: sanitizedArgs,
         });
       } else if (event.type === 'tool_execution_end') {
+        closeActiveThinking();
         const key = event.toolCallId || event.toolName;
-        const running = runningToolStarts.get(key);
+        let running = runningToolStarts.get(key);
+        if (!running) {
+          for (const [k, r] of runningToolStarts.entries()) {
+            if (k.startsWith(`${event.toolName}_`) || k === event.toolName) {
+              running = r;
+              runningToolStarts.delete(k);
+              break;
+            }
+          }
+        } else {
+          runningToolStarts.delete(key);
+        }
+
         let summary: string | undefined;
+        let sanitizedArgs: Record<string, unknown> | undefined;
         const isError = Boolean(event.isError);
         const rawOutput = event.result !== undefined ? event.result : event.output;
         const outputPreview = extractToolOutputPreview(rawOutput, isError);
+        const durationMs = running ? Math.max(0, Date.now() - running.startMs) : undefined;
 
         if (running) {
-          runningToolStarts.delete(key);
           summary = running.summary;
+          sanitizedArgs = running.args;
           const entry = toolCalls[running.index];
           if (entry) {
             entry.status = isError ? 'error' : 'done';
-            entry.durationMs = Math.max(0, Date.now() - running.startMs);
+            if (durationMs !== undefined) entry.durationMs = durationMs;
             entry.isError = isError;
             if (outputPreview) {
               entry.outputPreview = outputPreview;
             }
           }
+          const block = blocks[running.blockIndex];
+          if (block && block.type === 'tool') {
+            block.status = isError ? 'error' : 'done';
+            if (durationMs !== undefined) block.durationMs = durationMs;
+            block.isError = isError;
+            if (outputPreview) {
+              block.outputPreview = outputPreview;
+            }
+          }
+        } else {
+          const block = [...blocks].reverse().find(
+            (b) => b.type === 'tool' && (b.id === key || b.name === event.toolName) && b.status === 'running'
+          );
+          if (block && block.type === 'tool') {
+            block.status = isError ? 'error' : 'done';
+            block.isError = isError;
+            if (outputPreview) block.outputPreview = outputPreview;
+          }
         }
+
         if (!summary) {
           summary = extractToolSummary(event.toolName, event.args ?? event.input);
         }
+        if (!sanitizedArgs) {
+          sanitizedArgs = sanitizeToolArgs(event.args ?? event.input);
+        }
+
         hubRpc.onSessionStream.asEvent({
           sessionId: input.sessionId,
           botId: bot.id,
+          toolCallId: key,
           toolName: event.toolName,
-          toolStatus: 'done',
+          toolStatus: isError ? 'error' : 'done',
           toolSummary: summary,
+          toolArgs: sanitizedArgs,
+          toolOutput: outputPreview,
+          toolDurationMs: durationMs,
+          toolIsError: isError,
         });
       }
     });
@@ -757,6 +915,7 @@ export async function executeBotTurn(
       }
     }
     await session.waitForIdle();
+    closeActiveThinking();
     if (extensionErrors.length) throw new Error(extensionErrors.join('\n'));
     if (cancelledRuns.has(runKey)) throw new Error('Turn was cancelled');
 
@@ -832,10 +991,59 @@ export async function executeBotTurn(
       };
     }
 
+    if (blocks.length === 0 && (turnAssistants.length > 0 || toolCalls.length > 0)) {
+      for (const msg of turnAssistants) {
+        if (Array.isArray(msg.content)) {
+          for (const part of msg.content) {
+            if (part.type === 'thinking' && typeof part.thinking === 'string' && part.thinking.length > 0) {
+              blocks.push({
+                type: 'thinking',
+                thinking: part.thinking,
+                status: 'done',
+              });
+            } else if (part.type === 'text' && typeof part.text === 'string' && part.text.length > 0) {
+              const lastBlock = blocks[blocks.length - 1];
+              if (lastBlock && lastBlock.type === 'text') {
+                lastBlock.text += `\n\n${part.text}`;
+              } else {
+                blocks.push({
+                  type: 'text',
+                  text: part.text,
+                });
+              }
+            }
+          }
+        }
+      }
+      if (toolCalls.length > 0 && !blocks.some((b) => b.type === 'tool')) {
+        const toolBlocks: TurnBlock[] = toolCalls.map((tc, idx) => ({
+          type: 'tool',
+          id: tc.id || `${tc.name}_${idx}`,
+          name: tc.name,
+          ...(tc.args ? { args: tc.args } : {}),
+          ...(tc.summary ? { summary: tc.summary } : {}),
+          status: tc.status,
+          ...(tc.durationMs !== undefined ? { durationMs: tc.durationMs } : {}),
+          ...(tc.outputPreview !== undefined ? { outputPreview: tc.outputPreview } : {}),
+          ...(tc.isError !== undefined ? { isError: tc.isError } : {}),
+        }));
+        const firstTextIdx = blocks.findIndex((b) => b.type === 'text');
+        if (firstTextIdx >= 0) {
+          blocks.splice(firstTextIdx, 0, ...toolBlocks);
+        } else {
+          blocks.push(...toolBlocks);
+        }
+      }
+    }
+    if (blocks.length === 0 && replyText && replyText.length > 0) {
+      blocks.push({ type: 'text', text: replyText });
+    }
+
     return {
       replyText,
       modelBadge: `${effectiveBot.modelProvider}/${effectiveBot.modelId}`,
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
+      ...(blocks.length > 0 ? { blocks } : {}),
       ...(usage ? { usage } : {}),
     };
   } finally {

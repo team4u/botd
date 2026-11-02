@@ -7,8 +7,6 @@ import {
   Loader2,
   AlertTriangle,
   RefreshCw,
-  CheckCircle2,
-  Activity,
   MoreHorizontal,
   MessageSquarePlus,
   Pencil,
@@ -41,8 +39,8 @@ import {
   formatShortModel,
   subagentColorStyles,
   SubagentRunsPanel,
+  AssistantTurnContent,
 } from './MessageItem';
-import { Markdown } from './Markdown';
 import { ChatInput } from './ChatInput';
 import { ConfirmDialog } from './ConfirmDialog';
 import { AskCard } from './AskCard';
@@ -657,8 +655,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // 单个流式 BOT 输出块（并发网格内复用，风格与 MessageItem Assistant 一致）
   const renderStreamingBlock = (state: StreamingAssistantState) => {
     const bot = botMap.get(state.botId);
-    const node = bot ? nodeMap.get(bot.nodeId) : undefined;
     const shortModel = formatShortModel(bot?.modelId);
+    const hasContent = Boolean(
+      (state.blocks && state.blocks.length > 0) || state.delta || state.tools.length > 0
+    );
+
     return (
       <div
         key={state.botId}
@@ -669,36 +670,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
         }
       >
         {/* 极简单行浅灰元数据 */}
-        <div className="flex items-center gap-1.5 min-w-0 text-xs flex-wrap">
-          <div className="w-5 h-5 rounded-md bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 border border-blue-200/60 dark:border-blue-900/60 flex items-center justify-center shrink-0">
-            <Bot className="w-3.5 h-3.5 animate-pulse" />
-          </div>
-          <span className="font-semibold text-zinc-900 dark:text-zinc-100 truncate">
+        <div className="flex items-center gap-1.5 min-w-0 text-xs flex-wrap font-mono text-[11px] text-zinc-400 dark:text-zinc-500">
+          <span className="font-semibold text-zinc-900 dark:text-zinc-100 font-sans text-xs truncate">
             {bot?.name || state.botId}
           </span>
-          <span className="font-mono text-zinc-400 dark:text-zinc-500 text-[11px] shrink-0">
-            @{state.botId}
-          </span>
-          {node && (
-            <>
-              <span className="text-zinc-300 dark:text-zinc-600">·</span>
-              <span className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate max-w-[120px] font-normal">
-                {node.name}
-              </span>
-            </>
-          )}
-          {shortModel && (
-            <>
-              <span className="text-zinc-300 dark:text-zinc-600">·</span>
-              <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate max-w-[140px] font-normal">
-                {shortModel}
-              </span>
-            </>
-          )}
-          <span className="text-zinc-300 dark:text-zinc-600">·</span>
-          <span className="inline-flex items-center gap-1 text-[11px] text-blue-600 dark:text-blue-400 font-medium shrink-0">
-            <Activity className="w-3 h-3 animate-spin-fast" />
-            <span>正在输出...</span>
+          {shortModel && <span>· {shortModel}</span>}
+          <span className="flex items-center gap-1">
+            <span>·</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
+            <span>running...</span>
           </span>
         </div>
 
@@ -707,45 +687,28 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <SubagentRunsPanel runs={activeSubagentRuns[state.botId]} />
         )}
 
-        {/* 类似 Claude / Cursor 的紧凑工具状态列表 */}
-        {state.tools.length > 0 && (
-          <div className="my-2.5 p-2.5 bg-white dark:bg-zinc-950 border border-zinc-200/80 dark:border-zinc-800 rounded-xl text-xs space-y-1.5">
-            <div className="text-[11px] font-medium text-zinc-400 dark:text-zinc-500 px-1">工具执行状态</div>
-            {state.tools.map((tool, idx) => (
-              <div
-                key={`${tool.toolName}-${idx}`}
-                className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-zinc-50 dark:bg-zinc-900 border border-zinc-200/70 dark:border-zinc-800/70 text-zinc-700 dark:text-zinc-300"
-              >
-                {tool.status === 'running' ? (
-                  <Loader2 className="w-3.5 h-3.5 text-amber-500 animate-spin-fast shrink-0" />
-                ) : (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                )}
-                <span className="font-mono font-medium text-zinc-900 dark:text-zinc-100">{tool.toolName}</span>
-                <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
-                  {tool.status === 'running' ? '执行中...' : '已完成'}
-                </span>
-                {tool.summary && (
-                  <span className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate min-w-0 font-mono">
-                    ({tool.summary})
-                  </span>
-                )}
-              </div>
-            ))}
+        {/* 统一交错时间线渲染器 */}
+        {hasContent ? (
+          <AssistantTurnContent
+            blocks={state.blocks}
+            toolCalls={state.tools.map((t, idx) => ({
+              id: t.id || `${t.toolName}_${idx}`,
+              name: t.toolName,
+              status: t.status,
+              summary: t.summary,
+              args: t.args,
+              outputPreview: t.outputPreview,
+              durationMs: t.durationMs,
+              isError: t.isError,
+            }))}
+            content={state.delta}
+          />
+        ) : (
+          <div className="flex items-center gap-2 text-zinc-400 dark:text-zinc-500 text-xs py-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-ping" />
+            <span>等待首字回复与工具调用...</span>
           </div>
         )}
-
-        {/* 流式正文平铺输出，不套外层大白框 */}
-        <div className="mt-1 text-zinc-800 dark:text-zinc-200 leading-relaxed break-words prose-botd">
-          {state.delta ? (
-            <Markdown>{state.delta}</Markdown>
-          ) : (
-            <div className="flex items-center gap-2 text-zinc-400 dark:text-zinc-500 text-xs py-1">
-              <span className="w-2 h-2 rounded-full bg-blue-500 animate-ping" />
-              <span>等待首字回复与工具调用...</span>
-            </div>
-          )}
-        </div>
       </div>
     );
   };

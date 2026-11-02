@@ -9,6 +9,7 @@ import {
   type SessionRecord,
   type SubagentRunRecord,
   type ToolCallRecord,
+  type TurnBlock,
   type TurnUsage,
 } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
@@ -1198,7 +1199,7 @@ export class GroupRouter {
       });
     }
 
-    let turnResult: { replyText: string; modelBadge: string; toolCalls?: ToolCallRecord[]; usage?: TurnUsage };
+    let turnResult: { replyText: string; modelBadge: string; toolCalls?: ToolCallRecord[]; blocks?: TurnBlock[]; usage?: TurnUsage };
     try {
       turnResult = await rpc.runTurn({
         sessionId,
@@ -1281,6 +1282,7 @@ export class GroupRouter {
           modelBadge: turnResult.modelBadge,
           content: turnResult.replyText,
           toolCalls: turnResult.toolCalls,
+          blocks: turnResult.blocks,
           usage: turnResult.usage,
         });
         this.sseHub.broadcast(directSessionId, {
@@ -1332,6 +1334,7 @@ export class GroupRouter {
       ...(orchestrationPlan ? { orchestrationPlan } : {}),
       ...(subagentRun ? { subagentRuns: [subagentRun] } : {}),
       toolCalls: turnResult.toolCalls,
+      blocks: turnResult.blocks,
       usage: turnResult.usage,
     });
 
@@ -1346,6 +1349,7 @@ export class GroupRouter {
       message: {
         ...newMsg.message,
         ...(turnResult.toolCalls ? { toolCalls: turnResult.toolCalls } : {}),
+        ...(turnResult.blocks ? { blocks: turnResult.blocks } : {}),
         ...(turnResult.usage ? { usage: turnResult.usage } : {}),
       },
     });

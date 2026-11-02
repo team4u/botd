@@ -28,6 +28,7 @@ import type {
   SubagentToolScope,
   ThinkingLevel,
   ToolCallRecord,
+  TurnBlock,
   TriggerKind,
   TriggerRecord,
   TurnUsage,
@@ -91,6 +92,7 @@ type MessageRow = {
   orchestration_plan?: string | null;
   subagent_runs_json?: string | null;
   tool_calls_json: string | null;
+  blocks_json?: string | null;
   usage_json: string | null;
   attachments_json: string | null;
   created_at: string;
@@ -98,6 +100,7 @@ type MessageRow = {
 
 const mapMessageRow = (row: MessageRow): MessageRecord => {
   const toolCalls = parseOptionalJson<ToolCallRecord[]>(row.tool_calls_json);
+  const blocks = parseOptionalJson<TurnBlock[]>(row.blocks_json);
   const usage = parseOptionalJson<TurnUsage>(row.usage_json);
   const attachments = parseOptionalJson<MessageAttachment[]>(row.attachments_json);
   const whisperTargetBotIds = parseOptionalJson<string[]>(row.whisper_target_bot_ids_json);
@@ -116,6 +119,7 @@ const mapMessageRow = (row: MessageRow): MessageRecord => {
     ...(row.orchestration_plan ? { orchestrationPlan: row.orchestration_plan } : {}),
     ...(subagentRuns && subagentRuns.length > 0 ? { subagentRuns } : {}),
     ...(toolCalls ? { toolCalls } : {}),
+    ...(blocks && blocks.length > 0 ? { blocks } : {}),
     ...(usage ? { usage } : {}),
     ...(attachments ? { attachments } : {}),
     createdAt: row.created_at,
@@ -123,7 +127,7 @@ const mapMessageRow = (row: MessageRow): MessageRecord => {
 };
 
 const MESSAGE_SELECT_COLUMNS =
-  'id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, usage_json, attachments_json, created_at';
+  'id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, created_at';
 
 const ARTIFACT_COLUMNS = 'id, session_id, filename, mime_type, size_bytes, sender_bot_id, created_at';
 
@@ -417,6 +421,7 @@ export class HubDatabase {
         content TEXT NOT NULL,
         mentions_json TEXT NOT NULL DEFAULT '[]',
         tool_calls_json TEXT,
+        blocks_json TEXT,
         usage_json TEXT,
         attachments_json TEXT,
         created_at TEXT NOT NULL
@@ -544,6 +549,7 @@ export class HubDatabase {
       `ALTER TABLE messages ADD COLUMN whisper_target_bot_ids_json TEXT`,
       `ALTER TABLE messages ADD COLUMN orchestration_plan TEXT`,
       `ALTER TABLE messages ADD COLUMN subagent_runs_json TEXT`,
+      `ALTER TABLE messages ADD COLUMN blocks_json TEXT`,
     ];
 
     for (const sql of migrations) {
@@ -1679,7 +1685,7 @@ export class HubDatabase {
     `);
 
     const rows = this.db.prepare(`
-      SELECT role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, usage_json, attachments_json, created_at
+      SELECT role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, created_at
       FROM messages
       WHERE session_id = ? AND rowid <= ?
       ORDER BY rowid ASC
@@ -1695,14 +1701,15 @@ export class HubDatabase {
       orchestration_plan?: string | null;
       subagent_runs_json?: string | null;
       tool_calls_json: string | null;
+      blocks_json?: string | null;
       usage_json: string | null;
       attachments_json: string | null;
       created_at: string;
     }[];
     // 逐行 INSERT（新 msg id、新 session_id），created_at 保留原值以保真时间线
     const insertMessage = this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, usage_json, attachments_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertArtifact = this.db.prepare(`
       INSERT INTO artifacts (id, session_id, filename, mime_type, size_bytes, sender_bot_id, storage_path, created_at)
@@ -1781,6 +1788,7 @@ export class HubDatabase {
           row.orchestration_plan ?? null,
           row.subagent_runs_json ?? null,
           row.tool_calls_json,
+          row.blocks_json ?? null,
           row.usage_json,
           attachmentsJson,
           row.created_at
@@ -1894,19 +1902,21 @@ export class HubDatabase {
     orchestrationPlan?: string;
     subagentRuns?: SubagentRunRecord[];
     toolCalls?: ToolCallRecord[];
+    blocks?: TurnBlock[];
     usage?: TurnUsage;
     attachments?: MessageAttachment[];
     createdAt?: string;
   }): IncrementalMessageResult {
     const now = msg.createdAt ?? new Date().toISOString();
     const toolCallsJson = msg.toolCalls ? JSON.stringify(msg.toolCalls) : null;
+    const blocksJson = msg.blocks && msg.blocks.length > 0 ? JSON.stringify(msg.blocks) : null;
     const usageJson = msg.usage ? JSON.stringify(msg.usage) : null;
     const attachmentsJson = msg.attachments ? JSON.stringify(msg.attachments) : null;
     const whisperTargetBotIdsJson = msg.whisperTargetBotIds && msg.whisperTargetBotIds.length > 0 ? JSON.stringify(msg.whisperTargetBotIds) : null;
     const subagentRunsJson = msg.subagentRuns && msg.subagentRuns.length > 0 ? JSON.stringify(msg.subagentRuns) : null;
     const stmt = this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, usage_json, attachments_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       msg.id,
@@ -1922,6 +1932,7 @@ export class HubDatabase {
       msg.orchestrationPlan ?? null,
       subagentRunsJson,
       toolCallsJson,
+      blocksJson,
       usageJson,
       attachmentsJson,
       now
@@ -1945,6 +1956,7 @@ export class HubDatabase {
         ...(msg.senderUserId ? { senderUserId: msg.senderUserId } : {}),
         ...(msg.senderUsername ? { senderUsername: msg.senderUsername } : {}),
         ...(msg.toolCalls ? { toolCalls: msg.toolCalls } : {}),
+        ...(msg.blocks && msg.blocks.length > 0 ? { blocks: msg.blocks } : {}),
         ...(msg.usage ? { usage: msg.usage } : {}),
         ...(msg.attachments ? { attachments: msg.attachments } : {}),
         createdAt: now,

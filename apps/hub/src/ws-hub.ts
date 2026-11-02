@@ -230,14 +230,30 @@ export class NodeConnectionManager {
           });
         }
 
+        if (event.thinkingDelta !== undefined || event.thinkingStatus !== undefined) {
+          this.sseHub.broadcast(event.sessionId, {
+            type: 'thinking_stream',
+            sessionId: event.sessionId,
+            botId: event.botId,
+            ...(event.thinkingDelta !== undefined ? { delta: event.thinkingDelta } : {}),
+            status: event.thinkingStatus ?? 'running',
+            ...(event.thinkingDurationMs !== undefined ? { durationMs: event.thinkingDurationMs } : {}),
+          });
+        }
+
         if (event.toolName && event.toolStatus) {
           this.sseHub.broadcast(event.sessionId, {
             type: 'tool_status',
             sessionId: event.sessionId,
             botId: event.botId,
+            ...(event.toolCallId ? { toolCallId: event.toolCallId } : {}),
             toolName: event.toolName,
             status: event.toolStatus,
-            summary: event.toolSummary,
+            ...(event.toolSummary ? { summary: event.toolSummary } : {}),
+            ...(event.toolArgs ? { args: event.toolArgs } : {}),
+            ...(event.toolOutput ? { outputPreview: event.toolOutput } : {}),
+            ...(event.toolDurationMs !== undefined ? { durationMs: event.toolDurationMs } : {}),
+            ...(event.toolIsError !== undefined ? { isError: event.toolIsError } : {}),
           });
         }
       },
