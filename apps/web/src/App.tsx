@@ -1274,6 +1274,56 @@ export const App: React.FC = () => {
     }
   };
 
+  // 批量删除会话（历史话题全选删除）：逐个调用删除 API，运行中(409)跳过、其余失败计数，最后统一更新列表与提示
+  const handleDeleteSessions = async (sessionIds: string[]) => {
+    if (sessionIds.length === 0) return;
+    const deletedIds: string[] = [];
+    let running = 0;
+    let failed = 0;
+    for (const id of sessionIds) {
+      try {
+        await api.deleteSession(id);
+        deletedIds.push(id);
+      } catch (err: any) {
+        if (err instanceof AuthRequiredError || err?.status === 401) {
+          setAuthenticated(false);
+          authenticatedRef.current = false;
+          return;
+        }
+        if (err?.status === 409) running += 1;
+        else failed += 1;
+      }
+    }
+    if (deletedIds.length > 0) {
+      const deletedSet = new Set(deletedIds);
+      const firstIdx = sessions.findIndex((s) => deletedSet.has(s.id));
+      const remaining = sessions.filter((s) => !deletedSet.has(s.id));
+      setSessions(remaining);
+      // 同步移除被删会话的未读计数
+      setUnreadCounts((prev) => {
+        let changed = false;
+        const next = { ...prev };
+        for (const id of deletedIds) {
+          if (id in next) {
+            delete next[id];
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+      // 当前会话被删时切换到相邻会话（与单个删除同一策略）
+      const activeId = activeSessionIdRef.current;
+      if (activeId && deletedSet.has(activeId)) {
+        const fallback = remaining[Math.min(Math.max(firstIdx, 0), remaining.length - 1)];
+        navigate({ sessionId: fallback?.id ?? null });
+      }
+    }
+    const parts = [`已删除 ${deletedIds.length} 个会话`];
+    if (running > 0) parts.push(`${running} 个正在运行已跳过`);
+    if (failed > 0) parts.push(`${failed} 个删除失败`);
+    addToast(deletedIds.length > 0 ? 'success' : 'error', parts.join('，'));
+  };
+
   const handleClearMessages = async (sessionId: string) => {
     try {
       await api.clearSessionMessages(sessionId);
@@ -1395,6 +1445,7 @@ export const App: React.FC = () => {
         onOpenSettings={() => navigate({ modal: 'settings' })}
         onLogout={handleLogout}
         onDeleteSession={handleDeleteSession}
+        onDeleteSessions={handleDeleteSessions}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         currentUser={currentUser || undefined}
@@ -1434,6 +1485,7 @@ export const App: React.FC = () => {
             onRenameSession={handleRenameSession}
             onClearMessages={handleClearMessages}
             onDeleteSession={handleDeleteSession}
+            onDeleteSessions={handleDeleteSessions}
             onNewTopic={handleNewTopic}
             onForkMessage={handleForkMessage}
             cancelling={cancelling}

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   X,
   Loader2,
@@ -6,6 +6,9 @@ import {
   ArchiveRestore,
   Trash2,
   Bot as BotIcon,
+  CheckSquare,
+  Square,
+  ListChecks,
 } from 'lucide-react';
 import type { BotConfig, SessionRecord } from '@botd/protocol';
 import { api } from '../api';
@@ -35,6 +38,8 @@ interface BotHistoryDrawerProps {
   /** 点击历史话题：跳回聊天视图并定位该会话 */
   onOpenSession: (sessionId: string) => void;
   onAddToast: (type: 'success' | 'error' | 'info', message: string) => void;
+  /** 批量删除：由 App 统一执行并同步全局会话列表，缺省时退化为组件内逐个删除 */
+  onDeleteSessions?: (ids: string[]) => Promise<void> | void;
 }
 
 /**
@@ -48,6 +53,7 @@ export const BotHistoryDrawer: React.FC<BotHistoryDrawerProps> = ({
   onClose,
   onOpenSession,
   onAddToast,
+  onDeleteSessions,
 }) => {
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [loading, setLoading] = useState(false);
@@ -55,6 +61,11 @@ export const BotHistoryDrawer: React.FC<BotHistoryDrawerProps> = ({
   const [deleteTarget, setDeleteTarget] = useState<SessionRecord | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [restoringId, setRestoringId] = useState<string | null>(null);
+  // 多选批量删除：勾选后顶部栏一键删除
+  const [multiSelectOn, setMultiSelectOn] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [batchDeleting, setBatchDeleting] = useState(false);
+  const [batchConfirmOpen, setBatchConfirmOpen] = useState(false);
 
   const reload = useCallback(async (botId: string) => {
     setLoading(true);
@@ -76,6 +87,8 @@ export const BotHistoryDrawer: React.FC<BotHistoryDrawerProps> = ({
   useEffect(() => {
     if (isOpen && botId) {
       setDeleteTarget(null);
+      setMultiSelectOn(false);
+      setSelectedIds(new Set());
       void reload(botId);
     }
   }, [isOpen, botId, reload]);
@@ -92,13 +105,82 @@ export const BotHistoryDrawer: React.FC<BotHistoryDrawerProps> = ({
 
   // 与侧边栏「历史话题」同一口径：当前话题之外的全部单聊（含归档），按活跃时间倒序
   const current = botId ? pickCurrentDirectSession(sessions, botId) : undefined;
-  const historySessions = sessions
-    .filter((s) => s.id !== current?.id)
-    .sort(
-      (a, b) =>
-        (new Date(b.lastMessageAt ?? b.updatedAt).getTime() || 0) -
-        (new Date(a.lastMessageAt ?? a.updatedAt).getTime() || 0)
-    );
+  const historySessions = useMemo(
+    () =>
+      sessions
+        .filter((s) => s.id !== current?.id)
+        .sort(
+          (a, b) =>
+            (new Date(b.lastMessageAt ?? b.updatedAt).getTime() || 0) -
+            (new Date(a.lastMessageAt ?? b.updatedAt).getTime() || 0)
+        ),
+    [sessions, current?.id]
+  );
+
+  // 列表变化后丢弃已不可见项的选择，避免误删隐藏项
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const visible = new Set(historySessions.map((s) => s.id));
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [historySessions]);
+
+  const allSelected = historySessions.length > 0 && historySessions.every((s) => selectedIds.has(s.id));
+
+  const toggleSelectAll = () => {
+    setSelectedIds(allSelected ? new Set() : new Set(historySessions.map((s) => s.id)));
+  };
+
+  const toggleSelectOne = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleBatchDelete = async () => {
+    if (selectedIds.size === 0 || !botId) return;
+    setBatchDeleting(true);
+    try {
+      if (onDeleteSessions) {
+        // App 统一执行删除：同步全局会话列表/未读数/当前会话切换，并弹出结果 toast
+        await onDeleteSessions([...selectedIds]);
+      } else {
+        // 兕底：组件内逐个删除（仅同步抽屉本地列表）
+        const deleted: string[] = [];
+        let running = 0;
+        let failed = 0;
+        for (const id of selectedIds) {
+          try {
+            await api.deleteSession(id);
+            deleted.push(id);
+          } catch (err: any) {
+            // 409 = 运行中跳过，其余计入失败（会话数据在 Hub，节点离线不影响删除）
+            if (err?.status === 409) running += 1;
+            else failed += 1;
+          }
+        }
+        if (deleted.length > 0) {
+          const deletedSet = new Set(deleted);
+          setSessions((prev) => prev.filter((s) => !deletedSet.has(s.id)));
+        }
+        const parts = [`已删除 ${deleted.length} 个话题`];
+        if (running > 0) parts.push(`${running} 个运行中已跳过`);
+        if (failed > 0) parts.push(`${failed} 个删除失败`);
+        onAddToast(deleted.length > 0 ? 'success' : 'error', parts.join('，'));
+      }
+    } finally {
+      setBatchDeleting(false);
+      setBatchConfirmOpen(false);
+      setSelectedIds(new Set());
+      // 重新拉取本地列表，反映运行中未删成等情况
+      void reload(botId);
+    }
+  };
 
   const handleRestore = async (session: SessionRecord) => {
     setRestoringId(session.id);
@@ -161,19 +243,69 @@ export const BotHistoryDrawer: React.FC<BotHistoryDrawerProps> = ({
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="关闭"
-            title="关闭 (Esc)"
-            className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            {/* 多选批量删除入口：仅在有话题时展示 */}
+            {historySessions.length > 0 && !loading && !loadError && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMultiSelectOn((v) => !v);
+                  setSelectedIds(new Set());
+                }}
+                aria-pressed={multiSelectOn}
+                title={multiSelectOn ? '退出多选' : '多选删除话题'}
+                className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                  multiSelectOn
+                    ? 'text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40'
+                    : 'text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                }`}
+              >
+                <ListChecks className="w-4 h-4" />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="关闭"
+              title="关闭 (Esc)"
+              className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* 话题列表 */}
         <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5">
+          {/* 多选模式：全选/取消全选 + 批量删除栏 */}
+          {multiSelectOn && historySessions.length > 0 && !loading && !loadError && (
+            <div className="flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl bg-zinc-100/70 dark:bg-zinc-800/60 sticky top-0 z-10">
+              <button
+                type="button"
+                onClick={toggleSelectAll}
+                className="flex items-center gap-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 cursor-pointer"
+              >
+                {allSelected ? (
+                  <CheckSquare className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                ) : (
+                  <Square className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500" />
+                )}
+                <span>{allSelected ? '取消全选' : '全选'}</span>
+              </button>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-zinc-400 dark:text-zinc-500">已选 {selectedIds.size} 项</span>
+                <button
+                  type="button"
+                  onClick={() => setBatchConfirmOpen(true)}
+                  disabled={selectedIds.size === 0 || batchDeleting}
+                  className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors cursor-pointer"
+                >
+                  {batchDeleting ? <Loader2 className="w-3 h-3 animate-spin-fast" /> : <Trash2 className="w-3 h-3" />}
+                  <span>删除</span>
+                </button>
+              </div>
+            </div>
+          )}
           {loading ? (
             <div className="py-16 flex flex-col items-center justify-center gap-2 text-zinc-400 dark:text-zinc-500">
               <Loader2 className="w-5 h-5 animate-spin-fast text-blue-600 dark:text-blue-400" />
@@ -201,6 +333,52 @@ export const BotHistoryDrawer: React.FC<BotHistoryDrawerProps> = ({
           ) : (
             historySessions.map((session) => {
               const relativeTime = formatRelativeTime(session.lastMessageAt ?? session.updatedAt);
+              const checked = selectedIds.has(session.id);
+
+              // 多选模式：整行切换勾选，不触发进入会话
+              if (multiSelectOn) {
+                return (
+                  <div
+                    key={session.id}
+                    role="button"
+                    tabIndex={0}
+                    title={session.title}
+                    onClick={() => toggleSelectOne(session.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        toggleSelectOne(session.id);
+                      }
+                    }}
+                    className={`p-2.5 rounded-xl border transition-colors cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
+                      checked
+                        ? 'bg-blue-50/70 dark:bg-blue-950/30 border-blue-200 dark:border-blue-900/70'
+                        : 'border-zinc-200/80 dark:border-zinc-800/80 hover:bg-zinc-50 dark:hover:bg-zinc-900'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      {checked ? (
+                        <CheckSquare className="w-3.5 h-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
+                      ) : (
+                        <Square className="w-3.5 h-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                      )}
+                      <span className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                        {session.title}
+                      </span>
+                      {relativeTime && (
+                        <span className="ml-auto shrink-0 text-[11px] text-zinc-400 dark:text-zinc-500">
+                          {relativeTime}
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-1 pl-5.5 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                      {session.lastMessagePreview ||
+                        (session.messageCount != null ? `${session.messageCount} 条消息` : '暂无消息')}
+                    </div>
+                  </div>
+                );
+              }
+
               return (
                 <div
                   key={session.id}
@@ -294,6 +472,26 @@ export const BotHistoryDrawer: React.FC<BotHistoryDrawerProps> = ({
         onConfirm={handleDelete}
         onClose={() => {
           if (!deleting) setDeleteTarget(null);
+        }}
+      />
+
+      {/* 批量删除话题二次确认 */}
+      <ConfirmDialog
+        isOpen={batchConfirmOpen}
+        title="批量删除历史话题"
+        message={
+          <>
+            确定要删除已选的 {selectedIds.size} 个话题吗？
+            <br />
+            这些话题的全部历史消息将被永久移除，此操作不可恢复。运行中的话题会被自动跳过。
+          </>
+        }
+        confirmText="全部删除"
+        danger
+        busy={batchDeleting}
+        onConfirm={handleBatchDelete}
+        onClose={() => {
+          if (!batchDeleting) setBatchConfirmOpen(false);
         }}
       />
     </>

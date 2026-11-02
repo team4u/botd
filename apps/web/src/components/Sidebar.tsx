@@ -21,6 +21,9 @@ import {
   ArchiveRestore,
   Bell,
   BellRing,
+  CheckSquare,
+  Square,
+  ListChecks,
 } from 'lucide-react';
 import type { SessionRecord, BotConfig, NodeRecord, PendingAskRecord } from '@botd/protocol';
 import type { MessageSearchHit } from '../api.js';
@@ -43,6 +46,8 @@ interface SidebarProps {
   onOpenSettings: () => void;
   onLogout: () => void;
   onDeleteSession: (id: string) => Promise<void> | void;
+  /** 批量删除会话（历史话题全选删除） */
+  onDeleteSessions?: (ids: string[]) => Promise<void> | void;
   /** sessionId -> 未读消息数（可选，缺省视为全部为 0） */
   unreadCounts?: Record<string, number>;
   /** 置顶/取消置顶会话 */
@@ -294,6 +299,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenSettings,
   onLogout,
   onDeleteSession,
+  onDeleteSessions,
   unreadCounts = {},
   onTogglePinned,
   onSetArchived,
@@ -308,6 +314,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<SessionRecord | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // 历史话题批量选择模式：multiSelectOn 后每项前置勾选框，配合底部批量删除栏
+  const [multiSelectOn, setMultiSelectOn] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [batchDeleting, setBatchDeleting] = useState(false);
+  const [batchConfirmOpen, setBatchConfirmOpen] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState<PendingAskRecord[]>([]);
   const [showApprovals, setShowApprovals] = useState(false);
 
@@ -514,6 +525,55 @@ export const Sidebar: React.FC<SidebarProps> = ({
       setDeleteTarget(null);
     } finally {
       setDeleting(false);
+    }
+  };
+
+  // 进入/退出多选模式：退出时清空选择；搜索过滤变更时丢弃不可见项的选择
+  const toggleMultiSelect = (on?: boolean) => {
+    const next = on ?? !multiSelectOn;
+    setMultiSelectOn(next);
+    if (!next) setSelectedIds(new Set());
+  };
+
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const visible = new Set(historySessions.map((s) => s.id));
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historySessions]);
+
+  const allHistorySelected =
+    historySessions.length > 0 && historySessions.every((s) => selectedIds.has(s.id));
+
+  const toggleSelectAllHistory = () => {
+    if (allHistorySelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(historySessions.map((s) => s.id)));
+    }
+  };
+
+  const toggleSelectOne = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleBatchDelete = async () => {
+    if (selectedIds.size === 0) return;
+    setBatchDeleting(true);
+    try {
+      await onDeleteSessions?.([...selectedIds]);
+      setBatchConfirmOpen(false);
+      toggleMultiSelect(false);
+    } finally {
+      setBatchDeleting(false);
     }
   };
 
@@ -1006,17 +1066,106 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {/* 分区 3：历史话题（归档会话 + 非当前单聊），默认折叠 */}
           {historySessions.length > 0 && (
             <section>
-              <SectionHeader
-                label="历史话题"
-                count={historySessions.length}
-                open={effectiveHistoryOpen}
-                onToggle={() => setHistoryOpen((v) => !v)}
-              />
+              <div className="flex items-center">
+                <SectionHeader
+                  label="历史话题"
+                  count={historySessions.length}
+                  open={effectiveHistoryOpen}
+                  onToggle={() => setHistoryOpen((v) => !v)}
+                />
+                {/* 多选批量删除入口：仅在支持批量删除时展示 */}
+                {onDeleteSessions && (
+                  <button
+                    type="button"
+                    onClick={() => toggleMultiSelect()}
+                    aria-pressed={multiSelectOn}
+                    title={multiSelectOn ? '退出多选' : '多选删除历史话题'}
+                    className={`ml-auto mr-0.5 p-1 rounded-md transition-colors cursor-pointer shrink-0 ${
+                      multiSelectOn
+                        ? 'text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40'
+                        : 'text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                    }`}
+                  >
+                    <ListChecks className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
               {effectiveHistoryOpen && (
                 <div className="space-y-0.5">
+                  {/* 多选模式：全选/取消全选 + 批量删除栏 */}
+                  {multiSelectOn && (
+                    <div className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg bg-zinc-100/70 dark:bg-zinc-800/60">
+                      <button
+                        type="button"
+                        onClick={toggleSelectAllHistory}
+                        className="flex items-center gap-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 cursor-pointer"
+                      >
+                        {allHistorySelected ? (
+                          <CheckSquare className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                        ) : (
+                          <Square className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500" />
+                        )}
+                        <span>{allHistorySelected ? '取消全选' : '全选'}</span>
+                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] text-zinc-400 dark:text-zinc-500">已选 {selectedIds.size} 项</span>
+                        <button
+                          type="button"
+                          onClick={() => setBatchConfirmOpen(true)}
+                          disabled={selectedIds.size === 0}
+                          className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors cursor-pointer"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>删除</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   {historySessions.map((session) => {
                     const isActive = session.id === activeSessionId;
                     const relativeTime = formatRelativeTime(session.lastMessageAt ?? session.updatedAt);
+                    const checked = selectedIds.has(session.id);
+
+                    if (multiSelectOn) {
+                      // 多选模式：整行切换勾选，不触发会话切换
+                      return (
+                        <div
+                          key={session.id}
+                          role="button"
+                          tabIndex={0}
+                          title={session.title}
+                          onClick={() => toggleSelectOne(session.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              toggleSelectOne(session.id);
+                            }
+                          }}
+                          className={`w-full text-left p-2 rounded-xl text-xs transition-all flex items-center gap-2 border cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
+                            checked
+                              ? 'bg-blue-50/70 dark:bg-blue-950/30 border-blue-200 dark:border-blue-900/70'
+                              : 'hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 border-transparent'
+                          }`}
+                        >
+                          {checked ? (
+                            <CheckSquare className="w-3.5 h-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
+                          ) : (
+                            <Square className="w-3.5 h-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                          )}
+                          <Archive
+                            className={`w-3.5 h-3.5 shrink-0 ${
+                              checked ? 'text-zinc-600 dark:text-zinc-300' : 'text-zinc-500 dark:text-zinc-400'
+                            }`}
+                          />
+                          <span className="truncate text-zinc-900 dark:text-zinc-100">{session.title}</span>
+                          {relativeTime && (
+                            <span className="ml-auto shrink-0 text-[11px] text-zinc-400 dark:text-zinc-500">
+                              {relativeTime}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    }
 
                     return (
                       <div
@@ -1191,6 +1340,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
         onConfirm={handleConfirmDelete}
         onClose={() => {
           if (!deleting) setDeleteTarget(null);
+        }}
+      />
+
+      {/* 批量删除历史话题二次确认 */}
+      <ConfirmDialog
+        isOpen={batchConfirmOpen}
+        title="批量删除历史话题"
+        message={
+          <>
+            确定要删除已选的 {selectedIds.size} 个历史话题吗？
+            <br />
+            这些话题的全部历史消息将被永久移除，此操作不可恢复。运行中的话题会被自动跳过。
+          </>
+        }
+        confirmText="全部删除"
+        danger
+        busy={batchDeleting}
+        onConfirm={handleBatchDelete}
+        onClose={() => {
+          if (!batchDeleting) setBatchConfirmOpen(false);
         }}
       />
     </>
