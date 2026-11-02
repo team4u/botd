@@ -327,7 +327,7 @@ export const SubagentRunsPanel: React.FC<{
                         onInspectSubagentRun?.(run);
                       }
                     }}
-                    title="点击查看运行详情与控制（Steer / Resume / 停止）"
+                    title="点击查看运行详情"
                     className="flex-1 min-w-0 cursor-pointer"
                   >
                     <div className="flex items-center gap-1.5 flex-wrap">
@@ -355,9 +355,7 @@ export const SubagentRunsPanel: React.FC<{
                       {run.status === 'stopped' && (
                         <span className="text-[11px] text-zinc-400 dark:text-zinc-500">已停止</span>
                       )}
-                      <span className="ml-auto text-[11px] text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 shrink-0">
-                        详情 / 控制 ▸
-                      </span>
+                      <ChevronRight className="ml-auto w-3.5 h-3.5 text-zinc-300 dark:text-zinc-600 shrink-0" />
                     </div>
 
                     <div className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400 truncate">{run.task}</div>
@@ -1317,7 +1315,7 @@ interface MessageItemProps {
   onStartEdit?: (message: MessageRecord) => void;
   /** 从该消息（含）分叉出新会话并自动切换（MessageItem 不感知 sessionId，由上层闭包绑定） */
   onForkMessage?: (messageId: string) => void | Promise<void>;
-  /** 点击分身运行记录打开右侧详情抽屉（Steer / Resume / 停止控制） */
+  /** 点击分身运行记录打开右侧详情抽屉 */
   onInspectSubagentRun?: (run: SubagentRunRecord) => void;
 }
 

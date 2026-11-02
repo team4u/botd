@@ -84,7 +84,7 @@ export function subagentRunToTimeline(run: SubagentRunRecord): {
       role: 'user',
       content: steer.message,
       mentions: [],
-      senderUsername: steer.mode === 'resume' ? '追问 (Resume)' : '插话纠偏 (Steer)',
+      senderUsername: steer.mode === 'resume' ? '追问' : '插话',
       createdAt: steer.timestamp || startIso,
     });
   }
@@ -199,10 +199,7 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
         subagentId: run.subagentId,
       });
       setInputValue('');
-      onToast(
-        'success',
-        isRunning ? '插话已发送给正在运行的分身 (Steer)' : '已在该分身上下文继续追问 (Resume)'
-      );
+      onToast('success', isRunning ? '插话已发送给分身' : '已在该分身上下文继续追问');
     } catch (err: any) {
       onToast('error', err?.message || '发送失败');
     } finally {
@@ -302,7 +299,7 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
           className="max-w-none px-4"
         />
 
-        {/* 底部控制栏：steer / resume 输入框 */}
+        {/* 底部输入框：运行中发送即插话，结束后发送即继续追问（语义由当前状态自动决定） */}
         <div className="px-4 py-3 border-t border-zinc-200/80 dark:border-zinc-800/80 shrink-0">
           <div className="flex items-center gap-1.5">
             <input
@@ -317,11 +314,7 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
                   void handleSend();
                 }
               }}
-              placeholder={
-                isRunning
-                  ? '向正在运行的分身插话纠偏 (Steer)...'
-                  : '在同一分身上下文继续追问 (Resume)...'
-              }
+              placeholder={isRunning ? '向正在运行的分身插话...' : '继续追问该分身...'}
               aria-label={isRunning ? '向分身插话' : '向分身追问'}
               className="flex-1 min-w-0 h-8 px-2.5 text-xs rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-blue-500 dark:focus:border-blue-400 transition-colors"
             />
@@ -329,22 +322,16 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
               type="button"
               onClick={() => void handleSend()}
               disabled={!inputValue.trim() || sending}
-              className="inline-flex items-center gap-1 h-8 px-3 text-xs font-medium rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors cursor-pointer shrink-0"
-              title={isRunning ? '发送插话 (Steer)' : '发送追问 (Resume)'}
+              className="inline-flex items-center justify-center h-8 w-8 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors cursor-pointer shrink-0"
+              title={isRunning ? '发送插话' : '发送追问'}
             >
               {sending ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin-fast" />
               ) : (
                 <Send className="w-3.5 h-3.5" />
               )}
-              <span>{isRunning ? 'Steer' : 'Resume'}</span>
             </button>
           </div>
-          <p className="mt-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
-            {isRunning
-              ? 'Steer 消息将在分身当前工具执行完后注入其会话；「停止分身」仅停该 runId，不影响主回合。'
-              : 'Resume 在同一分身会话上下文继续追问，结果将更新到本抽屉与消息卡片。'}
-          </p>
         </div>
       </div>
     </>
