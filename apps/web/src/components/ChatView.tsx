@@ -21,12 +21,14 @@ import {
   SquareTerminal,
   ChevronUp,
   Share2,
+  History as HistoryIcon,
 } from 'lucide-react';
 import type {
   SessionRecord,
   MessageRecord,
   BotConfig,
   NodeRecord,
+  NodeWithBots,
   MessageAttachment,
   PendingAskRecord,
   BgJobRecord,
@@ -48,6 +50,8 @@ import { TriggersModal } from './TriggersModal';
 import { ArtifactsDrawer } from './ArtifactsDrawer';
 import { BgJobsDrawer } from './BgJobsDrawer';
 import { ShareSessionModal } from './ShareSessionModal';
+import { BotHistoryDrawer } from './BotHistoryDrawer';
+import { BotEditorModal } from './BotEditorModal';
 import { api } from '../api';
 import { onGlobalEvent } from '../events';
 import { useKeyboardInset } from '../utils/viewport';
@@ -61,6 +65,10 @@ interface ChatViewProps {
   onRetryLoad: () => void;
   botMap: Map<string, BotConfig>;
   nodeMap: Map<string, NodeRecord>;
+  /** 所有计算节点（用于单聊智能体设置） */
+  nodes?: NodeWithBots[];
+  /** 刷新节点与智能体列表 */
+  onRefreshNodes?: () => Promise<void>;
   /** 各 BOT 的流式状态；多个成员同时运行时并排展示。 */
   streamingStates: StreamingAssistantState[];
   /** 各 BOT 当前活跃的分身协同执行轨迹 */
@@ -114,6 +122,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onRetryLoad,
   botMap,
   nodeMap,
+  nodes,
+  onRefreshNodes,
   streamingStates,
   activeSubagentRuns = {},
   onSendMessage,
@@ -232,6 +242,37 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [triggersOpen, setTriggersOpen] = useState(false);
   // 分享对话弹窗开关
   const [shareModalOpen, setShareModalOpen] = useState(false);
+  // 智能体/分身专属历史话题抽屉开关
+  const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
+  // 智能体/分身专属设置弹窗开关
+  const [botEditorOpen, setBotEditorOpen] = useState(false);
+
+  // 单聊对应的目标智能体（主 BOT 或角色分身）
+  const directBot = useMemo<BotConfig | undefined>(() => {
+    if (session.mode !== 'direct') return undefined;
+    return memberBots[0] || (session.leadBotId ? botMap.get(session.leadBotId) : undefined);
+  }, [session.mode, session.leadBotId, memberBots, botMap]);
+
+  const directNode = useMemo<NodeWithBots | null>(() => {
+    if (!directBot) return null;
+    const found = nodes?.find((n) => n.id === directBot.nodeId);
+    if (found) return found;
+    const basicNode = nodeMap.get(directBot.nodeId);
+    if (!basicNode) return null;
+    return {
+      ...basicNode,
+      skills: [],
+      extensions: [],
+      bots: [directBot],
+    };
+  }, [directBot, nodes, nodeMap]);
+
+  const parentBot = useMemo<BotConfig | null>(() => {
+    if (!directBot?.parentBotId) return null;
+    return botMap.get(directBot.parentBotId) || null;
+  }, [directBot, botMap]);
+
+  const isDirectNodeOnline = directNode?.status === 'online';
 
   // 回到底部按钮触发的程序化平滑滚动标记，避免滚动动画的中间位置误触发 userScrolledUp
   const programmaticScrollRef = useRef(false);
@@ -834,10 +875,30 @@ export const ChatView: React.FC<ChatViewProps> = ({
           ) : (
             <div
               className={`flex items-center gap-2 min-w-0 ${
-                session.mode !== 'direct' ? 'cursor-pointer hover:opacity-85 transition-opacity' : ''
+                session.mode !== 'direct'
+                  ? 'cursor-pointer hover:opacity-85 transition-opacity'
+                  : directBot && isDirectNodeOnline
+                  ? 'cursor-pointer hover:opacity-85 transition-opacity'
+                  : ''
               }`}
-              onClick={session.mode !== 'direct' ? onOpenGroupSettings : undefined}
-              title={session.mode !== 'direct' ? '点击查看或修改群设置' : undefined}
+              onClick={
+                session.mode !== 'direct'
+                  ? onOpenGroupSettings
+                  : directBot && isDirectNodeOnline
+                  ? () => setBotEditorOpen(true)
+                  : undefined
+              }
+              title={
+                session.mode !== 'direct'
+                  ? '点击查看或修改群设置'
+                  : directBot
+                  ? isDirectNodeOnline
+                    ? directBot.parentBotId
+                      ? `点击打开分身「${directBot.name}」设置`
+                      : `点击打开智能体「${directBot.name}」设置`
+                    : '节点离线'
+                  : undefined
+              }
             >
               <h2 className="font-semibold text-sm sm:text-base text-zinc-900 dark:text-zinc-100 truncate">
                 {session.title}
@@ -911,6 +972,39 @@ export const ChatView: React.FC<ChatViewProps> = ({
           >
             <MessageSquarePlus className="w-4 h-4" />
           </button>
+
+          {/* 历史话题（单聊专属）：打开当前主 BOT 或分身的历史话题抽屉 */}
+          {directBot && (
+            <button
+              type="button"
+              onClick={() => setHistoryDrawerOpen(true)}
+              className="p-2 rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+              title={`历史话题（${directBot.name}）`}
+              aria-label={`查看 ${directBot.name} 的历史话题`}
+            >
+              <HistoryIcon className="w-4 h-4" />
+            </button>
+          )}
+
+          {/* 智能体/分身设置（单聊专属）：打开自身设置界面 */}
+          {directBot && (
+            <button
+              type="button"
+              onClick={() => setBotEditorOpen(true)}
+              disabled={!isDirectNodeOnline}
+              className="p-2 rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              title={
+                !isDirectNodeOnline
+                  ? '节点离线，无法编辑配置'
+                  : directBot.parentBotId
+                  ? `分身设置（${directBot.name}）`
+                  : `智能体设置（${directBot.name}）`
+              }
+              aria-label={directBot.parentBotId ? '分身设置' : '智能体设置'}
+            >
+              <SettingsIcon className="w-4 h-4" />
+            </button>
+          )}
 
           {/* 📌 群备忘录入口（群聊可见） */}
           {session.mode !== 'direct' && (
@@ -1052,6 +1146,34 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <Share2 className="w-3.5 h-3.5" />
                   <span>分享对话</span>
                 </button>
+
+                {session.mode === 'direct' && directBot && (
+                  <>
+                    <button
+                      role="menuitem"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        setHistoryDrawerOpen(true);
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                    >
+                      <HistoryIcon className="w-3.5 h-3.5" />
+                      <span>历史话题</span>
+                    </button>
+                    <button
+                      role="menuitem"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        setBotEditorOpen(true);
+                      }}
+                      disabled={!isDirectNodeOnline}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <SettingsIcon className="w-3.5 h-3.5" />
+                      <span>{directBot.parentBotId ? '分身设置' : '智能体设置'}</span>
+                    </button>
+                  </>
+                )}
 
                 {session.mode !== 'direct' && (
                   <button
@@ -1641,6 +1763,43 @@ export const ChatView: React.FC<ChatViewProps> = ({
         <ShareSessionModal
           sessionId={session.id}
           onClose={() => setShareModalOpen(false)}
+        />
+      )}
+
+      {/* 单聊专属：当前主 BOT 或分身的历史话题抽屉 */}
+      {directBot && (
+        <BotHistoryDrawer
+          isOpen={historyDrawerOpen}
+          bot={directBot}
+          onClose={() => setHistoryDrawerOpen(false)}
+          onOpenSession={(sid) => {
+            setHistoryDrawerOpen(false);
+            if (onSelectSession) {
+              onSelectSession(sid);
+            } else {
+              window.location.hash = `#?s=${sid}&v=chat`;
+            }
+          }}
+          onAddToast={(type, message) => onAddToast?.(type, message)}
+        />
+      )}
+
+      {/* 单聊专属：当前主 BOT 或分身的设置弹窗 */}
+      {directBot && (
+        <BotEditorModal
+          isOpen={botEditorOpen}
+          node={directNode}
+          bot={directBot}
+          parentBot={parentBot}
+          initialTab="basic"
+          onClose={() => setBotEditorOpen(false)}
+          onSaved={async () => {
+            onAddToast?.(
+              'success',
+              directBot.parentBotId ? '角色分身配置已成功更新' : '智能体配置已成功更新'
+            );
+            await onRefreshNodes?.();
+          }}
         />
       )}
 

@@ -20,6 +20,8 @@ import {
   ArrowUpCircle,
   MessageSquare,
   Sparkles,
+  History as HistoryIcon,
+  Settings,
 } from 'lucide-react';
 import type { NodeWithBots, BotConfig, NodeUpgradeCheckResult } from '@botd/protocol';
 
@@ -27,6 +29,7 @@ import { PairingModal } from './PairingModal';
 import { SkillEditorModal } from './SkillEditorModal';
 import { ExtensionEditorModal } from './ExtensionEditorModal';
 import { BotEditorModal } from './BotEditorModal';
+import { BotHistoryDrawer } from './BotHistoryDrawer';
 import { ConfirmDialog } from './ConfirmDialog';
 import { api } from '../api';
 
@@ -104,6 +107,9 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
   const [selectedBot, setSelectedBot] = useState<BotConfig | null>(null);
   const [selectedParentBot, setSelectedParentBot] = useState<BotConfig | null>(null);
   const [initialBotTab, setInitialBotTab] = useState<'basic' | 'system' | 'memory'>('basic');
+
+  // Bot history drawer state: per-bot archived/past direct sessions
+  const [historyBot, setHistoryBot] = useState<BotConfig | null>(null);
 
   // Deleting bot ID tracking
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
@@ -258,6 +264,13 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
     } catch (err: any) {
       onAddToast('error', err?.message || '发起对话失败');
     }
+  };
+
+  // 历史话题抽屉：点击历史话题直接跳回聊天视图定位该会话
+  const handleOpenHistorySession = (sessionId: string) => {
+    setHistoryBot(null);
+    window.location.hash = `#?s=${sessionId}&v=chat`;
+    onBackToChat();
   };
 
   const handleDeleteBot = async () => {
@@ -881,6 +894,25 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                     </div>
 
                                     <div className="flex items-center gap-1 shrink-0">
+                                      <button
+                                        type="button"
+                                        onClick={() => setHistoryBot(bot)}
+                                        className="p-1.5 text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 dark:text-zinc-500 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
+                                        title="历史话题"
+                                        aria-label={`查看 ${bot.name} 的历史话题`}
+                                      >
+                                        <HistoryIcon className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenEditBot(node, bot, 'basic')}
+                                        disabled={!isOnline}
+                                        className="p-1.5 text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 dark:text-zinc-500 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                                        title={!isOnline ? '节点离线，无法编辑配置' : '智能体设置'}
+                                        aria-label={`设置智能体 ${bot.name}`}
+                                      >
+                                        <Settings className="w-3.5 h-3.5" />
+                                      </button>
                                       {!isOnline && (
                                         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded text-[11px] text-zinc-500 dark:text-zinc-400 shrink-0">
                                           <PowerOff className="w-2.5 h-2.5" />
@@ -952,8 +984,18 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                         className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed"
                                         title={!isOnline ? '节点离线，无法编辑该智能体' : '编辑智能体配置'}
                                       >
-                                        <Edit className="w-3 h-3" />
-                                        <span>配置</span>
+                                        <Settings className="w-3 h-3" />
+                                        <span>设置</span>
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        onClick={() => setHistoryBot(bot)}
+                                        className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 cursor-pointer"
+                                        title="查看历史话题"
+                                      >
+                                        <HistoryIcon className="w-3 h-3" />
+                                        <span>历史</span>
                                       </button>
 
                                       <button
@@ -1035,13 +1077,22 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                                 </button>
                                                 <button
                                                   type="button"
+                                                  onClick={() => setHistoryBot(sub)}
+                                                  className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
+                                                  title="历史话题"
+                                                  aria-label={`分身 ${sub.name} 的历史话题`}
+                                                >
+                                                  <HistoryIcon className="w-3 h-3" />
+                                                </button>
+                                                <button
+                                                  type="button"
                                                   onClick={() => handleOpenEditBot(node, sub, 'basic')}
                                                   disabled={!isOnline}
                                                   className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                                  title={!isOnline ? '节点离线' : '编辑分身配置'}
-                                                  aria-label={`编辑分身 ${sub.name}`}
+                                                  title={!isOnline ? '节点离线' : '分身设置'}
+                                                  aria-label={`分身 ${sub.name} 设置`}
                                                 >
-                                                  <Edit className="w-3 h-3" />
+                                                  <Settings className="w-3 h-3" />
                                                 </button>
                                                 <button
                                                   type="button"
@@ -1115,13 +1166,22 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                                           </button>
                                           <button
                                             type="button"
+                                            onClick={() => setHistoryBot(sub)}
+                                            className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
+                                            title="历史话题"
+                                            aria-label={`分身 ${sub.name} 的历史话题`}
+                                          >
+                                            <HistoryIcon className="w-3 h-3" />
+                                          </button>
+                                          <button
+                                            type="button"
                                             onClick={() => handleOpenEditBot(node, sub, 'basic')}
                                             disabled={!isOnline}
-                                            className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
-                                            title="编辑分身配置"
-                                            aria-label={`编辑分身 ${sub.name}`}
+                                            className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                                            title={!isOnline ? '节点离线' : '分身设置'}
+                                            aria-label={`分身 ${sub.name} 设置`}
                                           >
-                                            <Edit className="w-3 h-3" />
+                                            <Settings className="w-3 h-3" />
                                           </button>
                                           <button
                                             type="button"
@@ -1502,6 +1562,15 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
           );
           await onRefresh();
         }}
+      />
+
+      {/* 单个智能体的历史话题抽屉：数据存于 Hub，节点离线也可查看 */}
+      <BotHistoryDrawer
+        isOpen={historyBot !== null}
+        bot={historyBot}
+        onClose={() => setHistoryBot(null)}
+        onOpenSession={handleOpenHistorySession}
+        onAddToast={onAddToast}
       />
     </div>
   );

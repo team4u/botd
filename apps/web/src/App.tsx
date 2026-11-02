@@ -1421,6 +1421,9 @@ export const App: React.FC = () => {
             onRetryLoad={() => activeSessionId && loadMessagesForSession(activeSessionId, sessionEpochRef.current)}
             botMap={botMap}
             nodeMap={nodeMap}
+            nodes={nodes}
+            onRefreshNodes={handleRefreshNodes}
+            onSelectSession={(id) => navigate({ sessionId: id, view: 'chat' })}
             streamingStates={Object.values(streamingStatesMap)}
             activeSubagentRuns={subagentRunsMap}
             onSendMessage={handleSendMessage}
