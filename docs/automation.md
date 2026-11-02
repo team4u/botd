@@ -95,6 +95,29 @@ botd artifact put ./check-report.md --message '检查报告已生成。'
 
 默认超时为 300 秒。`--timeout 0` 表示无限等待。
 
+### 结构化风险审批卡
+
+涉及高风险变更时，用一行语法糖生成结构化审批卡片：
+
+```bash
+if ! choice=$(botd ask '是否将本次变更发布到生产环境？' \
+  --risk high \
+  --reason '生产数据库 schema 迁移，失败需回滚' \
+  --resource 'prod-db/orders' \
+  --file ./change.patch --diff); then
+  exit 1
+fi
+```
+
+`--risk <low|medium|high>` 会自动渲染一张 Generative UI 确认卡片，包含：
+
+- 风险等级徽章与对应颜色（红 / 黄 / 蓝）的风险提示 Callout，正文为 `--reason`；
+- `--resource` 指定的目标资源（以等宽字体展示）；
+- `--file` / `--stdin` 附带的差异或文件预览（折叠面板，`--diff` 指定差异格式）；
+- 默认「批准 / 拒绝」按钮（可用 `--options` 覆盖）。
+
+不使用 `--json` 时，所选决策（如 `批准`）以纯文本写入 stdout，可直接用 `choice=$(botd ask ... --risk high ...)` 捕获。手写 `--ui` 规格优先于自动生成的卡片。
+
 ### 附上差异或文件预览
 
 准备好尚未应用的补丁文件后，可以发出请求：
@@ -144,7 +167,10 @@ botd sessions delegate "$BOTD_SESSION_ID" \
   --prompt '审查继承的检查报告。列出需要补充的证据。'
 ```
 
-Hub 创建独立子会话，继承父会话的产物引用，在父会话留下入口。子任务完成或失败后，会回报父会话并触发后续处理。
+Hub 创建独立子会话，在父会话留下入口。交付物在父子会话间自动双向零拷贝同步：
+
+- 派生时，父会话的产物以同一存储路径的多行引用同步给子会话（附件落到子会话 Bot 的 `workspace/inbox/`）；
+- 子会话完成后，新产出的交付物以零拷贝引用回传父会话，并自动向父会话回报摘要，触发主控 Bot 汇总。
 
 查看子任务：
 
@@ -152,7 +178,9 @@ Hub 创建独立子会话，继承父会话的产物引用，在父会话留下�
 botd sessions subsessions "$BOTD_SESSION_ID"
 ```
 
-目标 Bot 必须属于调用者。当前委派接口不能直接使用其他用户共享的 Bot。
+目标 Bot 必须属于调用者。当前委派接口不能直接使用其他用户共享的 Bot。子会话事件会向上继承父会话的通知通道配置。
+
+同机的多角色协同（并发盲评、流水线、对抗打磨）不需要子会话：主控 Bot 直接通过内置 `Agent` / `SubagentWorkflow` 工具调度角色分身，详见[用户指南](user-guide.md)。
 
 ## 定时执行与 Webhook
 
@@ -179,7 +207,9 @@ botd triggers create "$BOTD_SESSION_ID" \
   --prompt '检查报告是否已经生成。' --kind once --delay 15m
 ```
 
-### 外部事件
+### 外部事件（Event Inbox 与子会话派发）
+
+最简单的 Webhook 触发器只需要名称、Bot 和提示词：
 
 ```bash
 botd triggers create "$BOTD_SESSION_ID" \
@@ -187,7 +217,33 @@ botd triggers create "$BOTD_SESSION_ID" \
   --prompt '分析收到的构建结果。' --kind webhook
 ```
 
-外部系统向 `POST /api/webhooks/:token` 发送文本或 JSON。令牌来自触发器记录。完整 URL 允许触发任务，应当保密。
+外部系统向 `POST /api/webhooks/:token` 发送文本或 JSON。完整 URL 允许触发任务，应当保密。
+
+在此基础上，自动化触发器提供一组事件原语：
+
+**子会话派发与事件过滤（`--dispatch subsession`）**：
+
+```bash
+botd triggers create "$BOTD_SESSION_ID" \
+  --name 'PR 审查' --bot "$BOTD_BOT_ID" \
+  --prompt '审查 PR 变更并给出结论。' --kind webhook \
+  --dispatch subsession \
+  --skill pr-review \
+  --event-types "pull_request.opened"
+```
+
+- `--dispatch append`（默认）唤醒目标会话；`--dispatch subsession` 为每次事件派生一个干净的子会话执行，主会话只保留派生通知和结果回报，作为自动化运行账本。
+- `--skill <skillId>` 在触发时自动以 `/skill:<id>` 前缀调用指定技能。
+- `--event-types "pull_request.opened,push"` 只接受匹配的事件类型（GitHub 事件自动拼接 action，如 `pull_request.opened`）；不匹配的事件被记录后跳过。
+
+**Event Inbox（事件收件箱）**：
+
+- 每次触发都落库为自动化事件记录，可通过 `GET /api/sessions/:id/automation-events` 查询（含派生的子会话 ID 和载荷产物 ID）。
+- Webhook 原始载荷自动保存为 `event_<id>.json` 产物，投递到目标会话的 `workspace/inbox/`。不可信载荷不直接拼入提示词，防止提示词注入。
+- 去重：`X-Botd-Dedup` 或 `X-GitHub-Delivery` 头作为去重键，内存短窗口 + `automation_events` 唯一索引双重去重，跨 Hub 重启依然生效。
+- 限流：同一 token 最小触发间隔 10 秒，超出返回 `429`；事件过滤不匹配不消耗限流窗口。
+
+子会话派发模式下，Webhook 响应体额外返回 `eventId` 与 `childSessionId`。
 
 管理触发器：
 
@@ -201,7 +257,23 @@ botd triggers list "$BOTD_SESSION_ID"
 botd triggers delete trg_example
 ```
 
-出站通知与入站 Webhook 是不同功能。通知通道把会话事件发送到飞书、Slack、Telegram 或自定义 Webhook，接口见 [API 参考](api.md)。
+### 通知 Outbox 与按需打扰（tellPolicy）
+
+通知通道把会话事件发送到飞书、Slack、Telegram 或自定义 Webhook。通道支持 `tellPolicy` 字段：
+
+| 策略 | 行为 |
+| --- | --- |
+| `always` | 默认，所有订阅事件都推送 |
+| `needed` | 仅在请求人工确认（`ask_request`）或子任务执行失败时推送，日常成功静默 |
+| `never` | 全静默 |
+
+子会话事件自动向上继承父会话的通道配置（同一通道去重，不重复推送）；继承通知附带 `channelSessionId`，便于消费方区分事件源与通道归属。
+
+出站通知先写入持久化 Outbox 再投递：失败按指数退避自动重试，超过上限标记 `dead`；通过 `GET /api/sessions/:id/outbox` 查询近期投递记录与重试状态。`webhook` 类型通道可配置 `secret`，Hub 会以 `X-Botd-Signature: sha256=<hmac>` 头签名请求体。
+
+接口细节见 [API 参考](api.md)。
+
+出站通知与入站 Webhook 是不同功能。
 
 ## 把跑通的流程保存成技能
 
