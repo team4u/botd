@@ -188,7 +188,7 @@ export async function executeBotTurn(
             : '',
           skillContents.length > 0 ? `[框架内置 Skills]\n\n${skillContents.join('\n\n')}` : '',
         ].filter(Boolean),
-      { enableSubagents: !bot.parentBotId },
+      { enableSubagents: !bot.parentBotId, sessionId: input.sessionId },
     );
 
     // --- 6. 回合环境与 shell 工具 ---

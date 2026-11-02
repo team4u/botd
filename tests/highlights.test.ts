@@ -476,8 +476,8 @@ test('skill sync copies a skill between nodes', async t => {
 // --- 7. Builtin skill creator meta-skill ---
 
 test('builtin skill documents the skill creator and botd reload', () => {
-  assert.equal(BUILTIN_SKILL_VERSION, 9, 'version marker bumped to v9');
-  assert.match(BUILTIN_SKILL_MD, /<!-- botd-skill: botd-cli v9 -->/);
+  assert.equal(BUILTIN_SKILL_VERSION, 10, 'version marker bumped to v10');
+  assert.match(BUILTIN_SKILL_MD, /<!-- botd-skill: botd-cli v10 -->/);
   assert.match(BUILTIN_SKILL_MD, /## Subagents/);
   assert.match(BUILTIN_SKILL_MD, /botd bots create reviewer/);
   assert.match(BUILTIN_SKILL_MD, /subagent_type/);

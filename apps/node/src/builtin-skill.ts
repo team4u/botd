@@ -6,7 +6,7 @@ import { readSkill, writeSkill } from './storage.js';
  * survive until the framework ships a newer version.
  */
 export const BUILTIN_SKILL_ID = 'botd-cli';
-export const BUILTIN_SKILL_VERSION = 9;
+export const BUILTIN_SKILL_VERSION = 10;
 const VERSION_MARKER = `<!-- botd-skill: ${BUILTIN_SKILL_ID} v${BUILTIN_SKILL_VERSION} -->`;
 
 export const BUILTIN_SKILL_MD = `${VERSION_MARKER}
@@ -120,6 +120,26 @@ While a subagent runs (or after it finishes), the user may interrupt you mid-tur
 - **Mid-run redirect (steer)**: call \`steer_subagent\` with \`agent_id\` + \`message\`. The message is injected into the running subagent's conversation after its current tool execution.
 - **Continue a finished subagent (resume)**: call \`Agent\` again with \`resume: "<agent_id>"\` and the follow-up \`prompt\` — it reuses the SAME subagent context (no re-explaining needed).
 - When the user sends a new message while you are waiting on a foreground \`Agent\` call, the blocked wait is released automatically and the subagent keeps running in the background — read the user's new message and use the tools above as needed.
+
+## Cross-Bot Orchestration (跨主 BOT 协同编排)
+
+Two delegation levels, pick by target:
+- **Same workspace subagents** (your own role subagents): use the \`Agent\` / \`SubagentWorkflow\` tools — they share your workspace and memory.
+- **Other primary BOTs** (across nodes, or isolated workspace/env/memory): use the \`delegate_bot\` tool — the task runs in an isolated sub-session with zero-copy artifact sharing; delegate to \`@<botId>\` of any primary BOT that is not your own subagent.
+
+### Using \`delegate_bot\`
+
+- **Inline wait (default)**: omit \`run_in_background\` (or set \`false\`) and pass \`bot_id\`, \`prompt\`, optional \`title\` / \`artifact_ids\` / \`timeout_seconds\`. The call waits for the sub-session to finish and returns its reply plus any returned artifacts. Emit multiple \`delegate_bot\` calls in the same assistant turn to run several BOTs in parallel.
+- **Background (long tasks)**: set \`run_in_background: true\`. The sub-session runs autonomously; the parent session is woken up automatically once all active sub-sessions finish (all-settled barrier).
+- If the user sends a new message while you wait inline, the wait is released and the sub-session keeps running in the background — same handoff semantics as the \`Agent\` tool.
+
+### Using the CLI
+
+\`\`\`bash
+botd sessions delegate "$BOTD_SESSION_ID" --bot <botId> --prompt "<task>" [--wait 300] [--artifacts art_1,art_2]
+\`\`\`
+
+\`--wait <seconds>\` blocks until the sub-session finishes and prints its reply (plus returned artifacts); without it the command returns immediately after creating the sub-session. \`--artifacts\` restricts which session artifacts are shared (default: all).
 
 ## Generative UI (Dynamic Cards, Interactive Forms & Concept Deep-Dives)
 
