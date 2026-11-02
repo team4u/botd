@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { X, Bot, Loader2 } from 'lucide-react';
 import type { BotConfig, SessionMode, CreateSessionInput } from '@botd/protocol';
 import { CheckList } from './CheckList.js';
+import { MemberOptionRow, SelectedMembersChips, orderBotsAsTree } from './GroupMemberPicker.js';
 
 export interface CreateSessionDraft {
   groupTitle: string;
@@ -186,6 +187,14 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
     }
   }, [isOpen, bots]);
 
+  // 树序：主 BOT 保持原序，其分身紧随其后；供勾选列表与 chips 共用
+  const treeOrderedBots = React.useMemo(() => orderBotsAsTree(bots), [bots]);
+  // 已选成员（含锁定的主持人），按树序展示
+  const selectedMemberBots = React.useMemo(() => {
+    const ids = new Set([...groupMemberBotIds, ...(groupLeadBotId ? [groupLeadBotId] : [])]);
+    return treeOrderedBots.filter((bot) => ids.has(bot.id));
+  }, [treeOrderedBots, groupMemberBotIds, groupLeadBotId]);
+
   if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -314,58 +323,29 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
                 </p>
               </div>
 
-              {/* 成员勾选列表 */}
+              {/* 成员勾选列表：树序（主 BOT 后跟其分身），行视觉与 @ 提及下拉一致 */}
               <CheckList
                 label="参会成员"
                 countUnit="个"
                 emptyText="暂无可选成员"
-                options={bots.map((bot) => ({ id: bot.id, data: bot }))}
+                options={treeOrderedBots.map((bot) => ({ id: bot.id, data: bot }))}
                 selected={groupMemberBotIds}
                 onChange={setGroupMemberBotIds}
                 lockedIds={groupLeadBotId ? [groupLeadBotId] : []}
                 getAriaLabel={(bot: BotConfig) => `选择成员 ${bot.name}`}
-                renderItem={(bot: BotConfig, checked: boolean) => {
-                  const node = nodeMap.get(bot.nodeId);
-                  const isLead = bot.id === groupLeadBotId;
-                  const isSelected = checked || isLead || groupMemberBotIds.includes(bot.id);
-                  return (
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 min-w-0 flex-1">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <div className="min-w-0">
-                          <span className="font-semibold text-xs mr-1 truncate text-zinc-900 dark:text-zinc-100">{bot.name}</span>
-                          <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500">@{bot.id}</span>
-                          {isLead && (
-                            <span className="ml-1.5 px-1.5 py-0.2 bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 text-[11px] font-semibold rounded shrink-0">
-                              主持人
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        {isSelected && (
-                          <input
-                            type="text"
-                            value={memberRoles[bot.id] || ''}
-                            onClick={(e) => e.stopPropagation()}
-                            onKeyDown={(e) => e.stopPropagation()}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setMemberRoles((prev) => ({ ...prev, [bot.id]: val }));
-                            }}
-                            placeholder="本群头衔 (如: 初稿主笔 / 挑刺审稿)"
-                            className="h-7 px-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-amber-500 w-44 sm:w-52"
-                          />
-                        )}
-                        <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0">
-                          {node && <span className="hidden sm:inline">{node.name}</span>}
-                          <span className="font-mono bg-zinc-100 dark:bg-zinc-800 px-1 py-0.2 rounded text-zinc-500 dark:text-zinc-400">
-                            {bot.modelId}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                }}
+                renderItem={(bot: BotConfig) => (
+                  <MemberOptionRow bot={bot} nodeMap={nodeMap} isLead={bot.id === groupLeadBotId} />
+                )}
+              />
+
+              {/* 已选成员 chips：点击 chip 展开头衔编辑，头衔不进列表行 */}
+              <SelectedMembersChips
+                bots={selectedMemberBots}
+                roles={memberRoles}
+                onRoleChange={(botId, role) =>
+                  setMemberRoles((prev) => ({ ...prev, [botId]: role }))
+                }
+                leadBotId={groupLeadBotId}
               />
 
               {/* 📌 群备忘录 (Shared Blackboard) */}
