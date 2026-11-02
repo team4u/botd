@@ -385,34 +385,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return unsubscribe;
   }, [session.id]);
 
-  // ===== 消息日期分隔线 =====
-  // 相邻消息 createdAt 跨自然日时插入分隔条：今天/昨天/M月D日（同年省略年份，跨年带年份）
-  const dayLabel = (iso: string): string => {
-    const d = new Date(iso);
-    const now = new Date();
-    const sameCalendarDay = (a: Date, b: Date) =>
-      a.getFullYear() === b.getFullYear() &&
-      a.getMonth() === b.getMonth() &&
-      a.getDate() === b.getDate();
-    const yesterday = new Date(now);
-    yesterday.setDate(now.getDate() - 1);
-    if (sameCalendarDay(d, now)) return '今天';
-    if (sameCalendarDay(d, yesterday)) return '昨天';
-    const sameYear = d.getFullYear() === now.getFullYear();
-    return sameYear
-      ? `${d.getMonth() + 1}月${d.getDate()}日`
-      : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
-  };
-  const sameDay = (a: string, b: string): boolean => {
-    const da = new Date(a);
-    const db = new Date(b);
-    return (
-      da.getFullYear() === db.getFullYear() &&
-      da.getMonth() === db.getMonth() &&
-      da.getDate() === db.getDate()
-    );
-  };
-
   // 自动滚动到底部
   const scrollToBottom = (smooth = true) => {
     if (userScrolledUp) return;
@@ -1123,32 +1095,25 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </div>
             )}
 
-            {messages.map((msg, idx) => (
-              <React.Fragment key={msg.id}>
-                {/* 日期分隔线：相邻消息跨自然日时插入（只做视觉分组，不动数据） */}
-                {(idx === 0 || !sameDay(messages[idx - 1].createdAt, msg.createdAt)) && (
-                  <div className="sticky top-0 z-[5] mx-auto my-2 w-fit px-2.5 py-0.5 rounded-full bg-zinc-100/90 dark:bg-zinc-800/90 text-[11px] text-zinc-500 backdrop-blur-sm">
-                    {dayLabel(msg.createdAt)}
-                  </div>
-                )}
-                <div
-                  className={
-                    highlightedId === msg.id
-                      ? 'rounded-2xl ring-2 ring-blue-400/60 bg-blue-50/50 dark:bg-blue-500/5 transition-colors duration-500'
-                      : 'transition-colors duration-500'
-                  }
-                >
-                  <MemoizedMessageItem
-                    message={msg}
-                    botMap={botMap}
-                    nodeMap={nodeMap}
-                    canEdit={canEdit}
-                    isEditing={editingMessage?.id === msg.id}
-                    onStartEdit={startEdit}
-                    onForkMessage={handleForkMessage}
-                  />
-                </div>
-              </React.Fragment>
+            {messages.map((msg) => (
+              <div
+                key={msg.id}
+                className={
+                  highlightedId === msg.id
+                    ? 'rounded-2xl ring-2 ring-blue-400/60 bg-blue-50/50 dark:bg-blue-500/5 transition-colors duration-500'
+                    : 'transition-colors duration-500'
+                }
+              >
+                <MemoizedMessageItem
+                  message={msg}
+                  botMap={botMap}
+                  nodeMap={nodeMap}
+                  canEdit={canEdit}
+                  isEditing={editingMessage?.id === msg.id}
+                  onStartEdit={startEdit}
+                  onForkMessage={handleForkMessage}
+                />
+              </div>
             ))}
 
             {/* 多 BOT 并发流式（并行盲评）：网格并排展示，互不覆盖；单 BOT 保持平铺风格 */}
