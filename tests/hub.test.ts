@@ -146,7 +146,7 @@ async function fixture(t: TestContext) {
     await rpc.registerNode({ nodeId: identity.nodeId, name: 'Test node', platform: 'linux', bots, skills: ['demo'], extensions });
     return { identity, bots, socket, rpc, files, authCalls, resetCalls };
   };
-  const session = (ids: string[], mode = 'lead') => json<SessionRecord>('/api/sessions', 'POST', { title: 'Test session', mode, leadBotId: ids[0], memberBotIds: ids });
+  const session = (ids: string[], mode = 'direct') => json<SessionRecord>('/api/sessions', 'POST', { title: 'Test session', mode: 'direct', leadBotId: ids[0], memberBotIds: [ids[0]] });
   const messages = (id: string) => json<MessageRecord[]>(`/api/sessions/${id}/messages`);
   const idle = async (id: string) => waitFor(() => json<SessionRecord[]>('/api/sessions'), list => list.find(s => s.id === id)?.status !== 'running');
   return { hub, base, request, json, addNode, session, messages, idle, cookie: () => cookie, loginAs, forUser };
@@ -296,18 +296,21 @@ test('lead routing, cross-node @relay, public incremental context and SSE', asyn
   assert.equal(calls.at(-1)!.incrementalMessages.includes('Investigate the issue'), false);
 });
 
-test('lead mode order with workflow directive and bounded recursive @relay', async t => {
+test('order with prose mentions and bounded recursive @relay', async t => {
   const f = await fixture(t);
   const calls: string[] = [];
   let relay = false;
   await f.addNode(['lead', 'a', 'b'], async input => {
     calls.push(input.botId);
     if (input.botId === 'lead' && !relay) {
-      return { replyText: 'Lead dispatching -> @a -> @b', modelBadge: 'test/model' };
+      return { replyText: 'Lead dispatching @a', modelBadge: 'test/model' };
+    }
+    if (input.botId === 'a' && !relay) {
+      return { replyText: 'Next @b', modelBadge: 'test/model' };
     }
     return { replyText: relay ? `next @${input.botId === 'a' ? 'b' : 'a'}` : 'A conclusion.', modelBadge: 'test/model' };
   });
-  const session = await f.session(['lead', 'a', 'b'], 'lead');
+  const session = await f.session(['lead', 'a', 'b']);
   await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: 'Discuss' });
   await waitFor(() => f.messages(session.id), list => list.filter(m => m.role === 'assistant').length === 3);
   await f.idle(session.id);
@@ -672,7 +675,7 @@ test('command routing, execution and path compatibility', async t => {
     return { replyText: `Done by ${input.botId}`, modelBadge: 'openai/test-model' };
   });
 
-  const session = await f.session(['lead', 'coder', 'reviewer'], 'lead');
+  const session = await f.session(['lead', 'coder', 'reviewer']);
 
   // 1. Direct slash command -> lead, commandText passed, filtered from incrementalMessages
   await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: '/review focus on tests' });
@@ -709,8 +712,8 @@ test('command routing, execution and path compatibility', async t => {
   assert.equal(calls[0].commandText, undefined);
   assert(calls[0].incrementalMessages.includes('/tmp/report.md please inspect'));
 
-  // 6. Lead mode: slash command only routes to lead (no broadcast)
-  const rtSession = await f.session(['lead', 'coder', 'reviewer'], 'lead');
+  // 6. Direct mode: slash command routes to lead
+  const rtSession = await f.session(['lead', 'coder', 'reviewer']);
   calls.length = 0;
   await f.json(`/api/sessions/${rtSession.id}/messages`, 'POST', { content: '/skill:calc 2 + 2' });
   await f.idle(rtSession.id);
@@ -718,7 +721,7 @@ test('command routing, execution and path compatibility', async t => {
   assert.equal(calls[0].botId, 'lead');
   assert.equal(calls[0].commandText, '/skill:calc 2 + 2');
 
-  // 7. Normal messages in lead mode route to lead only
+  // 7. Normal messages route to lead only when no mentions
   calls.length = 0;
   await f.json(`/api/sessions/${rtSession.id}/messages`, 'POST', { content: 'Lead discussion topic' });
   await f.idle(rtSession.id);

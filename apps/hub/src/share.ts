@@ -216,8 +216,6 @@ export function registerShareRoutes(
         mode: session.mode,
         leadBotId: session.leadBotId,
         memberBotIds: session.memberBotIds,
-        ...(session.memberRoles ? { memberRoles: session.memberRoles } : {}),
-        ...(session.blackboard ? { blackboard: session.blackboard } : {}),
         createdAt: session.createdAt,
         updatedAt: session.updatedAt,
       },

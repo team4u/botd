@@ -32,7 +32,6 @@ import type {
   MessageAttachment,
   PendingAskRecord,
   BgJobRecord,
-  CreateSessionInput,
   SubagentRunRecord,
 } from '@botd/protocol';
 import type { StreamingAssistantState } from '../types';
@@ -76,7 +75,6 @@ interface ChatViewProps {
   onSendMessage: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
   onEditMessage: (sessionId: string, messageId: string, content: string) => Promise<void>;
   onCancelSession: () => Promise<void>;
-  onOpenGroupSettings: () => void;
   onToggleSidebar: () => void;
   onRenameSession: (sessionId: string, title: string) => Promise<void> | void;
   onClearMessages: (sessionId: string) => Promise<void> | void;
@@ -93,11 +91,6 @@ interface ChatViewProps {
   onRespondToAsk?: (sessionId: string, askId: string, answer: string) => Promise<void>;
   /** 全局 toast 通知（供弹窗内部使用） */
   onAddToast?: (type: ToastItem['type'], message: string) => void;
-  /** 更新会话配置（如黑板/头衔） */
-  onUpdateSession?: (
-    sessionId: string,
-    input: Partial<CreateSessionInput> & { memberRoles?: Record<string, string>; blackboard?: string }
-  ) => Promise<void>;
   /** 跳转/打开指定智能体的单聊 */
   onOpenBotChat?: (bot: BotConfig) => void;
   /** 点击分身运行记录跳转对应独立会话 */
@@ -131,7 +124,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onSendMessage,
   onEditMessage,
   onCancelSession,
-  onOpenGroupSettings,
   onToggleSidebar,
   onRenameSession,
   onClearMessages,
@@ -143,7 +135,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
   pendingAsks = [],
   onRespondToAsk,
   onAddToast,
-  onUpdateSession,
   onOpenBotChat,
   onSelectSession,
   hasEarlierMessages = false,
@@ -154,12 +145,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
   const keyboardInset = useKeyboardInset();
-
-  // 📌 群备忘录面板展开与编辑状态
-  const [blackboardOpen, setBlackboardOpen] = useState(false);
-  const [blackboardEditing, setBlackboardEditing] = useState(false);
-  const [blackboardDraft, setBlackboardDraft] = useState('');
-  const [savingBlackboard, setSavingBlackboard] = useState(false);
 
   // 临时点名下拉菜单状态
   const [appendDropdownOpen, setAppendDropdownOpen] = useState(false);
@@ -587,8 +572,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setConfirmAction(null);
     setEditingMessage(null);
     setTriggersOpen(false);
-    setBlackboardOpen(false);
-    setBlackboardEditing(false);
     setAppendDropdownOpen(false);
   }, [session.id]);
 
@@ -878,23 +861,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
           ) : (
             <div
               className={`flex items-center gap-2 min-w-0 ${
-                session.mode !== 'direct'
-                  ? 'cursor-pointer hover:opacity-85 transition-opacity'
-                  : directBot && isDirectNodeOnline
+                directBot && isDirectNodeOnline
                   ? 'cursor-pointer hover:opacity-85 transition-opacity'
                   : ''
               }`}
               onClick={
-                session.mode !== 'direct'
-                  ? onOpenGroupSettings
-                  : directBot && isDirectNodeOnline
+                directBot && isDirectNodeOnline
                   ? () => setBotEditorOpen(true)
                   : undefined
               }
               title={
-                session.mode !== 'direct'
-                  ? '点击查看或修改群设置'
-                  : directBot
+                directBot
                   ? isDirectNodeOnline
                     ? directBot.parentBotId
                       ? `点击打开分身「${directBot.name}」设置`
@@ -1006,48 +983,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
               aria-label={directBot.parentBotId ? '分身设置' : '智能体设置'}
             >
               <SettingsIcon className="w-4 h-4" />
-            </button>
-          )}
-
-          {/* 群设置（群聊模式下直接外显设置图标） */}
-          {session.mode !== 'direct' && (
-            <button
-              type="button"
-              onClick={onOpenGroupSettings}
-              className="p-2 rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-              title="群设置"
-              aria-label="群设置"
-            >
-              <SettingsIcon className="w-4 h-4" />
-            </button>
-          )}
-
-          {/* 📌 群备忘录入口（群聊可见） */}
-          {session.mode !== 'direct' && (
-            <button
-              type="button"
-              onClick={() => {
-                setBlackboardOpen((v) => !v);
-                if (!blackboardOpen) {
-                  setBlackboardDraft(session.blackboard || '');
-                  setBlackboardEditing(false);
-                }
-              }}
-              className={`h-8 px-2.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 ${
-                blackboardOpen
-                  ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800'
-                  : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800'
-              }`}
-              title="群备忘录 / 共享黑板"
-              aria-label="群备忘录"
-            >
-              <span>📌 群备忘录</span>
-              {Boolean(session.blackboard?.trim()) && (
-                <span
-                  className="w-1.5 h-1.5 rounded-full bg-indigo-500 shrink-0"
-                  aria-hidden="true"
-                />
-              )}
             </button>
           )}
 
@@ -1179,93 +1114,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         </div>
       </header>
-
-      {/* 📌 群聊备忘录 (Shared Blackboard) 折叠面板 */}
-      {blackboardOpen && session.mode !== 'direct' && (
-        <div className="mx-3 sm:mx-4 mt-2 px-3 py-2 bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200/80 dark:border-indigo-900/60 rounded-lg text-xs shrink-0 animate-in fade-in">
-          <div className="flex items-center justify-between gap-2 mb-1.5">
-            <div className="flex items-center gap-1.5 text-indigo-900 dark:text-indigo-200 font-medium">
-              <span>📌</span>
-              <span>群聊备忘录 (Shared Blackboard)</span>
-              <span className="text-[11px] text-indigo-600/70 dark:text-indigo-400/70 font-normal">
-                置顶注入上下文的共识与约束
-              </span>
-            </div>
-            <div className="flex items-center gap-1">
-              {!blackboardEditing ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setBlackboardDraft(session.blackboard || '');
-                    setBlackboardEditing(true);
-                  }}
-                  className="h-6 px-2 text-[11px] font-medium rounded-md text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 transition-colors cursor-pointer"
-                >
-                  编辑
-                </button>
-              ) : (
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    disabled={savingBlackboard}
-                    onClick={async () => {
-                      setSavingBlackboard(true);
-                      try {
-                        await onUpdateSession?.(session.id, { blackboard: blackboardDraft });
-                        setBlackboardEditing(false);
-                      } catch {
-                        // error handled by onUpdateSession toast
-                      } finally {
-                        setSavingBlackboard(false);
-                      }
-                    }}
-                    className="h-6 px-2 text-[11px] font-medium rounded-md bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors cursor-pointer flex items-center gap-1"
-                  >
-                    {savingBlackboard ? <Loader2 className="w-3 h-3 animate-spin-fast" /> : null}
-                    <span>保存</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={savingBlackboard}
-                    onClick={() => setBlackboardEditing(false)}
-                    className="h-6 px-2 text-[11px] font-medium rounded-md text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-                  >
-                    取消
-                  </button>
-                </div>
-              )}
-              <button
-                type="button"
-                onClick={() => setBlackboardOpen(false)}
-                className="p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 rounded-md transition-colors cursor-pointer"
-                aria-label="关闭备忘录"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
-
-          {blackboardEditing ? (
-            <textarea
-              value={blackboardDraft}
-              onChange={(e) => setBlackboardDraft(e.target.value)}
-              placeholder="记录本群长期共识、全局约定、当前阶段目标（将作为系统提示注入后续各 BOT 上下文）..."
-              rows={3}
-              className="w-full p-2.5 text-xs rounded-lg border border-indigo-200 dark:border-indigo-800 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-y leading-relaxed"
-            />
-          ) : (
-            <div className="text-zinc-700 dark:text-zinc-300 leading-relaxed break-words whitespace-pre-wrap max-h-48 overflow-y-auto">
-              {session.blackboard?.trim() ? (
-                session.blackboard
-              ) : (
-                <span className="text-zinc-400 dark:text-zinc-500 italic">
-                  暂未记录备忘录。点击右上角「编辑」添加群共识与约束。
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* 子任务委派状态条 */}
       {subSessions.length > 0 && (
@@ -1434,7 +1282,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   message={msg}
                   botMap={botMap}
                   nodeMap={nodeMap}
-                  memberRoles={session.memberRoles}
                   canEdit={canEdit}
                   isEditing={editingMessage?.id === msg.id}
                   onStartEdit={startEdit}
@@ -1576,8 +1423,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     const stageLabel = stage.parallel
                       ? `(@${stage.botIds.join(', @')})`
                       : `@${stage.botIds[0] || '?'}`;
-                    const loopPrefix = stage.loopGroupId ? '🔄 ' : '';
-                    const whisperPrefix = stage.whisper ? '🤫 ' : '';
 
                     return (
                       <React.Fragment key={stage.id || idx}>
@@ -1585,7 +1430,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                           <span className="text-zinc-300 dark:text-zinc-600 shrink-0">──▸</span>
                         )}
                         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded text-[11px] text-zinc-700 dark:text-zinc-300 shrink-0 font-mono">
-                          <span>⏳ {loopPrefix}{whisperPrefix}{stageLabel}</span>
+                          <span>⏳ {stageLabel}</span>
                           <button
                             type="button"
                             onClick={() => handleSkipStage(stage.id, stage.botIds[0])}
@@ -1641,7 +1486,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
       <ChatInput
         sessionId={session.id}
         leadBotId={session.leadBotId}
-        sessionMode={session.mode}
         isSubagentSession={false}
         botMap={botMap}
         onSendMessage={onSendMessage}

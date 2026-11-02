@@ -126,39 +126,24 @@ test('1. POST/PATCH 跨 user 拒绝', async (t) => {
   }, adminCookie);
   assert.equal(post1.status, 403);
 
-  // 1b: POST with members containing other user bot -> 403
+  // 1b: POST with non-direct mode -> 400
   const post2 = await ctx.jsonRequest('/api/sessions', 'POST', {
-    title: 'Cross member',
-    mode: 'lead',
+    title: 'Invalid mode',
+    mode: 'lead' as any,
     leadBotId: 'bot_admin',
-    memberBotIds: ['bot_admin', 'bot_user2'],
+    memberBotIds: ['bot_admin'],
   }, adminCookie);
-  assert.equal(post2.status, 403);
-
-  // 1c: Direct mode with multiple members -> 400
-  const postDirect = await ctx.jsonRequest('/api/sessions', 'POST', {
-    title: 'Direct invalid cardinality',
-    mode: 'direct',
-    leadBotId: 'bot_admin',
-    memberBotIds: ['bot_admin', 'bot_admin_2'],
-  }, adminCookie);
-  assert.equal(postDirect.status, 400);
+  assert.equal(post2.status, 400);
 
   // 1d: Valid session creation by admin
   const postValid = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Admin Session',
-    mode: 'lead',
+    mode: 'direct',
     leadBotId: 'bot_admin',
-    memberBotIds: ['bot_admin', 'bot_admin_2'],
+    memberBotIds: ['bot_admin'],
   }, adminCookie);
   assert.equal(postValid.status, 200);
   const sessionId = postValid.json.id;
-
-  // 1e: userAdmin attempts PATCH to add bot_user2 to members -> 403
-  const patch1 = await ctx.jsonRequest(`/api/sessions/${sessionId}`, 'PATCH', {
-    memberBotIds: ['bot_admin', 'bot_admin_2', 'bot_user2'],
-  }, adminCookie);
-  assert.equal(patch1.status, 403);
 
   // 1f: userAdmin attempts PATCH to set lead to bot_user2 -> 403
   const patch2 = await ctx.jsonRequest(`/api/sessions/${sessionId}`, 'PATCH', {
@@ -318,23 +303,31 @@ test('3. 离线 clear 保留 pending mark，下一 runTurn 前 reset 成功才 r
   assert.equal(sRunTurnCalled, true);
   assert.equal(ctx.hub.db.hasPendingSessionReset(sId, 'bot_s'), false);
 
-  // --- Part 2: Parallel mode (Workflow stage) ---
-  const pRes = await ctx.jsonRequest('/api/sessions', 'POST', {
-    title: 'Parallel Reset Test',
-    mode: 'lead',
-    leadBotId: 'bot_lead',
-    memberBotIds: ['bot_p1', 'bot_p2', 'bot_lead'],
+  // --- Part 2: Offline clear & reset failure vs success ---
+  const p1Res = await ctx.jsonRequest('/api/sessions', 'POST', {
+    title: 'Reset Fail Test',
+    mode: 'direct',
+    leadBotId: 'bot_p1',
+    memberBotIds: ['bot_p1'],
   }, cookie);
-  const pId = pRes.json.id;
+  const p1Id = p1Res.json.id;
+
+  const p2Res = await ctx.jsonRequest('/api/sessions', 'POST', {
+    title: 'Reset Success Test',
+    mode: 'direct',
+    leadBotId: 'bot_p2',
+    memberBotIds: ['bot_p2'],
+  }, cookie);
+  const p2Id = p2Res.json.id;
 
   // Offline clear
   ctx.mockRpcs.delete('node_p1');
   ctx.mockRpcs.delete('node_p2');
-  ctx.mockRpcs.delete('node_lead');
-  await ctx.jsonRequest(`/api/sessions/${pId}/messages`, 'DELETE', undefined, cookie);
+  await ctx.jsonRequest(`/api/sessions/${p1Id}/messages`, 'DELETE', undefined, cookie);
+  await ctx.jsonRequest(`/api/sessions/${p2Id}/messages`, 'DELETE', undefined, cookie);
 
-  assert.equal(ctx.hub.db.hasPendingSessionReset(pId, 'bot_p1'), true);
-  assert.equal(ctx.hub.db.hasPendingSessionReset(pId, 'bot_p2'), true);
+  assert.equal(ctx.hub.db.hasPendingSessionReset(p1Id, 'bot_p1'), true);
+  assert.equal(ctx.hub.db.hasPendingSessionReset(p2Id, 'bot_p2'), true);
 
   // Online: p1 fails reset, p2 succeeds reset
   let p1RunTurnCalled = false;
@@ -347,12 +340,9 @@ test('3. 离线 clear 保留 pending mark，下一 runTurn 前 reset 成功才 r
     resetSession: async () => {},
     runTurn: async () => { p2RunTurnCalled = true; return { replyText: 'p2', modelBadge: 'b' }; },
   });
-  ctx.mockRpcs.set('node_lead', {
-    resetSession: async () => {},
-    runTurn: async () => ({ replyText: 'lead summary', modelBadge: 'b' }),
-  });
 
-  await ctx.jsonRequest(`/api/sessions/${pId}/messages`, 'POST', { content: '(@bot_p1 @bot_p2) -> @bot_lead parallel question' }, cookie);
+  await ctx.jsonRequest(`/api/sessions/${p1Id}/messages`, 'POST', { content: 'question for p1' }, cookie);
+  await ctx.jsonRequest(`/api/sessions/${p2Id}/messages`, 'POST', { content: 'question for p2' }, cookie);
   await new Promise((r) => setTimeout(r, 120));
 
   assert.equal(p1RunTurnCalled, false);
@@ -395,9 +385,9 @@ test('5. remove 成员后 trigger disabled/webhook 403/直接 handleWakeup 拒�
 
   const sRes = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Trigger Remove Test',
-    mode: 'lead',
-    leadBotId: 'bot_lead',
-    memberBotIds: ['bot_lead', 'bot_stay', 'bot_rem'],
+    mode: 'direct',
+    leadBotId: 'bot_rem',
+    memberBotIds: ['bot_rem'],
   }, cookie);
   const sessionId = sRes.json.id;
 
@@ -415,9 +405,9 @@ test('5. remove 成员后 trigger disabled/webhook 403/直接 handleWakeup 拒�
   let trgInDb = ctx.hub.db.getTrigger(triggerId)!;
   assert.equal(trgInDb.enabled, true);
 
-  // Remove bot_rem from session members via PATCH
+  // Remove bot_rem by changing lead to bot_stay via PATCH
   const patchRes = await ctx.jsonRequest(`/api/sessions/${sessionId}`, 'PATCH', {
-    memberBotIds: ['bot_lead', 'bot_stay'],
+    leadBotId: 'bot_stay',
   }, cookie);
   assert.equal(patchRes.status, 200);
 
@@ -442,7 +432,7 @@ test('5. remove 成员后 trigger disabled/webhook 403/直接 handleWakeup 拒�
 
   // 4. Scheduling stage filter: canRunBot is false
   assert.equal(ctx.hub.router.canRunBot(sessionId, 'bot_rem'), false);
-  assert.equal(ctx.hub.router.canRunBot(sessionId, 'bot_lead'), true);
+  assert.equal(ctx.hub.router.canRunBot(sessionId, 'bot_stay'), true);
 });
 
 test('6. reset 异步中被取消/再次 clear 时老 reset 完成不能抹掉新的 pending 或 run 旧 task', async (t) => {

@@ -112,7 +112,14 @@ export class ArtifactService {
           throw new ArtifactError(`Forbidden: bot ${botId} does not belong to user`, 403);
         }
       }
-      const isMember = session.memberBotIds.includes(botId) || session.leadBotId === botId;
+      // 会话成员本身，或其所属主 Bot（角色分身/Subagent）为会话成员/主持人均可上传
+      const isMember =
+        session.memberBotIds.includes(botId) ||
+        session.leadBotId === botId ||
+        Boolean(
+          bot.parentBotId &&
+            (session.memberBotIds.includes(bot.parentBotId) || session.leadBotId === bot.parentBotId)
+        );
       if (!isMember) {
         throw new ArtifactError(`Forbidden: bot ${botId} is not a member of session ${input.sessionId}`, 403);
       }

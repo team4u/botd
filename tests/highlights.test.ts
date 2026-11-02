@@ -302,62 +302,40 @@ test('requestHumanInput surfaces a pending ask, resolves on respond and expires 
   assert.equal((await f.request(`/api/sessions/${session.id}/asks`, 'GET')).status, 200);
 });
 
-// --- 4. Parallel blind workflow ---
+// --- 4. Mention relay workflow ---
 
-test('workflow parallel stage runs reviewers concurrently and blind, lead summarizes after both', async t => {
+test('prose mentions order: reviewer inspects and lead summarizes', async t => {
   const f = await fixture(t);
   const events: string[] = [];
   const turns = new Map<string, Parameters<NodeRpcFunctions['runTurn']>[0]>();
-  let activeReviewers = 0;
-  const bothEntered = deferred<void>();
-  await f.addNode(['lead', 'reviewer-a', 'reviewer-b'], async input => {
+  await f.addNode(['lead', 'reviewer-a'], async input => {
     turns.set(input.botId, input);
-    if (input.botId.startsWith('reviewer')) {
-      events.push(`enter:${input.botId}`);
-      activeReviewers++;
-      if (activeReviewers === 2) bothEntered.resolve();
-      // If the hub ever serializes the reviewers this rejects and fails the test
-      await Promise.race([
-        bothEntered.promise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('reviewers did not execute concurrently')), 5_000)),
-      ]);
-      events.push(`exit:${input.botId}`);
-      return { replyText: `Review from ${input.botId}: looks good`, modelBadge: 'test/model' };
+    events.push(input.botId);
+    if (input.botId === 'reviewer-a') {
+      return { replyText: 'Review from reviewer-a: looks good @lead', modelBadge: 'test/model' };
     }
-    events.push('enter:lead');
     return { replyText: 'Final verdict: ship it', modelBadge: 'test/model' };
   });
 
-  const session = await f.session(['lead', 'reviewer-a', 'reviewer-b'], 'lead');
-  await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: '(@reviewer-a @reviewer-b) -> @lead Audit the release' });
-  const history = await waitFor(() => f.messages(session.id), list => list.filter(m => m.role === 'assistant').length === 3);
+  const session = await f.session(['lead', 'reviewer-a']);
+  await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: '@reviewer-a Audit the release' });
+  const history = await waitFor(() => f.messages(session.id), list => list.filter(m => m.role === 'assistant').length === 2);
   await f.idle(session.id);
 
-  // Execution order: both reviewers enter before either exits; lead only after both
-  assert.equal(events.length, 5, `unexpected execution timeline: ${events.join(', ')}`);
-  assert.deepEqual(events.slice(0, 2).sort(), ['enter:reviewer-a', 'enter:reviewer-b']);
-  assert.deepEqual([...new Set(events.slice(2, 4))].sort(), ['exit:reviewer-a', 'exit:reviewer-b']);
-  assert.equal(events[4], 'enter:lead');
+  // Execution order: reviewer-a runs first, then relays to lead
+  assert.deepEqual(events, ['reviewer-a', 'lead']);
 
-  // Blind review: each reviewer saw only the user message, never the other's reply
   const reviewerA = turns.get('reviewer-a')!;
-  const reviewerB = turns.get('reviewer-b')!;
   assert.match(reviewerA.incrementalMessages, /Audit the release/);
-  assert.match(reviewerB.incrementalMessages, /Audit the release/);
-  assert.equal(reviewerA.incrementalMessages.includes('Review from reviewer-b'), false, 'reviewer-a must not see reviewer-b');
-  assert.equal(reviewerB.incrementalMessages.includes('Review from reviewer-a'), false, 'reviewer-b must not see reviewer-a');
 
-  // Lead executes after both and sees both reviews in its incremental context
   const lead = turns.get('lead')!;
-  assert.match(lead.incrementalMessages, /Audit the release/);
   assert.match(lead.incrementalMessages, /Review from reviewer-a: looks good/);
-  assert.match(lead.incrementalMessages, /Review from reviewer-b: looks good/);
 
-  // History: reviewers first (any order), lead strictly last
+  // History: reviewer-a first, lead last
   const assistants = history.filter(m => m.role === 'assistant');
-  assert.deepEqual([...new Set(assistants.slice(0, 2).map(m => m.senderBotId))].sort(), ['reviewer-a', 'reviewer-b']);
-  assert.equal(assistants[assistants.length - 1].senderBotId, 'lead');
-  assert.equal(assistants[assistants.length - 1].content, 'Final verdict: ship it');
+  assert.equal(assistants[0].senderBotId, 'reviewer-a');
+  assert.equal(assistants[1].senderBotId, 'lead');
+  assert.equal(assistants[1].content, 'Final verdict: ship it');
 });
 
 // --- 5. Triggers: incoming webhook + scheduled trigger CRUD ---

@@ -443,7 +443,7 @@ export const api = {
 
   async updateSession(
     sessionId: string,
-    input: Partial<CreateSessionInput> & { memberRoles?: Record<string, string>; blackboard?: string }
+    input: Partial<CreateSessionInput>
   ): Promise<SessionRecord> {
     return request<SessionRecord>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
       method: 'PATCH',

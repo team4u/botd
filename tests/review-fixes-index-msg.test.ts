@@ -179,12 +179,12 @@ test('Fix 2 & 4 — D3: multi-user message stores clean content and structured s
     resetSession: async () => {},
   });
 
-  // UserA creates a lead-mode group session
+  // UserA creates a session
   const sessionRes = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Multi User Collab Session',
-    mode: 'lead',
+    mode: 'direct',
     leadBotId: 'lead_bot',
-    memberBotIds: ['lead_bot', 'worker_bot'],
+    memberBotIds: ['lead_bot'],
   }, ctx.adminCookie);
   assert.equal(sessionRes.status, 200);
   const session: SessionRecord = sessionRes.json;

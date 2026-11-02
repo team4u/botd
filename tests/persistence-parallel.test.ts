@@ -267,10 +267,8 @@ test('并行工作流执行时，session_status SSE 事件携带完整 activeBot
     updatedAt: new Date().toISOString(),
   }));
 
-  const entered = new Set<string>();
-  const bothReviewersEntered = deferred<void>();
-  const allowReviewer1Finish = deferred<void>();
-  const allowReviewer2Finish = deferred<void>();
+  const turnEntered = deferred<void>();
+  const allowTurnFinish = deferred<void>();
 
   const socket = new WebSocket(`${base.replace('http:', 'ws:')}/ws/node?nodeId=${identity.nodeId}&token=${identity.token}`);
   sockets.push(socket);
@@ -291,19 +289,9 @@ test('并行工作流执行时，session_status SSE 事件携带完整 activeBot
       deleteResource: async () => {},
       restartDaemon: async () => ({ ok: true, pid: 1234 }),
       getCommands: async () => [],
-      runTurn: async (input) => {
-        if (input.botId === 'agent-reviewer-1') {
-          entered.add('agent-reviewer-1');
-          if (entered.has('agent-reviewer-2')) bothReviewersEntered.resolve();
-          await allowReviewer1Finish.promise;
-          return { replyText: 'Review from reviewer 1', modelBadge: 'model/r1' };
-        }
-        if (input.botId === 'agent-reviewer-2') {
-          entered.add('agent-reviewer-2');
-          if (entered.has('agent-reviewer-1')) bothReviewersEntered.resolve();
-          await allowReviewer2Finish.promise;
-          return { replyText: 'Review from reviewer 2', modelBadge: 'model/r2' };
-        }
+      runTurn: async () => {
+        turnEntered.resolve();
+        await allowTurnFinish.promise;
         return { replyText: 'Summary from lead judge', modelBadge: 'model/lead' };
       },
       cancelTurn: async () => {},
@@ -328,12 +316,12 @@ test('并行工作流执行时，session_status SSE 事件携带完整 activeBot
     extensions: [],
   });
 
-  // 创建并行工作流会话
+  // 创建单主控会话
   const session = await json<SessionRecord>('/api/sessions', 'POST', {
-    title: 'Parallel Workflow Session',
-    mode: 'lead',
+    title: 'Workflow Session',
+    mode: 'direct',
     leadBotId: 'lead-judge',
-    memberBotIds: ['lead-judge', 'agent-reviewer-1', 'agent-reviewer-2'],
+    memberBotIds: ['lead-judge'],
   });
 
   // 监听会话 SSE 事件流
@@ -372,22 +360,22 @@ test('并行工作流执行时，session_status SSE 事件携带完整 activeBot
 
   // 发送触发消息
   await json(`/api/sessions/${session.id}/messages`, 'POST', {
-    content: '(@agent-reviewer-1 @agent-reviewer-2) -> @lead-judge Start parallel evaluation now',
+    content: 'Start evaluation now',
   });
 
-  // 等待两位评审员同时处于活跃推理中
-  await bothReviewersEntered.promise;
+  // 等待进入活跃推理
+  await turnEntered.promise;
 
-  // 1. 验证 SSE 收到 activeBotIds 包含两位并发评审员的 session_status 事件
-  const parallelStatusEvent = await waitFor(
+  // 1. 验证 SSE 收到 activeBotIds 包含当前活跃 BOT 的 session_status 事件
+  const statusEvent = await waitFor(
     () => sseEvents.filter((e): e is Extract<SessionSseEvent, { type: 'session_status' }> => e.type === 'session_status'),
-    (list) => list.some((e) => e.status === 'running' && Array.isArray(e.activeBotIds) && e.activeBotIds.length === 2)
+    (list) => list.some((e) => e.status === 'running' && Array.isArray(e.activeBotIds) && e.activeBotIds.length === 1)
   );
-  const initialRunningEvent = parallelStatusEvent.find((e) => e.status === 'running' && e.activeBotIds?.length === 2)!;
+  const initialRunningEvent = statusEvent.find((e) => e.status === 'running' && e.activeBotIds?.length === 1)!;
   assert.deepEqual(
-    [...(initialRunningEvent.activeBotIds || [])].sort(),
-    ['agent-reviewer-1', 'agent-reviewer-2'].sort(),
-    '并发启动时广播携带全部 activeBotIds'
+    initialRunningEvent.activeBotIds,
+    ['lead-judge'],
+    '启动时广播携带 activeBotIds'
   );
 
   // 2. 验证 GET /api/sessions 返回运行中的会话附加了 activeBotIds
@@ -396,22 +384,13 @@ test('并行工作流执行时，session_status SSE 事件携带完整 activeBot
   assert(runningSession, '列表必须包含当前会话');
   assert.equal(runningSession.status, 'running');
   assert.deepEqual(
-    [...(runningSession.activeBotIds || [])].sort(),
-    ['agent-reviewer-1', 'agent-reviewer-2'].sort(),
+    runningSession.activeBotIds,
+    ['lead-judge'],
     'GET /api/sessions 对 running 状态会话附加 activeBotIds'
   );
 
-  // 3. 放行 reviewer 1 完成：此时 reviewer 2 仍在运行，验证广播更新后的 activeBotIds（仅剩 reviewer 2）
-  allowReviewer1Finish.resolve();
-
-  const partialStatusEvent = await waitFor(
-    () => sseEvents.filter((e): e is Extract<SessionSseEvent, { type: 'session_status' }> => e.type === 'session_status'),
-    (list) => list.some((e) => e.status === 'running' && e.activeBotIds?.length === 1 && e.activeBotIds[0] === 'agent-reviewer-2')
-  );
-  assert(partialStatusEvent.length > 0, '某个成员完成后广播剩余 activeBotIds');
-
-  // 4. 放行 reviewer 2 完成，Lead 完成总结，会话回到 idle 广播 activeBotIds: []
-  allowReviewer2Finish.resolve();
+  // 3. 放行完成，会话回到 idle 广播 activeBotIds: []
+  allowTurnFinish.resolve();
 
   await waitFor(
     () => sseEvents.filter((e): e is Extract<SessionSseEvent, { type: 'session_status' }> => e.type === 'session_status'),
@@ -421,5 +400,5 @@ test('并行工作流执行时，session_status SSE 事件携带完整 activeBot
   // 最终会话消息完整
   const messages = await json<any[]>(`/api/sessions/${session.id}/messages`);
   const assistantMessages = messages.filter((m) => m.role === 'assistant');
-  assert.equal(assistantMessages.length, 3, '包含两位评审与 Lead 的总结');
+  assert.equal(assistantMessages.length, 1, '包含助手回复');
 });

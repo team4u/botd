@@ -41,8 +41,6 @@ export interface QueueItem {
   parallelGroupId?: string;
   replyToBotId?: string;
   stageId?: string;
-  loopGroupId?: string;
-  whisperTargetBotIds?: string[];
   dispatchedByBotId?: string;
 }
 
@@ -144,182 +142,6 @@ export function extractMentions(text: string, validBotIds: Set<string>): string[
   return result;
 }
 
-export function extractBotRoutingDirective(text: string): { directive: string; plan: string } | null {
-  const lines = text.trimEnd().split('\n');
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    const match = line.match(/^(?:->|ROUTE:)\s*(.*)$/);
-    if (match) {
-      return {
-        directive: line,
-        plan: match[1].trim(),
-      };
-    }
-    break;
-  }
-  return null;
-}
-
-export function parseOrchestrationPlan(
-  plan: string,
-  validBotIds: Set<string>,
-  session: SessionRecord,
-  options?: {
-    chainBudget?: ChainBudget;
-    generation?: number;
-    dispatchedByBotId?: string;
-  }
-): QueueItem[] {
-  const trimmed = plan.trim();
-  if (!trimmed || trimmed === '@none' || trimmed.startsWith('@none')) return [];
-
-  // Split by -> but not <->
-  const rawStages = trimmed.split(/(?<!<)->/).map((s) => s.trim()).filter(Boolean);
-  if (rawStages.length === 0) return [];
-
-  const items: QueueItem[] = [];
-  const generation = options?.generation ?? 0;
-  const chainBudget = options?.chainBudget ?? new ChainBudget(MAX_RELAY_TURNS);
-
-  for (const rawStage of rawStages) {
-    const stageId = `stage_${randomUUID()}`;
-
-    // 1. Check for @all
-    if (rawStage === '@all') {
-      const nonLeadMembers = session.memberBotIds.filter((id) => id !== session.leadBotId && validBotIds.has(id));
-      if (nonLeadMembers.length > 0) {
-        const parallelGroupId = `pg_${randomUUID()}`;
-        for (const botId of nonLeadMembers) {
-          items.push({
-            botId,
-            chainBudget,
-            generation,
-            parallelGroupId,
-            stageId,
-            ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
-          });
-        }
-      }
-      if (validBotIds.has(session.leadBotId)) {
-        items.push({
-          botId: session.leadBotId,
-          chainBudget,
-          generation,
-          stageId: `stage_${randomUUID()}`,
-          ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
-        });
-      }
-      continue;
-    }
-
-    // 2. Parallel group: (@botA @botB ...)
-    const parenMatch = rawStage.match(/^\(([^)]+)\)$/);
-    if (parenMatch) {
-      const inner = parenMatch[1];
-      const botMentions = extractMentions(inner, validBotIds);
-      if (botMentions.length > 0) {
-        const parallelGroupId = `pg_${randomUUID()}`;
-        for (const botId of botMentions) {
-          items.push({
-            botId,
-            chainBudget,
-            generation,
-            parallelGroupId,
-            stageId,
-            ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
-          });
-        }
-      }
-      continue;
-    }
-
-    // 3. Maker-Checker loop: @botA <-> @botB [* N]
-    if (rawStage.includes('<->')) {
-      const parts = rawStage.split('<->').map((p) => p.trim());
-      if (parts.length >= 2) {
-        const botAMentions = extractMentions(parts[0], validBotIds);
-        let roundCount = 2;
-        const starMatch = parts[1].match(/\*\s*(\d+)/);
-        if (starMatch) {
-          roundCount = Math.min(Math.max(1, parseInt(starMatch[1], 10) || 2), 4);
-        }
-        const botBMentions = extractMentions(parts[1].replace(/\*\s*\d+/, ''), validBotIds);
-
-        const botA = botAMentions[0];
-        const botB = botBMentions[0];
-        if (botA && botB) {
-          const loopGroupId = `loop_${randomUUID()}`;
-          for (let r = 0; r < roundCount; r++) {
-            items.push({
-              botId: botA,
-              chainBudget,
-              generation,
-              loopGroupId,
-              stageId,
-              ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
-            });
-            items.push({
-              botId: botB,
-              chainBudget,
-              generation,
-              loopGroupId,
-              stageId,
-              ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
-            });
-          }
-        }
-      }
-      continue;
-    }
-
-    // 4. Whisper sub-thread: @botA >> @botB
-    if (rawStage.includes('>>')) {
-      const parts = rawStage.split('>>').map((p) => p.trim());
-      if (parts.length >= 2) {
-        const botAMentions = extractMentions(parts[0], validBotIds);
-        const botBMentions = extractMentions(parts[1], validBotIds);
-        const botA = botAMentions[0];
-        const botB = botBMentions[0];
-        if (botA && botB) {
-          const whisperTargetBotIds = [botA, botB];
-          items.push({
-            botId: botA,
-            chainBudget,
-            generation,
-            whisperTargetBotIds,
-            stageId,
-            ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
-          });
-          items.push({
-            botId: botB,
-            chainBudget,
-            generation,
-            whisperTargetBotIds,
-            stageId,
-            ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
-          });
-        }
-      }
-      continue;
-    }
-
-    // 5. Single or multiple serial mentions
-    const botMentions = extractMentions(rawStage, validBotIds);
-    for (const botId of botMentions) {
-      items.push({
-        botId,
-        chainBudget,
-        generation,
-        stageId,
-        ...(options?.dispatchedByBotId ? { dispatchedByBotId: options.dispatchedByBotId } : {}),
-      });
-    }
-  }
-
-  return items;
-}
-
 export function formatIncrementalMessages(messages: MessageRecord[]): string {
   return messages
     .map((msg) => {
@@ -335,27 +157,17 @@ export function buildGroupContextPrompt(
   currentBotId?: string
 ): string {
   let prompt = '';
-  if (session.blackboard && session.blackboard.trim().length > 0) {
-    prompt += `## 📌 群备忘录 (Shared Blackboard)\n${session.blackboard.trim()}\n\n`;
-  }
-  const members = session.memberBotIds.map((id) => `@${id}`).join(', ');
-  prompt += `## 群聊上下文\n- 会话标题: ${session.title}\n- 会话模式: ${session.mode}\n- 群负责人: @${session.leadBotId}\n- 参与成员: ${members}\n`;
+  prompt += `## 会话上下文\n- 会话标题: ${session.title}\n- 主控 Bot: @${session.leadBotId}\n`;
 
   if (db) {
-    prompt += '\n### 成员列表与角色\n';
+    prompt += '\n### 成员信息\n';
     const allMemberIds = [session.leadBotId, ...session.memberBotIds.filter((id) => id !== session.leadBotId)];
     for (const memberId of allMemberIds) {
       const bot = db.getBot(memberId);
-      const role = session.memberRoles?.[memberId];
-      const roleStr = role ? ` | 本群头衔: 【${role}】` : '';
       const desc = bot?.description ? ` - ${bot.description}` : '';
       const skills = bot?.enabledSkills?.length ? ` (技能: ${bot.enabledSkills.join(', ')})` : '';
-      prompt += `- @${memberId} (${bot?.name || memberId}${roleStr})${desc}${skills}\n`;
+      prompt += `- @${memberId} (${bot?.name || memberId})${desc}${skills}\n`;
     }
-  }
-
-  if (currentBotId && session.memberRoles?.[currentBotId]) {
-    prompt += `\n🎭 你在本群的专属头衔/角色是：【${session.memberRoles[currentBotId]}】，请严格代入该视角发言。\n`;
   }
 
   // 分身感知：主 BOT 始终注入分身引导与规范，让主 BOT 知道如何调度与创建分身
@@ -377,7 +189,7 @@ export function buildGroupContextPrompt(
       }
       prompt +=
         '【调度分身规范】：\n' +
-        '1. 调度你麾下的分身时，请直接调用 `Agent` 工具（`subagent_type` 填分身 id，传入 `run_in_background: false`；在同一轮回复中同时发出多个 `Agent` 工具调用即可原生并发执行并在本回合汇总结果），或使用 `SubagentWorkflow` 工具编排多阶段流水线。不要在文本末尾用 `@分身` 或 `->` 编排指令去调你自己的分身。\n' +
+        '1. 调度你麾下的分身时，请直接调用 `Agent` 工具（`subagent_type` 填分身 id，传入 `run_in_background: false`；在同一轮回复中同时发出多个 `Agent` 工具调用即可原生并发执行并在本回合汇总结果），或使用 `SubagentWorkflow` 工具编排多阶段流水线。不要在文本末尾用 `@分身` 呼叫你自己的分身。\n' +
         '2. 默认情况下分身与你共享同一个主工作空间目录（不传 `isolation`）；仅当需要多个分身并发修改同一个 Git 仓库代码、或用户明确要求在独立分支/worktree 试验时，才在调用 `Agent` / `SubagentWorkflow` 时传入 `isolation: "worktree"`。\n' +
         '3. 如需新建更多分身或修改分身配置，可在 bash 中运行：`botd bots create <subId> --node "$BOTD_NODE_ID" --parent "$BOTD_BOT_ID" --name "<名称>" --desc "<职责>" --tool-scope <all|readonly> --system-file -`（创建后同一回合即可立即通过 `Agent` 工具调用）。\n';
     } else {
@@ -387,25 +199,7 @@ export function buildGroupContextPrompt(
     }
   }
 
-  if (session.mode === 'lead') {
-    prompt += `\n你当前处于 Lead 群聊模式。群负责人（@${session.leadBotId}）负责协调对话。如需交由其他成员发言，请在回复中使用 @<botId> 呼叫对方。`;
-  } else {
-    prompt += `\n你当前处于单聊模式。`;
-  }
-
-  const isLead = currentBotId === session.leadBotId;
-  if (session.mode !== 'direct' && isLead) {
-    prompt +=
-      `\n\n### 群聊跨 BOT 编排指令与共享黑板说明\n` +
-      `在群聊中，如需调度群内其他成员 BOT 接力发言，可在回复尾部输出单行编排指令（注意：调度你自己的分身请直接用 Agent 工具，跨成员发言才用 -> 指令）：\n` +
-      `- 并行聚合: \`-> (@botA @botB) -> @${session.leadBotId}\`\n` +
-      `- 串行流水线: \`-> @botA -> @botB -> @${session.leadBotId}\`\n` +
-      `- 双人对抗/审查循环: \`-> @botA <-> @botB -> @${session.leadBotId}\` (或 \`*N\` 次循环)\n` +
-      `- 私密子线程耳语: \`-> @botA >> @botB -> @${session.leadBotId}\`\n` +
-      `- 终止唤醒: \`-> @none\`\n` +
-      `如需更新共享备忘录，请在回复中包含如下代码块：\n` +
-      `\`\`\`blackboard\n[最新共识/进展/待办]\n\`\`\``;
-  }
+  prompt += `\n你当前处于单聊模式。`;
 
   return prompt;
 }
@@ -490,11 +284,7 @@ export class GroupRouter {
     const sessionMembers = [session.leadBotId, ...session.memberBotIds];
     if (sessionMembers.includes(botId)) return true;
     if (bot.parentBotId && sessionMembers.includes(bot.parentBotId)) return true;
-    // 单聊中允许 owner 随手 @ 自己可用的具他 BOT/分身接力；
-    // 群聊严格按成员资格（被移出群即失去运行权）
-    if (session.mode !== 'direct') return false;
-    const ownerId = this.getSessionOwner(sessionId, session);
-    return ownerId !== undefined && this.db.canUserUseBot(botId, ownerId);
+    return false;
   }
 
   getValidBotIds(session: SessionRecord): Set<string> {
@@ -532,8 +322,6 @@ export class GroupRouter {
         const pId = item.parallelGroupId;
         const botIds: string[] = [];
         const stageId = item.stageId || pId;
-        const loopGroupId = item.loopGroupId;
-        const whisper = Boolean(item.whisperTargetBotIds && item.whisperTargetBotIds.length > 0);
         while (i < state.queue.length && state.queue[i].parallelGroupId === pId) {
           botIds.push(state.queue[i].botId);
           i++;
@@ -542,15 +330,11 @@ export class GroupRouter {
           id: stageId,
           botIds,
           parallel: true,
-          ...(loopGroupId ? { loopGroupId } : {}),
-          ...(whisper ? { whisper } : {}),
         });
       } else {
         stages.push({
           id: item.stageId || `stage_${i}_${item.botId}`,
           botIds: [item.botId],
-          ...(item.loopGroupId ? { loopGroupId: item.loopGroupId } : {}),
-          ...(item.whisperTargetBotIds && item.whisperTargetBotIds.length > 0 ? { whisper: true } : {}),
         });
         i++;
       }
@@ -587,12 +371,16 @@ export class GroupRouter {
     if (!session) return [];
     const state = this.getOrCreateState(sessionId);
     const validBotIds = this.getValidBotIds(session);
-    const compiled = parseOrchestrationPlan(orchestration, validBotIds, session, {
-      chainBudget: new ChainBudget(MAX_RELAY_TURNS),
-      generation: state.generation,
-    });
-    if (compiled.length > 0) {
-      state.queue.push(...compiled);
+    const mentions = extractMentions(orchestration, validBotIds);
+    const botIds = mentions.length > 0 ? mentions : validBotIds.has(orchestration.trim()) ? [orchestration.trim()] : [];
+    const chainBudget = new ChainBudget(MAX_RELAY_TURNS);
+    for (const botId of botIds) {
+      state.queue.push({
+        botId,
+        chainBudget,
+        generation: state.generation,
+        stageId: `stage_${randomUUID()}`,
+      });
     }
     const queuePlan = this.getQueuePlan(sessionId);
     this.sseHub.broadcast(sessionId, {
@@ -914,21 +702,6 @@ export class GroupRouter {
       const target = parsedCommand.targetBotId ?? session.leadBotId;
       botIdsToQueue = [target];
     } else {
-      // Check if content has workflow DSL operators: ->, <->, >>, @all, or parenthesized parallel (@a @b)
-      const hasWorkflow = /(?<!<)->|<->|>>|@all|\([@\w\s-]+\)/.test(content);
-      if (hasWorkflow) {
-        const compiled = parseOrchestrationPlan(content, validBotIds, session, {
-          chainBudget: new ChainBudget(MAX_RELAY_TURNS),
-          generation: state.generation,
-        });
-        if (compiled.length > 0) {
-          this.db.updateMessageOrchestrationPlan(messageId, content.trim());
-          state.queue.push(...compiled);
-          this.processQueue(sessionId).catch(() => {});
-          return;
-        }
-      }
-
       const mentions = extractMentions(content, validBotIds);
       if (mentions.length > 0) {
         botIdsToQueue = mentions;
@@ -1117,15 +890,6 @@ export class GroupRouter {
       const msg = r.message;
       if (msg.role === 'assistant' && msg.senderBotId === item.botId) return false;
       if (item.commandMessageId && msg.id === item.commandMessageId) return false;
-      if (msg.whisperTargetBotIds && msg.whisperTargetBotIds.length > 0) {
-        if (
-          item.botId !== session.leadBotId &&
-          msg.senderBotId !== item.botId &&
-          !msg.whisperTargetBotIds.includes(item.botId)
-        ) {
-          return false;
-        }
-      }
       return true;
     });
     const incrementalText = formatIncrementalMessages(incResult.map((r) => r.message));
@@ -1370,29 +1134,10 @@ export class GroupRouter {
       }
       return 'cancelled';
     }
-    const bbMatch = turnResult.replyText.match(/```blackboard[^\n]*\r?\n([\s\S]*?)```/);
-    if (bbMatch) {
-      const blackboard = bbMatch[1].trim();
-      this.db.updateSession(sessionId, { blackboard });
-      this.sseHub.broadcast(sessionId, {
-        type: 'session_updated',
-        sessionId,
-        blackboard,
-      });
-    }
 
-    // 2. Loop pruning on [LGTM] or [PASS]
-    if (item.loopGroupId && (turnResult.replyText.includes('[LGTM]') || turnResult.replyText.includes('[PASS]'))) {
-      state.queue = state.queue.filter((q) => q.loopGroupId !== item.loopGroupId);
-    }
-
-    // 3. Pass check
+    // Pass check
     const trimmedReply = turnResult.replyText.trim();
     const isPass = trimmedReply === '[PASS]' || trimmedReply.startsWith('[PASS]');
-
-    // 4. Trailing routing directive
-    const routingDirective = extractBotRoutingDirective(turnResult.replyText);
-    const orchestrationPlan = routingDirective?.directive;
 
     const replyMentions = extractMentions(turnResult.replyText, validBotIds).filter((id) => id !== item.botId);
     const maxRowidBeforeInsert = this.db.getMaxMessageRowid(sessionId);
@@ -1415,10 +1160,6 @@ export class GroupRouter {
       modelBadge: turnResult.modelBadge,
       content: turnResult.replyText,
       mentions: replyMentions,
-      ...(item.whisperTargetBotIds && item.whisperTargetBotIds.length > 0
-        ? { whisperTargetBotIds: item.whisperTargetBotIds }
-        : {}),
-      ...(orchestrationPlan ? { orchestrationPlan } : {}),
       ...(allSubagentRuns.length > 0 ? { subagentRuns: allSubagentRuns } : {}),
       toolCalls: turnResult.toolCalls,
       blocks: turnResult.blocks,
@@ -1457,28 +1198,8 @@ export class GroupRouter {
       }
     }
 
-    if (routingDirective) {
-      if (routingDirective.plan !== '@none' && !routingDirective.plan.startsWith('@none')) {
-        if (item.botId === session.leadBotId) {
-          item.chainBudget = new ChainBudget(8);
-        }
-        const compiled = parseOrchestrationPlan(routingDirective.plan, validBotIds, session, {
-          chainBudget: item.chainBudget,
-          generation: state.generation,
-          dispatchedByBotId: item.botId,
-        });
-        while (compiled.length > 0 && !compiled[0].parallelGroupId && compiled[0].botId === item.botId) {
-          compiled.shift();
-        }
-        for (const nextItem of compiled) {
-          if (item.chainBudget.consumeRelay()) {
-            state.queue.push(nextItem);
-          }
-        }
-      }
-      // Explicit directive suppresses prose @mentions
-    } else if (!isPass) {
-      // 5. Fallback prose @mentions
+    if (!isPass) {
+      // Fallback prose @mentions
       if (item.replyToBotId && !replyMentions.includes(item.replyToBotId)) {
         if (item.chainBudget.consumeRelay()) {
           state.queue.push({

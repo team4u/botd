@@ -131,7 +131,7 @@ test('1 Node = 1 Primary Bot: POST /api/bots enforces single primary bot per nod
   assert.match(promoteSubagent.json.error, /该节点已有主 BOT/);
 });
 
-test('Session validation: rejects roundtable mode and enforces lead mode >=2 members and subagent parent presence', async (t) => {
+test('Session validation: rejects non-direct mode and validates lead bot', async (t) => {
   const ctx = await createTestContext(t);
 
   ctx.hub.db.createNode({
@@ -164,77 +164,43 @@ test('Session validation: rejects roundtable mode and enforces lead mode >=2 mem
     enabledSkills: [],
     updatedAt: new Date().toISOString(),
   });
-  ctx.hub.db.saveBot({
-    id: 'bot_other',
-    nodeId: 'node_beta',
-    parentBotId: 'bot_lead',
-    name: 'Other',
-    description: '',
-    modelProvider: 'openai',
-    modelId: 'gpt-4o',
-    enabledSkills: [],
-    updatedAt: new Date().toISOString(),
-  });
 
   // 1. Creating session with mode 'roundtable' is rejected with 400
   const rtRes = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Roundtable Attempt',
     mode: 'roundtable',
     leadBotId: 'bot_lead',
-    memberBotIds: ['bot_lead', 'bot_sub'],
+    memberBotIds: ['bot_lead'],
   });
   assert.equal(rtRes.status, 400);
   assert.equal(rtRes.json.error, 'Invalid session mode');
 
-  // 2. Creating lead mode session with < 2 members is rejected with 400
-  const singleRes = await ctx.jsonRequest('/api/sessions', 'POST', {
-    title: 'Lead Single Attempt',
+  // 2. Creating lead mode session is rejected with 400
+  const leadRes = await ctx.jsonRequest('/api/sessions', 'POST', {
+    title: 'Lead Attempt',
     mode: 'lead',
     leadBotId: 'bot_lead',
     memberBotIds: ['bot_lead'],
   });
-  assert.equal(singleRes.status, 400);
-  assert.match(singleRes.json.error, /Lead mode requires at least 2 members/);
+  assert.equal(leadRes.status, 400);
+  assert.equal(leadRes.json.error, 'Invalid session mode');
 
-  // 3. Creating lead mode session with subagent whose parent is present succeeds
-  const validLead = await ctx.jsonRequest('/api/sessions', 'POST', {
-    title: 'Valid Lead Session',
-    mode: 'lead',
+  // 3. Creating direct mode session succeeds
+  const validDirect = await ctx.jsonRequest('/api/sessions', 'POST', {
+    title: 'Valid Direct Session',
+    mode: 'direct',
     leadBotId: 'bot_lead',
-    memberBotIds: ['bot_lead', 'bot_sub'],
+    memberBotIds: ['bot_lead'],
   });
-  assert.equal(validLead.status, 200);
+  assert.equal(validDirect.status, 200);
 
-  // 4. Subagent whose parent is NOT in members is rejected
-  // Suppose bot_orphan_sub has parent bot_ghost (not in session members)
-  ctx.hub.db.saveBot({
-    id: 'bot_ghost',
-    nodeId: 'node_beta',
-    name: 'Ghost Parent',
-    description: '',
-    modelProvider: 'openai',
-    modelId: 'gpt-4o',
-    enabledSkills: [],
-    updatedAt: new Date().toISOString(),
+  // 4. Non-existent bot is rejected
+  const invalidBot = await ctx.jsonRequest('/api/sessions', 'POST', {
+    title: 'Invalid Bot Session',
+    mode: 'direct',
+    leadBotId: 'bot_nonexistent',
+    memberBotIds: ['bot_nonexistent'],
   });
-  ctx.hub.db.saveBot({
-    id: 'bot_orphan_sub',
-    nodeId: 'node_beta',
-    parentBotId: 'bot_ghost',
-    name: 'Orphan Sub',
-    description: '',
-    modelProvider: 'openai',
-    modelId: 'gpt-4o',
-    enabledSkills: [],
-    updatedAt: new Date().toISOString(),
-  });
-
-  const invalidOrphan = await ctx.jsonRequest('/api/sessions', 'POST', {
-    title: 'Invalid Orphan Subagent Session',
-    mode: 'lead',
-    leadBotId: 'bot_lead',
-    memberBotIds: ['bot_lead', 'bot_orphan_sub'],
-  });
-  assert.equal(invalidOrphan.status, 400);
-  assert.match(invalidOrphan.json.error, /requires its parent bot bot_ghost to be in the session members/);
+  assert.equal(invalidBot.status, 400);
+  assert.match(invalidBot.json.error, /not found/);
 });

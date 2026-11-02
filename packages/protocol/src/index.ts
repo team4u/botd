@@ -2,7 +2,7 @@ export * from './cron.js';
 export * from './ui-catalog.js';
 
 export type PlatformType = 'darwin' | 'linux' | 'win32';
-export type SessionMode = 'direct' | 'lead';
+export type SessionMode = 'direct';
 export type SessionStatus = 'idle' | 'running' | 'queued' | 'failed';
 export type MessageRole = 'user' | 'assistant' | 'callback' | 'system';
 
@@ -239,8 +239,6 @@ export interface QueueStageSummary {
   id: string;
   botIds: string[];
   parallel?: boolean;
-  loopGroupId?: string;
-  whisper?: boolean;
 }
 
 export interface BotConfig {
@@ -288,10 +286,6 @@ export interface SessionRecord {
   mode: SessionMode;
   leadBotId: string;
   memberBotIds: string[];
-  /** 群成员在本会话中的本群头衔 / 临时角色（botId -> roleText） */
-  memberRoles?: Record<string, string>;
-  /** 群聊备忘录 / 共享黑板（置顶注入上下文的共识、约束与进度） */
-  blackboard?: string;
   status: SessionStatus;
   activeBotId?: string;
   /** 圆桌并发盲评或并行工作流阶段同时处于活跃推理中的 BOT ID 列表 */
@@ -338,7 +332,7 @@ export interface SharedSessionSnapshot {
   share: SessionShareRecord;
   session: Pick<
     SessionRecord,
-    'id' | 'title' | 'mode' | 'leadBotId' | 'memberBotIds' | 'memberRoles' | 'blackboard' | 'createdAt' | 'updatedAt'
+    'id' | 'title' | 'mode' | 'leadBotId' | 'memberBotIds' | 'createdAt' | 'updatedAt'
   >;
   bots: SharedBotSummary[];
   messages: MessageRecord[];
@@ -397,10 +391,6 @@ export interface MessageRecord {
   modelBadge?: string;
   content: string;
   mentions: string[];
-  /** 耳语/子线程隔离目标 BOT 列表（非空时对其他旁观 BOT 隐藏增量上下文） */
-  whisperTargetBotIds?: string[];
-  /** 本条消息触发或声明的轻量工作流编排表达式（如 "(@a @b) -> @lead"） */
-  orchestrationPlan?: string;
   /** 主 BOT 调用分身协同的执行轨迹列表（用于渲染分身协同折叠面板） */
   subagentRuns?: SubagentRunRecord[];
   toolCalls?: ToolCallRecord[];
@@ -424,8 +414,6 @@ export type SessionSseEvent =
   | {
       type: 'session_updated';
       sessionId: string;
-      blackboard?: string;
-      memberRoles?: Record<string, string>;
     }
   | {
       type: 'subagent_status';
@@ -608,8 +596,6 @@ export interface CreateSessionInput {
   mode: SessionMode;
   leadBotId: string;
   memberBotIds: string[];
-  memberRoles?: Record<string, string>;
-  blackboard?: string;
   parentSessionId?: string;
 }
 export interface NodeIdentity { nodeId: string; name: string; hubUrl: string; token: string }

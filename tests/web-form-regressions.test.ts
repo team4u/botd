@@ -11,11 +11,6 @@ import {
   type CreateSessionDraft,
 } from '../apps/web/src/components/CreateSessionModal.js';
 import {
-  initGroupSettingsDraft,
-  resolveGroupSettingsStep,
-  type GroupSettingsDraft,
-} from '../apps/web/src/components/GroupSettingsModal.js';
-import {
   orderBotsAsTree,
   toggleGroupMember,
   selectGroupLead,
@@ -218,10 +213,8 @@ test('CheckList: 去重与合理顺序维护', () => {
 
 test('CreateSessionModal: 首次打开等待异步 bots 到达时能初始化一次', () => {
   const initialDraft: CreateSessionDraft = {
-    groupTitle: '',
-    groupMode: 'lead',
-    groupLeadBotId: '',
-    groupMemberBotIds: [],
+    title: '',
+    leadBotId: '',
     error: null,
   };
 
@@ -246,18 +239,14 @@ test('CreateSessionModal: 首次打开等待异步 bots 到达时能初始化一
   });
   assert.equal(step2.shouldUpdate, true, 'bots 首次到达应触发初始化');
   assert.equal(step2.nextInitialized, true, '标记已初始化');
-  assert.equal(step2.nextDraft.groupTitle, 'AI 协同群聊');
-  assert.equal(step2.nextDraft.groupLeadBotId, 'bot-1');
-  assert.deepEqual(step2.nextDraft.groupMemberBotIds, ['bot-1', 'bot-2', 'bot-3']);
+  assert.equal(step2.nextDraft.leadBotId, 'bot-1');
 });
 
 test('CreateSessionModal: 后台 10 秒轮询新 bots 数组不能冲掉用户正在编辑的草稿', () => {
   // 用户编辑过的草稿
   const userEditingDraft: CreateSessionDraft = {
-    groupTitle: '我的自定义敏捷开发讨论组',
-    groupMode: 'lead',
-    groupLeadBotId: 'bot-2',
-    groupMemberBotIds: ['bot-1', 'bot-2'],
+    title: '我的自定义敏捷开发讨论',
+    leadBotId: 'bot-2',
     error: null,
   };
 
@@ -273,18 +262,14 @@ test('CreateSessionModal: 后台 10 秒轮询新 bots 数组不能冲掉用户�
   });
 
   assert.equal(step.shouldUpdate, false, '后台数据相同刷新不更新组件草稿');
-  assert.equal(step.nextDraft.groupTitle, '我的自定义敏捷开发讨论组', '草稿标题未被冲掉');
-  assert.equal(step.nextDraft.groupMode, 'lead', '草稿协作模式未被冲掉');
-  assert.equal(step.nextDraft.groupLeadBotId, 'bot-2', '草稿主持人未被冲掉');
-  assert.deepEqual(step.nextDraft.groupMemberBotIds, ['bot-1', 'bot-2'], '草稿已选成员未被冲掉');
+  assert.equal(step.nextDraft.title, '我的自定义敏捷开发讨论', '草稿标题未被冲掉');
+  assert.equal(step.nextDraft.leadBotId, 'bot-2', '草稿智能体未被冲掉');
 });
 
 test('CreateSessionModal: 关后重开应该正确重新初始化', () => {
   const userDraft: CreateSessionDraft = {
-    groupTitle: '旧草稿',
-    groupMode: 'lead',
-    groupLeadBotId: 'bot-2',
-    groupMemberBotIds: ['bot-2'],
+    title: '旧草稿',
+    leadBotId: 'bot-2',
     error: null,
   };
 
@@ -307,16 +292,13 @@ test('CreateSessionModal: 关后重开应该正确重新初始化', () => {
     bots: mockBots,
   });
   assert.equal(stepReopen.shouldUpdate, true, '重新打开应触发初始化');
-  assert.equal(stepReopen.nextDraft.groupTitle, 'AI 协同群聊', '恢复默认标题');
-  assert.equal(stepReopen.nextDraft.groupLeadBotId, 'bot-1', '恢复默认主持人');
+  assert.equal(stepReopen.nextDraft.leadBotId, 'bot-1', '恢复默认智能体');
 });
 
-test('CreateSessionModal: 后台刷新时若有 BOT 被删，只合理剔除被删成员，不重设整份草稿', () => {
+test('CreateSessionModal: 后台刷新时若有 BOT 被删，只合理剔除已删智能体，不重设整份草稿', () => {
   const userDraft: CreateSessionDraft = {
-    groupTitle: '特定项目群',
-    groupMode: 'lead',
-    groupLeadBotId: 'bot-1',
-    groupMemberBotIds: ['bot-1', 'bot-deleted', 'bot-2'],
+    title: '特定项目',
+    leadBotId: 'bot-deleted',
     error: null,
   };
 
@@ -329,146 +311,9 @@ test('CreateSessionModal: 后台刷新时若有 BOT 被删，只合理剔除被�
     bots: mockBots,
   });
 
-  assert.equal(step.shouldUpdate, true, '检测到已删成员需要局部更新');
-  assert.equal(step.nextDraft.groupTitle, '特定项目群', '标题绝不被冲掉');
-  assert.equal(step.nextDraft.groupMode, 'lead', '协作模式绝不被冲掉');
-  assert.deepEqual(step.nextDraft.groupMemberBotIds, ['bot-1', 'bot-2'], '合理剔除 bot-deleted');
-});
-
-// ==========================================
-// 3. GroupSettingsModal 初始化边界与 SSE 防冲掉
-// ==========================================
-
-const mockSession: SessionRecord = {
-  id: 'session-101',
-  title: '生产环境发布指挥部',
-  status: 'idle',
-  mode: 'lead',
-  leadBotId: 'bot-1',
-  memberBotIds: ['bot-1', 'bot-2'],
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
-};
-
-test('GroupSettingsModal: 打开时以 session.id 为边界初始化', () => {
-  const step = resolveGroupSettingsStep({
-    isOpen: true,
-    lastInitializedSessionId: null,
-    currentSession: mockSession,
-    currentDraft: {
-      title: '',
-      mode: 'lead',
-      leadBotId: '',
-      memberBotIds: [],
-      error: null,
-    },
-    bots: mockBots,
-  });
-
-  assert.equal(step.shouldUpdate, true);
-  assert.equal(step.nextInitializedSessionId, 'session-101');
-  assert.equal(step.nextDraft.title, '生产环境发布指挥部');
-  assert.equal(step.nextDraft.leadBotId, 'bot-1');
-  assert.deepEqual(step.nextDraft.memberBotIds, ['bot-1', 'bot-2']);
-});
-
-test('GroupSettingsModal: SSE 产生新 session 对象时绝不冲掉用户草稿', () => {
-  const userEditingDraft: GroupSettingsDraft = {
-    title: '用户正在修改的标题...',
-    mode: 'lead',
-    leadBotId: 'bot-2',
-    memberBotIds: ['bot-1', 'bot-2', 'bot-3'],
-    error: null,
-  };
-
-  // 模拟 SSE 推送导致 App 生成新的 session 对象引用
-  const sseNewSession: SessionRecord = {
-    ...mockSession,
-    updatedAt: new Date(Date.now() + 5000).toISOString(),
-  };
-
-  const step = resolveGroupSettingsStep({
-    isOpen: true,
-    lastInitializedSessionId: 'session-101',
-    currentSession: sseNewSession,
-    currentDraft: userEditingDraft,
-    bots: mockBots,
-  });
-
-  assert.equal(step.shouldUpdate, false, '相同 session.id 的 SSE 对象更新绝不重写草稿');
-  assert.equal(step.nextDraft.title, '用户正在修改的标题...');
-  assert.equal(step.nextDraft.mode, 'lead');
-  assert.equal(step.nextDraft.leadBotId, 'bot-2');
-});
-
-test('GroupSettingsModal: 切换 session 必须重新初始化', () => {
-  const otherSession: SessionRecord = {
-    id: 'session-202',
-    title: '财务审计专项群',
-    status: 'idle',
-    mode: 'lead',
-    leadBotId: 'bot-3',
-    memberBotIds: ['bot-2', 'bot-3'],
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-
-  const step = resolveGroupSettingsStep({
-    isOpen: true,
-    lastInitializedSessionId: 'session-101', // 原 session
-    currentSession: otherSession, // 切换到新 session
-    currentDraft: {
-      title: '旧标题',
-      mode: 'lead',
-      leadBotId: 'bot-1',
-      memberBotIds: ['bot-1'],
-      error: null,
-    },
-    bots: mockBots,
-  });
-
-  assert.equal(step.shouldUpdate, true, '切换编辑对象 ID 应当触发初始化');
-  assert.equal(step.nextInitializedSessionId, 'session-202');
-  assert.equal(step.nextDraft.title, '财务审计专项群');
-  assert.equal(step.nextDraft.mode, 'lead');
-  assert.equal(step.nextDraft.leadBotId, 'bot-3');
-  assert.deepEqual(step.nextDraft.memberBotIds, ['bot-2', 'bot-3']);
-});
-
-test('GroupSettingsModal: 关后重开同一 session 应当重新初始化', () => {
-  // 1. 关闭弹窗
-  const stepClose = resolveGroupSettingsStep({
-    isOpen: false,
-    lastInitializedSessionId: 'session-101',
-    currentSession: mockSession,
-    currentDraft: {
-      title: '未保存的草稿',
-      mode: 'lead',
-      leadBotId: 'bot-2',
-      memberBotIds: ['bot-2'],
-      error: null,
-    },
-    bots: mockBots,
-  });
-  assert.equal(stepClose.nextInitializedSessionId, null, '关闭重置 session 边界');
-
-  // 2. 重新打开
-  const stepReopen = resolveGroupSettingsStep({
-    isOpen: true,
-    lastInitializedSessionId: null,
-    currentSession: mockSession,
-    currentDraft: {
-      title: '未保存的草稿',
-      mode: 'lead',
-      leadBotId: 'bot-2',
-      memberBotIds: ['bot-2'],
-      error: null,
-    },
-    bots: mockBots,
-  });
-  assert.equal(stepReopen.shouldUpdate, true, '重开应重新按 session 初始化');
-  assert.equal(stepReopen.nextDraft.title, '生产环境发布指挥部', '恢复为持久化会话标题');
-  assert.equal(stepReopen.nextDraft.mode, 'lead');
+  assert.equal(step.shouldUpdate, true, '检测到已删智能体需要局部更新');
+  assert.equal(step.nextDraft.title, '特定项目', '标题绝不被冲掉');
+  assert.equal(step.nextDraft.leadBotId, 'bot-1', '回退到可用首选 bot');
 });
 
 // ==========================================
@@ -485,8 +330,7 @@ test('GroupMemberPicker: orderBotsAsTree 将分身紧跟在所属主 BOT 后，�
   assert.deepEqual(tree.map((b) => b.id), ['main-1', 'sub-a', 'sub-b']);
 
   const draft = createDefaultSessionDraft(unorderedBots);
-  assert.equal(draft.groupLeadBotId, 'main-1', '默认主持人应为树序首位主 BOT');
-  assert.deepEqual(draft.groupMemberBotIds, ['main-1', 'sub-a', 'sub-b']);
+  assert.equal(draft.leadBotId, 'main-1', '默认主持人应为树序首位主 BOT');
 });
 
 test('GroupMemberPicker: 取消勾选当前主持人时自动顺延，设为主持时未勾选成员自动入群', () => {

@@ -69,21 +69,21 @@ test('2. pickCurrentDirectSession: 严格排除 parentSessionId 子会话与归�
     updatedAt: new Date(now).toISOString(),
   };
 
-  const groupSession: SessionRecord = {
-    id: 'sess_group',
-    title: '群聊',
-    mode: 'lead',
+  const otherSession: SessionRecord = {
+    id: 'sess_other',
+    title: '其他会话',
+    mode: 'direct',
     status: 'idle',
-    leadBotId: 'bot_1',
-    memberBotIds: ['bot_1', 'bot_2'],
+    leadBotId: 'bot_2',
+    memberBotIds: ['bot_2'],
     archived: false,
     createdAt: new Date(now - 5_000).toISOString(),
     updatedAt: new Date(now).toISOString(),
   };
 
-  // 即使 childSession、archivedSession、groupSession 的 updatedAt 更晚，也必须选取 mainSession
+  // 即使 childSession、archivedSession、otherSession 的 updatedAt 更晚，也必须选取 mainSession
   const picked = pickCurrentDirectSession(
-    [mainSession, childSession, archivedSession, groupSession],
+    [mainSession, childSession, archivedSession, otherSession],
     'bot_1'
   );
   assert.equal(picked?.id, 'sess_main', '子会话与归档会话不可篡位主单聊入口');
@@ -108,25 +108,4 @@ test('2. pickCurrentDirectSession: 严格排除 parentSessionId 子会话与归�
   assert.equal(pickedNewer?.id, 'sess_main_newer', '应选取 updatedAt 最新的非归档主单聊');
 });
 
-test('3. GroupSettingsModal 模块加载冒烟与纯逻辑草稿测试', async () => {
-  const modalModule = await import('../apps/web/src/components/GroupSettingsModal.js');
-  assert.equal(typeof modalModule.initGroupSettingsDraft, 'function');
-  assert.equal(typeof modalModule.resolveGroupSettingsStep, 'function');
 
-  const session: SessionRecord = {
-    id: 'sess_test',
-    title: '测试群',
-    mode: 'lead',
-    status: 'idle',
-    leadBotId: 'bot_a',
-    memberBotIds: ['bot_a', 'bot_b'],
-    archived: false,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-
-  const draft = modalModule.initGroupSettingsDraft(session, []);
-  assert.equal(draft.title, '测试群');
-  assert.equal(draft.leadBotId, 'bot_a');
-  assert.deepEqual(draft.memberBotIds, ['bot_a', 'bot_b']);
-});

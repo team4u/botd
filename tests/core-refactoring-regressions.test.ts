@@ -605,92 +605,60 @@ test('GroupRouter 串/并行统一管线的回合执行与错误隔离验证', a
     }
   );
 
-  // --- Part 4A: 并行工作流模式 (@a @b) -> @lead ---
-  failingBotId = 'member_a';
+  // --- Part 4: 单主控 Bot 回合执行与错误隔离验证 ---
+  failingBotId = null;
   deliveredIncremental.clear();
 
-  const parallelSession = await f.json<SessionRecord>('/api/sessions', 'POST', {
-    title: 'Parallel Blind Review Session',
-    mode: 'lead',
+  const normalSession = await f.json<SessionRecord>('/api/sessions', 'POST', {
+    title: 'Normal Direct Session',
+    mode: 'direct',
     leadBotId: 'lead_bot',
-    memberBotIds: ['lead_bot', 'member_a', 'member_b'],
+    memberBotIds: ['lead_bot'],
   });
 
-  await f.json(`/api/sessions/${parallelSession.id}/messages`, 'POST', {
-    content: '(@member_a @member_b) -> @lead_bot User RFC proposal for blind evaluation',
+  await f.json(`/api/sessions/${normalSession.id}/messages`, 'POST', {
+    content: 'User message to lead bot',
   });
 
-  // 等待 lead_bot 汇总发言且会话重回 idle 状态
   await waitFor(
-    () => f.messages(parallelSession.id),
+    () => f.messages(normalSession.id),
     (msgs) => msgs.some((m) => m.senderBotId === 'lead_bot')
   );
-  await f.idle(parallelSession.id);
+  await f.idle(normalSession.id);
 
-  const parallelMessages = await f.messages(parallelSession.id);
-
-  // 1. 验证并发盲评：member_a 与 member_b 在执行前接收到完全相同的初始增量快照，互不可见对方草稿
-  assert(deliveredIncremental.has('member_a'), 'member_a must have executed a turn');
-  assert(deliveredIncremental.has('member_b'), 'member_b must have executed a turn');
-  const incA = deliveredIncremental.get('member_a')![0];
-  const incB = deliveredIncremental.get('member_b')![0];
-  assert.equal(incA, incB, 'Parallel reviewers must receive identical incremental context snapshot');
-  assert(incA.includes('User RFC proposal for blind evaluation'));
-  assert(!incA.includes('Review reply from @member_b'), 'member_a must not see member_b draft');
-  assert(!incB.includes('Review reply from @member_a'), 'member_b must not see member_a draft');
-
-  // 2. 验证错误隔离：member_a 抛错写入 system 错误消息，但不阻塞 member_b 和 lead_bot
-  const sysMsgA = parallelMessages.find((m) => m.role === 'system' && m.content.includes('member_a'));
-  assert(sysMsgA, 'System error message must be recorded for failed member_a');
-  assert(sysMsgA.content.includes('Turn execution exploded for @member_a'));
-
-  const memberBReply = parallelMessages.find((m) => m.role === 'assistant' && m.senderBotId === 'member_b');
-  assert(memberBReply, 'member_b reply must exist and succeed');
-  assert.equal(memberBReply.content, 'Review reply from @member_b');
-
-  const leadReply = parallelMessages.find((m) => m.role === 'assistant' && m.senderBotId === 'lead_bot');
-  assert(leadReply, 'lead_bot summary must exist and succeed');
+  const normalMessages = await f.messages(normalSession.id);
+  const leadReply = normalMessages.find((m) => m.role === 'assistant' && m.senderBotId === 'lead_bot');
+  assert(leadReply, 'lead_bot reply must exist and succeed');
   assert.equal(leadReply.content, 'Review reply from @lead_bot');
 
-  // 3. 验证会话最终状态仍为 idle（未被单点故障置为 failed）
-  const finalParallelSess = (await f.json<SessionRecord[]>('/api/sessions')).find((s) => s.id === parallelSession.id);
-  assert.equal(finalParallelSess?.status, 'idle', 'Parallel session must end in idle status');
+  const finalNormalSess = (await f.json<SessionRecord[]>('/api/sessions')).find((s) => s.id === normalSession.id);
+  assert.equal(finalNormalSess?.status, 'idle', 'Successful session must end in idle status');
 
-  // --- Part 4B: 串行流水线模式 @a -> @b -> @lead ---
-  failingBotId = 'member_a';
+  // 失败隔离验证
+  failingBotId = 'lead_bot';
   deliveredIncremental.clear();
 
-  const serialSession = await f.json<SessionRecord>('/api/sessions', 'POST', {
-    title: 'Serial Review Session',
-    mode: 'lead',
+  const failSession = await f.json<SessionRecord>('/api/sessions', 'POST', {
+    title: 'Failing Direct Session',
+    mode: 'direct',
     leadBotId: 'lead_bot',
-    memberBotIds: ['lead_bot', 'member_a', 'member_b'],
+    memberBotIds: ['lead_bot'],
   });
 
-  await f.json(`/api/sessions/${serialSession.id}/messages`, 'POST', {
-    content: '@member_a -> @member_b -> @lead_bot User RFC proposal for serial evaluation',
+  await f.json(`/api/sessions/${failSession.id}/messages`, 'POST', {
+    content: 'User message causing turn error',
   });
 
-  // 串行模式下成员抛错，会话状态立即被置为 failed 并终止队列
   await waitFor(
     () => f.json<SessionRecord[]>('/api/sessions'),
-    (list) => list.find((s) => s.id === serialSession.id)?.status === 'failed'
+    (list) => list.find((s) => s.id === failSession.id)?.status === 'failed'
   );
 
-  const serialMessages = await f.messages(serialSession.id);
+  const failMessages = await f.messages(failSession.id);
+  const sysMsg = failMessages.find((m) => m.role === 'system' && m.content.includes('lead_bot'));
+  assert(sysMsg, 'System error message must be recorded for failed bot turn');
+  assert(sysMsg.content.includes('Turn execution exploded for @lead_bot'));
 
-  // 1. 验证写入了 member_a 的 system 错误消息
-  const serialSysMsg = serialMessages.find((m) => m.role === 'system' && m.content.includes('member_a'));
-  assert(serialSysMsg, 'System error message must be recorded for failed member_a in serial mode');
-  assert(serialSysMsg.content.includes('Turn execution exploded for @member_a'));
-
-  // 2. 验证队列被终止：member_b 与 lead_bot 均未被执行
-  assert.equal(deliveredIncremental.has('member_b'), false, 'member_b must not execute after failure in serial mode');
-  assert.equal(deliveredIncremental.has('lead_bot'), false, 'lead_bot must not execute after failure in serial mode');
-  assert(!serialMessages.some((m) => m.senderBotId === 'member_b'));
-  assert(!serialMessages.some((m) => m.senderBotId === 'lead_bot'));
-
-  // 3. 验证会话最终状态为 failed
-  const finalSerialSess = (await f.json<SessionRecord[]>('/api/sessions')).find((s) => s.id === serialSession.id);
-  assert.equal(finalSerialSess?.status, 'failed', 'Serial session must terminate with failed status');
+  const finalFailSess = (await f.json<SessionRecord[]>('/api/sessions')).find((s) => s.id === failSession.id);
+  assert.equal(finalFailSess?.status, 'failed', 'Failing session must terminate with failed status');
 });

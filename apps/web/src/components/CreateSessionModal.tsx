@@ -1,29 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Bot, Loader2 } from 'lucide-react';
-import type { BotConfig, SessionMode, CreateSessionInput } from '@botd/protocol';
-import { GroupMemberPicker, orderBotsAsTree } from './GroupMemberPicker.js';
+import type { BotConfig, CreateSessionInput } from '@botd/protocol';
+import { orderBotsAsTree } from './GroupMemberPicker.js';
 
 export interface CreateSessionDraft {
-  groupTitle: string;
-  groupMode: SessionMode;
-  groupLeadBotId: string;
-  groupMemberBotIds: string[];
+  title: string;
+  leadBotId: string;
   error: string | null;
-  memberRoles?: Record<string, string>;
-  blackboard?: string;
 }
 
 export function createDefaultSessionDraft(bots: BotConfig[]): CreateSessionDraft {
   const ordered = orderBotsAsTree(bots);
   const firstBot = ordered[0];
   return {
-    groupTitle: 'AI 协同群聊',
-    groupMode: 'lead',
-    groupLeadBotId: firstBot ? firstBot.id : '',
-    groupMemberBotIds: ordered.slice(0, 3).map((b) => b.id),
+    title: firstBot ? (firstBot.name || firstBot.id) : '',
+    leadBotId: firstBot ? firstBot.id : '',
     error: null,
-    memberRoles: {},
-    blackboard: '',
   };
 }
 
@@ -75,30 +67,20 @@ export function resolveCreateSessionStep({
   // 2. 弹窗已处于打开中：后台轮询新数组引用或在线状态刷新，绝对不能重设整份草稿
   if (bots.length > 0) {
     const validIds = new Set(bots.map((b) => b.id));
-    let leadBotId = currentDraft.groupLeadBotId;
+    let leadBotId = currentDraft.leadBotId;
     let leadChanged = false;
     if (leadBotId && !validIds.has(leadBotId)) {
       leadBotId = bots[0]?.id || '';
       leadChanged = true;
     }
 
-    const filteredMembers = currentDraft.groupMemberBotIds.filter((id) => validIds.has(id));
-    const finalMembers = leadChanged && leadBotId && !filteredMembers.includes(leadBotId)
-      ? [...filteredMembers, leadBotId]
-      : filteredMembers;
-
-    const membersChanged =
-      finalMembers.length !== currentDraft.groupMemberBotIds.length ||
-      finalMembers.some((id, idx) => id !== currentDraft.groupMemberBotIds[idx]);
-
-    if (leadChanged || membersChanged) {
+    if (leadChanged) {
       return {
         shouldUpdate: true,
         nextInitialized: true,
         nextDraft: {
           ...currentDraft,
-          groupLeadBotId: leadBotId,
-          groupMemberBotIds: finalMembers,
+          leadBotId,
         },
       };
     }
@@ -119,8 +101,6 @@ interface CreateSessionModalProps {
   onCreateSession: (input: CreateSessionInput) => Promise<void>;
 }
 
-// 单聊不走弹窗：侧边栏「智能体」通讯录点击即静默创建/进入默认单聊会话。
-// 本弹窗负责群聊（主持统筹）创建。
 export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
   isOpen,
   bots,
@@ -128,14 +108,8 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
   onClose,
   onCreateSession,
 }) => {
-  // 群聊状态
-  const [groupTitle, setGroupTitle] = useState<string>('');
-  const [groupMode, setGroupMode] = useState<SessionMode>('lead');
-  const [groupLeadBotId, setGroupLeadBotId] = useState<string>('');
-  const [groupMemberBotIds, setGroupMemberBotIds] = useState<string[]>([]);
-  const [memberRoles, setMemberRoles] = useState<Record<string, string>>({});
-  const [blackboard, setBlackboard] = useState<string>('');
-
+  const [title, setTitle] = useState<string>('');
+  const [leadBotId, setLeadBotId] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -143,22 +117,14 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
   const wasOpenRef = useRef(false);
 
   const draftRef = useRef<CreateSessionDraft>({
-    groupTitle,
-    groupMode,
-    groupLeadBotId,
-    groupMemberBotIds,
+    title,
+    leadBotId,
     error,
-    memberRoles,
-    blackboard,
   });
   draftRef.current = {
-    groupTitle,
-    groupMode,
-    groupLeadBotId,
-    groupMemberBotIds,
+    title,
+    leadBotId,
     error,
-    memberRoles,
-    blackboard,
   };
 
   useEffect(() => {
@@ -170,20 +136,13 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
       bots,
     });
 
-    const isReopen = !wasOpenRef.current && isOpen;
     wasOpenRef.current = isOpen;
     initializedRef.current = step.nextInitialized;
 
     if (step.shouldUpdate) {
-      setGroupTitle(step.nextDraft.groupTitle);
-      setGroupMode(step.nextDraft.groupMode);
-      setGroupLeadBotId(step.nextDraft.groupLeadBotId);
-      setGroupMemberBotIds(step.nextDraft.groupMemberBotIds);
+      setTitle(step.nextDraft.title);
+      setLeadBotId(step.nextDraft.leadBotId);
       setError(step.nextDraft.error);
-      if (isReopen || !initializedRef.current) {
-        setMemberRoles(step.nextDraft.memberRoles || {});
-        setBlackboard(step.nextDraft.blackboard || '');
-      }
     }
   }, [isOpen, bots]);
 
@@ -193,39 +152,31 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
     e.preventDefault();
     setError(null);
 
-    const trimmedTitle = groupTitle.trim();
-    if (!trimmedTitle) {
-      setError('请输入群聊名称');
-      return;
-    }
-    if (groupMemberBotIds.length < 2) {
-      setError('群聊至少需要选择 2 个成员');
-      return;
-    }
-    if (!groupLeadBotId) {
-      setError('主持模式下必须指定主持人');
+    if (!leadBotId) {
+      setError('请选择智能体');
       return;
     }
 
-    const finalMembers = Array.from(new Set([...groupMemberBotIds, groupLeadBotId]));
+    const selectedBot = bots.find((b) => b.id === leadBotId);
+    const finalTitle = title.trim() || selectedBot?.name || leadBotId;
 
     setLoading(true);
     try {
       await onCreateSession({
-        title: trimmedTitle,
-        mode: 'lead',
-        leadBotId: groupLeadBotId || finalMembers[0],
-        memberBotIds: finalMembers,
-        memberRoles: Object.keys(memberRoles).length > 0 ? memberRoles : undefined,
-        blackboard: blackboard.trim() ? blackboard.trim() : undefined,
+        title: finalTitle,
+        mode: 'direct',
+        leadBotId,
+        memberBotIds: [leadBotId],
       });
       onClose();
     } catch (err: any) {
-      setError(err?.message || '创建群聊失败');
+      setError(err?.message || '创建会话失败');
     } finally {
       setLoading(false);
     }
   };
+
+  const orderedBots = orderBotsAsTree(bots);
 
   return (
     <div
@@ -234,14 +185,14 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
       aria-modal="true"
       aria-labelledby="create-session-title"
     >
-      <div className="bg-white dark:bg-zinc-950 rounded-t-2xl sm:rounded-2xl shadow-2xl border border-zinc-200/80 dark:border-zinc-800/80 w-full sm:max-w-lg overflow-hidden flex flex-col max-h-[90dvh]">
+      <div className="bg-white dark:bg-zinc-950 rounded-t-2xl sm:rounded-2xl shadow-2xl border border-zinc-200/80 dark:border-zinc-800/80 w-full sm:max-w-md overflow-hidden flex flex-col max-h-[90dvh]">
         {/* 移动端手柄条 */}
         <div className="w-10 h-1 bg-zinc-300 dark:bg-zinc-700 rounded-full mx-auto my-2 sm:hidden shrink-0" />
 
         {/* 头部标题与关闭按钮 */}
         <div className="px-5 py-3.5 sm:px-6 sm:py-4 border-b border-zinc-100 dark:border-zinc-800/60 flex items-center justify-between shrink-0">
           <h2 id="create-session-title" className="text-sm sm:text-base font-semibold text-zinc-900 dark:text-zinc-100">
-            新建群聊
+            新建会话
           </h2>
           <button
             onClick={onClose}
@@ -268,73 +219,65 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
           ) : (
             <>
               <div>
-                <label htmlFor="create-group-title" className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5">
-                  群聊名称
+                <label htmlFor="create-session-bot" className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5">
+                  选择智能体
                 </label>
-                <input
-                  id="create-group-title"
-                  type="text"
-                  value={groupTitle}
-                  onChange={(e) => setGroupTitle(e.target.value)}
-                  placeholder="例如：产品与架构研讨群"
-                  className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  required
-                />
+                <select
+                  id="create-session-bot"
+                  value={leadBotId}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    setLeadBotId(nextId);
+                    const b = bots.find((bot) => bot.id === nextId);
+                    if (b && !title.trim()) {
+                      setTitle(b.name || b.id);
+                    }
+                  }}
+                  className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  {orderedBots.map((bot) => {
+                    const node = nodeMap.get(bot.nodeId);
+                    const isOffline = node?.status === 'offline';
+                    const prefix = bot.parentBotId ? '  └ ' : '';
+                    return (
+                      <option key={bot.id} value={bot.id}>
+                        {prefix}{bot.name || bot.id} ({bot.id}){isOffline ? ' [离线]' : ''}
+                      </option>
+                    );
+                  })}
+                </select>
               </div>
 
-              {/* 三合一树状参会成员（勾选入群 + 设为主持 + 行内头衔） */}
-              <GroupMemberPicker
-                label="参会成员"
-                bots={bots}
-                nodeMap={nodeMap}
-                selectedIds={groupMemberBotIds}
-                leadBotId={groupLeadBotId}
-                memberRoles={memberRoles}
-                onChange={({ selectedIds, leadBotId }) => {
-                  setGroupMemberBotIds(selectedIds);
-                  setGroupLeadBotId(leadBotId);
-                }}
-                onRoleChange={(botId, role) =>
-                  setMemberRoles((prev) => ({ ...prev, [botId]: role }))
-                }
-              />
-
-              {/* 📌 群备忘录 (Shared Blackboard) */}
               <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label htmlFor="create-group-blackboard" className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300">
-                    📌 群备忘录 (Shared Blackboard)
-                  </label>
-                  <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
-                    置顶注入群内共识与约束
-                  </span>
-                </div>
-                <textarea
-                  id="create-group-blackboard"
-                  rows={2}
-                  value={blackboard}
-                  onChange={(e) => setBlackboard(e.target.value)}
-                  placeholder="记录本群共识、输出规范、核心约束与待办清单（对群内所有 BOT 全局生效）..."
-                  className="w-full p-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-amber-500 leading-relaxed font-mono"
+                <label htmlFor="create-session-title-input" className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5">
+                  会话标题（可选）
+                </label>
+                <input
+                  id="create-session-title-input"
+                  type="text"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="留空默认使用智能体名称"
+                  className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
               </div>
             </>
           )}
 
-          {/* 底部操作区适配移动端安全边距 */}
+          {/* 底部操作区 */}
           <div className="pt-3 flex items-center justify-end gap-2 border-t border-zinc-100 dark:border-zinc-800/60 pb-[max(1rem,env(safe-area-inset-bottom,0px))]">
             <button
               type="button"
               onClick={onClose}
               disabled={loading}
-              className="px-4 py-2 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-xl cursor-pointer"
+              className="px-4 py-2 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-lg cursor-pointer"
             >
               取消
             </button>
             <button
               type="submit"
               disabled={loading || bots.length === 0}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 dark:disabled:bg-blue-900/50 dark:disabled:text-blue-300/50 text-white text-xs font-semibold rounded-xl shadow-xs flex items-center gap-1.5 cursor-pointer"
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 dark:disabled:bg-blue-900/50 dark:disabled:text-blue-300/50 text-white text-xs font-semibold rounded-lg shadow-xs flex items-center gap-1.5 cursor-pointer"
             >
               {loading && <Loader2 className="w-3.5 h-3.5 animate-spin-fast" />}
               <span>立即创建</span>

@@ -3,11 +3,10 @@ import type {
   DelegateSessionResult,
   MessageRecord,
   MessageSearchHit,
-  SessionMode,
   SessionRecord,
   SessionShareRecord,
 } from '@botd/protocol';
-import { Command, Option } from 'commander';
+import { Command } from 'commander';
 import { cliAction, readGlobals } from '../context.js';
 import { HubClient } from '../hub-client.js';
 import { printResult } from '../render.js';
@@ -32,12 +31,6 @@ export function registerSessionsCommands(program: Command): void {
     .description('Create a new chat session')
     .requiredOption('--title <title>', 'Session title')
     .requiredOption('--lead <botId>', 'Lead bot ID')
-    .option('--member <ids...>', 'Member bot IDs')
-    .addOption(
-      new Option('--mode <mode>', 'Session mode')
-        .choices(['direct', 'lead'])
-        .default('direct'),
-    )
     .action(
       cliAction(async (options, command) => {
         const g = readGlobals(command);
@@ -45,22 +38,12 @@ export function registerSessionsCommands(program: Command): void {
 
         const title = String(options.title).trim();
         const leadBotId = String(options.lead).trim();
-        const mode = String(options.mode) as SessionMode;
-
-        const rawMembers = Array.isArray(options.member)
-          ? (options.member as string[]).map((id) => String(id).trim())
-          : undefined;
-        const members = rawMembers ? [...rawMembers] : [leadBotId];
-        if (!members.includes(leadBotId)) {
-          members.push(leadBotId);
-        }
-        const memberBotIds = [...new Set(members)];
 
         const session = await client.post<SessionRecord>('/api/sessions', {
           title,
-          mode,
+          mode: 'direct',
           leadBotId,
-          memberBotIds,
+          memberBotIds: [leadBotId],
         });
         printResult(session, g.json);
       }),
@@ -71,11 +54,7 @@ export function registerSessionsCommands(program: Command): void {
     .description('Update a chat session')
     .option('--title <title>', 'Session title')
     .option('--lead <botId>', 'Lead bot ID')
-    .option('--member <ids...>', 'Member bot IDs')
     .option('--archive <boolean>', 'Archive (true) or restore (false) the session', (v: string) => v !== 'false')
-    .addOption(
-      new Option('--mode <mode>', 'Session mode').choices(['direct', 'lead']),
-    )
     .action((sessionId: string, options: Record<string, unknown>, command: Command) =>
       cliAction(async (_opts, cmd) => {
         const g = readGlobals(cmd);
@@ -87,25 +66,10 @@ export function registerSessionsCommands(program: Command): void {
         }
         if (typeof options.lead === 'string') {
           body.leadBotId = options.lead.trim();
-        }
-        if (typeof options.mode === 'string') {
-          body.mode = options.mode as SessionMode;
+          body.memberBotIds = [options.lead.trim()];
         }
         if (typeof options.archive === 'boolean') {
           body.archived = options.archive;
-        }
-        if (Array.isArray(options.member)) {
-          const members = (options.member as string[]).map((id) => String(id).trim());
-          const lead =
-            typeof body.leadBotId === 'string'
-              ? (body.leadBotId as string)
-              : typeof options.lead === 'string'
-                ? options.lead.trim()
-                : undefined;
-          if (lead && !members.includes(lead)) {
-            members.push(lead);
-          }
-          body.memberBotIds = [...new Set(members)];
         }
 
         const updated = await client.patch<SessionRecord>(
@@ -266,9 +230,6 @@ export function registerSessionsCommands(program: Command): void {
     .requiredOption('--bot <botId>', 'Bot ID to execute the task')
     .requiredOption('--prompt <prompt>', 'Task prompt for the sub-session')
     .option('--title <title>', 'Sub-session title')
-    .addOption(
-      new Option('--mode <mode>', 'Session mode').choices(['direct', 'lead']),
-    )
     .action((parentSessionId: string, options: Record<string, unknown>, command: Command) =>
       cliAction(async (_opts, cmd) => {
         const g = readGlobals(cmd);
@@ -276,12 +237,10 @@ export function registerSessionsCommands(program: Command): void {
         const input: DelegateSessionInput = {
           botId: String(options.bot).trim(),
           prompt: String(options.prompt).trim(),
+          mode: 'direct',
         };
         if (typeof options.title === 'string' && options.title.trim()) {
           input.title = options.title.trim();
-        }
-        if (typeof options.mode === 'string' && options.mode.trim()) {
-          input.mode = options.mode.trim() as SessionMode;
         }
         const result = await client.post<DelegateSessionResult>(
           `/api/sessions/${encodeURIComponent(parentSessionId)}/delegate`,

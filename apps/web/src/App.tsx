@@ -20,7 +20,6 @@ import { LoginView } from './components/LoginView';
 import { Sidebar, pickCurrentDirectSession } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
 import { CreateSessionModal } from './components/CreateSessionModal';
-import { GroupSettingsModal } from './components/GroupSettingsModal';
 import { NodesBotsView } from './components/NodesBotsView';
 import { SettingsModal } from './components/SettingsModal';
 import { UsersModal } from './components/UsersModal';
@@ -54,7 +53,7 @@ const parseHash = (): HashRoute => {
   return {
     view: params.get('v') === 'nodes' ? 'nodes' : 'chat',
     sessionId: params.get('s'),
-    modal: m === 'create' || m === 'group' || m === 'settings' || m === 'users' ? m : null,
+    modal: m === 'create' || m === 'settings' || m === 'users' ? m : null,
     messageId: params.get('msg'),
   };
 };
@@ -799,17 +798,6 @@ export const App: React.FC = () => {
         }
 
         case 'session_updated': {
-          setSessions((prev) =>
-            prev.map((s) =>
-              s.id === event.sessionId
-                ? {
-                    ...s,
-                    blackboard: event.blackboard !== undefined ? event.blackboard : s.blackboard,
-                    memberRoles: event.memberRoles !== undefined ? event.memberRoles : s.memberRoles,
-                  }
-                : s
-            )
-          );
           break;
         }
 
@@ -918,17 +906,6 @@ export const App: React.FC = () => {
         }
 
         if (event.type === 'session_updated') {
-          setSessions((prev) =>
-            prev.map((s) =>
-              s.id === eventSessionId
-                ? {
-                    ...s,
-                    blackboard: event.blackboard !== undefined ? event.blackboard : s.blackboard,
-                    memberRoles: event.memberRoles !== undefined ? event.memberRoles : s.memberRoles,
-                  }
-                : s
-            )
-          );
           return;
         }
       },
@@ -1141,20 +1118,12 @@ export const App: React.FC = () => {
     if (!session) return;
 
     try {
-      const input: CreateSessionInput =
-        session.mode === 'direct'
-          ? {
-              title: botMap.get(session.leadBotId)?.name || session.title,
-              mode: 'direct',
-              leadBotId: session.leadBotId,
-              memberBotIds: session.memberBotIds,
-            }
-          : {
-              title: session.title,
-              mode: session.mode,
-              leadBotId: session.leadBotId,
-              memberBotIds: session.memberBotIds,
-            };
+      const input: CreateSessionInput = {
+        title: botMap.get(session.leadBotId)?.name || session.title,
+        mode: 'direct',
+        leadBotId: session.leadBotId,
+        memberBotIds: [session.leadBotId],
+      };
 
       const created = await api.createSession(input);
       setSessions((prev) => [created, ...prev]);
@@ -1208,21 +1177,6 @@ export const App: React.FC = () => {
       // 创建成功后直接导航进新会话，界面反馈已足够，不再弹 toast
     } catch (err: any) {
       addToast('error', err?.message || '创建会话失败');
-      throw err;
-    }
-  };
-
-  const handleUpdateSession = async (
-    sessionId: string,
-    input: Partial<CreateSessionInput> & { memberRoles?: Record<string, string>; blackboard?: string }
-  ) => {
-    try {
-      const updated = await api.updateSession(sessionId, input);
-      setSessions((prev) =>
-        prev.map((s) => (s.id === sessionId ? { ...s, ...updated } : s))
-      );
-    } catch (err: any) {
-      addToast('error', err?.message || '更新群配置失败');
       throw err;
     }
   };
@@ -1355,21 +1309,6 @@ export const App: React.FC = () => {
     }
   };
 
-  // 置顶/取消置顶：服务端更新后 patch 本地列表，失败如实提示
-  const handleTogglePinned = async (sessionId: string, pinned: boolean) => {
-    try {
-      const updated = await api.updateSessionPinned(sessionId, pinned);
-      setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, ...updated } : s)));
-    } catch (err: any) {
-      if (err instanceof AuthRequiredError || err?.status === 401) {
-        setAuthenticated(false);
-        authenticatedRef.current = false;
-        return;
-      }
-      addToast('error', err?.message || '更新置顶状态失败');
-    }
-  };
-
   // 归档/恢复：归档当前会话时不跳转（保留查看），仅切换列表分类
   const handleSetArchived = async (sessionId: string, archived: boolean) => {
     try {
@@ -1438,9 +1377,7 @@ export const App: React.FC = () => {
         }}
         onOpenBotChat={handleOpenBotChat}
         unreadCounts={unreadCounts}
-        onTogglePinned={handleTogglePinned}
         onSetArchived={handleSetArchived}
-        onCreateGroup={() => navigate({ modal: 'create' })}
         onOpenNodesView={() => navigate({ view: 'nodes' })}
         onOpenSettings={() => navigate({ modal: 'settings' })}
         onLogout={handleLogout}
@@ -1480,7 +1417,6 @@ export const App: React.FC = () => {
             onSendMessage={handleSendMessage}
             onEditMessage={handleEditMessage}
             onCancelSession={handleCancelSession}
-            onOpenGroupSettings={() => navigate({ modal: 'group' })}
             onToggleSidebar={() => setSidebarOpen(true)}
             onRenameSession={handleRenameSession}
             onClearMessages={handleClearMessages}
@@ -1496,7 +1432,6 @@ export const App: React.FC = () => {
             highlightMessageId={route.messageId}
             onRespondToAsk={handleRespondToAsk}
             onAddToast={addToast}
-            onUpdateSession={handleUpdateSession}
             onOpenBotChat={handleOpenBotChat}
           />
         ) : (
@@ -1524,17 +1459,9 @@ export const App: React.FC = () => {
                 <Bot className="w-7 h-7" />
               </div>
               <h2 className="text-sm sm:text-base font-bold text-zinc-900 dark:text-zinc-100 mb-1.5">欢迎使用 botd</h2>
-              <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-6 max-w-sm leading-relaxed">
-                从左侧智能体列表选择一个智能体即可开始单聊，或点击下方按钮发起多智能体协同群聊。
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 max-w-sm leading-relaxed">
+                从左侧智能体列表选择一个智能体即可开始对话。
               </p>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => navigate({ modal: 'create' })}
-                  className="px-4 py-2 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200/90 dark:border-zinc-800 text-zinc-800 dark:text-zinc-200 rounded-xl text-xs font-medium shadow-xs transition-colors cursor-pointer"
-                >
-                  新建群聊
-                </button>
-              </div>
             </div>
           </div>
         )}
@@ -1548,17 +1475,6 @@ export const App: React.FC = () => {
         onClose={() => navigate({ modal: null })}
         onCreateSession={handleCreateSession}
       />
-
-      {activeSession && (
-        <GroupSettingsModal
-          isOpen={openModal === 'group'}
-          session={activeSession}
-          bots={allBots}
-          nodeMap={nodeMap}
-          onClose={() => navigate({ modal: null })}
-          onUpdateSession={handleUpdateSession}
-        />
-      )}
 
       <SettingsModal
         isOpen={openModal === 'settings'}

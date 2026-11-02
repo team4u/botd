@@ -391,12 +391,12 @@ test('Task 3.2: session_participants multi-user group session collaboration', as
   // Create node for admin
   await f.addNode(['bot-lead', 'bot-helper']);
 
-  // Admin creates a group session
+  // Admin creates a session
   const groupSession = await f.json<SessionRecord>('/api/sessions', 'POST', {
     title: 'War Room Discussion',
-    mode: 'lead',
+    mode: 'direct',
     leadBotId: 'bot-lead',
-    memberBotIds: ['bot-lead', 'bot-helper'],
+    memberBotIds: ['bot-lead'],
   });
 
   // Create member user 'alice'
@@ -493,9 +493,9 @@ test('Task 1.4: Cross-node incomingArtifacts passed into rpc.runTurn', async (t)
 
   const session = await f.json<SessionRecord>('/api/sessions', 'POST', {
     title: 'Cross Node Artifacts',
-    mode: 'lead',
+    mode: 'direct',
     leadBotId: 'bot-alice',
-    memberBotIds: ['bot-alice', 'bot-bob'],
+    memberBotIds: ['bot-alice'],
   });
 
   // Alice uploads an artifact into the session

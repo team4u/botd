@@ -109,9 +109,9 @@ test('Session share link: full lifecycle and authorization', async (t) => {
   const session = hub.db.createSession({
     id: 'sess_share_test',
     title: 'Distributed System Design Review',
-    mode: 'lead',
+    mode: 'direct',
     leadBotId: 'bot_lead',
-    memberBotIds: ['bot_lead', 'bot_worker'],
+    memberBotIds: ['bot_lead'],
     ownerId: adminUser.id,
   });
 
@@ -274,12 +274,12 @@ test('Session share link: full lifecycle and authorization', async (t) => {
   // Verify session metadata
   assert.equal(snapshot.session.id, session.id);
   assert.equal(snapshot.session.title, 'Distributed System Design Review');
-  assert.equal(snapshot.session.mode, 'lead');
+  assert.equal(snapshot.session.mode, 'direct');
   assert.equal(snapshot.session.leadBotId, 'bot_lead');
-  assert.deepEqual(snapshot.session.memberBotIds, ['bot_lead', 'bot_worker']);
+  assert.deepEqual(snapshot.session.memberBotIds, ['bot_lead']);
 
   // Verify bot summaries (sensitive fields like prompt / env stripped)
-  assert.equal(snapshot.bots.length, 2);
+  assert.equal(snapshot.bots.length, 1);
   const leadBot = snapshot.bots.find((b: { id: string }) => b.id === 'bot_lead');
   assert.ok(leadBot);
   assert.equal(leadBot.name, 'Lead Architect');

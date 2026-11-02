@@ -51,10 +51,8 @@ const sameDay = (a: string, b: string): boolean => {
   );
 };
 
-function formatModeLabel(mode: SessionMode): string {
-  if (mode === 'direct') return '单聊';
-  if (mode === 'lead') return '群聊';
-  return mode;
+function formatModeLabel(_mode: SessionMode): string {
+  return '单聊';
 }
 
 export const SharedSessionView: React.FC<SharedSessionViewProps> = ({ token }) => {
@@ -263,7 +261,6 @@ export const SharedSessionView: React.FC<SharedSessionViewProps> = ({ token }) =
                   botMap={botMap}
                   nodeMap={emptyNodeMap}
                   canEdit={false}
-                  memberRoles={session.memberRoles}
                 />
               </React.Fragment>
             ))

@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   MessageSquare,
-  Users,
   Server,
   Settings,
   LogOut,
@@ -41,7 +40,6 @@ interface SidebarProps {
   onSelectSession: (id: string, messageId?: string) => void;
   onOpenBotChat: (bot: BotConfig) => void;
   onOpenBotDirect?: (bot: BotConfig) => void;
-  onCreateGroup: () => void;
   onOpenNodesView: () => void;
   onOpenSettings: () => void;
   onLogout: () => void;
@@ -50,8 +48,6 @@ interface SidebarProps {
   onDeleteSessions?: (ids: string[]) => Promise<void> | void;
   /** sessionId -> 未读消息数（可选，缺省视为全部为 0） */
   unreadCounts?: Record<string, number>;
-  /** 置顶/取消置顶会话 */
-  onTogglePinned?: (sessionId: string, pinned: boolean) => void;
   /** 归档/恢复会话 */
   onSetArchived?: (sessionId: string, archived: boolean) => void;
   isOpen: boolean;
@@ -294,14 +290,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectSession,
   onOpenBotChat,
   onOpenBotDirect,
-  onCreateGroup,
   onOpenNodesView,
   onOpenSettings,
   onLogout,
   onDeleteSession,
   onDeleteSessions,
   unreadCounts = {},
-  onTogglePinned,
   onSetArchived,
   isOpen,
   onClose,
@@ -310,7 +304,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const [filter, setFilter] = useState('');
   const [botsOpen, setBotsOpen] = useState(true);
-  const [groupsOpen, setGroupsOpen] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<SessionRecord | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -410,7 +403,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   // 搜索时强制展开各分区，保证结果可见
   const effectiveBotsOpen = botsOpen || !!query;
-  const effectiveGroupsOpen = groupsOpen || !!query;
   const effectiveHistoryOpen = historyOpen || !!query;
 
   // 每个 bot 当前指向的单聊会话（通讯录 active 高亮 / 历史话题分类依据）
@@ -609,20 +601,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
             aria-label="关闭侧边栏"
           >
             <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Action Buttons：单聊走左侧通讯录直接点击，这里只保留新建群聊 */}
-        <div className="p-3 border-b border-zinc-200/60 dark:border-zinc-800/60 shrink-0">
-          <button
-            onClick={() => {
-              onCreateGroup();
-              onClose();
-            }}
-            className="w-full flex items-center justify-center gap-1.5 py-2 px-2.5 bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-100 dark:hover:bg-white dark:text-zinc-900 rounded-xl text-xs font-medium transition-colors shadow-xs cursor-pointer"
-          >
-            <Users className="w-3.5 h-3.5" />
-            <span>新建群聊</span>
           </button>
         </div>
 
@@ -949,121 +927,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             )}
           </section>
 
-          {/* 分区 2：群聊 */}
-          {groupSessions.length > 0 && (
-            <section>
-              <SectionHeader
-                label="群聊"
-                count={groupSessions.length}
-                open={effectiveGroupsOpen}
-                onToggle={() => setGroupsOpen((v) => !v)}
-              />
-              {effectiveGroupsOpen && (
-                <div className="space-y-1">
-                  {groupSessions.map((session) => {
-                    const isActive = session.id === activeSessionId;
-                    const isRunning = session.status === 'running';
-                    const isFailed = session.status === 'failed';
-
-                    const modeText = session.mode === 'direct' ? '单聊' : '群聊';
-
-                    const relativeTime = formatRelativeTime(session.lastMessageAt ?? session.updatedAt);
-
-                    return (
-                      <div
-                        key={session.id}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => {
-                          onSelectSession(session.id);
-                          onClose();
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault();
-                            onSelectSession(session.id);
-                            onClose();
-                          }
-                        }}
-                        className={`group w-full text-left p-2.5 rounded-xl text-xs transition-all flex flex-col gap-1 border cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
-                          isActive
-                            ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs text-zinc-900 dark:text-zinc-100'
-                            : 'hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 border-transparent text-zinc-700 dark:text-zinc-300'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-1 w-full">
-                          {/* 名称行：置顶 Pin 标记 + 标题 + 未读徽标 */}
-                          <div className="flex items-center gap-1.5 truncate">
-                            {session.mode === 'direct' ? (
-                              <Bot
-                                className={`w-3.5 h-3.5 shrink-0 ${
-                                  isActive ? 'text-zinc-600 dark:text-zinc-300' : 'text-zinc-500 dark:text-zinc-400'
-                                }`}
-                              />
-                            ) : (
-                              <Users
-                                className={`w-3.5 h-3.5 shrink-0 ${
-                                  isActive ? 'text-zinc-600 dark:text-zinc-300' : 'text-zinc-500 dark:text-zinc-400'
-                                }`}
-                              />
-                            )}
-                            {session.pinned && (
-                              <span title="已置顶" className="shrink-0 flex items-center">
-                                <Pin className="w-3 h-3 text-[11px] text-zinc-400 dark:text-zinc-500" />
-                              </span>
-                            )}
-                            <span
-                              className="truncate font-medium text-zinc-900 dark:text-zinc-100"
-                            >
-                              {session.title}
-                            </span>
-                            {!isActive && <UnreadBadge count={unreadCounts[session.id] || 0} />}
-                          </div>
-
-                          {/* 状态圆点：hover 时让位给「⋯」菜单 */}
-                          <div className="w-4 h-4 flex items-center justify-center shrink-0">
-                            {isRunning ? (
-                              <span
-                                className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse-dot group-hover:hidden"
-                                title="运行中"
-                              />
-                            ) : isFailed ? (
-                              <span
-                                className="w-2 h-2 rounded-full bg-rose-500 group-hover:hidden"
-                                title="执行异常"
-                              />
-                            ) : null}
-                            <SessionItemMenu
-                              session={session}
-                              variant="group"
-                              onTogglePinned={onTogglePinned}
-                              onSetArchived={onSetArchived}
-                              onDelete={setDeleteTarget}
-                            />
-                          </div>
-                        </div>
-
-                        <div
-                          className={`flex items-center justify-between gap-2 text-[11px] ${
-                            isActive ? 'text-zinc-500 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500'
-                          }`}
-                        >
-                          <span className="truncate">
-                            {session.lastMessagePreview || `${modeText} · @${session.leadBotId}`}
-                          </span>
-                          {relativeTime && (
-                            <span className="shrink-0 text-[11px] opacity-75">{relativeTime}</span>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          )}
-
-          {/* 分区 3：历史话题（归档会话 + 非当前单聊），默认折叠 */}
+          {/* 分区 2：历史话题（归档会话 + 非当前单聊），默认折叠 */}
           {historySessions.length > 0 && (
             <section>
               <div className="flex items-center">

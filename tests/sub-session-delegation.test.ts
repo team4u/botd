@@ -149,9 +149,9 @@ test('Sub-Session Delegation: 创建子会话、父会话通知、subsessions �
   // 1. 创建父会话
   const parentRes = await jsonRequest('/api/sessions', 'POST', {
     title: '主项目群',
-    mode: 'lead',
+    mode: 'direct',
     leadBotId: botLead,
-    memberBotIds: [botLead, botWorker],
+    memberBotIds: [botLead],
   }, adminCookie);
   assert.equal(parentRes.status, 200);
   const parentSession: SessionRecord = parentRes.json;
@@ -242,9 +242,9 @@ test('Sub-Session Delegation: 自定义标题与模式，多个子会话按 crea
 
   const parentRes = await jsonRequest('/api/sessions', 'POST', {
     title: '复杂项目',
-    mode: 'lead',
+    mode: 'direct',
     leadBotId: botLead,
-    memberBotIds: [botLead, botWorker1, botWorker2],
+    memberBotIds: [botLead],
   }, adminCookie);
   const parentSession: SessionRecord = parentRes.json;
 
@@ -259,18 +259,17 @@ test('Sub-Session Delegation: 自定义标题与模式，多个子会话按 crea
   assert.equal(sub1.json.childSession.title, '自定义子任务一');
   assert.equal(sub1.json.childSession.mode, 'direct');
 
-  // 第二个子会话（指定 memberBotIds 与 mode）
+  // 第二个子会话（指定 mode）
   const sub2 = await jsonRequest(`/api/sessions/${parentSession.id}/delegate`, 'POST', {
     botId: botWorker2,
-    title: '自定义子任务二（群聊）',
-    mode: 'lead',
-    memberBotIds: [botWorker1, botWorker2],
+    title: '自定义子任务二',
+    mode: 'direct',
     prompt: 'Prompt 2',
   }, adminCookie);
   assert.equal(sub2.status, 201);
-  assert.equal(sub2.json.childSession.title, '自定义子任务二（群聊）');
-  assert.equal(sub2.json.childSession.mode, 'lead');
-  assert.deepEqual(sub2.json.childSession.memberBotIds.sort(), [botWorker1, botWorker2].sort());
+  assert.equal(sub2.json.childSession.title, '自定义子任务二');
+  assert.equal(sub2.json.childSession.mode, 'direct');
+  assert.deepEqual(sub2.json.childSession.memberBotIds, [botWorker2]);
 
   // 验证 subsessions 包含两个且顺序正确
   const listRes = await jsonRequest(`/api/sessions/${parentSession.id}/subsessions`, 'GET', undefined, adminCookie);
@@ -534,9 +533,9 @@ test('Sub-Session Delegation: 子会话执行失败时向父会话回传失败�
 
   const parentRes = await jsonRequest('/api/sessions', 'POST', {
     title: '失败测试群',
-    mode: 'lead',
+    mode: 'direct',
     leadBotId: botLead,
-    memberBotIds: [botLead, botWorker],
+    memberBotIds: [botLead],
   }, adminCookie);
   const parentSession: SessionRecord = parentRes.json;
 
@@ -591,9 +590,9 @@ test('Sub-Session Delegation: 产物文件关联/复制至子会话', async (t) 
 
   const parentRes = await jsonRequest('/api/sessions', 'POST', {
     title: '产物传递测试群',
-    mode: 'lead',
+    mode: 'direct',
     leadBotId: botLead,
-    memberBotIds: [botLead, botWorker],
+    memberBotIds: [botLead],
   }, adminCookie);
   const parentSession: SessionRecord = parentRes.json;
 

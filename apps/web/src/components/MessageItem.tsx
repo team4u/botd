@@ -155,26 +155,6 @@ export const subagentColorStyles: Record<
 };
 
 /**
- * 协作排期卡片展示组件：极简无边框无背景 monospace 单行
- */
-export const OrchestrationPlanCard: React.FC<{ plan: string }> = ({ plan }) => {
-  const steps = plan.split(/\s*(?:->|──▸)\s*/).filter(Boolean);
-  if (steps.length === 0) return null;
-
-  return (
-    <div className="my-1 text-[11px] font-mono text-zinc-400 dark:text-zinc-500 flex items-center gap-1.5 flex-wrap">
-      <span>plan:</span>
-      {steps.map((step, idx) => (
-        <React.Fragment key={idx}>
-          {idx > 0 && <span className="text-zinc-300 dark:text-zinc-600">──▸</span>}
-          <span>{step}</span>
-        </React.Fragment>
-      ))}
-    </div>
-  );
-};
-
-/**
  * 分身协同执行面板组件（Pi TUI 纯文本折叠组风格）
  */
 export const SubagentRunsPanel: React.FC<{
@@ -1119,8 +1099,6 @@ interface MessageItemProps {
   message: MessageRecord;
   botMap: Map<string, BotConfig>;
   nodeMap: Map<string, NodeRecord>;
-  /** 会话成员的本群角色字典（botId -> roleName） */
-  memberRoles?: Record<string, string>;
   /** 是否允许编辑（运行中的会话禁止，与后端 409 拦截对齐） */
   canEdit?: boolean;
   /** 该消息是否为止在编辑的目标（编辑由底部 ChatInput 承载） */
@@ -1137,7 +1115,6 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   message,
   botMap,
   nodeMap,
-  memberRoles,
   canEdit = true,
   isEditing = false,
   onStartEdit,
@@ -1283,10 +1260,6 @@ export const MessageItem: React.FC<MessageItemProps> = ({
         </div>
         {/* 附件（图片缩略图 / 文件下载芯片），与气泡同宽右对齐展示 */}
         <MessageAttachments attachments={message.attachments || []} />
-        {/* 协作排期卡片 */}
-        {message.orchestrationPlan && (
-          <OrchestrationPlanCard plan={message.orchestrationPlan} />
-        )}
         <div className="flex items-center gap-0.5 mt-0.5 mr-1 select-none opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
           <span className="text-[11px] text-zinc-400 dark:text-zinc-500" title={fullTime}>
             {formattedTime}
@@ -1312,8 +1285,6 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   }
 
   // AI 助手消息（Assistant）：去独立头像列、去外框气泡，Markdown 正文平铺画布，释放移动端阅读空间
-  const roleTag = message.senderBotId && memberRoles ? memberRoles[message.senderBotId] : undefined;
-
   return (
     <div data-message-id={message.id} className="group px-3 sm:px-6 py-2.5 sm:py-3 hover:bg-zinc-50/50 dark:hover:bg-zinc-900/50 transition-colors">
       {/* 极简单行浅灰元数据 */}
@@ -1324,20 +1295,11 @@ export const MessageItem: React.FC<MessageItemProps> = ({
         >
           {bot?.name || message.senderBotId}
         </span>
-        {roleTag && <span>· {roleTag}</span>}
-        {message.whisperTargetBotIds && message.whisperTargetBotIds.length > 0 && (
-          <span>· whisper {message.whisperTargetBotIds.map((id) => '@' + id).join(' ')}</span>
-        )}
         {shortModel && <span>· {shortModel}</span>}
         {message.aborted && (
           <span className="italic text-amber-600/90 dark:text-amber-500/90">· 已中止</span>
         )}
       </div>
-
-      {/* 协作排期卡 */}
-      {message.orchestrationPlan && (
-        <OrchestrationPlanCard plan={message.orchestrationPlan} />
-      )}
 
       {/* 分身协同面板 */}
       {message.subagentRuns && message.subagentRuns.length > 0 && (
@@ -1381,8 +1343,7 @@ function areMessageItemPropsEqual(prev: MessageItemProps, next: MessageItemProps
     prev.isEditing !== next.isEditing ||
     prev.onStartEdit !== next.onStartEdit ||
     prev.onForkMessage !== next.onForkMessage ||
-    prev.onSelectSession !== next.onSelectSession ||
-    prev.memberRoles !== next.memberRoles
+    prev.onSelectSession !== next.onSelectSession
   ) {
     return false;
   }

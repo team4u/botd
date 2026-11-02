@@ -73,7 +73,7 @@ export interface StartHubResult extends HubInstance {
   port: number;
 }
 
-const VALID_MODES = new Set<SessionMode>(['direct', 'lead']);
+const VALID_MODES = new Set<SessionMode>(['direct']);
 const USERNAME_REGEX = /^[a-zA-Z0-9_-]{2,32}$/;
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isText = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
@@ -97,8 +97,11 @@ function validateSessionMembers(
   userId: string,
   mode: SessionMode,
   leadBotIdInput: unknown,
-  memberBotIdsInput: unknown
+  _memberBotIdsInput?: unknown
 ): MemberValidationResult {
+  if (mode !== 'direct') {
+    return { ok: false, error: 'Invalid session mode', status: 400 };
+  }
   if (!isSafeId(leadBotIdInput)) {
     return { ok: false, error: 'Invalid lead BOT', status: 400 };
   }
@@ -110,40 +113,7 @@ function validateSessionMembers(
     return { ok: false, error: 'Forbidden', status: 403 };
   }
 
-  if (!Array.isArray(memberBotIdsInput) || !memberBotIdsInput.every(isSafeId)) {
-    return { ok: false, error: 'Invalid memberBotIds', status: 400 };
-  }
-
-  const dedupedMembers = [...new Set<string>(memberBotIdsInput)];
-
-  for (const mid of dedupedMembers) {
-    const memberBot = db.getBot(mid);
-    if (!memberBot) {
-      return { ok: false, error: `Member bot ${mid} not found`, status: 400 };
-    }
-    if (!db.canUserUseBot(mid, userId)) {
-      return { ok: false, error: 'Forbidden', status: 403 };
-    }
-    if (mode === 'lead' && memberBot.parentBotId) {
-      if (!dedupedMembers.includes(memberBot.parentBotId) && memberBot.parentBotId !== leadBotIdInput) {
-        return {
-          ok: false,
-          error: `Subagent ${mid} requires its parent bot ${memberBot.parentBotId} to be in the session members or lead`,
-          status: 400,
-        };
-      }
-    }
-  }
-
-  if (!dedupedMembers.includes(leadBotIdInput) || (mode === 'direct' && dedupedMembers.length !== 1)) {
-    return { ok: false, error: 'Lead BOT must be a member; direct sessions have exactly one member', status: 400 };
-  }
-
-  if (mode === 'lead' && dedupedMembers.length < 2) {
-    return { ok: false, error: 'Lead mode requires at least 2 members', status: 400 };
-  }
-
-  return { ok: true, leadBotId: leadBotIdInput, memberBotIds: dedupedMembers };
+  return { ok: true, leadBotId: leadBotIdInput, memberBotIds: [leadBotIdInput] };
 }
 
 export function createHub(options?: HubOptions): HubInstance {
@@ -925,8 +895,6 @@ export function createHub(options?: HubOptions): HubInstance {
       memberBotIds,
       ownerId: user.id,
       parentSessionId: body.parentSessionId,
-      ...(body.memberRoles ? { memberRoles: body.memberRoles } : {}),
-      ...(body.blackboard ? { blackboard: body.blackboard } : {}),
     });
 
     return c.json(session);
@@ -943,8 +911,6 @@ export function createHub(options?: HubOptions): HubInstance {
       mode?: SessionMode;
       leadBotId?: string;
       memberBotIds?: string[];
-      memberRoles?: Record<string, string>;
-      blackboard?: string;
       archived?: boolean;
       pinned?: boolean;
     }>().catch(() => null);
@@ -965,12 +931,6 @@ export function createHub(options?: HubOptions): HubInstance {
     if (body.leadBotId !== undefined && !isSafeId(body.leadBotId)) return c.json({ error: 'Invalid lead BOT' }, 400);
     if (body.memberBotIds !== undefined && (!Array.isArray(body.memberBotIds) || !body.memberBotIds.every(isSafeId))) {
       return c.json({ error: 'Invalid memberBotIds' }, 400);
-    }
-    if (body.memberRoles !== undefined && (typeof body.memberRoles !== 'object' || body.memberRoles === null || Array.isArray(body.memberRoles))) {
-      return c.json({ error: 'Invalid memberRoles' }, 400);
-    }
-    if (body.blackboard !== undefined && typeof body.blackboard !== 'string') {
-      return c.json({ error: 'Invalid blackboard' }, 400);
     }
 
     if (body.mode !== undefined && !VALID_MODES.has(body.mode)) {
@@ -1010,19 +970,9 @@ export function createHub(options?: HubOptions): HubInstance {
       mode,
       leadBotId,
       memberBotIds,
-      memberRoles: body.memberRoles,
-      blackboard: body.blackboard,
       archived: body.archived,
       pinned: body.pinned,
     });
-    if (body.blackboard !== undefined || body.memberRoles !== undefined) {
-      sseHub.broadcast(id, {
-        type: 'session_updated',
-        sessionId: id,
-        blackboard: updated?.blackboard,
-        memberRoles: updated?.memberRoles,
-      });
-    }
     return c.json(updated);
   });
 
@@ -1087,7 +1037,7 @@ export function createHub(options?: HubOptions): HubInstance {
     }
     const content = typeof body.content === 'string' ? body.content : '';
 
-    const validBots = new Set([session.leadBotId, ...session.memberBotIds]);
+    const validBots = router.getValidBotIds(session);
     const cmdResult = parseSlashCommand(content, validBots);
     if (cmdResult.error) {
       return c.json({ error: cmdResult.error }, 400);
@@ -1159,7 +1109,7 @@ export function createHub(options?: HubOptions): HubInstance {
     }
 
     // 先校验斜杠命令，避免截断发生后才发现无法派发
-    const validBots = new Set([session.leadBotId, ...session.memberBotIds]);
+    const validBots = router.getValidBotIds(session);
     const cmdResult = parseSlashCommand(body.content, validBots);
     if (cmdResult.error) {
       return c.json({ error: cmdResult.error }, 400);

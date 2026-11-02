@@ -15,7 +15,7 @@ import {
   Paperclip,
   FileText,
 } from 'lucide-react';
-import type { BotConfig, NodeRecord, ChatCommand, MessageRecord, MessageAttachment, SessionMode } from '@botd/protocol';
+import type { BotConfig, NodeRecord, ChatCommand, MessageRecord, MessageAttachment } from '@botd/protocol';
 import { api } from '../api';
 import { formatFileSize } from './MessageItem';
 import {
@@ -37,7 +37,6 @@ interface ChatInputProps {
   sessionId?: string;
   leadBotId?: string;
   botMap?: Map<string, BotConfig>;
-  sessionMode?: SessionMode;
   isSubagentSession?: boolean;
   disabled?: boolean;
   isRunning?: boolean;
@@ -104,7 +103,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   sessionId,
   leadBotId,
   botMap,
-  sessionMode,
   isSubagentSession = false,
   disabled = false,
   isRunning = false,
@@ -193,53 +191,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       return nameMatch || descMatch;
     });
   }, [allCommands, slashQuery]);
-
-  // 快捷协作胶囊栏（群聊且非编辑态且成员数>=2时展示）
-  const showWorkflowPills =
-    sessionMode !== 'direct' &&
-    !editingMessage &&
-    memberBots.length >= 2;
-
-  const { relayPillText, refinePillText, whisperPillText } = useMemo(() => {
-    const nonLeads = memberBots.filter((b) => b.id !== leadBotId);
-    const nonLead0 = nonLeads[0]?.id || memberBots[0]?.id;
-    const nonLead1 =
-      nonLeads[1]?.id ||
-      (memberBots[1]?.id !== nonLead0 ? memberBots[1]?.id : memberBots[0]?.id);
-    const lead = leadBotId || memberBots[memberBots.length - 1]?.id;
-
-    if (nonLeads.length >= 2) {
-      return {
-        relayPillText: `@${nonLead0} -> @${nonLead1} -> @${lead} `,
-        refinePillText: `@${nonLead0} <-> @${nonLead1} -> @${lead} `,
-        whisperPillText: `@${nonLead0} >> @${nonLead1} `,
-      };
-    } else if (nonLeads.length === 1 && lead && lead !== nonLead0) {
-      return {
-        relayPillText: `@${nonLead0} -> @${lead} `,
-        refinePillText: `@${nonLead0} <-> @${lead} `,
-        whisperPillText: `@${nonLead0} >> @${lead} `,
-      };
-    } else {
-      const b0 = memberBots[0]?.id;
-      const b1 = memberBots[1]?.id;
-      return {
-        relayPillText: `@${b0} -> @${b1} `,
-        refinePillText: `@${b0} <-> @${b1} `,
-        whisperPillText: `@${b0} >> @${b1} `,
-      };
-    }
-  }, [memberBots, leadBotId]);
-
-  const handleInsertWorkflowPill = (prefix: string) => {
-    setContent((prev) => {
-      if (prev.startsWith(prefix)) return prev;
-      return `${prefix}${prev}`;
-    });
-    setTimeout(() => {
-      textareaRef.current?.focus();
-    }, 10);
-  };
 
   // 按目标 BOT 加载命令目录（具备防竞态与异常重试）
   const fetchCommands = useCallback(async (botId: string) => {
@@ -1187,44 +1138,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
       {/* 现代悬浮胶囊输入框 */}
       <div className="max-w-4xl mx-auto">
-        {/* 快捷协作胶囊栏 (Workflow Quick Pills) */}
-        {showWorkflowPills && (
-          <div className="flex items-center gap-1.5 mb-1.5 overflow-x-auto no-scrollbar py-0.5">
-            <button
-              type="button"
-              onClick={() => handleInsertWorkflowPill('@all ')}
-              className="h-6 px-2 text-[11px] font-medium bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-md transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1 shrink-0"
-              title="插入各自盲评编排 (@all )"
-            >
-              <span>💡 各自盲评</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleInsertWorkflowPill(relayPillText)}
-              className="h-6 px-2 text-[11px] font-medium bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-md transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1 shrink-0"
-              title={`插入顺序接力 (${relayPillText})`}
-            >
-              <span>🔗 顺序接力</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleInsertWorkflowPill(refinePillText)}
-              className="h-6 px-2 text-[11px] font-medium bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-md transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1 shrink-0"
-              title={`插入交叉打磨 (${refinePillText})`}
-            >
-              <span>⚖️ 交叉打磨</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleInsertWorkflowPill(whisperPillText)}
-              className="h-6 px-2 text-[11px] font-medium bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-md transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1 shrink-0"
-              title={`插入耳语协商 (${whisperPillText})`}
-            >
-              <span>🤫 耳语协商</span>
-            </button>
-          </div>
-        )}
-
         {/* 待发送附件芯片：图片显示缩略图，文件显示文件名与体积，可逐个移除 */}
         {(pendingAttachments.length > 0 || uploadingFile) && (
           <div className="flex flex-wrap gap-1.5 mb-1.5 px-1">
