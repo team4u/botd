@@ -19,9 +19,12 @@ import {
 } from '../utils/input-uploads';
 import { useSlashMenu } from './ChatInput/useSlashMenu';
 import { useMentionMenu } from './ChatInput/useMentionMenu';
+import { useFileMentionMenu } from './ChatInput/useFileMentionMenu';
 import { useUploads } from './ChatInput/useUploads';
 import { SlashMenuDropdown } from './ChatInput/SlashMenuDropdown';
 import { MentionMenuDropdown } from './ChatInput/MentionMenuDropdown';
+import { FileMentionDropdown } from './ChatInput/FileMentionDropdown';
+import { ComposerStatusBar } from './ChatInput/ComposerStatusBar';
 
 export { parseSlashTrigger, type ParsedSlashTrigger } from './ChatInput/slash';
 
@@ -45,6 +48,8 @@ interface ChatInputProps {
   onCancelEditing?: () => void;
   /** 外部插入文本请求（如代码变更抽屉引用文件路径 / 扩展 editor_text 事件）；seq 变化时追加到输入框末尾并聚焦；replace=true 时直接替换输入框内容 */
   insertTextRequest?: { text: string; seq: number; replace?: boolean } | null;
+  /** 空输入框按 ↑ 快速回溯编辑上一条消息（未传时降级为本地发送历史回填） */
+  onRecallLastMessage?: () => void;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -63,6 +68,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   onSubmitEditing,
   onCancelEditing,
   insertTextRequest = null,
+  onRecallLastMessage,
 }) => {
   const [content, setContent] = useState('');
   const [sending, setSending] = useState(false);
@@ -83,14 +89,31 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const slash = useSlashMenu({ content, setContent, textareaRef, leadBotId, memberBots, botMap });
   const mention = useMentionMenu({ content, setContent, textareaRef, memberBots, isSubagentSession });
 
+  // 当前主控 BOT：# 文件补全的工作区归属，也是底栏微操舱的秒切目标
+  const currentBot = leadBotId && botMap ? botMap.get(leadBotId) : undefined;
+  const fileMention = useFileMentionMenu({
+    content,
+    setContent,
+    textareaRef,
+    leadBot: currentBot,
+    sessionId,
+  });
+
+  // 本地发送历史栈：空输入框按 ↑ 逐条回填最近发出的文本
+  const sentHistoryRef = useRef<string[]>([]);
+  const historyCursorRef = useRef<number>(-1);
+
   // 切换会话时重置所有状态、请求版本及草稿内容
   useEffect(() => {
     slash.resetOnSessionChange();
     resetUploadsOnSessionChange();
+    fileMention.resetOnSessionChange();
     setContent('');
     setSending(false);
     setValidationNotice(null);
     draftBeforeEditRef.current = null;
+    sentHistoryRef.current = [];
+    historyCursorRef.current = -1;
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
@@ -106,6 +129,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     }
     mention.setShowMentions(false);
     slash.closeSlashMenu();
+    fileMention.closeFileMenu();
     setContent(editingMessage.content);
     // 等受控值更新后再聚焦，光标落在文本末尾
     setTimeout(() => {
@@ -126,6 +150,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     draftBeforeEditRef.current = null;
     mention.setShowMentions(false);
     slash.closeSlashMenu();
+    fileMention.closeFileMenu();
     setValidationNotice(null);
     onCancelEditing?.();
   };
@@ -165,16 +190,18 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [content]);
 
-  // 点击外部关闭所有浮层（两浮层互斥，分别可选判断）
+  // 点击外部关闭所有浮层（各浮层互斥，分别可选判断）
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as Node;
       const insideSlash = slash.slashDropdownRef.current?.contains(target);
       const insideMention = mention.mentionDropdownRef.current?.contains(target);
+      const insideFile = fileMention.fileDropdownRef.current?.contains(target);
       const insideTextarea = textareaRef.current?.contains(target);
-      if (!insideSlash && !insideMention && !insideTextarea) {
+      if (!insideSlash && !insideMention && !insideFile && !insideTextarea) {
         mention.setShowMentions(false);
         slash.closeSlashMenu();
+        fileMention.closeFileMenu();
       }
     };
 
@@ -185,7 +212,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 检测 @ 与 / 触发（严格互斥：斜杠优先）
+  // 检测 @ / # 与 / 触发（严格互斥：斜杠优先，其次 #，最后 @）
   const checkTriggers = () => {
     const el = textareaRef.current;
     if (!el) return;
@@ -195,8 +222,17 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
     if (slash.checkSlashTrigger(text, cursor)) {
       mention.setShowMentions(false);
+      fileMention.closeFileMenu();
       return;
     }
+
+    const textBefore = text.slice(0, cursor);
+    if (/(?:^|\s)#([^\s#]*)$/.test(textBefore) && currentBot) {
+      mention.setShowMentions(false);
+      fileMention.checkFileTrigger(text, cursor);
+      return;
+    }
+    fileMention.closeFileMenu();
     mention.checkMentionTrigger(text, cursor);
   };
 
@@ -212,14 +248,71 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     // 2. 提及下拉菜单处于打开状态
     if (mention.handleMentionKeyDown(e)) return;
 
-    // 3. 编辑态按 Esc 取消编辑（补全浮层未打开时）
+    // 3. # 工作区文件引用浮层处于打开状态
+    if (fileMention.handleFileKeyDown(e)) return;
+
+    // 4. 空输入框按 ↑ 快速编辑上一条消息：优先外部回调，否则本地发送历史回填
+    if (e.key === 'ArrowUp' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const el = textareaRef.current;
+      if (
+        el &&
+        content === '' &&
+        el.selectionStart === 0 &&
+        el.selectionEnd === 0 &&
+        !editingMessage
+      ) {
+        if (onRecallLastMessage) {
+          e.preventDefault();
+          onRecallLastMessage();
+          return;
+        }
+        const history = sentHistoryRef.current;
+        if (history.length > 0) {
+          e.preventDefault();
+          const nextCursor = Math.min(historyCursorRef.current + 1, history.length - 1);
+          historyCursorRef.current = nextCursor;
+          setContent(history[nextCursor]);
+          setTimeout(() => {
+            const end = history[nextCursor].length;
+            el.focus();
+            el.setSelectionRange(end, end);
+          }, 0);
+          return;
+        }
+      }
+    }
+
+    // 空输入框按 ↓ 回到更新的历史条目（与 ↑ 回填配对）
+    if (e.key === 'ArrowDown' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const el = textareaRef.current;
+      if (
+        el &&
+        content === '' &&
+        historyCursorRef.current >= 0 &&
+        el.selectionStart === el.value.length &&
+        el.selectionEnd === el.value.length
+      ) {
+        const nextCursor = historyCursorRef.current - 1;
+        e.preventDefault();
+        historyCursorRef.current = nextCursor;
+        setContent(nextCursor >= 0 ? sentHistoryRef.current[nextCursor] : '');
+        setTimeout(() => {
+          const end = nextCursor >= 0 ? sentHistoryRef.current[nextCursor].length : 0;
+          el.focus();
+          el.setSelectionRange(end, end);
+        }, 0);
+        return;
+      }
+    }
+
+    // 5. 编辑态按 Esc 取消编辑（补全浮层未打开时）
     if (e.key === 'Escape' && editingMessage) {
       e.preventDefault();
       cancelEditing();
       return;
     }
 
-    // 4. Enter 直接发送消息（编辑态下为提交编辑）；Shift+Enter / Ctrl+Enter / Command+Enter 换行
+    // 6. Enter 直接发送消息（编辑态下为提交编辑）；Shift+Enter / Ctrl+Enter / Command+Enter 换行
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       handleSubmit();
@@ -298,6 +391,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       setSending(true);
       mention.setShowMentions(false);
       slash.closeSlashMenu();
+      fileMention.closeFileMenu();
       setValidationNotice(null);
       try {
         await onSubmitEditing(trimmed);
@@ -341,6 +435,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     setSending(true);
     mention.setShowMentions(false);
     slash.closeSlashMenu();
+    fileMention.closeFileMenu();
     setValidationNotice(null);
 
     // 纯附件发送时自动补充占位正文，保证消息流可读
@@ -348,6 +443,15 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     const outgoingAttachments = [...pendingAttachments];
     const submittedDraft = content;
     const submittedAttachments = [...pendingAttachments];
+
+    // 入本地发送历史栈（去重顶部重复项，最多保留 50 条）
+    if (trimmed) {
+      sentHistoryRef.current =
+        sentHistoryRef.current[0] === trimmed
+          ? sentHistoryRef.current
+          : [trimmed, ...sentHistoryRef.current].slice(0, 50);
+      historyCursorRef.current = -1;
+    }
 
     try {
       await onSendMessage(outgoingContent, outgoingAttachments);
@@ -480,6 +584,21 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         />
       )}
 
+      {/* # 工作区文件引用浮层 */}
+      {fileMention.showFileMenu && (
+        <FileMentionDropdown
+          fileQuery={fileMention.fileQuery}
+          fileIndex={fileMention.fileIndex}
+          setFileIndex={fileMention.setFileIndex}
+          filteredFiles={fileMention.filteredFiles}
+          loadingFiles={fileMention.loadingFiles}
+          filesError={fileMention.filesError}
+          dropdownRef={fileMention.fileDropdownRef}
+          itemRefs={fileMention.fileItemRefs}
+          insertFileMention={fileMention.insertFileMention}
+        />
+      )}
+
       {/* 现代悬浮胶囊输入框 */}
       <div className="max-w-4xl mx-auto">
         {/* 待发送附件芯片：图片显示缩略图，文件显示文件名与体积，可逐个移除 */}
@@ -586,19 +705,21 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             placeholder={
               editingMessage
                 ? '编辑消息，Enter 保存，Esc 取消...'
-                : '输入 / 命令，@ 提及成员...'
+                : '输入 / 命令，@ 提及智能体，# 引用工作区文件...'
             }
             rows={1}
             disabled={disabled || sending}
             role="combobox"
             aria-autocomplete="list"
             aria-haspopup="listbox"
-            aria-expanded={slash.showSlashMenu || mention.showMentions}
+            aria-expanded={slash.showSlashMenu || mention.showMentions || fileMention.showFileMenu}
             aria-controls={
               slash.showSlashMenu
                 ? 'slash-commands-listbox'
                 : mention.showMentions
                 ? 'mention-listbox'
+                : fileMention.showFileMenu
+                ? 'file-mention-listbox'
                 : undefined
             }
             aria-activedescendant={
@@ -606,6 +727,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                 ? `slash-cmd-${slash.filteredCommands[slash.slashIndex].name}`
                 : mention.showMentions && mention.filteredBots[mention.mentionIndex]
                 ? `mention-bot-${mention.filteredBots[mention.mentionIndex].id}`
+                : fileMention.showFileMenu && fileMention.filteredFiles[fileMention.fileIndex]
+                ? `file-mention-${fileMention.fileIndex}`
                 : undefined
             }
             className="w-full resize-none bg-transparent px-2.5 py-1.5 sm:py-2 text-base sm:text-xs text-zinc-800 dark:text-zinc-100 placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none max-h-[180px] leading-relaxed"
@@ -660,6 +783,37 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             </button>
           )}
         </div>
+
+        {/* 底栏微操舱：模型/思考档位秒切、工作区徽章与快捷指令芯片（编辑态隐藏） */}
+        {!editingMessage && currentBot && (
+          <div className="mt-1.5 px-1">
+            <ComposerStatusBar
+              currentBot={currentBot}
+              onCompact={() => {
+                setContent('/compact ');
+                setTimeout(() => {
+                  const el = textareaRef.current;
+                  if (el) {
+                    el.focus();
+                    const end = el.value.length;
+                    el.setSelectionRange(end, end);
+                  }
+                }, 0);
+              }}
+              onNewTopic={() => {
+                setContent('/new ');
+                setTimeout(() => {
+                  const el = textareaRef.current;
+                  if (el) {
+                    el.focus();
+                    const end = el.value.length;
+                    el.setSelectionRange(end, end);
+                  }
+                }, 0);
+              }}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
