@@ -1499,6 +1499,43 @@ export class HubDatabase {
     return this.isSessionParticipant(sessionId, userId);
   }
 
+  /**
+   * 节点能否以其凭据在指定会话上执行操作（委派/读写消息/产物/取消）。
+   *
+   * 授权依据是"调度事实"而非节点归属：只要会话（或其父会话链上的任一会话）的
+   * 成员 Bot 运行在该节点上，且会话所有者有权使用该 Bot（如团队共享 Bot），
+   * 该节点即可代表会话所有者行动。这覆盖了共享 Bot 在他人会话中 delegate_bot /
+   * 跨 Bot Workflow / 产物读写的身份传递；与节点、会话均无关的请求仍会被拒绝。
+   */
+  canNodeActOnSession(nodeId: string, sessionId: string): boolean {
+    const session = this.getSession(sessionId);
+    const sessionOwner = this.getSessionOwner(sessionId);
+    if (!session || !sessionOwner) return false;
+
+    // 节点归会话所有者本人所有：最常见情形，直接放行
+    if (this.getNodeOwner(nodeId) === sessionOwner) return true;
+
+    // 沿父会话链向上追溯（最多 8 层，防御环路）：子会话由父会话派生，
+    // 只要链上任一会话调度过该节点上的 Bot，节点即可继续操作派生出的子会话
+    let current: SessionRecord | undefined = session;
+    for (let depth = 0; current && depth < 8; depth++) {
+      const memberBotIds = [current.leadBotId, ...current.memberBotIds];
+      for (const botId of memberBotIds) {
+        const bot = this.getBot(botId);
+        if (!bot) continue;
+        // bot 本体或其父 Bot（子代理随主 Bot 所在节点执行）位于该节点
+        const botOnNode =
+          bot.nodeId === nodeId ||
+          Boolean(bot.parentBotId && this.getBot(bot.parentBotId)?.nodeId === nodeId);
+        if (!botOnNode) continue;
+        // 会话所有者必须有权使用该 Bot（私有 Bot 不得借节点凭据越权进入他人会话）
+        if (this.canUserUseBot(botId, sessionOwner)) return true;
+      }
+      current = current.parentSessionId ? this.getSession(current.parentSessionId) : undefined;
+    }
+    return false;
+  }
+
   // --- Outbound Task Queue (Offline Store-and-Forward) ---
   enqueueOutboundTask(input: {
     id?: string;
