@@ -6,6 +6,8 @@ import type { SubagentBridge } from './subagent-bridge.js';
 /**
  * 回合运行注册表：收敛 runtime 的全部模块级可变状态为单个对象。
  * runKey = `${sessionId}:${botId}`；pending 与 active 的区分保证「占位在任何 await 之前」。
+ * 另维护工作目录级互斥：同一 (dataDir, 主Bot) 的 workspace 同一时刻只允许一个回合进入，
+ * 不同会话触发同一主 Bot 时 FIFO 排队（子代理与其父主 Bot 共享同一 workspace，同样互斥）。
  */
 
 export interface ActiveTurnContext {
@@ -25,12 +27,23 @@ export interface ActiveTurnContext {
   peekSubagentRun: (runId: string) => SubagentRunRecord | undefined;
 }
 
+/** 工作区等待者：排队的回合拿到锁（resolve）或被取消（reject） */
+interface WorkspaceWaiter {
+  runKey: string;
+  resolve: () => void;
+  reject: (err: Error) => void;
+}
+
 export class RunRegistry {
   private readonly pendingRuns = new Set<string>();
   private readonly activeSessions = new Map<string, AgentSession>();
   private readonly cancelledRuns = new Set<string>();
   private readonly runKeyToDataDir = new Map<string, string>();
   private readonly activeTurns = new Map<string, ActiveTurnContext>();
+  // 工作目录级互斥：同一主 Bot 的 workspace 同一时刻只允许一个回合进入（跨会话 FIFO 排队）
+  private readonly workspaceOwner = new Map<string, string>();
+  private readonly workspaceWaiters = new Map<string, WorkspaceWaiter[]>();
+  private readonly runKeyToWorkspaceKey = new Map<string, string>();
 
   /** 占位（必须在任何 await 之前调用）；已运行则返回 false */
   reserve(runKey: string, dataDir: string): boolean {
@@ -47,10 +60,24 @@ export class RunRegistry {
     this.activeSessions.set(runKey, session);
   }
 
-  /** 取消标记（cancelBotTurn / cancelAllBotTurns 调用） */
+  /** 取消标记（cancelBotTurn / cancelAllBotTurns 调用）；排队中的回合立即拒绝，绝不死等 */
   cancel(runKey: string): boolean {
     this.cancelledRuns.add(runKey);
+    this.rejectWaitingRun(runKey);
     return this.activeSessions.has(runKey) || this.pendingRuns.has(runKey);
+  }
+
+  /** 把正在排队的 runKey 从等待队列中移除并拒绝（已持有锁的不受影响，走正常中止路径） */
+  private rejectWaitingRun(runKey: string): void {
+    const workspaceKey = this.runKeyToWorkspaceKey.get(runKey);
+    if (!workspaceKey) return;
+    const waiters = this.workspaceWaiters.get(workspaceKey);
+    if (!waiters) return;
+    const index = waiters.findIndex((w) => w.runKey === runKey);
+    if (index === -1) return;
+    const [waiter] = waiters.splice(index, 1);
+    if (waiters.length === 0) this.workspaceWaiters.delete(workspaceKey);
+    waiter.reject(new Error('Turn was cancelled'));
   }
 
   isCancelled(runKey: string): boolean {
@@ -90,13 +117,76 @@ export class RunRegistry {
     return this.activeTurns.get(runKey);
   }
 
-  /** 回合收尾：清空该 runKey 的全部痕迹（finally 路径统一调用） */
+  /**
+   * 获取 Bot 实际工作目录（workspace）的互斥锁：同一 (dataDir, 主Bot) 同一时刻只有一个回合在跑。
+   * 不同会话触发同一主 Bot 时按 FIFO 排队，等待期间被 cancel 立即拒绝。
+   * 必须与 release(runKey) 严格配对调用。
+   */
+  acquireWorkspace(runKey: string, dataDir: string, workspaceBotId: string): Promise<void> {
+    const workspaceKey = `${dataDir}::${workspaceBotId}`;
+    this.runKeyToWorkspaceKey.set(runKey, workspaceKey);
+    if (this.isCancelled(runKey)) {
+      return Promise.reject(new Error('Turn was cancelled'));
+    }
+    const owner = this.workspaceOwner.get(workspaceKey);
+    if (owner === undefined || owner === runKey) {
+      this.workspaceOwner.set(workspaceKey, runKey);
+      return Promise.resolve();
+    }
+    // 已被其他回合持有：进入 FIFO 等待队列（resolve = 拿到锁；reject = 排队期间被取消）
+    return new Promise<void>((resolve, reject) => {
+      const waiters = this.workspaceWaiters.get(workspaceKey) ?? [];
+      waiters.push({ runKey, resolve, reject });
+      this.workspaceWaiters.set(workspaceKey, waiters);
+    });
+  }
+
+  /** 工作区是否被占用（不含排队中的等待者） */
+  isWorkspaceBusy(dataDir: string, workspaceBotId: string): boolean {
+    return this.workspaceOwner.has(`${dataDir}::${workspaceBotId}`);
+  }
+
+  /** 工作区当前排队长度（不含持锁者） */
+  getWorkspaceQueueLength(dataDir: string, workspaceBotId: string): number {
+    return this.workspaceWaiters.get(`${dataDir}::${workspaceBotId}`)?.length ?? 0;
+  }
+
+  /** 回合收尾：清空该 runKey 的全部痕迹（finally 路径统一调用），并把工作区锁移交给队首等待者 */
   release(runKey: string): void {
     this.pendingRuns.delete(runKey);
     this.activeSessions.delete(runKey);
     this.activeTurns.delete(runKey);
     this.cancelledRuns.delete(runKey);
     this.runKeyToDataDir.delete(runKey);
+
+    const workspaceKey = this.runKeyToWorkspaceKey.get(runKey);
+    this.runKeyToWorkspaceKey.delete(runKey);
+    if (!workspaceKey) return;
+
+    // 仍在排队（未拿到锁就被 release）：只移出队列，不动锁
+    const waiters = this.workspaceWaiters.get(workspaceKey);
+    if (waiters) {
+      const index = waiters.findIndex((w) => w.runKey === runKey);
+      if (index !== -1) {
+        waiters.splice(index, 1);
+        if (waiters.length === 0) this.workspaceWaiters.delete(workspaceKey);
+        return;
+      }
+    }
+
+    if (this.workspaceOwner.get(workspaceKey) !== runKey) return;
+    // 移交队首未取消的等待者；已取消的直接跳过（其 promise 已由 cancel 拒绝）
+    const queue = this.workspaceWaiters.get(workspaceKey);
+    while (queue && queue.length > 0) {
+      const next = queue.shift()!;
+      if (queue.length === 0) this.workspaceWaiters.delete(workspaceKey);
+      if (this.isCancelled(next.runKey)) continue;
+      this.workspaceOwner.set(workspaceKey, next.runKey);
+      next.resolve();
+      return;
+    }
+    this.workspaceOwner.delete(workspaceKey);
+    this.workspaceWaiters.delete(workspaceKey);
   }
 
   /** 按 sessionId 找当前活跃回合上下文（同一会话同刻只有一个主回合在跑） */
