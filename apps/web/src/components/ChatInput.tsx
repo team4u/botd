@@ -43,8 +43,8 @@ interface ChatInputProps {
   onSubmitEditing?: (content: string) => Promise<void>;
   /** 取消编辑（恢复进入编辑前的草稿） */
   onCancelEditing?: () => void;
-  /** 外部插入文本请求（如代码变更抽屉引用文件路径）；seq 变化时追加到输入框末尾并聚焦 */
-  insertTextRequest?: { text: string; seq: number } | null;
+  /** 外部插入文本请求（如代码变更抽屉引用文件路径 / 扩展 editor_text 事件）；seq 变化时追加到输入框末尾并聚焦；replace=true 时直接替换输入框内容 */
+  insertTextRequest?: { text: string; seq: number; replace?: boolean } | null;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -130,10 +130,17 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     onCancelEditing?.();
   };
 
-  // 外部插入文本（如代码变更抽屉引用文件路径）：追加到草稿末尾并聚焦输入框
+  // 外部插入文本（代码变更抽屉引用文件路径 / 扩展 editor_text）：追加到草稿末尾并聚焦输入框；
+  // replace=true（扩展 setEditorText）时直接替换输入框内容
   useEffect(() => {
     if (!insertTextRequest?.seq) return;
-    setContent((prev) => (prev ? `${prev}${prev.endsWith(' ') ? '' : ' '}${insertTextRequest.text}` : insertTextRequest.text));
+    setContent((prev) =>
+      insertTextRequest.replace
+        ? insertTextRequest.text
+        : prev
+          ? `${prev}${prev.endsWith(' ') ? '' : ' '}${insertTextRequest.text}`
+          : insertTextRequest.text,
+    );
     setTimeout(() => {
       const el = textareaRef.current;
       if (!el) return;

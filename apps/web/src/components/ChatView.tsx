@@ -29,7 +29,7 @@ import type {
   BgJobRecord,
   SubagentRunRecord,
 } from '@botd/protocol';
-import type { StreamingAssistantState } from '../types';
+import type { StreamingAssistantState, SessionExtensionUiState, ExtensionWidgetState } from '../types';
 import { MessageTimeline } from './MessageTimeline';
 import { ChatInput } from './ChatInput';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -43,6 +43,7 @@ import { BotHistoryDrawer } from './BotHistoryDrawer';
 import { SubagentRunDrawer } from './SubagentRunDrawer';
 import { SubSessionDrawer } from './SubSessionDrawer';
 import { BotEditorModal } from './BotEditorModal';
+import { BotdUiRenderer } from './generative-ui/BotdUiRenderer';
 import { api } from '../api';
 import { onGlobalEvent } from '../events';
 import { useKeyboardInset } from '../utils/viewport';
@@ -64,6 +65,8 @@ interface ChatViewProps {
   streamingStates: StreamingAssistantState[];
   /** 各 BOT 当前活跃的子代理协同执行轨迹 */
   activeSubagentRuns?: Record<string, SubagentRunRecord[]>;
+  /** 会话级扩展 UI 状态（ctx.ui 桥接：status 徽标 / workingMessage / composer 挂件） */
+  extensionUiState?: SessionExtensionUiState;
   onSendMessage: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
   onEditMessage: (sessionId: string, messageId: string, content: string) => Promise<void>;
   onCancelSession: () => Promise<void>;
@@ -152,6 +155,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onRefreshNodes,
   streamingStates,
   activeSubagentRuns = {},
+  extensionUiState,
   onSendMessage,
   onEditMessage,
   onCancelSession,
@@ -281,7 +285,67 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   // ===== 代码变更抽屉 =====
   const [diffDrawerOpen, setDiffDrawerOpen] = useState(false);
-  const [insertTextRequest, setInsertTextRequest] = useState<{ text: string; seq: number } | null>(null);
+  const [insertTextRequest, setInsertTextRequest] = useState<{ text: string; seq: number; replace?: boolean } | null>(null);
+
+  // ===== 扩展 UI（ctx.ui 桥接）=====
+  // editor_text 事件预填输入框（mode=set 替换 / paste 追加）；挂件与状态徽标由 extensionUiState 渲染
+  useEffect(() => {
+    const unsubscribe = onGlobalEvent((e) => {
+      if (e.type !== 'extension_ui' || e.sessionId !== session.id || e.event.kind !== 'editor_text') return;
+      const { text, mode } = e.event;
+      setInsertTextRequest({ text, seq: Date.now(), replace: mode === 'set' });
+    });
+    return unsubscribe;
+  }, [session.id]);
+
+  // 用户手动收起的挂件 key（会话内记忆，直到扩展重设该挂件）
+  const [dismissedWidgetKeys, setDismissedWidgetKeys] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    setDismissedWidgetKeys(new Set());
+  }, [session.id]);
+
+  const visibleWidgets = useMemo(() => {
+    const widgets = Object.values(extensionUiState?.widgets ?? {}).filter(
+      (w) => !dismissedWidgetKeys.has(w.key),
+    );
+    widgets.sort((a, b) => a.updatedAt - b.updatedAt);
+    return widgets;
+  }, [extensionUiState, dismissedWidgetKeys]);
+
+  const aboveEditorWidgets = visibleWidgets.filter((w) => w.placement !== 'belowEditor');
+  const belowEditorWidgets = visibleWidgets.filter((w) => w.placement === 'belowEditor');
+
+  const renderWidget = (widget: ExtensionWidgetState) => (
+    <div
+      key={widget.key}
+      className="relative rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 p-2.5 shadow-xs"
+    >
+      <button
+        type="button"
+        onClick={() =>
+          setDismissedWidgetKeys((prev) => {
+            const next = new Set(prev);
+            next.add(widget.key);
+            return next;
+          })
+        }
+        className="absolute top-1.5 right-1.5 p-1 rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+        aria-label={`收起挂件 ${widget.key}`}
+        title="收起挂件"
+      >
+        <X className="w-3.5 h-3.5" />
+      </button>
+      {widget.uiSpec ? (
+        <div className="pr-6">
+          <BotdUiRenderer spec={widget.uiSpec} mode="display" />
+        </div>
+      ) : (
+        <pre className="pr-6 font-mono text-[11px] leading-relaxed text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-words">
+          {(widget.lines ?? []).join('\n')}
+        </pre>
+      )}
+    </div>
+  );
 
   // ===== 会话切换守卫 =====
   // 异步响应提交前校验会话未变，防止 A 会话的在途响应覆盖 B 会话的界面
@@ -503,6 +567,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
   };
 
   const isRunning = session.status === 'running';
+
+  // 扩展状态徽标：workingMessage（会话运行中）与各 statusKey
+  const statusEntries = useMemo(() => {
+    if (!extensionUiState) return [];
+    const entries: { botId: string; label: string }[] = [];
+    if (isRunning) {
+      for (const [botId, message] of Object.entries(extensionUiState.workingMessages)) {
+        entries.push({ botId, label: `@${botMap.get(botId)?.name || botId}: ${message}` });
+      }
+    }
+    for (const { botId, text } of Object.values(extensionUiState.statuses)) {
+      entries.push({ botId, label: text });
+    }
+    return entries;
+  }, [extensionUiState, isRunning, botMap]);
   // 运行中禁止编辑用户消息（与后端 409 拦截对齐）
   const canEdit = session.status !== 'running';
 
@@ -999,6 +1078,28 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       )}
 
+      {/* 扩展 UI：输入框上方挂件（composer.widget 插槽）+ 扩展状态徽标栏 */}
+      {aboveEditorWidgets.length > 0 && (
+        <div className="px-3 sm:px-4 pb-2 max-w-4xl w-full mx-auto space-y-2 shrink-0">
+          {aboveEditorWidgets.map(renderWidget)}
+        </div>
+      )}
+      {statusEntries.length > 0 && (
+        <div className="px-3 sm:px-4 pb-1.5 max-w-4xl w-full mx-auto shrink-0">
+          <div className="flex flex-wrap items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200/70 dark:border-zinc-800/70 text-[11px] text-zinc-600 dark:text-zinc-300">
+            {statusEntries.map((entry, idx) => (
+              <span
+                key={`${entry.botId}-${idx}`}
+                className="inline-flex items-center gap-1.5 max-w-full truncate"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />
+                <span className="truncate">{entry.label}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* 底部输入框：将 isRunning, cancelling, onCancelSession 传给 ChatInput 实现发送/停止二合一；
           编辑态复用输入框（享受斜杠/提及补全、自动增高与 IME 处理） */}
       <ChatInput
@@ -1017,6 +1118,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onCancelEditing={() => setEditingMessage(null)}
         insertTextRequest={insertTextRequest}
       />
+
+      {/* 扩展 UI：输入框下方挂件（placement='belowEditor'） */}
+      {belowEditorWidgets.length > 0 && (
+        <div className="px-3 sm:px-4 pb-2 max-w-4xl w-full mx-auto space-y-2 shrink-0">
+          {belowEditorWidgets.map(renderWidget)}
+        </div>
+      )}
 
       {/* 移动端软键盘动态避让垫片：iOS Safari 键盘弹起时垫起输入框，消除悬空与空白 */}
       {keyboardInset > 0 && (

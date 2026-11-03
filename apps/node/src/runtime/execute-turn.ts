@@ -100,7 +100,7 @@ export async function executeBotTurn(
     const { createAgentSession, SessionManager, SettingsManager } = piAgent;
     const { getModel } = piAiCompat;
     const { collectBotCommands, loadBotResources } = commandsMod;
-    const { guardExtensionCommands } = webCommandUiMod;
+    const { createWebExtensionUIContext, guardExtensionCommands } = webCommandUiMod;
 
     // --- 1. 生效配置与目录 ---
     let parentBotData: Awaited<ReturnType<typeof readBot>> = null;
@@ -278,6 +278,7 @@ export async function executeBotTurn(
             toolOutput: outputPreview,
             toolDurationMs: durationMs,
             toolIsError: toolCall.isError,
+            ...(toolCall.uiSpec ? { toolUiSpec: toolCall.uiSpec } : {}),
           }),
       },
     );
@@ -303,7 +304,7 @@ export async function executeBotTurn(
       peekSubagentRun: (runId) => bridge?.runs.get(runId),
     });
 
-    // --- 9. 扩展绑定（print 模式 + 网页不支持的会话动作显式拒绝） ---
+    // --- 9. 扩展绑定（Web 扩展 UI 桥接：流式 UI 经 sink 推送，交互对话经 requestHumanInput 闭环） ---
     // messageCountBefore 在 bindExtensions 之前拍快照：只看本回合消息，扩展命令可能不产生 assistant 消息
     const extensionErrors: string[] = [];
     const messageCountBefore = session.messages.length;
@@ -311,8 +312,22 @@ export async function executeBotTurn(
     const unsupportedSessionAction = async (): Promise<never> => {
       throw new Error('此扩展命令的会话操作暂不支持在网页中运行');
     };
+    const trackExtensionError = (message: string) => {
+      if (!extensionErrors.includes(message)) extensionErrors.push(message);
+    };
+    // uiContext 使 ctx.hasUI 为 true：select/confirm/input/editor/custom(BotdUiSpec) 走 Web 桥接，
+    // notify/setStatus/setWidget/setEditorText 等流式方法仅依赖 onSessionStream 推流；
+    // 纯 TUI 方法（theme/onTerminalInput/custom(fn)/setFooter...）在上下文内显式拒绝并上报，不会被 try/catch 吞成假成功。
+    const webUiContext = createWebExtensionUIContext({
+      sessionId: input.sessionId,
+      botId: bot.id,
+      hubRpc,
+      sink,
+      onUnsupported: (error) => trackExtensionError(error.message),
+    });
     await session.bindExtensions({
       mode: 'print',
+      uiContext: webUiContext,
       commandContextActions: {
         waitForIdle: () => boundSession.waitForIdle(),
         newSession: unsupportedSessionAction,
@@ -322,15 +337,15 @@ export async function executeBotTurn(
         reload: unsupportedSessionAction,
       },
       onError: (error: { error: string }) => {
-        if (!extensionErrors.includes(error.error)) extensionErrors.push(error.error);
+        trackExtensionError(error.error);
       },
     });
     if (extensionErrors.length) throw new Error(extensionErrors.join('\n'));
     if (runRegistry.isCancelled(runKey)) throw new Error('Turn was cancelled');
 
     guardExtensionCommands(resourceLoader, (error) => {
-      if (!extensionErrors.includes(error.message)) extensionErrors.push(error.message);
-    });
+      trackExtensionError(error.message);
+    }, webUiContext);
 
     // --- 10. 提示词组装（附件通知 / 斜杠命令校验） ---
     let promptText = input.commandText?.trim() || input.incrementalMessages?.trim() || '(continue)';

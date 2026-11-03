@@ -1,6 +1,8 @@
 export * from './cron.js';
 export * from './ui-catalog.js';
 
+import type { BotdUiSpec } from './ui-catalog.js';
+
 export type PlatformType = 'darwin' | 'linux' | 'win32';
 export type SessionStatus = 'idle' | 'running' | 'queued' | 'failed';
 export type MessageRole = 'user' | 'assistant' | 'callback' | 'system';
@@ -14,6 +16,8 @@ export interface ToolCallRecord {
   durationMs?: number;
   outputPreview?: string;
   isError?: boolean;
+  /** 工具返回的声明式 UI 规格（如扩展工具在 details.ui 中返回的合法 BotdUiSpec），供前端 tool.view 插槽直接渲染 */
+  uiSpec?: BotdUiSpec;
 }
 
 export type TurnBlock =
@@ -37,6 +41,8 @@ export type TurnBlock =
       durationMs?: number;
       outputPreview?: string;
       isError?: boolean;
+      /** 工具返回的声明式 UI 规格（tool.view 插槽），与 ToolCallRecord.uiSpec 同源 */
+      uiSpec?: BotdUiSpec;
     };
 
 export interface TurnUsage {
@@ -525,6 +531,8 @@ export type SessionSseEvent =
       outputPreview?: string;
       durationMs?: number;
       isError?: boolean;
+      /** 工具自定义视图插槽（tool.view）：扩展工具返回的合法 BotdUiSpec */
+      uiSpec?: BotdUiSpec;
     }
   | { type: 'message_created'; message: MessageRecord }
   /** 编辑用户消息后：锚点之后的历史已被截断、锚点内容已更新，客户端应重新拉取消息列表 */
@@ -534,13 +542,53 @@ export type SessionSseEvent =
   /** 人机协同交互已完成响应 */
   | { type: 'interaction_resolved'; sessionId: string; askId: string; answer: string }
   /** 新文件产物上传通知 */
-  | { type: 'artifact_created'; sessionId: string; artifact: ArtifactRecord };
+  | { type: 'artifact_created'; sessionId: string; artifact: ArtifactRecord }
+  /** 扩展 UI 实时事件（notify / status / working_message / widget / editor_text） */
+  | {
+      type: 'extension_ui';
+      sessionId: string;
+      botId: string;
+      event: ExtensionUiStreamPayload;
+    };
 
 /** 节点上下线通知（按节点 owner 用户广播） */
 export type NodeStatusSseEvent = { type: 'node_status'; nodeId: string; status: 'online' | 'offline' };
 
 /** 全局 SSE（GET /api/events）事件：会话事件 + 节点状态事件 */
 export type GlobalSseEvent = SessionSseEvent | NodeStatusSseEvent;
+
+/** 扩展挂件插槽位置：输入框上方 / 下方 */
+export type ExtensionWidgetPlacement = 'aboveEditor' | 'belowEditor';
+
+/** 扩展 UI 实时事件（ctx.ui 桥接到 Web 端的流式载荷） */
+export type ExtensionUiStreamPayload =
+  | {
+      kind: 'notify';
+      message: string;
+      notifyType?: 'info' | 'warning' | 'error';
+    }
+  | {
+      kind: 'status';
+      statusKey: string;
+      statusText?: string;
+    }
+  | {
+      kind: 'working_message';
+      message?: string;
+    }
+  | {
+      kind: 'widget';
+      widgetKey: string;
+      /** undefined 表示清除该挂件 */
+      lines?: string[];
+      uiSpec?: BotdUiSpec;
+      placement?: ExtensionWidgetPlacement;
+    }
+  | {
+      kind: 'editor_text';
+      text: string;
+      mode?: 'set' | 'paste';
+    };
 
 export interface HubRpcFunctions {
   registerNode(info: {
@@ -570,6 +618,8 @@ export interface HubRpcFunctions {
     toolOutput?: string;
     toolDurationMs?: number;
     toolIsError?: boolean;
+    toolUiSpec?: BotdUiSpec;
+    extensionUiEvent?: ExtensionUiStreamPayload;
     subagentEvent?: {
       id: string;
       subagentId: string;

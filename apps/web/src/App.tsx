@@ -399,6 +399,7 @@ export const App: React.FC = () => {
             onRefreshNodes={handleRefreshNodes}
             streamingStates={Object.values(chat.streamingStatesMap)}
             activeSubagentRuns={chat.subagentRunsMap}
+            extensionUiState={chat.extensionUiState}
             onSendMessage={chat.handleSendMessage}
             onEditMessage={chat.handleEditMessage}
             onCancelSession={chat.handleCancelSession}

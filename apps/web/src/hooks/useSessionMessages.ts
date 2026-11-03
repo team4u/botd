@@ -10,7 +10,13 @@ import type {
   TurnBlock,
 } from '@botd/protocol';
 import { api, AuthRequiredError } from '../api';
-import type { StreamingAssistantState, ToolExecutionState } from '../types';
+import {
+  EMPTY_EXTENSION_UI_STATE,
+  type ExtensionWidgetState,
+  type SessionExtensionUiState,
+  type StreamingAssistantState,
+  type ToolExecutionState,
+} from '../types';
 import {
   mergeMessagesPage,
   isSnapshotCurrent,
@@ -96,6 +102,9 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
 
   // 当前会话待处理的人机协同交互请求（botd ask）
   const [pendingAsks, setPendingAsks] = useState<PendingAskRecord[]>([]);
+
+  // 当前会话扩展 UI 状态（ctx.ui 桥接：statuses / workingMessages / widgets）；切会话时重置
+  const [extensionUiState, setExtensionUiState] = useState<SessionExtensionUiState>(EMPTY_EXTENSION_UI_STATE);
 
   // 历史消息分页：是否还有更早消息 / 加载中（ref 防重入，state 供 UI 展示）
   const [hasEarlierMessages, setHasEarlierMessages] = useState(false);
@@ -338,6 +347,7 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
             outputPreview: event.outputPreview,
             durationMs: event.durationMs,
             isError: event.isError,
+            ...(event.uiSpec ? { uiSpec: event.uiSpec } : {}),
             updatedAt: Date.now(),
           };
 
@@ -372,6 +382,7 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
             ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
             ...(event.outputPreview !== undefined ? { outputPreview: event.outputPreview } : {}),
             ...(event.isError !== undefined ? { isError: event.isError } : {}),
+            ...(event.uiSpec ? { uiSpec: event.uiSpec } : {}),
           };
 
           if (existingBlockIdx >= 0) {
@@ -381,6 +392,7 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
               ...toolBlock,
               args: event.args ?? existing.args,
               summary: event.summary ?? existing.summary,
+              ...(event.uiSpec || existing.uiSpec ? { uiSpec: event.uiSpec ?? existing.uiSpec } : {}),
             };
           } else {
             currentBlocks.push(toolBlock);
@@ -465,9 +477,62 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
             return prevMap;
           });
           setSubagentRunsMap({});
+          // 回合结束：清理 workingMessages（statuses/widgets 保留，由扩展显式清除或用户手动收起）
+          setExtensionUiState((prev) =>
+            Object.keys(prev.workingMessages).length > 0
+              ? { ...prev, workingMessages: {} }
+              : prev,
+          );
           // 不区分当前/其他会话：全局同一时刻只有一个取消动作在飞行中，任一会话结束即复位
           setCancelling(false);
         }
+        break;
+      }
+
+      case 'extension_ui': {
+        // ctx.ui 桥接事件：notify 弹 Toast，status/working_message/widget 更新会话级扩展 UI 状态
+        const ui = event.event;
+        if (ui.kind === 'notify') {
+          addToast(ui.notifyType === 'error' ? 'error' : 'info', ui.message);
+          break;
+        }
+        setExtensionUiState((prev) => {
+          if (ui.kind === 'status') {
+            const next = { ...prev, statuses: { ...prev.statuses } };
+            if (ui.statusText === undefined || ui.statusText === '') {
+              delete next.statuses[ui.statusKey];
+            } else {
+              next.statuses[ui.statusKey] = { botId: event.botId, text: ui.statusText };
+            }
+            return next;
+          }
+          if (ui.kind === 'working_message') {
+            const next = { ...prev, workingMessages: { ...prev.workingMessages } };
+            if (ui.message === undefined || ui.message === '') {
+              delete next.workingMessages[event.botId];
+            } else {
+              next.workingMessages[event.botId] = ui.message;
+            }
+            return next;
+          }
+          // widget：undefined 内容或既无 lines 也无 uiSpec 表示清除
+          if (ui.kind !== 'widget') return prev;
+          const widgets = { ...prev.widgets };
+          if (ui.lines === undefined && ui.uiSpec === undefined) {
+            delete widgets[ui.widgetKey];
+          } else {
+            const widget: ExtensionWidgetState = {
+              key: ui.widgetKey,
+              botId: event.botId,
+              ...(ui.lines !== undefined ? { lines: ui.lines } : {}),
+              ...(ui.uiSpec ? { uiSpec: ui.uiSpec } : {}),
+              placement: ui.placement ?? 'aboveEditor',
+              updatedAt: Date.now(),
+            };
+            widgets[ui.widgetKey] = widget;
+          }
+          return { ...prev, widgets };
+        });
         break;
       }
 
@@ -512,6 +577,7 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
     // 切换会话即复位取消状态：取消动作只针对原会话，切走后停止按钮不得永久卡在「正在停止...」
     setCancelling(false);
     setInspectingRunId(null);
+    setExtensionUiState(EMPTY_EXTENSION_UI_STATE);
     if (!authenticated || !activeSessionId) {
       setStreamingStatesMap(clearStreamingMap());
       setPendingAsks([]);
@@ -690,6 +756,7 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
     setMessages([]);
     setStreamingStatesMap(clearStreamingMap());
     setPendingAsks([]);
+    setExtensionUiState(EMPTY_EXTENSION_UI_STATE);
     // 登出同样复位取消状态，防止残留的 cancelling 卡住下一次会话的停止按钮
     setCancelling(false);
   };
@@ -717,6 +784,7 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
     inspectingRunId,
     cancelling,
     pendingAsks,
+    extensionUiState,
     hasEarlierMessages,
     loadingEarlier,
     // refs（供 SSE 分流层与装配层同步读取）

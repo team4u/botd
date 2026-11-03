@@ -34,6 +34,7 @@ import type {
 import { Markdown } from './Markdown';
 import { copyText } from '../utils/clipboard';
 import { AttachmentPreviewModal } from './AttachmentPreviewModal';
+import { BotdUiRenderer } from './generative-ui/BotdUiRenderer';
 
 /** 单个工具块类型别名 */
 type ToolBlock = Extract<TurnBlock, { type: 'tool' }>;
@@ -672,6 +673,24 @@ export const ToolStatusBadge: React.FC<{ tool: ToolBlock }> = ({ tool }) => {
 export const ToolDetailPanel: React.FC<{ tool: ToolBlock }> = ({ tool }) => {
   const [showFullWrite, setShowFullWrite] = useState(false);
 
+  // tool.view 插槽：工具返回合法 BotdUiSpec 时以富视图为主视图；
+  // 仅当同时出错且带输出预览时，在下方补充错误输出
+  if (tool.uiSpec) {
+    const hasError = Boolean(tool.isError || tool.status === 'error');
+    return (
+      <div className="space-y-1.5">
+        <div className="py-1 font-sans">
+          <BotdUiRenderer spec={tool.uiSpec} mode="display" />
+        </div>
+        {hasError && tool.outputPreview && (
+          <pre className="px-2.5 py-2 text-[11px] font-mono whitespace-pre-wrap break-all border rounded-lg max-h-48 overflow-y-auto bg-rose-50/80 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border-rose-200/60 dark:border-rose-900/60">
+            {tool.outputPreview}
+          </pre>
+        )}
+      </div>
+    );
+  }
+
   // 1. Edit tool: unified diff
   if (tool.name === 'edit') {
     const rawEdits = normalizeEditEntries(tool.args) || [];
@@ -878,7 +897,8 @@ export const SingleToolView: React.FC<{
   initialExpanded?: boolean;
 }> = ({ tool, initialExpanded }) => {
   const isError = tool.status === 'error' || Boolean(tool.isError);
-  const [expanded, setExpanded] = useState<boolean>(initialExpanded ?? isError);
+  // 带声明式 UI 规格（tool.view 插槽）的工具默认展开，直接呈现富视图
+  const [expanded, setExpanded] = useState<boolean>(() => Boolean(initialExpanded || tool.uiSpec || isError));
 
   useEffect(() => {
     if (isError) {
@@ -1076,6 +1096,7 @@ export const ToolCallsTrace: React.FC<{ toolCalls: ToolCallRecord[]; initialExpa
     ...(tc.durationMs !== undefined ? { durationMs: tc.durationMs } : {}),
     ...(tc.outputPreview !== undefined ? { outputPreview: tc.outputPreview } : {}),
     ...(tc.isError !== undefined ? { isError: tc.isError } : {}),
+    ...(tc.uiSpec ? { uiSpec: tc.uiSpec } : {}),
   }));
 
   if (toolBlocks.length === 1) {
@@ -1282,6 +1303,7 @@ export const AssistantTurnContent: React.FC<{
           ...(tc.durationMs !== undefined ? { durationMs: tc.durationMs } : {}),
           ...(tc.outputPreview !== undefined ? { outputPreview: tc.outputPreview } : {}),
           ...(tc.isError !== undefined ? { isError: tc.isError } : {}),
+          ...(tc.uiSpec ? { uiSpec: tc.uiSpec } : {}),
         });
       }
     }
