@@ -16,6 +16,8 @@ interface EditorModalsProps {
     node: { id: string; name: string } | null;
     extId: string | null;
     setOpen: (open: boolean) => void;
+    /** 当前节点的智能体列表：传入后弹窗支持「同时启用到智能体」一键挂载 */
+    bots?: BotConfig[];
   };
   bot: {
     open: boolean;
@@ -51,6 +53,7 @@ export const EditorModals: React.FC<EditorModalsProps> = ({ skill, extension, bo
         nodeId={extension.node.id}
         nodeName={extension.node.name}
         extId={extension.extId}
+        bots={extension.bots}
         onClose={() => extension.setOpen(false)}
         onSaved={async () => {
           await onSaved(extension.extId ? '扩展已更新' : '扩展已成功保存');

@@ -749,7 +749,13 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
 
       <EditorModals
         skill={{ open: skillEditorOpen, node: selectedNodeForSkill, skillId: selectedSkillId, setOpen: setSkillEditorOpen }}
-        extension={{ open: extensionEditorOpen, node: selectedNodeForExtension, extId: selectedExtId, setOpen: setExtensionEditorOpen }}
+        extension={{
+          open: extensionEditorOpen,
+          node: selectedNodeForExtension,
+          extId: selectedExtId,
+          setOpen: setExtensionEditorOpen,
+          bots: nodes.find((n) => n.id === selectedNodeForExtension?.id)?.bots,
+        }}
         bot={{
           open: botEditorOpen,
           node: selectedNodeForBot,

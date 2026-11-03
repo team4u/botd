@@ -16,6 +16,7 @@ import {
   SquareTerminal,
   FileDiff,
   Share2,
+  Sparkles,
   History as HistoryIcon,
 } from 'lucide-react';
 import type {
@@ -28,6 +29,7 @@ import type {
   PendingAskRecord,
   BgJobRecord,
   SubagentRunRecord,
+  ChatCommand,
 } from '@botd/protocol';
 import type { StreamingAssistantState, SessionExtensionUiState, ExtensionWidgetState } from '../types';
 import { MessageTimeline } from './MessageTimeline';
@@ -275,6 +277,39 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   const isDirectNodeOnline = directNode?.status === 'online';
 
+  // 会话是否正在运行（提前声明：挂件交互禁用态与胶囊点击分流都依赖）
+  const isRunning = session.status === 'running';
+
+  // ===== 扩展命令快捷胶囊（composer.pill 插槽）=====
+  // 主控智能体注册的扩展斜杠命令：无参命令点击即发，带参命令预填输入框
+  const [extensionCommands, setExtensionCommands] = useState<ChatCommand[]>([]);
+  useEffect(() => {
+    setExtensionCommands([]);
+    if (!session.leadBotId || !isDirectNodeOnline) return;
+    let cancelled = false;
+    api
+      .getBotCommands(session.leadBotId)
+      .then((list) => {
+        if (cancelled) return;
+        setExtensionCommands((Array.isArray(list) ? list : []).filter((cmd) => cmd.source === 'extension'));
+      })
+      .catch(() => {
+        // 静默降级：命令目录拉取失败时 capsule 条不展示即可
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session.leadBotId, isDirectNodeOnline]);
+
+  const handleExtensionPillClick = (cmd: ChatCommand) => {
+    // 带参数或会话运行中：仅预填到输入框供用户补充/确认，不直接发送
+    if (cmd.argumentHint || isRunning) {
+      setInsertTextRequest({ text: `/${cmd.name} `, seq: Date.now(), replace: true });
+      return;
+    }
+    void onSendMessage(`/${cmd.name}`);
+  };
+
   // ===== 会话产物 / 后台进程抽屉 =====
   const [artifactsOpen, setArtifactsOpen] = useState(false);
   const [bgJobsOpen, setBgJobsOpen] = useState(false);
@@ -315,37 +350,67 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const aboveEditorWidgets = visibleWidgets.filter((w) => w.placement !== 'belowEditor');
   const belowEditorWidgets = visibleWidgets.filter((w) => w.placement === 'belowEditor');
 
-  const renderWidget = (widget: ExtensionWidgetState) => (
-    <div
-      key={widget.key}
-      className="relative rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 p-2.5 shadow-xs"
-    >
-      <button
-        type="button"
-        onClick={() =>
-          setDismissedWidgetKeys((prev) => {
-            const next = new Set(prev);
-            next.add(widget.key);
-            return next;
-          })
-        }
-        className="absolute top-1.5 right-1.5 p-1 rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-        aria-label={`收起挂件 ${widget.key}`}
-        title="收起挂件"
+  // 挂件按钮交互回流：spec 含 Button 时切到 ask 模式，点击后把命令/表单回灌到输入框发送
+  const handleWidgetSubmit = (payloadJson: string) => {
+    try {
+      const parsed = JSON.parse(payloadJson);
+      const cmd = parsed?.params?.command;
+      if (typeof cmd === 'string' && cmd.trim()) {
+        const stateStr =
+          parsed?.state && Object.keys(parsed.state).length > 0
+            ? ` ${JSON.stringify(parsed.state)}`
+            : '';
+        void onSendMessage(`${cmd.trim()}${stateStr}`);
+        return;
+      }
+    } catch {
+      // 非 JSON payload，回退为原文发送
+    }
+    void onSendMessage(payloadJson);
+  };
+
+  const renderWidget = (widget: ExtensionWidgetState) => {
+    // 含 Button 的挂件切 ask 模式（可点击、运行中禁用），纯展示挂件保持 display
+    const hasInteractiveButtons = Boolean(
+      widget.uiSpec && Object.values(widget.uiSpec.elements).some((el) => el.type === 'Button')
+    );
+    return (
+      <div
+        key={widget.key}
+        className="relative rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 p-2.5 shadow-xs"
       >
-        <X className="w-3.5 h-3.5" />
-      </button>
-      {widget.uiSpec ? (
-        <div className="pr-6">
-          <BotdUiRenderer spec={widget.uiSpec} mode="display" />
-        </div>
-      ) : (
-        <pre className="pr-6 font-mono text-[11px] leading-relaxed text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-words">
-          {(widget.lines ?? []).join('\n')}
-        </pre>
-      )}
-    </div>
-  );
+        <button
+          type="button"
+          onClick={() =>
+            setDismissedWidgetKeys((prev) => {
+              const next = new Set(prev);
+              next.add(widget.key);
+              return next;
+            })
+          }
+          className="absolute top-1.5 right-1.5 p-1 rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+          aria-label={`收起挂件 ${widget.key}`}
+          title="收起挂件"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+        {widget.uiSpec ? (
+          <div className="pr-6">
+            <BotdUiRenderer
+              spec={widget.uiSpec}
+              mode={hasInteractiveButtons ? 'ask' : 'display'}
+              disabled={isRunning}
+              onSubmit={hasInteractiveButtons ? handleWidgetSubmit : undefined}
+            />
+          </div>
+        ) : (
+          <pre className="pr-6 font-mono text-[11px] leading-relaxed text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-words">
+            {(widget.lines ?? []).join('\n')}
+          </pre>
+        )}
+      </div>
+    );
+  };
 
   // ===== 会话切换守卫 =====
   // 异步响应提交前校验会话未变，防止 A 会话的在途响应覆盖 B 会话的界面
@@ -565,8 +630,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
       setActionBusy(false);
     }
   };
-
-  const isRunning = session.status === 'running';
 
   // 扩展状态徽标：workingMessage（会话运行中）与各 statusKey
   const statusEntries = useMemo(() => {
@@ -1095,6 +1158,26 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />
                 <span className="truncate">{entry.label}</span>
               </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 扩展命令快捷胶囊（composer.pill 插槽）：编辑态隐藏，避免与编辑表单抢焦点 */}
+      {extensionCommands.length > 0 && !editingMessage && (
+        <div className="px-3 sm:px-4 pb-1.5 max-w-4xl w-full mx-auto shrink-0">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {extensionCommands.map((cmd) => (
+              <button
+                key={cmd.name}
+                type="button"
+                onClick={() => handleExtensionPillClick(cmd)}
+                title={cmd.description || `/${cmd.name}`}
+                className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 text-[11px] font-mono text-zinc-600 dark:text-zinc-300 hover:border-zinc-300 hover:text-zinc-900 dark:hover:border-zinc-700 dark:hover:text-zinc-100 transition-colors cursor-pointer shadow-2xs"
+              >
+                <Sparkles className="w-3 h-3 text-zinc-400 dark:text-zinc-500 shrink-0" />
+                <span className="max-w-[12rem] truncate">/{cmd.name}</span>
+              </button>
             ))}
           </div>
         </div>

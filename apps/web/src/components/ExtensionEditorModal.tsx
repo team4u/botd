@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Blocks,
@@ -6,11 +6,13 @@ import {
   Loader2,
   Trash2,
   CheckCircle2,
+  Circle,
   Code2,
   Download,
   FileCode,
   Globe,
 } from 'lucide-react';
+import type { BotConfig } from '@botd/protocol';
 import { ConfirmDialog } from './ConfirmDialog';
 import { api } from '../api';
 
@@ -19,33 +21,87 @@ interface ExtensionEditorModalProps {
   nodeId: string;
   nodeName: string;
   extId?: string | null;
+  /** 当前节点上的智能体列表：非空时展示「启用到本节点智能体」多选区 */
+  bots?: BotConfig[];
   onClose: () => void;
   onSaved: () => void;
 }
 
 const STARTER_EXTENSION_TS = `import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { Type } from 'typebox';
 
 export default function (pi: ExtensionAPI) {
-  // 1. 拦截工具调用示例 (tool_call hook)
-  pi.on('tool_call', async (event) => {
+  // 1. 拦截高危工具调用并在网页弹出确认卡 (ctx.ui.confirm)
+  pi.on('tool_call', async (event, ctx) => {
     if (event.toolName === 'bash') {
       const cmd = String((event.input as { command?: string })?.command || '');
-      if (cmd.includes('rm -rf /')) {
-        return { block: true, reason: '已通过 bash-guard 扩展拦截高危指令' };
+      if (cmd.includes('rm -rf')) {
+        const ok = await ctx.ui.confirm('高危指令拦截', \`是否允许执行: \${cmd} ?\`);
+        if (!ok) return { block: true, reason: '用户已拒绝执行该高危指令' };
       }
     }
   });
 
-  // 2. 注册自定义工具示例 (registerTool)
-  // pi.registerTool({ ... });
+  // 2. 注册斜杠命令 /hello (支持 notify / setStatus / setWidget / custom 表单)
+  pi.registerCommand('hello', {
+    description: '发送扩展通知并挂载状态卡片',
+    handler: async (args, ctx) => {
+      ctx.ui.notify(\`你好 \${args || 'botd'}！扩展运行正常\`, 'info');
+    },
+  });
+
+  // 3. 注册自定义工具：在 details.ui 中返回 BotdUiSpec 即可在聊天流渲染富视图
+  // pi.registerTool({ name: 'my_tool', parameters: Type.Object({}), async execute() { ... } });
 }
 `;
+
+/** 「启用到本节点智能体」多选胶囊区：保存/安装扩展后自动完成挂载或解绑 */
+const BotEnablePicker: React.FC<{
+  bots: BotConfig[];
+  selected: Set<string>;
+  onToggle: (botId: string) => void;
+}> = ({ bots, selected, onToggle }) => (
+  <div>
+    <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
+      启用到本节点智能体
+    </label>
+    <div className="flex flex-wrap gap-1.5">
+      {bots.map((bot) => {
+        const checked = selected.has(bot.id);
+        return (
+          <button
+            key={bot.id}
+            type="button"
+            onClick={() => onToggle(bot.id)}
+            aria-pressed={checked}
+            className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border text-xs font-medium transition-colors cursor-pointer ${
+              checked
+                ? 'bg-zinc-900 border-zinc-900 text-white dark:bg-zinc-100 dark:border-zinc-100 dark:text-zinc-900'
+                : 'bg-zinc-50 border-zinc-200 text-zinc-600 hover:border-zinc-300 hover:text-zinc-800 dark:bg-zinc-900/60 dark:border-zinc-800 dark:text-zinc-400 dark:hover:border-zinc-700 dark:hover:text-zinc-200'
+            }`}
+          >
+            {checked ? (
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+            ) : (
+              <Circle className="w-3.5 h-3.5 shrink-0" />
+            )}
+            <span className="max-w-[10rem] truncate">{bot.name}</span>
+          </button>
+        );
+      })}
+    </div>
+    <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1">
+      保存后将自动把该扩展挂载到勾选的智能体，取消勾选则自动解绑
+    </p>
+  </div>
+);
 
 export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
   isOpen,
   nodeId,
   nodeName,
   extId: initialExtId,
+  bots,
   onClose,
   onSaved,
 }) => {
@@ -69,6 +125,24 @@ export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
   // Feedback state
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  // 「同时启用到智能体」勾选集合；ref 让打开弹窗时的默认勾选用最新 bots 快照，
+  // 而不把 bots 加入 effect 依赖（避免节点列表刷新时重置用户勾选）
+  const botsRef = useRef(bots);
+  botsRef.current = bots;
+  const [selectedBotIds, setSelectedBotIds] = useState<Set<string>>(new Set());
+
+  const toggleBotId = (botId: string) => {
+    setSelectedBotIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(botId)) {
+        next.delete(botId);
+      } else {
+        next.add(botId);
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (isOpen) {
@@ -95,10 +169,65 @@ export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
         setCustomId('');
         setActiveTab('code');
       }
+
+      // 默认勾选：编辑时按现有挂载状态回填；新建/安装且节点下只有一个主智能体时自动勾选它
+      const botList = botsRef.current || [];
+      if (initialExtId) {
+        setSelectedBotIds(
+          new Set(
+            botList
+              .filter((b) => b.enabledExtensions?.includes(initialExtId))
+              .map((b) => b.id)
+          )
+        );
+      } else {
+        const mainBots = botList.filter((b) => !b.parentBotId);
+        setSelectedBotIds(mainBots.length === 1 ? new Set([mainBots[0].id]) : new Set());
+      }
     }
   }, [isOpen, nodeId, initialExtId]);
 
   if (!isOpen) return null;
+
+  // 将勾选状态落库：对所有「已启用状态」与「勾选状态」不一致的智能体执行挂载/解绑
+  const syncBotExtensionMounting = async (targetExtId: string): Promise<string> => {
+    const botList = bots || [];
+    const changed = botList.filter((bot) => {
+      const enabled = bot.enabledExtensions?.includes(targetExtId) ?? false;
+      return enabled !== selectedBotIds.has(bot.id);
+    });
+    if (changed.length === 0) return '';
+
+    let syncedCount = 0;
+    const failedNames: string[] = [];
+    await Promise.all(
+      changed.map(async (bot) => {
+        const shouldEnable = selectedBotIds.has(bot.id);
+        const current = bot.enabledExtensions || [];
+        const nextExtensions = shouldEnable
+          ? current.includes(targetExtId)
+            ? current
+            : [...current, targetExtId]
+          : current.filter((id) => id !== targetExtId);
+        try {
+          const sys = await api.getBotSystem(bot.id);
+          await api.updateBot(bot.id, {
+            ...bot,
+            enabledExtensions: nextExtensions,
+            systemMd: sys.content,
+          });
+          syncedCount++;
+        } catch {
+          failedNames.push(bot.name);
+        }
+      })
+    );
+
+    const notes: string[] = [];
+    if (syncedCount > 0) notes.push(`已同步启用状态到 ${syncedCount} 个智能体`);
+    if (failedNames.length > 0) notes.push(`${failedNames.length} 个智能体同步失败（${failedNames.join('、')}）`);
+    return notes.length > 0 ? `，${notes.join('；')}` : '';
+  };
 
   const handleSaveCode = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -121,7 +250,8 @@ export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
 
     try {
       await api.saveExtension(nodeId, cleanId, content);
-      setSuccess(isEditing ? '扩展已成功更新' : '扩展已成功保存');
+      const syncNote = await syncBotExtensionMounting(cleanId);
+      setSuccess((isEditing ? '扩展已成功更新' : '扩展已成功保存') + syncNote);
       setTimeout(() => {
         onSaved();
         onClose();
@@ -156,7 +286,9 @@ export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
         kind,
         customId: cleanCustomId,
       });
-      setSuccess(`安装成功！类型: ${result.kind === 'extension' ? '扩展插件' : '技能文档'}，标识: ${result.id}`);
+      // 仅扩展插件需要挂载到智能体；技能文档没有 enabledExtensions 语义
+      const syncNote = result.kind === 'extension' ? await syncBotExtensionMounting(result.id) : '';
+      setSuccess(`安装成功！类型: ${result.kind === 'extension' ? '扩展插件' : '技能文档'}，标识: ${result.id}${syncNote}`);
       setTimeout(() => {
         onSaved();
         onClose();
@@ -318,6 +450,10 @@ export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
                     required
                   />
                 </div>
+
+                {bots && bots.length > 0 && (
+                  <BotEnablePicker bots={bots} selected={selectedBotIds} onToggle={toggleBotId} />
+                )}
               </>
             )}
 
@@ -390,12 +526,12 @@ export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
                 type="text"
                 value={source}
                 onChange={(e) => setSource(e.target.value)}
-                placeholder="例如: https://github.com/owner/repo 或 npm:@scope/pi-extension"
+                placeholder="例如: https://github.com/owner/repo、git:github.com/owner/repo@v1 或 npm:@scope/pkg"
                 className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono transition-colors"
                 required
               />
               <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-1 leading-relaxed">
-                支持 Git 仓库根目录、GitHub 单目录 URL (如 <code>https://github.com/owner/repo/tree/main/skills/herdr</code>) 或 <code>npm:&lt;包名&gt;</code>
+                支持 Git 仓库根目录（<code>git:github.com/owner/repo@v1</code>）、GitHub 单目录 URL (如 <code>https://github.com/owner/repo/tree/main/skills/herdr</code>) 或 <code>npm:&lt;包名&gt;</code>（如 <code>npm:@scope/pkg</code>）
               </p>
             </div>
 
@@ -443,6 +579,10 @@ export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
                 <li>安装完成后，智能体即可在配置中勾选启用。</li>
               </ul>
             </div>
+
+            {bots && bots.length > 0 && (
+              <BotEnablePicker bots={bots} selected={selectedBotIds} onToggle={toggleBotId} />
+            )}
 
             <div className="mt-auto pt-4 flex items-center justify-end gap-2 border-t border-zinc-100 dark:border-zinc-800/60 shrink-0">
               <button
