@@ -22,6 +22,8 @@ interface LifecycleEvent {
   error?: string;
   durationMs?: number;
   toolUses?: number;
+  phase?: string;
+  childSessionId?: string;
 }
 
 /** 全局 manager 里的一条子代理记录（含会话与文件，供实时订阅与跨回合 resume） */
@@ -97,6 +99,8 @@ export function createSubagentBridge(
     if (d.type) record.subagentId = d.type;
     if (d.description) record.task = d.description;
     if (typeof d.toolUses === 'number') record.toolCount = d.toolUses;
+    if (d.phase) record.phase = d.phase;
+    if (d.childSessionId) record.childSessionId = d.childSessionId;
     runs.set(d.id, record);
     return record;
   };
@@ -186,7 +190,7 @@ export function createSubagentBridge(
       sink.tool(sessionId, botId, {
         toolName: `subagent:${record.subagentId}`,
         toolStatus: isDone ? 'done' : 'running',
-        toolSummary: `${isDone ? (record.status === 'error' ? '[失败] ' : record.status === 'stopped' ? '[已停止] ' : '[完成] ') : ''}${record.task}${isDone && typeof d.durationMs === 'number' ? ` · ${Math.round(d.durationMs / 1000)}s` : ''}`,
+        toolSummary: `${isDone ? (record.status === 'error' ? '[失败] ' : record.status === 'stopped' ? '[已停止] ' : '[完成] ') : ''}${record.phase ? `[${record.phase}] ` : ''}${record.task}${isDone && typeof d.durationMs === 'number' ? ` · ${Math.round(d.durationMs / 1000)}s` : ''}`,
       });
     } catch {
       // 推流失败不影响回合

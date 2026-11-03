@@ -43,6 +43,8 @@ export interface GroupRouterDelegate {
       durationMs?: number;
       toolUses?: number;
       currentTool?: string;
+      phase?: string;
+      childSessionId?: string;
       startedAt?: string;
       blocks?: TurnBlock[];
       toolCalls?: ToolCallRecord[];

@@ -18,6 +18,8 @@ export interface SubagentStreamPayload {
   durationMs?: number;
   toolUses?: number;
   currentTool?: string;
+  phase?: string;
+  childSessionId?: string;
   startedAt?: string;
   blocks?: SubagentRunRecord['blocks'];
   toolCalls?: SubagentRunRecord['toolCalls'];
@@ -95,6 +97,8 @@ export function toSubagentPayload(run: SubagentRunRecord, extra?: { error?: stri
     ...(run.durationMs !== undefined ? { durationMs: run.durationMs } : {}),
     ...(run.toolCount !== undefined ? { toolUses: run.toolCount } : {}),
     ...(run.currentTool !== undefined ? { currentTool: run.currentTool } : {}),
+    ...(run.phase ? { phase: run.phase } : {}),
+    ...(run.childSessionId ? { childSessionId: run.childSessionId } : {}),
     ...(run.startedAt ? { startedAt: run.startedAt } : {}),
     ...(run.blocks ? { blocks: run.blocks } : {}),
     ...(run.toolCalls ? { toolCalls: run.toolCalls } : {}),

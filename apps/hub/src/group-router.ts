@@ -221,7 +221,7 @@ export function buildGroupContextPrompt(
       prompt +=
         '【跨 BOT 协同规范】：\n' +
         '1. 同工作区内的多角色分工请优先使用 `Agent` / `SubagentWorkflow` 调度你麾下的子代理。\n' +
-        '2. 当任务需要跨机器节点执行、需要其他主 BOT 的独立工作区/专属环境变量、或需调用团队共享主 BOT 时，请调用 `delegate_bot` 工具（默认 `run_in_background: false` 可在本回合内同步等待结果与回传产物，同一回合多次调用可并发执行；耗时任务传 `run_in_background: true` 转为后台子会话并在全部完成后自动汇总唤醒），也可在 bash 中执行 `botd sessions delegate "$BOTD_SESSION_ID" --bot <botId> --prompt "<任务>" [--wait]`。\n';
+        '2. 当任务需要跨机器节点执行、需要其他主 BOT 的独立工作区/专属环境变量、或需调用团队共享主 BOT 时：单步或多并发委派可调用 `delegate_bot` 工具；多阶段流水线、条件分支或需断点续跑（`resumeFromRunId`）的跨 BOT 任务，可直接使用 `SubagentWorkflow` 工具并在脚本的 `agent(prompt, { agentType: "<botId>", phase: "<阶段名>" })` 中指定目标主 BOT ID，支持将本机子代理与跨节点主 BOT 无缝混编。\n';
     }
   }
 
@@ -472,6 +472,8 @@ export class GroupRouter {
       durationMs?: number;
       toolUses?: number;
       currentTool?: string;
+      phase?: string;
+      childSessionId?: string;
       startedAt?: string;
       blocks?: TurnBlock[];
       toolCalls?: ToolCallRecord[];
@@ -491,6 +493,8 @@ export class GroupRouter {
         ...(subBot?.color ? { color: subBot.color } : {}),
         task: subEvent.task,
         status: subEvent.status,
+        ...(subEvent.phase ? { phase: subEvent.phase } : {}),
+        ...(subEvent.childSessionId ? { childSessionId: subEvent.childSessionId } : {}),
       };
       entry = {
         sessionId,
@@ -505,6 +509,8 @@ export class GroupRouter {
     if (typeof subEvent.durationMs === 'number') entry.run.durationMs = subEvent.durationMs;
     if (typeof subEvent.toolUses === 'number') entry.run.toolCount = subEvent.toolUses;
     if (subEvent.currentTool !== undefined) entry.run.currentTool = subEvent.currentTool;
+    if (subEvent.phase) entry.run.phase = subEvent.phase;
+    if (subEvent.childSessionId) entry.run.childSessionId = subEvent.childSessionId;
     if (subEvent.startedAt) entry.run.startedAt = subEvent.startedAt;
     if (subEvent.blocks) entry.run.blocks = subEvent.blocks;
     if (subEvent.toolCalls) entry.run.toolCalls = subEvent.toolCalls;

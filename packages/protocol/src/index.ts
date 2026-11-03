@@ -278,6 +278,8 @@ export interface SubagentRunRecord {
   color?: SubagentColor;
   task: string;
   phase?: string;
+  /** 若该执行步骤对应跨 BOT 派生的独立子会话，记录其子会话 ID（供前端点击直接打开子会话抽屉） */
+  childSessionId?: string;
   /** 本次运行的启动时间（ISO），供检视抽屉合成消息时间戳与日期分隔线 */
   startedAt?: string;
   status: 'running' | 'done' | 'error' | 'stopped' | 'skipped';
@@ -583,6 +585,8 @@ export interface HubRpcFunctions {
       durationMs?: number;
       toolUses?: number;
       currentTool?: string;
+      phase?: string;
+      childSessionId?: string;
       blocks?: TurnBlock[];
       toolCalls?: ToolCallRecord[];
       steers?: SubagentSteerRecord[];
