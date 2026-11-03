@@ -1,9 +1,16 @@
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { isSafeId, type BotConfig, type WorkspaceDiffFile, type WorkspaceDiffResult } from '@botd/protocol';
+import {
+  isSafeId,
+  type BotConfig,
+  type WorkspaceDiffFile,
+  type WorkspaceDiffResult,
+  type WorkspaceSpaceInfo,
+} from '@botd/protocol';
 import { assertSafeId, ensureDir, readBot } from './storage.js';
 import { resolveBotPaths } from './runtime/bot-context.js';
 import { isWindows, windowsShellPathPrefix } from './windows-shell.js';
@@ -97,7 +104,14 @@ async function resolveTargetGitRoot(
   workspaceDir: string,
   sessionDir: string,
   sessionId?: string,
+  boundWorkspaceDir?: string,
 ): Promise<string | null> {
+  // 显式绑定的项目 Space（真实目录）：优先直接探测其所在仓库
+  if (boundWorkspaceDir?.trim()) {
+    const boundRoot = await gitRepoRoot(dataDir, boundWorkspaceDir.trim());
+    if (boundRoot) return boundRoot;
+  }
+
   if (sessionId && isSafeId(sessionId)) {
     const sessionFile = path.join(sessionDir, `${sessionId}.jsonl`);
     if (existsSync(sessionFile)) {
@@ -201,16 +215,16 @@ async function buildTrackedDiff(
  */
 export async function getWorkspaceDiff(
   dataDir: string,
-  input: { botId: string; sessionId?: string },
+  input: { botId: string; sessionId?: string; workspaceDir?: string },
 ): Promise<WorkspaceDiffResult> {
   assertSafeId(input.botId, 'Bot ID');
 
   const botData = await readBot(dataDir, input.botId).catch(() => null);
-  const bot: Pick<BotConfig, 'id' | 'parentBotId'> = botData?.bot ?? { id: input.botId };
-  const { workspaceDir, sessionDir } = resolveBotPaths(dataDir, bot as BotConfig);
+  const bot: Pick<BotConfig, 'id' | 'parentBotId' | 'workspaceDir'> = botData?.bot ?? { id: input.botId };
+  const { workspaceDir, sessionDir } = resolveBotPaths(dataDir, bot as BotConfig, input.workspaceDir);
   await ensureDir(workspaceDir).catch(() => {});
 
-  const repoRoot = await resolveTargetGitRoot(dataDir, workspaceDir, sessionDir, input.sessionId);
+  const repoRoot = await resolveTargetGitRoot(dataDir, workspaceDir, sessionDir, input.sessionId, input.workspaceDir);
   if (!repoRoot) {
     return { isGitRepo: false, repoRoot: workspaceDir, files: [], totalAdditions: 0, totalDeletions: 0 };
   }
@@ -272,4 +286,184 @@ export async function getWorkspaceDiff(
     totalDeletions,
     ...(truncated ? { truncated: true } : {}),
   };
+}
+
+// --- Space（项目工作目录绑定）---
+
+/**
+ * 扫描节点上可绑定的项目 Space：
+ * 默认扫 BOTD_CODE_DIR 或 ~/code 下的一级目录，同时包含进程当前目录；
+ * 目录不存在时回退扫描 process.cwd() 的父目录（含 cwd 自身）。
+ * 并发探测每个目录的 Git 仓库归属与当前分支。
+ */
+export async function listSpaces(dataDir: string): Promise<WorkspaceSpaceInfo[]> {
+  const codeDir = process.env.BOTD_CODE_DIR || path.join(os.homedir(), 'code');
+  const candidates = new Set<string>();
+  if (existsSync(codeDir)) {
+    const entries = await fs.readdir(codeDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.isDirectory()) candidates.add(path.join(codeDir, entry.name));
+    }
+  } else {
+    // 回退：扫描 cwd 的父目录下的一级目录（并包含 cwd 自身）
+    const parentDir = path.dirname(process.cwd());
+    if (existsSync(parentDir)) {
+      const entries = await fs.readdir(parentDir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        if (entry.isDirectory()) candidates.add(path.join(parentDir, entry.name));
+      }
+    }
+  }
+  candidates.add(process.cwd());
+
+  const spaces = await Promise.all(
+    Array.from(candidates).map(async (dir) => {
+      const root = await gitRepoRoot(dataDir, dir);
+      if (!root) {
+        return { path: dir, name: path.basename(dir) || dir, isGitRepo: false } satisfies WorkspaceSpaceInfo;
+      }
+      const branchRaw = await runGit(dataDir, ['rev-parse', '--abbrev-ref', 'HEAD'], root, 5_000);
+      const branch = branchRaw?.trim();
+      return {
+        path: dir,
+        name: path.basename(dir) || dir,
+        ...(branch && branch !== 'HEAD' ? { branch } : {}),
+        isGitRepo: true,
+      } satisfies WorkspaceSpaceInfo;
+    }),
+  );
+  return spaces.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** 解析 listWorkspaceFiles / revertWorkspaceFile 的目标工作目录 */
+async function resolveWorkspaceTargetDir(
+  dataDir: string,
+  input: { botId: string; sessionId?: string; workspaceDir?: string },
+): Promise<string> {
+  if (input.workspaceDir?.trim()) return path.resolve(input.workspaceDir.trim());
+
+  assertSafeId(input.botId, 'Bot ID');
+  const botData = await readBot(dataDir, input.botId).catch(() => null);
+  const bot: Pick<BotConfig, 'id' | 'parentBotId' | 'workspaceDir'> = botData?.bot ?? { id: input.botId };
+  const { workspaceDir, sessionDir } = resolveBotPaths(dataDir, bot as BotConfig);
+  if (bot.workspaceDir?.trim()) return path.resolve(workspaceDir);
+
+  const repoRoot = await resolveTargetGitRoot(dataDir, workspaceDir, sessionDir, input.sessionId);
+  return repoRoot ?? workspaceDir;
+}
+
+/** 大小写不敏感的路径字符顺序子序列匹配（如 `pk/i` 匹配 `packages/protocol/index.ts`） */
+function isFuzzySubsequence(query: string, target: string): boolean {
+  let i = 0;
+  for (const ch of target) {
+    if (i < query.length && ch === query[i]) i++;
+  }
+  return i === query.length;
+}
+
+/** 匹配优先级：文件名包含 > 完整路径包含 > 字符顺序子序列 */
+function matchScore(query: string, relPath: string): number {
+  const lowerQuery = query.toLowerCase();
+  const fileName = relPath.slice(relPath.lastIndexOf('/') + 1).toLowerCase();
+  const lowerPath = relPath.toLowerCase();
+  if (fileName.includes(lowerQuery)) return 0;
+  if (lowerPath.includes(lowerQuery)) return 1;
+  if (isFuzzySubsequence(lowerQuery, lowerPath)) return 2;
+  return -1;
+}
+
+/** 非 Git 目录回退：浅层（最多 2 层）文件扫描，忽略 .git / node_modules / dist 等 */
+async function shallowListFiles(dir: string, maxEntries: number): Promise<string[]> {
+  const IGNORED = new Set(['.git', 'node_modules', 'dist', 'build', 'out', '.next', 'coverage']);
+  const results: string[] = [];
+  const walk = async (current: string, depth: number): Promise<void> => {
+    if (depth > 2 || results.length >= maxEntries) return;
+    const entries = await fs.readdir(current, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (results.length >= maxEntries) return;
+      const rel = path.relative(dir, path.join(current, entry.name));
+      if (entry.isDirectory()) {
+        if (IGNORED.has(entry.name)) continue;
+        await walk(path.join(current, entry.name), depth + 1);
+      } else if (entry.isFile()) {
+        results.push(rel);
+      }
+    }
+  };
+  await walk(dir, 0);
+  return results;
+}
+
+/**
+ * 工作区文件模糊检索（前端 # 文件补全）：基于 `git ls-files -co --exclude-standard`
+ * （非 Git 目录回退浅层扫描），按 query 子串/路径缩写匹配，默认最多返回 50 条。
+ */
+export async function listWorkspaceFiles(
+  dataDir: string,
+  input: { botId: string; sessionId?: string; workspaceDir?: string; query?: string; limit?: number },
+): Promise<string[]> {
+  const targetDir = await resolveWorkspaceTargetDir(dataDir, input);
+  const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+
+  const gitOut = await runGit(dataDir, ['-c', 'core.quotePath=false', 'ls-files', '-co', '--exclude-standard'], targetDir, 5_000);
+  const files = gitOut !== null
+    ? gitOut.split(/\r?\n/).filter(Boolean)
+    : await shallowListFiles(targetDir, 2000);
+
+  const query = input.query?.trim().toLowerCase();
+  if (!query) return files.slice(0, limit);
+
+  const scored = files
+    .map((file) => ({ file, score: matchScore(query, file) }))
+    .filter((item) => item.score >= 0);
+  scored.sort((a, b) => a.score - b.score || a.file.length - b.file.length || a.file.localeCompare(b.file));
+  return scored.slice(0, limit).map((item) => item.file);
+}
+
+/**
+ * 单文件一键回滚：已跟踪文件 `git checkout HEAD -- <path>`，未跟踪文件直接删除。
+ * 严格校验路径不逃逸仓库根，防止路径穿越。
+ */
+export async function revertWorkspaceFile(
+  dataDir: string,
+  input: { botId: string; sessionId?: string; workspaceDir?: string; filePath: string },
+): Promise<{ ok: boolean; error?: string }> {
+  const filePath = input.filePath?.trim();
+  if (!filePath) return { ok: false, error: 'filePath is required' };
+
+  const targetDir = await resolveWorkspaceTargetDir(dataDir, input);
+  const repoRoot = await gitRepoRoot(dataDir, targetDir);
+  if (!repoRoot) return { ok: false, error: 'Not a Git repository' };
+
+  const resolved = path.resolve(repoRoot, filePath);
+  const relative = path.relative(repoRoot, resolved);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    return { ok: false, error: 'Invalid file path: outside repository root' };
+  }
+
+  // 检查文件在 Git 中的状态：未跟踪（??）直接删除，否则 checkout HEAD
+  const statusOut = await runGit(
+    dataDir,
+    ['-c', 'core.quotePath=false', 'status', '--porcelain', '--', filePath],
+    repoRoot,
+    STATUS_TIMEOUT_MS,
+  );
+  if (statusOut === null) return { ok: false, error: 'Failed to read Git status' };
+
+  const line = statusOut.split(/\r?\n/).find((l) => l.length >= 4);
+  if (line?.startsWith('??')) {
+    try {
+      await fs.rm(resolved, { force: true });
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err?.message || 'Failed to delete untracked file' };
+    }
+  }
+
+  const checkoutOut = await runGit(dataDir, ['checkout', 'HEAD', '--', filePath], repoRoot, STATUS_TIMEOUT_MS);
+  if (checkoutOut === null) {
+    // 无 HEAD（空仓库）等场景：git 会失败，把原样错误返回给调用方
+    return { ok: false, error: 'git checkout HEAD failed (repository may have no commits)' };
+  }
+  return { ok: true };
 }

@@ -35,6 +35,7 @@ import type {
   NotificationOutboxRecord,
   SubagentRunRecord,
   WorkspaceDiffResult,
+  WorkspaceSpaceInfo,
 } from '@botd/protocol';
 
 export class ApiError extends Error {
@@ -786,11 +787,49 @@ export const api = {
   async getWorkspaceDiff(
     nodeId: string,
     botId: string,
-    sessionId?: string
+    sessionId?: string,
+    workspaceDir?: string
   ): Promise<WorkspaceDiffResult> {
-    const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : '';
+    const params = new URLSearchParams();
+    if (sessionId) params.set('sessionId', sessionId);
+    if (workspaceDir) params.set('workspaceDir', workspaceDir);
+    const query = params.toString();
     return request<WorkspaceDiffResult>(
-      `/api/nodes/${encodeURIComponent(nodeId)}/bots/${encodeURIComponent(botId)}/diff${query}`
+      `/api/nodes/${encodeURIComponent(nodeId)}/bots/${encodeURIComponent(botId)}/diff${query ? `?${query}` : ''}`
+    );
+  },
+
+  // 节点上可绑定的项目 Space 列表
+  async listSpaces(nodeId: string): Promise<WorkspaceSpaceInfo[]> {
+    return request<WorkspaceSpaceInfo[]>(`/api/nodes/${encodeURIComponent(nodeId)}/spaces`);
+  },
+
+  // 工作区文件模糊检索（# 文件补全）
+  async listWorkspaceFiles(
+    nodeId: string,
+    botId: string,
+    params?: { sessionId?: string; workspaceDir?: string; query?: string; limit?: number }
+  ): Promise<{ files: string[] }> {
+    const search = new URLSearchParams();
+    if (params?.sessionId) search.set('sessionId', params.sessionId);
+    if (params?.workspaceDir) search.set('workspaceDir', params.workspaceDir);
+    if (params?.query) search.set('q', params.query);
+    if (params?.limit !== undefined) search.set('limit', String(params.limit));
+    const query = search.toString();
+    return request<{ files: string[] }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/bots/${encodeURIComponent(botId)}/files${query ? `?${query}` : ''}`
+    );
+  },
+
+  // 单文件一键回滚
+  async revertWorkspaceFile(
+    nodeId: string,
+    botId: string,
+    input: { sessionId?: string; workspaceDir?: string; filePath: string }
+  ): Promise<{ ok: boolean; error?: string }> {
+    return request<{ ok: boolean; error?: string }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/bots/${encodeURIComponent(botId)}/diff/revert`,
+      { method: 'POST', body: JSON.stringify(input) }
     );
   },
 };

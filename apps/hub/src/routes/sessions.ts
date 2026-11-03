@@ -10,6 +10,7 @@ const isText = (value: unknown): value is string => typeof value === 'string' &&
 interface MemberValidationSuccess {
   ok: true;
   leadBotId: string;
+  leadBot: NonNullable<ReturnType<HubContext['db']['getBot']>>;
 }
 
 interface MemberValidationFailure {
@@ -36,7 +37,7 @@ function validateSessionMembers(
     return { ok: false, error: 'Forbidden', status: 403 };
   }
 
-  return { ok: true, leadBotId: leadBotIdInput };
+  return { ok: true, leadBotId: leadBotIdInput, leadBot };
 }
 
 export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
@@ -70,7 +71,13 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
     if (!validation.ok) {
       return c.json({ error: validation.error }, validation.status);
     }
-    const { leadBotId } = validation;
+    const { leadBotId, leadBot } = validation;
+
+    // Space 绑定：未显式指定时默认继承主 Bot 的绑定目录
+    const workspaceDir =
+      (typeof body.workspaceDir === 'string' && body.workspaceDir.trim())
+        ? body.workspaceDir.trim()
+        : leadBot.workspaceDir;
 
     const sessionId = `sess_${randomUUID()}`;
     const session = db.createSession({
@@ -79,6 +86,7 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
       leadBotId,
       ownerId: user.id,
       parentSessionId: body.parentSessionId,
+      ...(workspaceDir ? { workspaceDir } : {}),
     });
 
     return c.json(session);
@@ -94,19 +102,24 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
       title?: string;
       leadBotId?: string;
       archived?: boolean;
+      workspaceDir?: string;
     }>().catch(() => null);
     if (!isObject(body)) return c.json({ error: 'Invalid session configuration' }, 400);
     // 归档是纯 UI 分类标记，允许在运行中修改（如「开启新话题」时旧会话仍在后台执行）；
-    // 标题/负责人会改变调度行为，运行中仍需拒绝。
+    // 标题/负责人/Space 会改变调度行为，运行中仍需拒绝。
     const touchesConfig =
       body.title !== undefined ||
-      body.leadBotId !== undefined;
+      body.leadBotId !== undefined ||
+      body.workspaceDir !== undefined;
     if (session.status === 'running' && touchesConfig) {
       return c.json({ error: 'Stop the session before changing its configuration' }, 409);
     }
     if (body.archived !== undefined && typeof body.archived !== 'boolean') return c.json({ error: 'Invalid archived flag' }, 400);
     if (body.title !== undefined && !isText(body.title)) return c.json({ error: 'Invalid session title' }, 400);
     if (body.leadBotId !== undefined && !isSafeId(body.leadBotId)) return c.json({ error: 'Invalid lead BOT' }, 400);
+    if (body.workspaceDir !== undefined && typeof body.workspaceDir !== 'string') {
+      return c.json({ error: 'Invalid workspaceDir' }, 400);
+    }
 
     const validation = validateSessionMembers(db, c.get('user').id, body.leadBotId ?? session.leadBotId);
     if (!validation.ok) {
@@ -123,6 +136,7 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
       title: body.title?.trim(),
       leadBotId,
       archived: body.archived,
+      ...(body.workspaceDir !== undefined ? { workspaceDir: body.workspaceDir } : {}),
     });
     return c.json(updated);
   });

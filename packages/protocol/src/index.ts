@@ -322,6 +322,14 @@ export interface QueueStageSummary {
   parallel?: boolean;
 }
 
+/** 可用项目 Space（真实项目目录）：供会话/Bot 绑定工作区时选择 */
+export interface WorkspaceSpaceInfo {
+  path: string;
+  name: string;
+  branch?: string;
+  isGitRepo: boolean;
+}
+
 export interface BotConfig {
   id: string;
   nodeId: string;
@@ -351,6 +359,8 @@ export interface BotConfig {
   customTools?: string[];
   /** 子代理工作区隔离模式：off（共享主工作区）| worktree（独立 Git 分支） */
   isolation?: SubagentIsolation;
+  /** 绑定的真实项目目录（Space）：设置后回合以该目录为 cwd 运行 */
+  workspaceDir?: string;
 }
 
 /** Discoverable Pi commands. Names preserve Pi syntax, including the skill: prefix. */
@@ -385,6 +395,8 @@ export interface SessionRecord {
   archived?: boolean;
   /** 会话创建者 ID */
   ownerId?: string;
+  /** 绑定的真实项目目录（Space）：回合以该目录为 cwd 运行 */
+  workspaceDir?: string;
 }
 
 export interface SessionShareRecord {
@@ -709,6 +721,8 @@ export interface NodeRpcFunctions {
     attachments?: MessageAttachment[];
     /** Upstream artifacts automatically synced across nodes for this turn */
     incomingArtifacts?: IncomingArtifactRef[];
+    /** 会话/Bot 绑定的真实项目目录（Space）：作为回合 cwd */
+    workspaceDir?: string;
   }): Promise<{
     replyText: string;
     modelBadge: string;
@@ -739,7 +753,24 @@ export interface NodeRpcFunctions {
   getBgJobLogs?(jobId: string, tailLines?: number): Promise<{ job: BgJobRecord; logs: string }>;
   killBgJob?(jobId: string): Promise<BgJobRecord>;
   /** 查询 BOT 工作区的 Git 净变更（或会话触碰文件），供前端「代码变更」抽屉展示 */
-  getWorkspaceDiff?(input: { botId: string; sessionId?: string }): Promise<WorkspaceDiffResult>;
+  getWorkspaceDiff?(input: { botId: string; sessionId?: string; workspaceDir?: string }): Promise<WorkspaceDiffResult>;
+  /** 扫描节点上可绑定的项目 Space（真实项目目录 + Git 分支信息） */
+  listSpaces?(): Promise<WorkspaceSpaceInfo[]>;
+  /** 工作区文件模糊检索（前端 # 文件补全）：返回相对路径列表 */
+  listWorkspaceFiles?(input: {
+    botId: string;
+    sessionId?: string;
+    workspaceDir?: string;
+    query?: string;
+    limit?: number;
+  }): Promise<string[]>;
+  /** 单文件一键回滚：已跟踪文件 checkout HEAD，未跟踪文件删除 */
+  revertWorkspaceFile?(input: {
+    botId: string;
+    sessionId?: string;
+    workspaceDir?: string;
+    filePath: string;
+  }): Promise<{ ok: boolean; error?: string }>;
 }
 
 // HTTP shapes shared by the browser and Hub. Responses contain these values directly.
@@ -749,6 +780,7 @@ export interface CreateSessionInput {
   title: string;
   leadBotId: string;
   parentSessionId?: string;
+  workspaceDir?: string;
 }
 export interface NodeIdentity { nodeId: string; name: string; hubUrl: string; token: string }
 export interface PairingResult { code: string; expiresAt: string }
@@ -817,7 +849,8 @@ export const isBotConfig = (value: unknown): value is BotConfig => {
     (v.color === undefined || typeof v.color === 'string') &&
     (v.toolScope === undefined || v.toolScope === 'all' || v.toolScope === 'readonly' || v.toolScope === 'custom') &&
     (v.customTools === undefined || (Array.isArray(v.customTools) && v.customTools.every((t) => typeof t === 'string'))) &&
-    (v.isolation === undefined || v.isolation === 'off' || v.isolation === 'worktree')
+    (v.isolation === undefined || v.isolation === 'off' || v.isolation === 'worktree') &&
+    (v.workspaceDir === undefined || typeof v.workspaceDir === 'string')
   );
 };
 

@@ -47,7 +47,7 @@ import { getNodeModelCatalog } from './models.js';
 import { ProviderAuthManager } from './provider-auth.js';
 import { installResourceToNode } from './installer.js';
 import { BgJobManager } from './bg-jobs.js';
-import { getWorkspaceDiff } from './workspace-diff.js';
+import { getWorkspaceDiff, listSpaces, listWorkspaceFiles, revertWorkspaceFile } from './workspace-diff.js';
 import { ensureBuiltinSkill } from './builtin-skill.js';
 import { ensureWindowsShell, isWindows } from './windows-shell.js';
 import { notifyDaemonReady, spawnReplacementDaemon } from './daemon-launch.js';
@@ -404,6 +404,15 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       },
       getWorkspaceDiff: async (input) => {
         return await getWorkspaceDiff(dataDir, input);
+      },
+      listSpaces: async () => {
+        return await listSpaces(dataDir);
+      },
+      listWorkspaceFiles: async (input) => {
+        return await listWorkspaceFiles(dataDir, input);
+      },
+      revertWorkspaceFile: async (input) => {
+        return await revertWorkspaceFile(dataDir, input);
       },
     },
     {

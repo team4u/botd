@@ -49,6 +49,7 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
       ...(body.toolScope ? { toolScope: body.toolScope } : {}),
       ...(Array.isArray(body.customTools) ? { customTools: body.customTools } : {}),
       ...(body.isolation ? { isolation: body.isolation } : {}),
+      ...(typeof body.workspaceDir === 'string' && body.workspaceDir.trim() ? { workspaceDir: body.workspaceDir.trim() } : {}),
       updatedAt: new Date().toISOString(),
     };
 
@@ -98,6 +99,12 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
       botConfig.parentBotId = nextParentBotId;
     } else {
       delete botConfig.parentBotId;
+    }
+    // Space 绑定：传空字符串/null 清除；否则以本次请求为准（未传时保留 existing）
+    if (body.workspaceDir !== undefined) {
+      const trimmed = typeof body.workspaceDir === 'string' ? body.workspaceDir.trim() : '';
+      if (trimmed) botConfig.workspaceDir = trimmed;
+      else delete botConfig.workspaceDir;
     }
 
     try {
