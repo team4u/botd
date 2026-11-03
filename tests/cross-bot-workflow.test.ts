@@ -36,8 +36,8 @@ interface TestEnv {
   turnCounts: Map<string, number>;
   /** botId -> 最新一次收到的 prompt（用于校验 schema 注入与上游结果传递） */
   lastPrompts: Map<string, string>;
-  /** botId -> 回复文本（每次 runTurn 动态读取，支持“修复后成功”） */
-  replies: Map<string, string | ((input: TurnInput, call: number) => string)>;
+  /** botId -> 回复文本（每次 runTurn 动态读取，支持“修复后成功”；函数可为 async 以模拟耗时） */
+  replies: Map<string, string | ((input: TurnInput, call: number) => string | Promise<string>)>;
 }
 
 /**
@@ -65,7 +65,7 @@ async function createTestEnv(t: TestContext): Promise<TestEnv> {
     tokenHash: '{{SECRET_kz3p8wqn}}',
     ownerId: adminUser.id,
   });
-  for (const botId of ['bot_lead', 'bot_builder', 'bot_tester_linux', 'bot_tester_mac', 'bot_step1', 'bot_step2']) {
+  for (const botId of ['bot_lead', 'bot_builder', 'bot_tester_linux', 'bot_tester_mac', 'bot_step1', 'bot_step2', 'bot_slow']) {
     hub.db.saveBot({
       id: botId,
       nodeId: 'node_wf',
@@ -82,7 +82,7 @@ async function createTestEnv(t: TestContext): Promise<TestEnv> {
 
   const turnCounts = new Map<string, number>();
   const lastPrompts = new Map<string, string>();
-  const replies = new Map<string, string | ((input: TurnInput, call: number) => string)>();
+  const replies = new Map<string, string | ((input: TurnInput, call: number) => string | Promise<string>)>();
 
   (hub.connections as any).getNodeRpc = () => ({
     runTurn: async (input: any) => {
@@ -92,7 +92,7 @@ async function createTestEnv(t: TestContext): Promise<TestEnv> {
       const configured = replies.get(input.botId);
       const replyText =
         typeof configured === 'function'
-          ? configured(input as TurnInput, call)
+          ? await configured(input as TurnInput, call)
           : configured ?? `ok:${input.botId}`;
       if (replyText.startsWith('__THROW__')) {
         throw new Error(replyText.slice('__THROW__'.length));
@@ -427,4 +427,71 @@ return { initial, refined };
     `/api/sessions/${encodeURIComponent(parent.id)}/subsessions`,
   );
   assert.equal(subs.length, 1);
+});
+
+test('SubagentWorkflow: 跨 Bot 步骤等待超时返回 timed_out 结果，断点续跑幂等重连同一子会话不重复创建', { timeout: 120_000 }, async (t) => {
+  const env = await createTestEnv(t);
+
+  // bot_slow 每次真实耗时 1500ms（超过第一次运行的 1s 等待超时）
+  env.replies.set('bot_slow', async () => {
+    await new Promise((r) => setTimeout(r, 1500));
+    return 'slow-bot-finally-done';
+  });
+
+  const parent = createParentSession(env);
+  const { tool, ctx, workspaceDir, loader } = await buildWorkflowTool(env, parent.id);
+
+  const script = `
+export const meta = { name: "cross-bot-timeout-resume", description: "Slow step times out then resume re-attaches" }
+phase("Slow")
+const res = await agent("do the slow work", { agentType: "@bot_slow", label: "slow-step" });
+if (!res) throw new Error("slow step failed");
+return { res };
+`.trim();
+
+  // 监听子代理事件：超时步骤的 failed 事件必须携带超时说明与子会话 ID
+  const failedEvents: any[] = [];
+  const bus = (loader as any).eventBus as
+    | { on: (ch: string, fn: (d: unknown) => void) => () => void }
+    | undefined;
+  assert.ok(bus, 'resource loader must expose an eventBus');
+  const unsubFailed = bus.on('subagents:failed', (d: unknown) => failedEvents.push(d as any));
+  t.after(() => unsubFailed());
+
+  // 第一次运行：1 秒等待超时，工作流 failed，超时说明携带子会话 ID
+  const run1 = await runWorkflowTool(tool, ctx, { script, timeout_seconds: 1 });
+  assert.equal(run1.details.status, 'failed', `first run must fail on timeout: ${run1.text}`);
+  assert.equal(run1.isError, true);
+  assert.ok(existsSync(path.join(workspaceDir, '.workflows', `${run1.details.runId}.sessions.json`)), 'sessions map persisted for timed-out step');
+  const timeoutFailed = failedEvents.find((e) => e.type === 'bot_slow');
+  assert.ok(timeoutFailed, `timed-out step must emit subagents:failed: ${JSON.stringify(failedEvents)}`);
+  assert.match(timeoutFailed.error, /timed out after 1s while still running/);
+  assert.ok(timeoutFailed.childSessionId, 'failed event must carry childSessionId');
+  const timedOutChildSessionId = timeoutFailed.childSessionId;
+  // 关键：bot_slow 只被触发了一次（超时未取消子会话，仍在后台继续跑）
+  assert.equal(env.turnCounts.get('bot_slow'), 1, 'bot_slow must be triggered exactly once in the first run');
+
+  // 等待后台子会话真正跑完（或接近跑完），再断点续跑
+  await new Promise((r) => setTimeout(r, 1200));
+
+  const run2 = await runWorkflowTool(tool, ctx, {
+    scriptPath: run1.details.scriptPath,
+    resumeFromRunId: run1.details.runId,
+    timeout_seconds: 5,
+  });
+
+  assert.equal(run2.details.status, 'completed', `resume run must complete: ${run2.text}`);
+  assert.equal(run2.isError, undefined);
+  assert.deepEqual((run2.details.value as any), { res: 'slow-bot-finally-done' });
+
+  // 幂等重连：bot_slow 依然只被调用 1 次，没有为续跑创建第二个子会话
+  assert.equal(env.turnCounts.get('bot_slow'), 1, 'resume must NOT re-trigger bot_slow');
+  const subs2 = await (await HubClient.connect({ dataDir: env.dir })).get<SessionRecord[]>(
+    `/api/sessions/${encodeURIComponent(parent.id)}/subsessions`,
+  );
+  assert.equal(subs2.length, 1, 'no duplicate child session after resume');
+  assert.equal(subs2[0].id, timedOutChildSessionId, 'resumed step re-attached the same child session');
+
+  // 续跑运行的映射文件也落盘（支持 resume-of-resume）
+  assert.ok(existsSync(path.join(workspaceDir, '.workflows', `${run2.details.runId}.sessions.json`)));
 });
