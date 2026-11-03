@@ -209,45 +209,528 @@ export type UiValidationResult =
   | { ok: true; spec: BotdUiSpec; normalizedJson: string }
   | { ok: false; errors: string[] };
 
+function isStateBinding(val: unknown): boolean {
+  if (typeof val !== 'object' || val === null || Array.isArray(val)) return false;
+  const obj = val as Record<string, unknown>;
+  return (
+    (typeof obj.$state === 'string' && obj.$state.trim().length > 0) ||
+    (typeof obj.$bindState === 'string' && obj.$bindState.trim().length > 0)
+  );
+}
+
 function isStringOrStateBinding(val: unknown): boolean {
-  if (typeof val === 'string') return true;
-  if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
-    const obj = val as Record<string, unknown>;
-    return (
-      (typeof obj.$state === 'string' && obj.$state.trim().length > 0) ||
-      (typeof obj.$bindState === 'string' && obj.$bindState.trim().length > 0)
-    );
-  }
-  return false;
+  return typeof val === 'string' || isStateBinding(val);
 }
 
 function isBooleanOrStateBinding(val: unknown): boolean {
-  if (typeof val === 'boolean') return true;
-  if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
-    const obj = val as Record<string, unknown>;
-    return (
-      (typeof obj.$state === 'string' && obj.$state.trim().length > 0) ||
-      (typeof obj.$bindState === 'string' && obj.$bindState.trim().length > 0)
-    );
-  }
-  return false;
+  return typeof val === 'boolean' || isStateBinding(val);
 }
 
 function isStringArrayOrStateBinding(val: unknown): boolean {
-  if (Array.isArray(val) && val.every((item) => typeof item === 'string')) return true;
-  if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
-    const obj = val as Record<string, unknown>;
-    return (
-      (typeof obj.$state === 'string' && obj.$state.trim().length > 0) ||
-      (typeof obj.$bindState === 'string' && obj.$bindState.trim().length > 0)
-    );
-  }
-  return false;
+  return (Array.isArray(val) && val.every((item) => typeof item === 'string')) || isStateBinding(val);
 }
 
-export function validateUiSpec(input: string | unknown): UiValidationResult {
-  const errors: string[] = [];
+// --- per-component props validators -----------------------------------------
 
+type PropsValidator = (id: string, props: Record<string, any>) => string[];
+
+function validateStackProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (props.direction !== undefined && props.direction !== 'vertical' && props.direction !== 'horizontal') {
+    errors.push(`Element "${id}" (Stack) props.direction must be "vertical" or "horizontal"`);
+  }
+  if (props.gap !== undefined && props.gap !== 'sm' && props.gap !== 'md') {
+    errors.push(`Element "${id}" (Stack) props.gap must be "sm" or "md"`);
+  }
+  return errors;
+}
+
+function validateCardProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (typeof props.title !== 'string' || !props.title.trim()) {
+    errors.push(`Element "${id}" (Card) requires a non-empty string "title" prop`);
+  }
+  if (props.subtitle !== undefined && typeof props.subtitle !== 'string') {
+    errors.push(`Element "${id}" (Card) props.subtitle must be a string`);
+  }
+  if (props.badge !== undefined && typeof props.badge !== 'string') {
+    errors.push(`Element "${id}" (Card) props.badge must be a string`);
+  }
+  if (props.icon !== undefined && typeof props.icon !== 'string') {
+    errors.push(`Element "${id}" (Card) props.icon must be a string`);
+  }
+  return errors;
+}
+
+function validateMetricGridProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (props.columns !== undefined && ![2, 3, 4].includes(props.columns)) {
+    errors.push(`Element "${id}" (MetricGrid) props.columns must be 2, 3, or 4`);
+  }
+  return errors;
+}
+
+function validateMetricCardProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (typeof props.label !== 'string' || !props.label.trim()) {
+    errors.push(`Element "${id}" (MetricCard) requires a non-empty string "label" prop`);
+  }
+  if (typeof props.value !== 'string') {
+    errors.push(`Element "${id}" (MetricCard) requires a string "value" prop`);
+  }
+  if (props.hint !== undefined && typeof props.hint !== 'string') {
+    errors.push(`Element "${id}" (MetricCard) props.hint must be a string`);
+  }
+  if (props.status !== undefined && !['ok', 'warn', 'error'].includes(props.status)) {
+    errors.push(`Element "${id}" (MetricCard) props.status must be "ok", "warn", or "error"`);
+  }
+  if (props.trend !== undefined && !['up', 'down', 'flat'].includes(props.trend)) {
+    errors.push(`Element "${id}" (MetricCard) props.trend must be "up", "down", or "flat"`);
+  }
+  if (props.icon !== undefined && typeof props.icon !== 'string') {
+    errors.push(`Element "${id}" (MetricCard) props.icon must be a string`);
+  }
+  return errors;
+}
+
+function validateKeyValueListProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (!Array.isArray(props.items) || props.items.length === 0) {
+    errors.push(`Element "${id}" (KeyValueList) requires a non-empty array "items" prop`);
+  } else {
+    for (let i = 0; i < props.items.length; i++) {
+      const item = props.items[i];
+      if (!item || typeof item !== 'object' || typeof item.key !== 'string' || typeof item.value !== 'string') {
+        errors.push(`Element "${id}" (KeyValueList) item at index ${i} must have string "key" and "value"`);
+      }
+      if (item && item.mono !== undefined && typeof item.mono !== 'boolean') {
+        errors.push(`Element "${id}" (KeyValueList) item at index ${i} "mono" must be a boolean`);
+      }
+      if (item && item.badge !== undefined && typeof item.badge !== 'string') {
+        errors.push(`Element "${id}" (KeyValueList) item at index ${i} "badge" must be a string`);
+      }
+    }
+  }
+  return errors;
+}
+
+function validateTextInputProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (typeof props.label !== 'string' || !props.label.trim()) {
+    errors.push(`Element "${id}" (TextInput) requires a non-empty string "label" prop`);
+  }
+  if (props.value !== undefined && !isStringOrStateBinding(props.value)) {
+    errors.push(`Element "${id}" (TextInput) props.value must be a string or state binding {"$state": "..."}`);
+  }
+  if (props.placeholder !== undefined && typeof props.placeholder !== 'string') {
+    errors.push(`Element "${id}" (TextInput) props.placeholder must be a string`);
+  }
+  if (props.hint !== undefined && typeof props.hint !== 'string') {
+    errors.push(`Element "${id}" (TextInput) props.hint must be a string`);
+  }
+  if (props.multiline !== undefined && typeof props.multiline !== 'boolean') {
+    errors.push(`Element "${id}" (TextInput) props.multiline must be a boolean`);
+  }
+  if (
+    props.rows !== undefined &&
+    (typeof props.rows !== 'number' || !Number.isInteger(props.rows) || props.rows < 2 || props.rows > 12)
+  ) {
+    errors.push(`Element "${id}" (TextInput) props.rows must be an integer between 2 and 12`);
+  }
+  return errors;
+}
+
+function validateSelectProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (typeof props.label !== 'string' || !props.label.trim()) {
+    errors.push(`Element "${id}" (Select) requires a non-empty string "label" prop`);
+  }
+  if (props.value !== undefined && !isStringOrStateBinding(props.value)) {
+    errors.push(`Element "${id}" (Select) props.value must be a string or state binding {"$state": "..."}`);
+  }
+  if (!Array.isArray(props.options) || props.options.length === 0) {
+    errors.push(`Element "${id}" (Select) requires a non-empty array "options" prop`);
+  } else {
+    for (let i = 0; i < props.options.length; i++) {
+      const opt = props.options[i];
+      if (!opt || typeof opt !== 'object' || typeof opt.value !== 'string' || typeof opt.label !== 'string') {
+        errors.push(`Element "${id}" (Select) option at index ${i} must have string "value" and "label"`);
+      }
+    }
+  }
+  return errors;
+}
+
+function validateSwitchProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (typeof props.label !== 'string' || !props.label.trim()) {
+    errors.push(`Element "${id}" (Switch) requires a non-empty string "label" prop`);
+  }
+  if (props.checked !== undefined && !isBooleanOrStateBinding(props.checked)) {
+    errors.push(`Element "${id}" (Switch) props.checked must be a boolean or state binding {"$state": "..."}`);
+  }
+  if (props.hint !== undefined && typeof props.hint !== 'string') {
+    errors.push(`Element "${id}" (Switch) props.hint must be a string`);
+  }
+  return errors;
+}
+
+function validateCheckboxGroupProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (typeof props.label !== 'string' || !props.label.trim()) {
+    errors.push(`Element "${id}" (CheckboxGroup) requires a non-empty string "label" prop`);
+  }
+  if (props.value !== undefined && !isStringArrayOrStateBinding(props.value)) {
+    errors.push(
+      `Element "${id}" (CheckboxGroup) props.value must be a string array or state binding {"$state": "..."}`,
+    );
+  }
+  if (!Array.isArray(props.options) || props.options.length === 0) {
+    errors.push(`Element "${id}" (CheckboxGroup) requires a non-empty array "options" prop`);
+  } else {
+    for (let i = 0; i < props.options.length; i++) {
+      const opt = props.options[i];
+      if (!opt || typeof opt !== 'object' || typeof opt.value !== 'string' || typeof opt.label !== 'string') {
+        errors.push(`Element "${id}" (CheckboxGroup) option at index ${i} must have string "value" and "label"`);
+      }
+      if (opt && opt.description !== undefined && typeof opt.description !== 'string') {
+        errors.push(`Element "${id}" (CheckboxGroup) option at index ${i} "description" must be a string`);
+      }
+    }
+  }
+  if (props.hint !== undefined && typeof props.hint !== 'string') {
+    errors.push(`Element "${id}" (CheckboxGroup) props.hint must be a string`);
+  }
+  return errors;
+}
+
+function validateActionBarProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (props.align !== undefined && !['left', 'right', 'between'].includes(props.align)) {
+    errors.push(`Element "${id}" (ActionBar) props.align must be "left", "right", or "between"`);
+  }
+  return errors;
+}
+
+function validateButtonProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (typeof props.label !== 'string' || !props.label.trim()) {
+    errors.push(`Element "${id}" (Button) requires a non-empty string "label" prop`);
+  }
+  if (props.variant !== undefined && !['primary', 'secondary', 'danger'].includes(props.variant)) {
+    errors.push(`Element "${id}" (Button) props.variant must be "primary", "secondary", or "danger"`);
+  }
+  return errors;
+}
+
+function validateCalloutProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (typeof props.content !== 'string' || !props.content.trim()) {
+    errors.push(`Element "${id}" (Callout) requires a non-empty string "content" prop`);
+  }
+  if (props.title !== undefined && typeof props.title !== 'string') {
+    errors.push(`Element "${id}" (Callout) props.title must be a string`);
+  }
+  if (props.variant !== undefined && !['info', 'tip', 'warn', 'error'].includes(props.variant)) {
+    errors.push(`Element "${id}" (Callout) props.variant must be "info", "tip", "warn", or "error"`);
+  }
+  if (props.icon !== undefined && typeof props.icon !== 'string') {
+    errors.push(`Element "${id}" (Callout) props.icon must be a string`);
+  }
+  if (props.mono !== undefined && typeof props.mono !== 'boolean') {
+    errors.push(`Element "${id}" (Callout) props.mono must be a boolean`);
+  }
+  return errors;
+}
+
+function validateTabsProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (!Array.isArray(props.tabs) || props.tabs.length === 0) {
+    errors.push(`Element "${id}" (Tabs) requires a non-empty array "tabs" prop`);
+  } else {
+    for (let i = 0; i < props.tabs.length; i++) {
+      const tab = props.tabs[i];
+      if (!tab || typeof tab !== 'object' || typeof tab.id !== 'string' || typeof tab.label !== 'string') {
+        errors.push(`Element "${id}" (Tabs) tab at index ${i} must have string "id" and "label"`);
+      }
+      if (tab && tab.icon !== undefined && typeof tab.icon !== 'string') {
+        errors.push(`Element "${id}" (Tabs) tab at index ${i} "icon" must be a string`);
+      }
+    }
+  }
+  if (props.defaultTab !== undefined && typeof props.defaultTab !== 'string') {
+    errors.push(`Element "${id}" (Tabs) props.defaultTab must be a string`);
+  }
+  return errors;
+}
+
+function validateStepsProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (!Array.isArray(props.items) || props.items.length === 0) {
+    errors.push(`Element "${id}" (Steps) requires a non-empty array "items" prop`);
+  } else {
+    for (let i = 0; i < props.items.length; i++) {
+      const step = props.items[i];
+      if (!step || typeof step !== 'object' || typeof step.title !== 'string' || !step.title.trim()) {
+        errors.push(`Element "${id}" (Steps) step at index ${i} must have non-empty string "title"`);
+      }
+      if (step && step.description !== undefined && typeof step.description !== 'string') {
+        errors.push(`Element "${id}" (Steps) step at index ${i} "description" must be a string`);
+      }
+      if (step && step.status !== undefined && !['done', 'current', 'pending'].includes(step.status)) {
+        errors.push(`Element "${id}" (Steps) step at index ${i} "status" must be "done", "current", or "pending"`);
+      }
+      if (step && step.icon !== undefined && typeof step.icon !== 'string') {
+        errors.push(`Element "${id}" (Steps) step at index ${i} "icon" must be a string`);
+      }
+      if (step && step.badge !== undefined && typeof step.badge !== 'string') {
+        errors.push(`Element "${id}" (Steps) step at index ${i} "badge" must be a string`);
+      }
+    }
+  }
+  return errors;
+}
+
+function validateAccordionProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (!Array.isArray(props.items) || props.items.length === 0) {
+    errors.push(`Element "${id}" (Accordion) requires a non-empty array "items" prop`);
+  } else {
+    for (let i = 0; i < props.items.length; i++) {
+      const acc = props.items[i];
+      if (!acc || typeof acc !== 'object' || typeof acc.title !== 'string' || !acc.title.trim()) {
+        errors.push(`Element "${id}" (Accordion) item at index ${i} must have non-empty string "title"`);
+      }
+      if (acc && acc.content !== undefined && typeof acc.content !== 'string') {
+        errors.push(`Element "${id}" (Accordion) item at index ${i} "content" must be a string`);
+      }
+      if (acc && acc.defaultOpen !== undefined && typeof acc.defaultOpen !== 'boolean') {
+        errors.push(`Element "${id}" (Accordion) item at index ${i} "defaultOpen" must be a boolean`);
+      }
+      if (acc && acc.icon !== undefined && typeof acc.icon !== 'string') {
+        errors.push(`Element "${id}" (Accordion) item at index ${i} "icon" must be a string`);
+      }
+      if (acc && acc.badge !== undefined && typeof acc.badge !== 'string') {
+        errors.push(`Element "${id}" (Accordion) item at index ${i} "badge" must be a string`);
+      }
+      if (acc && acc.mono !== undefined && typeof acc.mono !== 'boolean') {
+        errors.push(`Element "${id}" (Accordion) item at index ${i} "mono" must be a boolean`);
+      }
+    }
+  }
+  return errors;
+}
+
+function validateBarListProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (!Array.isArray(props.items) || props.items.length === 0) {
+    errors.push(`Element "${id}" (BarList) requires a non-empty array "items" prop`);
+  } else {
+    for (let i = 0; i < props.items.length; i++) {
+      const bar = props.items[i];
+      if (!bar || typeof bar !== 'object' || typeof bar.label !== 'string' || typeof bar.value !== 'number' || !Number.isFinite(bar.value)) {
+        errors.push(`Element "${id}" (BarList) item at index ${i} must have string "label" and finite number "value"`);
+      }
+      if (bar && bar.max !== undefined && (typeof bar.max !== 'number' || !Number.isFinite(bar.max) || bar.max <= 0)) {
+        errors.push(`Element "${id}" (BarList) item at index ${i} "max" must be a positive number`);
+      }
+      if (bar && bar.displayValue !== undefined && typeof bar.displayValue !== 'string') {
+        errors.push(`Element "${id}" (BarList) item at index ${i} "displayValue" must be a string`);
+      }
+      if (bar && bar.color !== undefined && !['blue', 'emerald', 'amber', 'rose', 'purple'].includes(bar.color)) {
+        errors.push(`Element "${id}" (BarList) item at index ${i} "color" must be "blue", "emerald", "amber", "rose", or "purple"`);
+      }
+    }
+  }
+  if (props.title !== undefined && typeof props.title !== 'string') {
+    errors.push(`Element "${id}" (BarList) props.title must be a string`);
+  }
+  return errors;
+}
+
+function validateTableProps(id: string, props: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (
+    !Array.isArray(props.columns) ||
+    props.columns.length === 0 ||
+    props.columns.some((c: unknown) => typeof c !== 'string')
+  ) {
+    errors.push(`Element "${id}" (Table) requires a non-empty array "columns" prop of strings`);
+  }
+  if (props.title !== undefined && typeof props.title !== 'string') {
+    errors.push(`Element "${id}" (Table) props.title must be a string`);
+  }
+  if (props.monoColumns !== undefined) {
+    if (
+      !Array.isArray(props.monoColumns) ||
+      props.monoColumns.some((n: unknown) => typeof n !== 'number' || !Number.isInteger(n) || n < 0)
+    ) {
+      errors.push(`Element "${id}" (Table) props.monoColumns must be an array of non-negative integers`);
+    } else if (Array.isArray(props.columns)) {
+      const colCount = props.columns.length;
+      for (const n of props.monoColumns as number[]) {
+        if (n >= colCount) {
+          errors.push(`Element "${id}" (Table) props.monoColumns index ${n} is out of range (columns: ${colCount})`);
+        }
+      }
+    }
+  }
+  if (!Array.isArray(props.rows)) {
+    errors.push(`Element "${id}" (Table) requires an array "rows" prop`);
+  } else if (Array.isArray(props.columns)) {
+    const colCount = props.columns.length;
+    for (let i = 0; i < props.rows.length; i++) {
+      const row = props.rows[i];
+      if (!Array.isArray(row) || row.length !== colCount || row.some((cell: unknown) => typeof cell !== 'string')) {
+        errors.push(
+          `Element "${id}" (Table) row at index ${i} must be a string array of length ${colCount} matching columns`,
+        );
+      }
+    }
+  }
+  return errors;
+}
+
+const propsValidators: Record<BotdUiComponentType, PropsValidator> = {
+  Stack: validateStackProps,
+  Card: validateCardProps,
+  MetricGrid: validateMetricGridProps,
+  MetricCard: validateMetricCardProps,
+  KeyValueList: validateKeyValueListProps,
+  TextInput: validateTextInputProps,
+  Select: validateSelectProps,
+  Switch: validateSwitchProps,
+  CheckboxGroup: validateCheckboxGroupProps,
+  ActionBar: validateActionBarProps,
+  Button: validateButtonProps,
+  Callout: validateCalloutProps,
+  Tabs: validateTabsProps,
+  Steps: validateStepsProps,
+  Accordion: validateAccordionProps,
+  BarList: validateBarListProps,
+  Table: validateTableProps,
+};
+
+// --- element structure validation (children / slots / on) -------------------
+
+function validateChildren(id: string, el: Record<string, any>, elements: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (el.children !== undefined) {
+    if (!Array.isArray(el.children)) {
+      errors.push(`Element "${id}".children must be an array of strings`);
+    } else {
+      for (const childId of el.children) {
+        if (typeof childId !== 'string') {
+          errors.push(`Element "${id}".children contains non-string child ID`);
+        } else if (!(childId in elements)) {
+          errors.push(`Child "${childId}" referenced by "${id}" does not exist in elements`);
+        }
+      }
+    }
+  }
+  return errors;
+}
+
+function validateSlots(id: string, el: Record<string, any>, elements: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (el.slots !== undefined) {
+    if (typeof el.slots !== 'object' || el.slots === null || Array.isArray(el.slots)) {
+      errors.push(`Element "${id}".slots must be an object`);
+    } else {
+      for (const [slotName, slotChildren] of Object.entries(el.slots)) {
+        if (!Array.isArray(slotChildren)) {
+          errors.push(`Element "${id}".slots.${slotName} must be an array of strings`);
+        } else {
+          for (const childId of slotChildren) {
+            if (typeof childId !== 'string') {
+              errors.push(`Element "${id}".slots.${slotName} contains non-string child ID`);
+            } else if (!(childId in elements)) {
+              errors.push(`Child "${childId}" in slot "${slotName}" of "${id}" does not exist in elements`);
+            }
+          }
+        }
+      }
+    }
+  }
+  return errors;
+}
+
+function validateOn(id: string, el: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (el.on !== undefined) {
+    if (typeof el.on !== 'object' || el.on === null || Array.isArray(el.on)) {
+      errors.push(`Element "${id}".on must be an object`);
+    } else {
+      for (const [eventKey, actionBinding] of Object.entries(el.on)) {
+        if (!actionBinding || typeof actionBinding !== 'object' || Array.isArray(actionBinding)) {
+          errors.push(`Element "${id}".on.${eventKey} must be an action object`);
+        } else {
+          const act = actionBinding as Record<string, any>;
+          if (act.action !== 'submit') {
+            errors.push(`Unknown action "${act.action}" on element "${id}". Allowed actions: submit`);
+          }
+          if (
+            act.params !== undefined &&
+            (typeof act.params !== 'object' || act.params === null || Array.isArray(act.params))
+          ) {
+            errors.push(`Element "${id}".on.${eventKey}.params must be an object if provided`);
+          }
+        }
+      }
+    }
+  }
+  return errors;
+}
+
+/** Tree traversal from root: cycle detection and max depth check. */
+function validateTree(root: string, elements: Record<string, any>): string[] {
+  const errors: string[] = [];
+  const visitedPath = new Set<string>();
+  let depthExceeded = false;
+
+  const checkTree = (nodeId: string, depth: number) => {
+    if (depth > MAX_UI_TREE_DEPTH) {
+      depthExceeded = true;
+      return;
+    }
+    if (visitedPath.has(nodeId)) {
+      errors.push(`Cycle detected in UI tree at element "${nodeId}"`);
+      return;
+    }
+    visitedPath.add(nodeId);
+    const elem = elements[nodeId];
+    if (elem) {
+      if (Array.isArray(elem.children)) {
+        for (const childId of elem.children) {
+          if (typeof childId === 'string' && childId in elements) {
+            checkTree(childId, depth + 1);
+          }
+        }
+      }
+      if (elem.slots && typeof elem.slots === 'object') {
+        for (const slotChildren of Object.values(elem.slots)) {
+          if (Array.isArray(slotChildren)) {
+            for (const childId of slotChildren) {
+              if (typeof childId === 'string' && childId in elements) {
+                checkTree(childId, depth + 1);
+              }
+            }
+          }
+        }
+      }
+    }
+    visitedPath.delete(nodeId);
+  };
+
+  checkTree(root, 1);
+  if (depthExceeded) {
+    errors.push(`UI tree depth exceeds maximum depth of ${MAX_UI_TREE_DEPTH}`);
+  }
+  return errors;
+}
+
+/** Size limit + JSON parsing: accepts a JSON string or an object, returns a plain object. */
+function parseUiSpecInput(input: string | unknown): { ok: true; raw: any } | { ok: false; errors: string[] } {
   let raw: any;
   if (typeof input === 'string') {
     const byteLength = new TextEncoder().encode(input).length;
@@ -292,6 +775,17 @@ export function validateUiSpec(input: string | unknown): UiValidationResult {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return { ok: false, errors: ['UI spec must be a plain object'] };
   }
+  return { ok: true, raw };
+}
+
+export function validateUiSpec(input: string | unknown): UiValidationResult {
+  const parsed = parseUiSpecInput(input);
+  if (!parsed.ok) {
+    return { ok: false, errors: parsed.errors };
+  }
+  const raw = parsed.raw;
+
+  const errors: string[] = [];
 
   if (typeof raw.root !== 'string' || !raw.root.trim()) {
     errors.push('UI spec must contain a non-empty string "root" property');
@@ -314,7 +808,7 @@ export function validateUiSpec(input: string | unknown): UiValidationResult {
   }
 
   // If basic top-level structure failed, return early
-  if (errors.length > 0 || !raw.elements || typeof raw.elements !== 'object') {
+  if (errors.length > 0) {
     return { ok: false, errors };
   }
 
@@ -331,447 +825,29 @@ export function validateUiSpec(input: string | unknown): UiValidationResult {
     }
     const el = elem as Record<string, any>;
 
-    if (typeof el.type !== 'string' || !BOTD_UI_COMPONENT_TYPES.includes(el.type as any)) {
+    const type = (BOTD_UI_COMPONENT_TYPES as readonly string[]).includes(el.type)
+      ? (el.type as BotdUiComponentType)
+      : undefined;
+    if (!type) {
       errors.push(`Unknown component type "${el.type}". Allowed types: ${allowedTypesStr}`);
     }
 
-    if (el.children !== undefined) {
-      if (!Array.isArray(el.children)) {
-        errors.push(`Element "${id}".children must be an array of strings`);
-      } else {
-        for (const childId of el.children) {
-          if (typeof childId !== 'string') {
-            errors.push(`Element "${id}".children contains non-string child ID`);
-          } else if (!(childId in raw.elements)) {
-            errors.push(`Child "${childId}" referenced by "${id}" does not exist in elements`);
-          }
-        }
-      }
-    }
-
-    if (el.slots !== undefined) {
-      if (typeof el.slots !== 'object' || el.slots === null || Array.isArray(el.slots)) {
-        errors.push(`Element "${id}".slots must be an object`);
-      } else {
-        for (const [slotName, slotChildren] of Object.entries(el.slots)) {
-          if (!Array.isArray(slotChildren)) {
-            errors.push(`Element "${id}".slots.${slotName} must be an array of strings`);
-          } else {
-            for (const childId of slotChildren) {
-              if (typeof childId !== 'string') {
-                errors.push(`Element "${id}".slots.${slotName} contains non-string child ID`);
-              } else if (!(childId in raw.elements)) {
-                errors.push(`Child "${childId}" in slot "${slotName}" of "${id}" does not exist in elements`);
-              }
-            }
-          }
-        }
-      }
-    }
-
-    if (el.on !== undefined) {
-      if (typeof el.on !== 'object' || el.on === null || Array.isArray(el.on)) {
-        errors.push(`Element "${id}".on must be an object`);
-      } else {
-        for (const [eventKey, actionBinding] of Object.entries(el.on)) {
-          if (!actionBinding || typeof actionBinding !== 'object' || Array.isArray(actionBinding)) {
-            errors.push(`Element "${id}".on.${eventKey} must be an action object`);
-          } else {
-            const act = actionBinding as Record<string, any>;
-            if (act.action !== 'submit') {
-              errors.push(
-                `Unknown action "${act.action}" on element "${id}". Allowed actions: submit`,
-              );
-            }
-            if (
-              act.params !== undefined &&
-              (typeof act.params !== 'object' || act.params === null || Array.isArray(act.params))
-            ) {
-              errors.push(`Element "${id}".on.${eventKey}.params must be an object if provided`);
-            }
-          }
-        }
-      }
-    }
+    errors.push(...validateChildren(id, el, raw.elements));
+    errors.push(...validateSlots(id, el, raw.elements));
+    errors.push(...validateOn(id, el));
 
     const props = el.props || {};
     if (typeof props !== 'object' || props === null || Array.isArray(props)) {
       errors.push(`Element "${id}".props must be an object`);
       continue;
     }
-
-    switch (el.type) {
-      case 'Stack': {
-        if (props.direction !== undefined && props.direction !== 'vertical' && props.direction !== 'horizontal') {
-          errors.push(`Element "${id}" (Stack) props.direction must be "vertical" or "horizontal"`);
-        }
-        if (props.gap !== undefined && props.gap !== 'sm' && props.gap !== 'md') {
-          errors.push(`Element "${id}" (Stack) props.gap must be "sm" or "md"`);
-        }
-        break;
-      }
-      case 'Card': {
-        if (typeof props.title !== 'string' || !props.title.trim()) {
-          errors.push(`Element "${id}" (Card) requires a non-empty string "title" prop`);
-        }
-        if (props.subtitle !== undefined && typeof props.subtitle !== 'string') {
-          errors.push(`Element "${id}" (Card) props.subtitle must be a string`);
-        }
-        if (props.badge !== undefined && typeof props.badge !== 'string') {
-          errors.push(`Element "${id}" (Card) props.badge must be a string`);
-        }
-        if (props.icon !== undefined && typeof props.icon !== 'string') {
-          errors.push(`Element "${id}" (Card) props.icon must be a string`);
-        }
-        break;
-      }
-      case 'MetricGrid': {
-        if (props.columns !== undefined && ![2, 3, 4].includes(props.columns)) {
-          errors.push(`Element "${id}" (MetricGrid) props.columns must be 2, 3, or 4`);
-        }
-        break;
-      }
-      case 'MetricCard': {
-        if (typeof props.label !== 'string' || !props.label.trim()) {
-          errors.push(`Element "${id}" (MetricCard) requires a non-empty string "label" prop`);
-        }
-        if (typeof props.value !== 'string') {
-          errors.push(`Element "${id}" (MetricCard) requires a string "value" prop`);
-        }
-        if (props.hint !== undefined && typeof props.hint !== 'string') {
-          errors.push(`Element "${id}" (MetricCard) props.hint must be a string`);
-        }
-        if (props.status !== undefined && !['ok', 'warn', 'error'].includes(props.status)) {
-          errors.push(`Element "${id}" (MetricCard) props.status must be "ok", "warn", or "error"`);
-        }
-        if (props.trend !== undefined && !['up', 'down', 'flat'].includes(props.trend)) {
-          errors.push(`Element "${id}" (MetricCard) props.trend must be "up", "down", or "flat"`);
-        }
-        if (props.icon !== undefined && typeof props.icon !== 'string') {
-          errors.push(`Element "${id}" (MetricCard) props.icon must be a string`);
-        }
-        break;
-      }
-      case 'KeyValueList': {
-        if (!Array.isArray(props.items) || props.items.length === 0) {
-          errors.push(`Element "${id}" (KeyValueList) requires a non-empty array "items" prop`);
-        } else {
-          for (let i = 0; i < props.items.length; i++) {
-            const item = props.items[i];
-            if (!item || typeof item !== 'object' || typeof item.key !== 'string' || typeof item.value !== 'string') {
-              errors.push(`Element "${id}" (KeyValueList) item at index ${i} must have string "key" and "value"`);
-            }
-            if (item && item.mono !== undefined && typeof item.mono !== 'boolean') {
-              errors.push(`Element "${id}" (KeyValueList) item at index ${i} "mono" must be a boolean`);
-            }
-            if (item && item.badge !== undefined && typeof item.badge !== 'string') {
-              errors.push(`Element "${id}" (KeyValueList) item at index ${i} "badge" must be a string`);
-            }
-          }
-        }
-        break;
-      }
-      case 'TextInput': {
-        if (typeof props.label !== 'string' || !props.label.trim()) {
-          errors.push(`Element "${id}" (TextInput) requires a non-empty string "label" prop`);
-        }
-        if (props.value !== undefined && !isStringOrStateBinding(props.value)) {
-          errors.push(`Element "${id}" (TextInput) props.value must be a string or state binding {"$state": "..."}`);
-        }
-        if (props.placeholder !== undefined && typeof props.placeholder !== 'string') {
-          errors.push(`Element "${id}" (TextInput) props.placeholder must be a string`);
-        }
-        if (props.hint !== undefined && typeof props.hint !== 'string') {
-          errors.push(`Element "${id}" (TextInput) props.hint must be a string`);
-        }
-        if (props.multiline !== undefined && typeof props.multiline !== 'boolean') {
-          errors.push(`Element "${id}" (TextInput) props.multiline must be a boolean`);
-        }
-        if (
-          props.rows !== undefined &&
-          (typeof props.rows !== 'number' || !Number.isInteger(props.rows) || props.rows < 2 || props.rows > 12)
-        ) {
-          errors.push(`Element "${id}" (TextInput) props.rows must be an integer between 2 and 12`);
-        }
-        break;
-      }
-      case 'Select': {
-        if (typeof props.label !== 'string' || !props.label.trim()) {
-          errors.push(`Element "${id}" (Select) requires a non-empty string "label" prop`);
-        }
-        if (props.value !== undefined && !isStringOrStateBinding(props.value)) {
-          errors.push(`Element "${id}" (Select) props.value must be a string or state binding {"$state": "..."}`);
-        }
-        if (!Array.isArray(props.options) || props.options.length === 0) {
-          errors.push(`Element "${id}" (Select) requires a non-empty array "options" prop`);
-        } else {
-          for (let i = 0; i < props.options.length; i++) {
-            const opt = props.options[i];
-            if (!opt || typeof opt !== 'object' || typeof opt.value !== 'string' || typeof opt.label !== 'string') {
-              errors.push(`Element "${id}" (Select) option at index ${i} must have string "value" and "label"`);
-            }
-          }
-        }
-        break;
-      }
-      case 'Switch': {
-        if (typeof props.label !== 'string' || !props.label.trim()) {
-          errors.push(`Element "${id}" (Switch) requires a non-empty string "label" prop`);
-        }
-        if (props.checked !== undefined && !isBooleanOrStateBinding(props.checked)) {
-          errors.push(`Element "${id}" (Switch) props.checked must be a boolean or state binding {"$state": "..."}`);
-        }
-        if (props.hint !== undefined && typeof props.hint !== 'string') {
-          errors.push(`Element "${id}" (Switch) props.hint must be a string`);
-        }
-        break;
-      }
-      case 'CheckboxGroup': {
-        if (typeof props.label !== 'string' || !props.label.trim()) {
-          errors.push(`Element "${id}" (CheckboxGroup) requires a non-empty string "label" prop`);
-        }
-        if (props.value !== undefined && !isStringArrayOrStateBinding(props.value)) {
-          errors.push(
-            `Element "${id}" (CheckboxGroup) props.value must be a string array or state binding {"$state": "..."}`,
-          );
-        }
-        if (!Array.isArray(props.options) || props.options.length === 0) {
-          errors.push(`Element "${id}" (CheckboxGroup) requires a non-empty array "options" prop`);
-        } else {
-          for (let i = 0; i < props.options.length; i++) {
-            const opt = props.options[i];
-            if (!opt || typeof opt !== 'object' || typeof opt.value !== 'string' || typeof opt.label !== 'string') {
-              errors.push(`Element "${id}" (CheckboxGroup) option at index ${i} must have string "value" and "label"`);
-            }
-            if (opt && opt.description !== undefined && typeof opt.description !== 'string') {
-              errors.push(`Element "${id}" (CheckboxGroup) option at index ${i} "description" must be a string`);
-            }
-          }
-        }
-        if (props.hint !== undefined && typeof props.hint !== 'string') {
-          errors.push(`Element "${id}" (CheckboxGroup) props.hint must be a string`);
-        }
-        break;
-      }
-      case 'ActionBar': {
-        if (props.align !== undefined && !['left', 'right', 'between'].includes(props.align)) {
-          errors.push(`Element "${id}" (ActionBar) props.align must be "left", "right", or "between"`);
-        }
-        break;
-      }
-      case 'Button': {
-        if (typeof props.label !== 'string' || !props.label.trim()) {
-          errors.push(`Element "${id}" (Button) requires a non-empty string "label" prop`);
-        }
-        if (props.variant !== undefined && !['primary', 'secondary', 'danger'].includes(props.variant)) {
-          errors.push(`Element "${id}" (Button) props.variant must be "primary", "secondary", or "danger"`);
-        }
-        break;
-      }
-      case 'Callout': {
-        if (typeof props.content !== 'string' || !props.content.trim()) {
-          errors.push(`Element "${id}" (Callout) requires a non-empty string "content" prop`);
-        }
-        if (props.title !== undefined && typeof props.title !== 'string') {
-          errors.push(`Element "${id}" (Callout) props.title must be a string`);
-        }
-        if (props.variant !== undefined && !['info', 'tip', 'warn', 'error'].includes(props.variant)) {
-          errors.push(`Element "${id}" (Callout) props.variant must be "info", "tip", "warn", or "error"`);
-        }
-        if (props.icon !== undefined && typeof props.icon !== 'string') {
-          errors.push(`Element "${id}" (Callout) props.icon must be a string`);
-        }
-        if (props.mono !== undefined && typeof props.mono !== 'boolean') {
-          errors.push(`Element "${id}" (Callout) props.mono must be a boolean`);
-        }
-        break;
-      }
-      case 'Tabs': {
-        if (!Array.isArray(props.tabs) || props.tabs.length === 0) {
-          errors.push(`Element "${id}" (Tabs) requires a non-empty array "tabs" prop`);
-        } else {
-          for (let i = 0; i < props.tabs.length; i++) {
-            const tab = props.tabs[i];
-            if (!tab || typeof tab !== 'object' || typeof tab.id !== 'string' || typeof tab.label !== 'string') {
-              errors.push(`Element "${id}" (Tabs) tab at index ${i} must have string "id" and "label"`);
-            }
-            if (tab && tab.icon !== undefined && typeof tab.icon !== 'string') {
-              errors.push(`Element "${id}" (Tabs) tab at index ${i} "icon" must be a string`);
-            }
-          }
-        }
-        if (props.defaultTab !== undefined && typeof props.defaultTab !== 'string') {
-          errors.push(`Element "${id}" (Tabs) props.defaultTab must be a string`);
-        }
-        break;
-      }
-      case 'Steps': {
-        if (!Array.isArray(props.items) || props.items.length === 0) {
-          errors.push(`Element "${id}" (Steps) requires a non-empty array "items" prop`);
-        } else {
-          for (let i = 0; i < props.items.length; i++) {
-            const step = props.items[i];
-            if (!step || typeof step !== 'object' || typeof step.title !== 'string' || !step.title.trim()) {
-              errors.push(`Element "${id}" (Steps) step at index ${i} must have non-empty string "title"`);
-            }
-            if (step && step.description !== undefined && typeof step.description !== 'string') {
-              errors.push(`Element "${id}" (Steps) step at index ${i} "description" must be a string`);
-            }
-            if (step && step.status !== undefined && !['done', 'current', 'pending'].includes(step.status)) {
-              errors.push(`Element "${id}" (Steps) step at index ${i} "status" must be "done", "current", or "pending"`);
-            }
-            if (step && step.icon !== undefined && typeof step.icon !== 'string') {
-              errors.push(`Element "${id}" (Steps) step at index ${i} "icon" must be a string`);
-            }
-            if (step && step.badge !== undefined && typeof step.badge !== 'string') {
-              errors.push(`Element "${id}" (Steps) step at index ${i} "badge" must be a string`);
-            }
-          }
-        }
-        break;
-      }
-      case 'Accordion': {
-        if (!Array.isArray(props.items) || props.items.length === 0) {
-          errors.push(`Element "${id}" (Accordion) requires a non-empty array "items" prop`);
-        } else {
-          for (let i = 0; i < props.items.length; i++) {
-            const acc = props.items[i];
-            if (!acc || typeof acc !== 'object' || typeof acc.title !== 'string' || !acc.title.trim()) {
-              errors.push(`Element "${id}" (Accordion) item at index ${i} must have non-empty string "title"`);
-            }
-            if (acc && acc.content !== undefined && typeof acc.content !== 'string') {
-              errors.push(`Element "${id}" (Accordion) item at index ${i} "content" must be a string`);
-            }
-            if (acc && acc.defaultOpen !== undefined && typeof acc.defaultOpen !== 'boolean') {
-              errors.push(`Element "${id}" (Accordion) item at index ${i} "defaultOpen" must be a boolean`);
-            }
-            if (acc && acc.icon !== undefined && typeof acc.icon !== 'string') {
-              errors.push(`Element "${id}" (Accordion) item at index ${i} "icon" must be a string`);
-            }
-            if (acc && acc.badge !== undefined && typeof acc.badge !== 'string') {
-              errors.push(`Element "${id}" (Accordion) item at index ${i} "badge" must be a string`);
-            }
-            if (acc && acc.mono !== undefined && typeof acc.mono !== 'boolean') {
-              errors.push(`Element "${id}" (Accordion) item at index ${i} "mono" must be a boolean`);
-            }
-          }
-        }
-        break;
-      }
-      case 'BarList': {
-        if (!Array.isArray(props.items) || props.items.length === 0) {
-          errors.push(`Element "${id}" (BarList) requires a non-empty array "items" prop`);
-        } else {
-          for (let i = 0; i < props.items.length; i++) {
-            const bar = props.items[i];
-            if (!bar || typeof bar !== 'object' || typeof bar.label !== 'string' || typeof bar.value !== 'number' || !Number.isFinite(bar.value)) {
-              errors.push(`Element "${id}" (BarList) item at index ${i} must have string "label" and finite number "value"`);
-            }
-            if (bar && bar.max !== undefined && (typeof bar.max !== 'number' || !Number.isFinite(bar.max) || bar.max <= 0)) {
-              errors.push(`Element "${id}" (BarList) item at index ${i} "max" must be a positive number`);
-            }
-            if (bar && bar.displayValue !== undefined && typeof bar.displayValue !== 'string') {
-              errors.push(`Element "${id}" (BarList) item at index ${i} "displayValue" must be a string`);
-            }
-            if (bar && bar.color !== undefined && !['blue', 'emerald', 'amber', 'rose', 'purple'].includes(bar.color)) {
-              errors.push(`Element "${id}" (BarList) item at index ${i} "color" must be "blue", "emerald", "amber", "rose", or "purple"`);
-            }
-          }
-        }
-        if (props.title !== undefined && typeof props.title !== 'string') {
-          errors.push(`Element "${id}" (BarList) props.title must be a string`);
-        }
-        break;
-      }
-      case 'Table': {
-        if (
-          !Array.isArray(props.columns) ||
-          props.columns.length === 0 ||
-          props.columns.some((c: unknown) => typeof c !== 'string')
-        ) {
-          errors.push(`Element "${id}" (Table) requires a non-empty array "columns" prop of strings`);
-        }
-        if (props.title !== undefined && typeof props.title !== 'string') {
-          errors.push(`Element "${id}" (Table) props.title must be a string`);
-        }
-        if (props.monoColumns !== undefined) {
-          if (
-            !Array.isArray(props.monoColumns) ||
-            props.monoColumns.some((n: unknown) => typeof n !== 'number' || !Number.isInteger(n) || n < 0)
-          ) {
-            errors.push(`Element "${id}" (Table) props.monoColumns must be an array of non-negative integers`);
-          } else if (Array.isArray(props.columns)) {
-            const colCount = props.columns.length;
-            for (const n of props.monoColumns as number[]) {
-              if (n >= colCount) {
-                errors.push(
-                  `Element "${id}" (Table) props.monoColumns index ${n} is out of range (columns: ${colCount})`,
-                );
-              }
-            }
-          }
-        }
-        if (!Array.isArray(props.rows)) {
-          errors.push(`Element "${id}" (Table) requires an array "rows" prop`);
-        } else if (Array.isArray(props.columns)) {
-          const colCount = props.columns.length;
-          for (let i = 0; i < props.rows.length; i++) {
-            const row = props.rows[i];
-            if (!Array.isArray(row) || row.length !== colCount || row.some((cell: unknown) => typeof cell !== 'string')) {
-              errors.push(
-                `Element "${id}" (Table) row at index ${i} must be a string array of length ${colCount} matching columns`,
-              );
-            }
-          }
-        }
-        break;
-      }
+    if (type) {
+      errors.push(...propsValidators[type](id, props));
     }
   }
 
-  // Tree traversal: cycle detection and max depth check starting from root
   if (raw.root in raw.elements) {
-    const visitedPath = new Set<string>();
-    let depthExceeded = false;
-
-    const checkTree = (nodeId: string, depth: number) => {
-      if (depth > MAX_UI_TREE_DEPTH) {
-        depthExceeded = true;
-        return;
-      }
-      if (visitedPath.has(nodeId)) {
-        errors.push(`Cycle detected in UI tree at element "${nodeId}"`);
-        return;
-      }
-      visitedPath.add(nodeId);
-      const elem = raw.elements[nodeId];
-      if (elem) {
-        if (Array.isArray(elem.children)) {
-          for (const childId of elem.children) {
-            if (typeof childId === 'string' && childId in raw.elements) {
-              checkTree(childId, depth + 1);
-            }
-          }
-        }
-        if (elem.slots && typeof elem.slots === 'object') {
-          for (const slotChildren of Object.values(elem.slots)) {
-            if (Array.isArray(slotChildren)) {
-              for (const childId of slotChildren) {
-                if (typeof childId === 'string' && childId in raw.elements) {
-                  checkTree(childId, depth + 1);
-                }
-              }
-            }
-          }
-        }
-      }
-      visitedPath.delete(nodeId);
-    };
-
-    checkTree(raw.root, 1);
-    if (depthExceeded) {
-      errors.push(`UI tree depth exceeds maximum depth of ${MAX_UI_TREE_DEPTH}`);
-    }
+    errors.push(...validateTree(raw.root, raw.elements));
   }
 
   if (errors.length > 0) {
