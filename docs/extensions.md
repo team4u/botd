@@ -186,7 +186,7 @@ pi.registerCommand('deploy-ask', {
 
 ### 三大插槽
 
-UI 能挂到网页的三个位置（插槽思想），完整代码示例见[生成式 UI · 在 Pi 扩展中使用全栈 UI](generative-ui.md#在-pi-扩展中使用全栈-ui-ctxui-与三大插槽)：
+UI 能挂到网页的三个位置（插槽思想），完整代码示例见[生成式 UI · 在 Pi 扩展中使用全栈 UI](generative-ui.md#在-pi-扩展中使用全栈-uictxui-与三大插槽)：
 
 1. **`dialog.custom`** —— 交互表单弹在聊天流里，`await` 拿到 `{ decision, state }` 后继续执行。适合审批、参数收集。
 2. **`composer.widget`** —— `ctx.ui.setWidget(key, spec, { placement })` 在输入框上下挂实时面板（构建进度、监控指标、日志尾巴）。面板里的 `Button` 可直接点击，点击后把命令与表单状态回灌发送，实现「卡片按钮 → 扩展命令 → 刷新卡片」的操控闭环。`content` 传 `string[]` 渲染为等宽文本行，传 `undefined` 清除。
@@ -250,6 +250,6 @@ botd 的扩展就是 Pi 扩展的超集：任何符合 Pi `ExtensionAPI` 的扩�
 
 ## 下一步
 
-- 完整的插槽代码示例：[生成式 UI · 在 Pi 扩展中使用全栈 UI](generative-ui.md#在-pi-扩展中使用全栈-ui-ctxui-与三大插槽)
+- 完整的插槽代码示例：[生成式 UI · 在 Pi 扩展中使用全栈 UI](generative-ui.md#在-pi-扩展中使用全栈-uictxui-与三大插槽)
 - 让 Bot 自己写扩展（自举）：[用户指南 · 扩展安装与使用](user-guide.md#扩展安装与使用与-web-ui-无缝融合)
 - 安装命令全参数：[CLI 参考 · install](cli.md#install)

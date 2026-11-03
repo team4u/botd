@@ -8,7 +8,7 @@ Bot 在回复中输出一份结构化 JSON Spec，Web 前端把它渲染成可�
 
 1. **聊天内展示**：Bot 在回复正文里输出 ` ```ui `（或 ` ```json-render `）代码围栏。前端把围栏内容渲染成只读卡片。输入控件不可编辑，按钮不可点击。
 2. **人工交互**：脚本或 Bot 调用 `botd ask "<提示>" --ui`，把 Spec 作为确认卡发给会话。参与者在网页上填写表单、点击按钮。提交结果以单行 JSON 写入 stdout。
-3. **扩展全栈 UI**：Pi 扩展通过 `ctx.ui` 与三大声明式插槽（`tool.view`、`composer.widget`、`dialog.custom`）在网页上直接渲染交互界面，见下文[在 Pi 扩展中使用全栈 UI](#在-pi-扩展中使用全栈-ui-ctxui-与三大插槽)。
+3. **扩展全栈 UI**：Pi 扩展通过 `ctx.ui` 与三大声明式插槽（`tool.view`、`composer.widget`、`dialog.custom`）在网页上直接渲染交互界面，见下文[在 Pi 扩展中使用全栈 UI](#在-pi-扩展中使用全栈-uictxui-与三大插槽)。
 
 Spec 在三个层级被校验，非法 Spec 不会到达浏览器：
 
