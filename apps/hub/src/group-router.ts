@@ -1224,7 +1224,7 @@ export class GroupRouter {
         subagentId: prep.bot.id,
         subagentName: prep.bot.name,
         color: prep.bot.color,
-        task: prep.incrementalText.trim().slice(0, 120) || 'Task execution',
+        task: prep.incrementalText.trim() || 'Task execution',
         status: 'running',
       };
 
@@ -1331,7 +1331,14 @@ export class GroupRouter {
       subagentRun.status = 'done';
       subagentRun.durationMs = Date.now() - turnStartTime;
       subagentRun.toolCount = turnResult.toolCalls?.length ?? 0;
-      subagentRun.replyPreview = turnResult.replyText.slice(0, 200);
+      subagentRun.replyPreview = turnResult.replyText.slice(0, 500);
+      subagentRun.replyFull = turnResult.replyText;
+      if (turnResult.blocks && turnResult.blocks.length > 0) {
+        subagentRun.blocks = turnResult.blocks;
+      }
+      if (turnResult.toolCalls && turnResult.toolCalls.length > 0) {
+        subagentRun.toolCalls = turnResult.toolCalls;
+      }
 
       this.sseHub.broadcast(sessionId, {
         type: 'subagent_status',
@@ -1384,10 +1391,10 @@ export class GroupRouter {
       this.mirroredSubagentRuns.delete(r.id);
       return mirrored ? { ...r, ...mirrored, status: r.status } : r;
     });
-    const allSubagentRuns: SubagentRunRecord[] = [
-      ...(subagentRun ? [subagentRun] : []),
-      ...nativeRuns,
-    ];
+    // 注意：subagentRun 是该子代理「自己这次发言」的镜像记录，而 newMsg 本身就是 item.botId
+    // 在当前会话的直接发言——不再把它挂到自己消息头顶（避免公屏出现自己挂自己的冗余卡片），
+    // 只保留本轮内部真正调用产生的 nativeRuns。
+    const allSubagentRuns: SubagentRunRecord[] = [...nativeRuns];
 
     const newMsg = this.db.createMessage({
       id: `msg_${randomUUID()}`,

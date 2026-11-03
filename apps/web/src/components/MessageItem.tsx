@@ -887,7 +887,7 @@ export const SingleToolView: React.FC<{
   }, [isError]);
 
   return (
-    <div className="my-1.5 max-w-2xl select-none">
+    <div className="my-1.5 max-w-2xl">
       <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/40 overflow-hidden shadow-xs">
         <button
           type="button"
@@ -968,7 +968,7 @@ export const ToolGroupView: React.FC<{
   const breakdown = computeToolBreakdown(tools);
 
   return (
-    <div className="my-2 max-w-2xl select-none">
+    <div className="my-2 max-w-2xl">
       <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/40 overflow-hidden shadow-xs">
         <button
           type="button"
@@ -1113,7 +1113,7 @@ export const ThinkingTrace: React.FC<{ block: Extract<TurnBlock, { type: 'thinki
   if (!block.thinking && !isRunning) return null;
 
   return (
-    <div className="my-2 max-w-2xl select-none">
+    <div className="my-2 max-w-2xl">
       <button
         type="button"
         onClick={() => setUserOverride(!isExpanded)}
@@ -1123,7 +1123,11 @@ export const ThinkingTrace: React.FC<{ block: Extract<TurnBlock, { type: 'thinki
         <span>
           {isRunning
             ? '深度思考中'
-            : `已深度思考${block.durationMs ? ` · ${formatDuration(block.durationMs)}` : ''}`}
+            : `已深度思考${
+                block.durationMs && block.durationMs >= 100
+                  ? ` · ${formatDuration(block.durationMs)}`
+                  : ''
+              }`}
         </span>
         <ChevronRight
           className={`w-3.5 h-3.5 opacity-60 transition-transform duration-200 ${
@@ -1176,13 +1180,90 @@ export function buildTimelineItems(blocks: TurnBlock[]): TimelineItem[] {
 }
 
 /**
+ * 已完成消息的连续过程项（thinking / tool_group）折叠条：
+ * 默认收起为 1 行摘要，点击展开后带左边框缩进渲染原本的时间线项。
+ */
+const CollapsedProcessGroup: React.FC<{ items: TimelineItem[] }> = ({ items }) => {
+  const [expanded, setExpanded] = useState(false);
+
+  let thinkingCount = 0;
+  let toolCount = 0;
+  let errorCount = 0;
+  for (const item of items) {
+    if (item.kind === 'thinking') {
+      thinkingCount++;
+    } else if (item.kind === 'tool_group') {
+      toolCount += item.tools.length;
+      errorCount += item.tools.filter(
+        (t) => t.status === 'error' || t.isError === true || t.status === 'cancelled'
+      ).length;
+    }
+  }
+
+  const summaryParts: string[] = [];
+  if (thinkingCount > 0) summaryParts.push(`已完成 ${thinkingCount} 步思考`);
+  if (toolCount > 0) summaryParts.push(`${toolCount} 次工具调用`);
+  const summaryText = summaryParts.join(' · ');
+
+  return (
+    <div className="my-1.5">
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-900/50 text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer select-none"
+      >
+        <span>{summaryText}</span>
+        {errorCount > 0 && <span className="text-rose-500 dark:text-rose-400">· {errorCount} 项失败</span>}
+        <ChevronRight
+          className={`w-3.5 h-3.5 opacity-60 transition-transform duration-200 ${
+            expanded ? 'rotate-90' : ''
+          }`}
+        />
+      </button>
+      {expanded && (
+        <div className="mt-1.5 pl-3 border-l-2 border-zinc-200/70 dark:border-zinc-800 space-y-1">
+          {items.map((item, idx) => {
+            if (item.kind === 'thinking') {
+              return <ThinkingTrace key={`thinking-${idx}-${item.index}`} block={item.block} />;
+            }
+            if (item.kind === 'tool_group') {
+              if (item.tools.length === 1) {
+                return (
+                  <SingleToolView
+                    key={`tool-single-${idx}-${item.index}`}
+                    tool={item.tools[0]}
+                  />
+                );
+              }
+              return (
+                <ToolGroupView
+                  key={`tool-group-${idx}-${item.index}`}
+                  tools={item.tools}
+                />
+              );
+            }
+            return null;
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
  * 统一时间线交错渲染器（供 MessageItem 与 ChatView 流式块共用）
+ *
+ * collapseCompletedProcess=true（已落库完成的消息）：过程项（思考/工具）总步骤数 >= 2 时，
+ * 把连续的过程项聚合成一个默认收起的折叠条（位于对应 text 块上方），
+ * 点击展开后带左边框缩进渲染原本的 ThinkingTrace / SingleToolView / ToolGroupView。
+ * 默认 false：流式渲染与既有单测保持原行为（逐项平铺）。
  */
 export const AssistantTurnContent: React.FC<{
   blocks?: TurnBlock[];
   toolCalls?: ToolCallRecord[];
   content?: string;
-}> = ({ blocks, toolCalls, content }) => {
+  collapseCompletedProcess?: boolean;
+}> = ({ blocks, toolCalls, content, collapseCompletedProcess = false }) => {
   const resolvedBlocks: TurnBlock[] = useMemo(() => {
     if (blocks && blocks.length > 0) {
       return blocks;
@@ -1216,6 +1297,43 @@ export const AssistantTurnContent: React.FC<{
   const timelineItems = useMemo(() => buildTimelineItems(resolvedBlocks), [resolvedBlocks]);
 
   if (timelineItems.length === 0) return null;
+
+  // 已完成消息的过程块折叠：非 text 过程项总步骤数（思考块数 + 工具总数）>= 2 时，
+  // 把每段连续的过程项（thinking / tool_group，直到遇到 text 分隔）聚合成一个默认收起的折叠条
+  const processStepTotal = timelineItems.reduce(
+    (sum, item) =>
+      item.kind === 'thinking' ? sum + 1 : item.kind === 'tool_group' ? sum + item.tools.length : sum,
+    0
+  );
+  const shouldCollapseProcess = collapseCompletedProcess && processStepTotal >= 2;
+
+  if (shouldCollapseProcess) {
+    const rendered: React.ReactNode[] = [];
+    let pendingProcessItems: TimelineItem[] = [];
+    const flushProcessItems = (keyPrefix: string) => {
+      if (pendingProcessItems.length === 0) return;
+      rendered.push(<CollapsedProcessGroup key={keyPrefix} items={pendingProcessItems} />);
+      pendingProcessItems = [];
+    };
+    timelineItems.forEach((item, idx) => {
+      if (item.kind === 'text') {
+        flushProcessItems(`process-${idx}`);
+        rendered.push(
+          <div
+            key={`text-${idx}-${item.index}`}
+            className="mt-1 text-zinc-800 dark:text-zinc-200 leading-relaxed break-words prose-botd"
+          >
+            <Markdown>{item.block.text}</Markdown>
+          </div>
+        );
+      } else {
+        pendingProcessItems.push(item);
+      }
+    });
+    flushProcessItems(`process-end-${timelineItems.length}`);
+
+    return <div className="space-y-1">{rendered}</div>;
+  }
 
   return (
     <div className="space-y-1">
@@ -1342,6 +1460,20 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   const bot = message.senderBotId ? botMap.get(message.senderBotId) : undefined;
   const node = bot ? nodeMap.get(bot.nodeId) : undefined;
 
+  // 历史消息过滤「自己挂自己」的 subagentRuns：
+  // 旧版本会把子代理自己发言的镜像 run（id 以 run_ 开头且 subagentId === 发送者自身）挂到它自己的消息上，
+  // 造成公屏消息头顶出现冗余的自指卡片；真实子代理卡片（其他 bot 的 runs）不受影响。
+  // 注：这里不用 useMemo——既有单测以普通函数方式直接调用 MessageItem，顶层 hooks 会破坏该用法；
+  // 过滤本身是廉价数组操作，外层 MemoizedMessageItem 已隔绝大多数重渲染。
+  const visibleSubagentRuns = (message.subagentRuns || []).filter(
+    (r) => !(r.subagentId === message.senderBotId && r.id.startsWith('run_'))
+  );
+
+  // 跨 BOT 回调黄卡：正文包含指向子会话的 #?s=sess_... 链接时，右上角提供「查看对话 / 追问」内联入口
+  const callbackChildSessionId = isCallback
+    ? message.content.match(/#\?s=(sess_[a-zA-Z0-9_-]+)/)?.[1]
+    : undefined;
+
   const rawModel = message.modelBadge || bot?.modelId;
   const shortModel = formatShortModel(rawModel);
 
@@ -1440,9 +1572,19 @@ export const MessageItem: React.FC<MessageItemProps> = ({
               <BellRing className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
               <span>后台任务唤醒回调</span>
             </div>
-            <span className="text-[11px] text-amber-600/80 dark:text-amber-400/80 font-normal" title={fullTime}>
-              {formattedTime}
-            </span>
+            <div className="flex items-center gap-2 shrink-0">
+              {callbackChildSessionId && (
+                <a
+                  href={`#?s=${callbackChildSessionId}`}
+                  className="text-[11px] font-medium text-amber-700 dark:text-amber-300 hover:underline"
+                >
+                  查看对话 / 追问 →
+                </a>
+              )}
+              <span className="text-[11px] text-amber-600/80 dark:text-amber-400/80 font-normal" title={fullTime}>
+                {formattedTime}
+              </span>
+            </div>
           </div>
           <div className="prose-botd prose-botd--xs text-amber-950 dark:text-amber-200 mt-1">
             <Markdown>{message.content}</Markdown>
@@ -1522,16 +1664,17 @@ export const MessageItem: React.FC<MessageItemProps> = ({
         )}
       </div>
 
-      {/* 子代理协同面板 */}
-      {message.subagentRuns && message.subagentRuns.length > 0 && (
-        <SubagentRunsPanel runs={message.subagentRuns} onInspectSubagentRun={onInspectSubagentRun} />
+      {/* 子代理协同面板（过滤历史数据中「自己挂自己」的自指 run 记录） */}
+      {visibleSubagentRuns.length > 0 && (
+        <SubagentRunsPanel runs={visibleSubagentRuns} onInspectSubagentRun={onInspectSubagentRun} />
       )}
 
-      {/* 统一交错时间线渲染器 */}
+      {/* 统一交错时间线渲染器（已落库完成消息：过程块折叠为 1 行摘要） */}
       <AssistantTurnContent
         blocks={message.blocks}
         toolCalls={isAssistant ? message.toolCalls : undefined}
         content={message.content}
+        collapseCompletedProcess={true}
       />
 
       {/* 附件（图片缩略图 / 文件下载芯片），助手产出的文件产物同样可预览与下载 */}

@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { X, Loader2, Send, CircleStop, ExternalLink } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { X, Loader2, Send, CircleStop } from 'lucide-react';
 import type {
   BotConfig,
   MessageRecord,
@@ -65,13 +65,16 @@ export const SubSessionDrawer: React.FC<SubSessionDrawerProps> = ({
   botMap,
   nodeMap,
   onClose,
-  onOpenFullSession,
+  // onOpenFullSession 保留在 Props 签名中以兼容外部调用方；UI 已移除冗余跳转按钮，不再解构使用
   onToast,
 }) => {
   const [messages, setMessages] = useState<MessageRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+  // 向上分页：是否还有更早消息 / 加载中
+  const [hasEarlier, setHasEarlier] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
   // 实时会话状态（SSE session_status 驱动；null 时回退 subSession.status 轮询快照）
   const [liveStatus, setLiveStatus] = useState<SessionStatus | null>(null);
   const [streamingMap, setStreamingMap] = useState<Record<string, StreamingAssistantState>>({});
@@ -113,12 +116,14 @@ export const SubSessionDrawer: React.FC<SubSessionDrawerProps> = ({
     setLiveStatus(null);
     setLoading(true);
     setLoadError(null);
+    setHasEarlier(false);
 
     api
       .getSessionMessagesPage(sessionId, { limit: 60 })
       .then((result) => {
         if (cancelled) return;
         setMessages(result.messages);
+        setHasEarlier(result.hasMore);
       })
       .catch((err: any) => {
         if (cancelled) return;
@@ -347,6 +352,30 @@ export const SubSessionDrawer: React.FC<SubSessionDrawerProps> = ({
     return () => window.removeEventListener('keydown', onKey);
   }, [isOpen, onClose]);
 
+  // 向上加载更早消息：以当前最早一条为游标向前取一页并 prepend（按 id 去重兼容实时 SSE 到达）
+  const handleLoadEarlier = useCallback(async () => {
+    if (!sessionId || loadingEarlier) return;
+    const oldest = messages[0];
+    if (!oldest) return;
+    setLoadingEarlier(true);
+    try {
+      const result = await api.getSessionMessagesPage(sessionId, {
+        before: oldest.id,
+        limit: 60,
+      });
+      setHasEarlier(result.hasMore);
+      setMessages((prev) => {
+        const existingIds = new Set(prev.map((m) => m.id));
+        const older = result.messages.filter((m) => !existingIds.has(m.id));
+        return older.length > 0 ? [...older, ...prev] : prev;
+      });
+    } catch (err: any) {
+      onToast('error', err?.message || '加载更早消息失败');
+    } finally {
+      setLoadingEarlier(false);
+    }
+  }, [sessionId, loadingEarlier, messages, onToast]);
+
   const handleStop = async () => {
     if (!subSession || stopping) return;
     setStopping(true);
@@ -455,15 +484,6 @@ export const SubSessionDrawer: React.FC<SubSessionDrawerProps> = ({
             )}
             <button
               type="button"
-              onClick={() => onOpenFullSession?.(subSession.id)}
-              className="inline-flex items-center gap-1 h-8 px-2.5 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 text-xs font-medium transition-colors cursor-pointer shrink-0"
-              title="切换到该子会话的完整视图"
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">完整会话</span>
-            </button>
-            <button
-              type="button"
               onClick={onClose}
               className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
               aria-label="关闭抽屉"
@@ -483,6 +503,9 @@ export const SubSessionDrawer: React.FC<SubSessionDrawerProps> = ({
           loadingMessages={loading}
           loadError={loadError}
           onRetryLoad={() => setReloadToken((t) => t + 1)}
+          hasEarlierMessages={hasEarlier}
+          loadingEarlier={loadingEarlier}
+          onLoadEarlier={handleLoadEarlier}
           className="max-w-none px-4"
         />
 

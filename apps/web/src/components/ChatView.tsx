@@ -643,11 +643,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const hit = runs.find((r) => r.id === inspectingRunId);
       if (hit) return hit;
     }
-    // 已落库消息（后台完成 / resume 更新已持久化）
+    // 已落库消息（后台完成 / resume 更新已持久化）；
+    // 历史「自己挂自己」的镜像 run 可能缺 replyFull/blocks/toolCalls，
+    // 用宿主消息自身内容兑底补全，保证抽屉可完整展示
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
       const hit = msg.subagentRuns?.find((r) => r.id === inspectingRunId);
-      if (hit) return hit;
+      if (hit) {
+        if (!hit.replyFull && hit.subagentId === msg.senderBotId) {
+          return {
+            ...hit,
+            replyFull: msg.content,
+            blocks: hit.blocks ?? msg.blocks,
+            toolCalls: hit.toolCalls ?? msg.toolCalls,
+          };
+        }
+        return hit;
+      }
     }
     return null;
   }, [inspectingRunId, activeSubagentRuns, messages]);
@@ -812,6 +824,48 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <span>{memberBots.length} 人</span>
               </span>
             )}
+
+              {/* 子任务药丸：紧凑内联在顶栏标题区右侧，不单独占一行（点击打开内联检视抽屉） */}
+              {subSessions.length > 0 && (
+                <div className="hidden md:flex items-center gap-1.5 min-w-0 overflow-x-auto py-0.5">
+                  {subSessions.map((sub) => {
+                    let statusIndicator = (
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" title="已完成" />
+                    );
+                    if (sub.status === 'running') {
+                      statusIndicator = (
+                        <span title="运行中" className="shrink-0 flex items-center">
+                          <Loader2 className="w-3 h-3 text-blue-500 animate-spin-fast" />
+                        </span>
+                      );
+                    } else if (sub.status === 'failed') {
+                      statusIndicator = (
+                        <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0" title="失败" />
+                      );
+                    }
+                    return (
+                      <button
+                        key={sub.id}
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation(); // 标题区在单聊模式下可点击打开 BOT 设置，阻断冒泡
+                          setInspectingSubSessionId(sub.id);
+                        }}
+                        className="inline-flex items-center gap-1.5 h-7 px-2.5 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200/90 dark:border-zinc-700/80 rounded-lg text-xs hover:border-blue-400 dark:hover:border-blue-500 hover:bg-blue-50/40 dark:hover:bg-blue-950/30 transition-colors shrink-0 cursor-pointer text-left max-w-[220px]"
+                        title={`${sub.title} (@${sub.leadBotId})`}
+                      >
+                        {statusIndicator}
+                        <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400 shrink-0">
+                          @{sub.leadBotId}
+                        </span>
+                        <span className="truncate text-zinc-800 dark:text-zinc-200 text-xs">
+                          {sub.title.replace(/^\[子任务\]\s*/, '')}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1001,52 +1055,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         </div>
       </header>
-
-      {/* 子任务委派状态条 */}
-      {subSessions.length > 0 && (
-        <div className="mx-3 sm:mx-4 mt-2.5 px-3 py-1.5 bg-zinc-50/80 dark:bg-zinc-900/60 border border-zinc-200/80 dark:border-zinc-800/80 rounded-lg flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300 shrink-0 overflow-x-auto">
-          <span className="font-medium shrink-0 text-zinc-600 dark:text-zinc-400">
-            子任务 ({subSessions.length})
-          </span>
-          <div className="flex items-center gap-1.5 min-w-0 flex-1 overflow-x-auto py-0.5">
-            {subSessions.map((sub) => {
-              let statusIndicator = (
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" title="已完成" />
-              );
-              if (sub.status === 'running') {
-                statusIndicator = (
-                  <span title="运行中" className="shrink-0 flex items-center">
-                    <Loader2 className="w-3 h-3 text-blue-500 animate-spin-fast" />
-                  </span>
-                );
-              } else if (sub.status === 'failed') {
-                statusIndicator = (
-                  <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0" title="失败" />
-                );
-              }
-              return (
-                <button
-                  key={sub.id}
-                  type="button"
-                  onClick={() => {
-                    setInspectingSubSessionId(sub.id);
-                  }}
-                  className="inline-flex items-center gap-1.5 h-7 px-2.5 bg-white dark:bg-zinc-800 border border-zinc-200/90 dark:border-zinc-700/80 rounded-lg text-xs hover:border-blue-400 dark:hover:border-blue-500 hover:bg-blue-50/40 dark:hover:bg-blue-950/30 transition-colors shrink-0 cursor-pointer text-left max-w-[220px]"
-                  title={`${sub.title} (@${sub.leadBotId})`}
-                >
-                  {statusIndicator}
-                  <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400 shrink-0">
-                    @{sub.leadBotId}
-                  </span>
-                  <span className="truncate text-zinc-800 dark:text-zinc-200 text-xs">
-                    {sub.title.replace(/^\[子任务\]\s*/, '')}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       {/* 子会话模式返回父会话横幅 */}
       {session.parentSessionId && (

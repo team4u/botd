@@ -249,6 +249,37 @@ export const App: React.FC = () => {
     [sessions, activeSessionId]
   );
 
+  // 补拉会话列表的防重入标记（记录已尝试补拉过的 activeSessionId）
+  const sessionFetchAttemptedRef = useRef<string | null>(null);
+
+  // 修复子会话路由空白：activeSessionId 非空但 sessions 里找不到（例如刚创建的子会话通过
+  // #?s=sess_xxx 访问、列表快照未包含它）且已登录时，补拉一次会话列表，
+  // 避免 activeSession 为 null 掉进空白欢迎页；拉不到（无权限/已删除）时清空路由回到默认会话
+  useEffect(() => {
+    if (!authenticated || !activeSessionId) return;
+    if (sessions.some((s) => s.id === activeSessionId)) return;
+    // 防重入：同一会话 ID 只补拉一次（拉不到说明无权限/已删除，避免 SSE 高频重渲染反复触发）
+    if (sessionFetchAttemptedRef.current === activeSessionId) return;
+    sessionFetchAttemptedRef.current = activeSessionId;
+    let cancelled = false;
+    api
+      .getSessions()
+      .then((fetched) => {
+        if (cancelled || !isMountedRef.current) return;
+        setSessions((prev) => {
+          const knownIds = new Set(prev.map((s) => s.id));
+          const additions = fetched.filter((s) => !knownIds.has(s.id));
+          return additions.length > 0 ? [...additions, ...prev] : prev;
+        });
+      })
+      .catch(() => {
+        // 静默失败：保留现状，不打断当前视图
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticated, activeSessionId, sessions]);
+
   // Check auth on mount，成功后再取当前用户信息（未拿到则回登录页）
   useEffect(() => {
     let mounted = true;

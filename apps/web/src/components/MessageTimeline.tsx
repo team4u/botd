@@ -2,6 +2,7 @@ import React, {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -91,6 +92,29 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
   activeSubagentRunsFor,
   className = 'max-w-4xl px-3 sm:px-5',
 }) => {
+  // ===== 展示层过滤：合并跨 BOT 委派的两条黄卡 =====
+  // 「📋 已派生子会话…」是过程通知，「✅/❌ …已完成/执行失败」是终态回调。
+  // 同一子会话已有终态回调时，对应的过程通知在时间线中隐藏，只保留一条黄卡。
+  const displayMessages = useMemo(() => {
+    const extractChildSessionId = (content: string): string | null =>
+      content.match(/#\?s=(sess_[a-zA-Z0-9_-]+)/)?.[1] ?? null;
+
+    const finishedSubSessionIds = new Set<string>();
+    for (const msg of messages) {
+      if (msg.role !== 'callback') continue;
+      if (!/^[✅❌]/.test(msg.content)) continue;
+      const childSid = extractChildSessionId(msg.content);
+      if (childSid) finishedSubSessionIds.add(childSid);
+    }
+    if (finishedSubSessionIds.size === 0) return messages;
+
+    return messages.filter((msg) => {
+      if (msg.role !== 'callback' || !msg.content.startsWith('📋')) return true;
+      const childSid = extractChildSessionId(msg.content);
+      return !(childSid && finishedSubSessionIds.has(childSid));
+    });
+  }, [messages]);
+
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
   // 回到底部按钮触发的程序化平滑滚动标记，避免滚动动画的中间位置误触发 userScrolledUp
@@ -398,10 +422,10 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
                 </div>
               )}
 
-              {messages.map((msg, idx) => (
+              {displayMessages.map((msg, idx) => (
                 <React.Fragment key={msg.id}>
                   {/* 日期分隔线：相邻消息跨自然日时插入时间锚点 */}
-                  {(idx === 0 || !isSameCalendarDay(messages[idx - 1].createdAt, msg.createdAt)) && (
+                  {(idx === 0 || !isSameCalendarDay(displayMessages[idx - 1].createdAt, msg.createdAt)) && (
                     <div className="flex justify-center my-3">
                       <span className="px-2.5 py-0.5 rounded-full bg-zinc-100/90 dark:bg-zinc-800/90 text-[11px] text-zinc-500 dark:text-zinc-400 select-none">
                         {formatChatDayLabel(msg.createdAt)}
