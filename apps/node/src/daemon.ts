@@ -34,10 +34,10 @@ import {
   cancelAllBotTurns,
   cancelBotTurn,
   ensureBotdBinWrapper,
-  executeBotTurn,
   getBotCommands,
   interactSubagent,
   resetBotSession,
+  runTurnWithResilience,
   setRuntimeHubRpc,
   steerBotTurn,
   stopSubagent,
@@ -168,6 +168,18 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
 
   let isStopping = false;
   let hubRpc: BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null = null;
+  // 连接代数：每次 WS 断开 +1；回合发起与完成时对比代数即可判断发起连接是否已死
+  let hubEpoch = 0;
+  const isHubConnected = () => rws !== undefined && rws.readyState === ReconnectingWebSocket.OPEN;
+  /** 动态 Hub 推流代理：每次访问转发到当前最新的 hubRpc（断连重连后推流自动切到新连接） */
+  const dynamicHubRpc = new Proxy({} as BirpcReturn<HubRpcFunctions, NodeRpcFunctions>, {
+    get(_target, prop: string) {
+      const current = hubRpc;
+      if (!current) throw new Error('Hub RPC not available');
+      const value = Reflect.get(current as any, prop);
+      return typeof value === 'function' ? (value as any).bind(current) : value;
+    },
+  });
   let heartbeatTimer: NodeJS.Timeout | null = null;
   let rpcInstance: BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null = null;
   let rws: ReconnectingWebSocket;
@@ -337,10 +349,17 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
         if (!bot) {
           throw new Error(`Bot "${input.botId}" not found on node`);
         }
-        return await executeBotTurn(dataDir, bot, input, hubRpc);
+        // 断连容错：在途附着 + 单槽回执；推流经 dynamicHubRpc 在重连后自动恢复
+        return await runTurnWithResilience(
+          dataDir,
+          bot,
+          input,
+          () => (isHubConnected() ? dynamicHubRpc : null),
+          () => (isHubConnected() ? hubEpoch : 0),
+        );
       },
       cancelTurn: async (sessionId, botId) => {
-        await cancelBotTurn(sessionId, botId);
+        await cancelBotTurn(sessionId, botId, dataDir);
       },
       steerBotTurn: async (sessionId, botId, message) => {
         return await steerBotTurn(sessionId, botId, message);
@@ -429,12 +448,13 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       heartbeatTimer = null;
     }
     hubRpc = null;
+    hubEpoch++;
     setRuntimeHubRpc(null);
     rpcInstance?.$close();
     rpcInstance = null;
     onRpcMessage = undefined;
-    // Cancel active turns so they don't hang if disconnected from Hub
-    await cancelAllBotTurns(dataDir).catch(() => {});
+    // 断连不杀本地正在执行的长回合：回合继续跑，推流经 dynamicHubRpc 在重连后恢复，
+    // 结果由单槽回执保障交付（Hub 侧断连转队列，重连后重发同一回合时附着/消费回执）。
   };
 
   rws.addEventListener('close', () => {

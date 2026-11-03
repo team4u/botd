@@ -35,6 +35,10 @@ import {
 import { resolveWorkflowScript, resolveWorkflowSource } from '@tintinweb/pi-subagents/dist/workflow/saved.js';
 import type { ExtensionFactory, ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { createDeferred, sleep } from './async-util.js';
+import {
+  markWorkflowRunFinished,
+  markWorkflowRunStarted,
+} from './cross-bot/workflow.js';
 
 /** pi-subagents 扩展工厂：为主 BOT 提供 Agent / SubagentWorkflow 编排底座。 */
 const subagentsExtensionFactory: ExtensionFactory = subagentsExtension as unknown as ExtensionFactory;
@@ -1087,6 +1091,13 @@ function wrapWorkflowToolForCrossBot(
     }
     const journalPath = path.join(workflowsDir, `${runId}.workflow.jsonl`);
 
+    // 4c) 未完成断点标记：启动即写入，正常跑完删除；失败 / 中断保留供下回合提示续跑
+    await markWorkflowRunStarted(workspaceDir, {
+      runId,
+      workflowName: validated.meta.name,
+      scriptPath,
+    });
+
     // 4b) 跨 Bot 子会话映射持久化：<runId>.sessions.json。
     // 等待超时（timed_out）的步骤不会写入 journal，但它的子会话仍在后台运行；
     // 该映射让 resumeFromRunId 续跑时能幂等重连同一个子会话，而不是再创建一个。
@@ -1491,6 +1502,10 @@ function wrapWorkflowToolForCrossBot(
         },
       });
       completeWorkflowTask(task, result);
+      // 正常跑完（completed）才清除断点标记；failed / killed 保留供下回合提示续跑
+      if (result.status === 'completed') {
+        await markWorkflowRunFinished(workspaceDir);
+      }
 
       const lines = [
         `Workflow "${validated.meta.name}" ${result.status} (runId: ${runId})`,

@@ -19,6 +19,11 @@ export {
   sanitizeToolArgs,
 } from './runtime/tool-preview.js';
 export { executeBotTurn, type BotTurnResult } from './runtime/execute-turn.js';
+export {
+  turnSignature,
+  runTurnWithResilience,
+  clearTurnReceipt,
+} from './runtime/turn-receipt.js';
 export { getBotCommands } from './runtime/commands-bridge.js';
 export { runRegistry, getActiveSessionCount } from './runtime/run-registry.js';
 export { resetBotSession, cancelBotTurn, cancelAllBotTurns } from './runtime/turn-lifecycle.js';

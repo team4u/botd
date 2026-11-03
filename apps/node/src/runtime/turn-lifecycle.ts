@@ -4,6 +4,7 @@ import path from 'node:path';
 import { assertSafeId, getBotDir } from '../storage.js';
 import { getGlobalSubagentManager } from '../commands.js';
 import { runRegistry } from './run-registry.js';
+import { clearTurnReceipt } from './turn-receipt.js';
 
 /**
  * 回合生命周期 API：会话重置与取消（单回合 / 按 dataDir 全量）。
@@ -27,6 +28,9 @@ export async function resetBotSession(dataDir: string, sessionId: string, botId:
     activeSession.dispose();
   }
 
+  // 重置会话意味着放弃上下文：未消费的断连回执一并清理
+  await clearTurnReceipt(dataDir, sessionId, botId);
+
   const sessionFile = path.join(getBotDir(dataDir, botId), 'sessions', `${sessionId}.jsonl`);
   if (!existsSync(sessionFile)) {
     return;
@@ -34,9 +38,12 @@ export async function resetBotSession(dataDir: string, sessionId: string, botId:
   await fs.rm(sessionFile);
 }
 
-export async function cancelBotTurn(sessionId: string, botId: string): Promise<void> {
+export async function cancelBotTurn(sessionId: string, botId: string, dataDir?: string): Promise<void> {
   const runKey = `${sessionId}:${botId}`;
   runRegistry.cancel(runKey);
+  // 取消的回合不会产生有效结果：清理其未消费回执（优先用显式 dataDir，退化到运行注册表反查）
+  const resolvedDataDir = dataDir ?? runRegistry.dataDirOf(runKey);
+  if (resolvedDataDir) await clearTurnReceipt(resolvedDataDir, sessionId, botId);
   const session = runRegistry.getSession(runKey);
   if (session) {
     // 取消前先停掉全部分身（含后台），避免 dispose 只断开主会话而分身孤儿化

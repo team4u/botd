@@ -362,10 +362,55 @@ export class HubDatabase {
   }
 
   public resetStaleMetadata(): void {
-    this.db.exec(`
-      UPDATE nodes SET status = 'offline' WHERE status = 'online';
-      UPDATE sessions SET status = 'idle', active_bot_id = NULL WHERE status IN ('running', 'queued');
-    `);
+    this.db.exec(`UPDATE nodes SET status = 'offline' WHERE status = 'online'`);
+
+    // 会话状态处置（启动时进程内队列已丢失，磁盘是唯一事实）：
+    // - 有未过期的 queued_offline 待发任务 → 保持 queued（节点重连后 onNodeOnline 补发）；
+    // - running 且无待发任务 → Hub 在回合运行期间重启，诚实标记 failed 并交代原因；
+    // - queued 且无待发任务 → 内存队列已随重启丢失，回到 idle。
+    const now = new Date().toISOString();
+    const staleSessions = this.db.prepare(
+      "SELECT id, status FROM sessions WHERE status IN ('running', 'queued') AND archived = 0"
+    ).all() as { id: string; status: string }[];
+
+    for (const session of staleSessions) {
+      const hasQueuedTask = Boolean(
+        this.db
+          .prepare(
+            "SELECT 1 FROM outbound_task_queue WHERE session_id = ? AND status = 'queued_offline' AND expires_at > ? LIMIT 1"
+          )
+          .get(session.id, now)
+      );
+      if (hasQueuedTask) {
+        // 保留排队状态：节点重连后由 onNodeOnline 消费待发任务自动恢复
+        this.db
+          .prepare("UPDATE sessions SET status = 'queued', active_bot_id = NULL, updated_at = ? WHERE id = ?")
+          .run(now, session.id);
+        continue;
+      }
+      if (session.status === 'running') {
+        // Hub 在回合运行期间重启：已产生的工作区变更仍在节点上，向用户诚实交代中断
+        this.db
+          .prepare("UPDATE sessions SET status = 'failed', active_bot_id = NULL, updated_at = ? WHERE id = ?")
+          .run(now, session.id);
+        this.db
+          .prepare(
+            `INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, aborted, created_at)
+             VALUES (?, ?, 'system', NULL, NULL, NULL, NULL, ?, '[]', 0, ?)`
+          )
+          .run(
+            `msg_restart_${randomUUID()}`,
+            session.id,
+            '⚠️ 回合因服务重启中断。已完成的工作区文件与工作流断点已保留，发送「继续」即可接着执行。',
+            now
+          );
+      } else {
+        // queued 无待发任务：内存队列已丢，回 idle
+        this.db
+          .prepare("UPDATE sessions SET status = 'idle', active_bot_id = NULL, updated_at = ? WHERE id = ?")
+          .run(now, session.id);
+      }
+    }
   }
 
   public inTransaction<T>(fn: () => T): T {
