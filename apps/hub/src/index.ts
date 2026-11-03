@@ -111,12 +111,12 @@ export function createHub(options?: HubOptions): HubInstance {
   registerEventRoutes(app, ctx);
   registerProviderRoutes(app, db, connections);
   registerArtifactRoutes(app, artifacts);
-  registerShareRoutes(app, db, artifacts, getSessionOwnerId);
+  registerShareRoutes(app, db, getSessionOwnerId);
   const triggerScheduler = registerTriggerRoutes(app, db, router, getSessionOwnerId, { sseHub, artifacts });
   registerBgJobRoutes(app, db, connections);
-  registerSkillSyncAndAskRoutes(app, db, connections, router, getSessionOwnerId);
-  registerDelegationRoutes(app, db, router, sseHub, getSessionOwnerId);
-  const unsubscribeChannels = registerChannelRoutes(app, db, router, sseHub, getSessionOwnerId);
+  registerSkillSyncAndAskRoutes(app, db, connections, router);
+  registerDelegationRoutes(app, db, router, sseHub);
+  const unsubscribeChannels = registerChannelRoutes(app, db, router, sseHub);
 
   // 静态 Web 文件 & SPA fallback
   app.use('*', createStaticMiddleware(options?.webDir));

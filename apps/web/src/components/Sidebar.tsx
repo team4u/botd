@@ -23,7 +23,7 @@ import {
   ListChecks,
 } from 'lucide-react';
 import type { SessionRecord, BotConfig, NodeRecord, UserRecord } from '@botd/protocol';
-import type { MessageSearchHit } from '../api.js';
+import type { MessageSearchHit } from '@botd/protocol';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import ThemeToggle from './ThemeToggle.js';
 import { BotAvatarBadge } from './MessageItem.js';

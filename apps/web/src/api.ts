@@ -29,28 +29,13 @@ import type {
   DelegateSessionResult,
   NotificationChannelRecord,
   CreateNotificationChannelInput,
-  NotificationChannelKind,
-  NotificationEventKind,
   NotificationTellPolicy,
+  UserRecord,
   AutomationEventRecord,
   NotificationOutboxRecord,
   SubagentRunRecord,
   WorkspaceDiffResult,
 } from '@botd/protocol';
-import type { UserInfo } from './types.js';
-
-export type {
-  MessageSearchHit,
-  NotificationChannelRecord,
-  CreateNotificationChannelInput,
-  NotificationChannelKind,
-  NotificationEventKind,
-  NotificationTellPolicy,
-  AutomationEventRecord,
-  NotificationOutboxRecord,
-  TriggerDispatchMode,
-  TriggerEventFilter,
-};
 
 export class ApiError extends Error {
   status: number;
@@ -124,15 +109,15 @@ export const api = {
     }
   },
 
-  async login(username: string, password: string): Promise<{ ok: boolean; user: UserInfo }> {
-    return request<{ ok: boolean; user: UserInfo }>('/api/auth/login', {
+  async login(username: string, password: string): Promise<{ ok: boolean; user: UserRecord }> {
+    return request<{ ok: boolean; user: UserRecord }>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     });
   },
 
-  async me(): Promise<{ authenticated: boolean; user: UserInfo }> {
-    return request<{ authenticated: boolean; user: UserInfo }>('/api/auth/me');
+  async me(): Promise<{ authenticated: boolean; user: UserRecord }> {
+    return request<{ authenticated: boolean; user: UserRecord }>('/api/auth/me');
   },
 
   async logout(): Promise<{ ok: boolean }> {
@@ -142,16 +127,16 @@ export const api = {
   },
 
   // Users（仅 admin，后端对非 admin 返回 403）
-  async listUsers(): Promise<UserInfo[]> {
-    return request<UserInfo[]>('/api/users');
+  async listUsers(): Promise<UserRecord[]> {
+    return request<UserRecord[]>('/api/users');
   },
 
   async createUser(input: {
     username: string;
     password: string;
     role?: 'admin' | 'member';
-  }): Promise<UserInfo> {
-    return request<UserInfo>('/api/users', {
+  }): Promise<UserRecord> {
+    return request<UserRecord>('/api/users', {
       method: 'POST',
       body: JSON.stringify(input),
     });

@@ -90,6 +90,8 @@ export function registerMessageRoutes(app: HubApp, ctx: HubContext): void {
       return c.json({ error: cmdResult.error }, 400);
     }
 
+    const user = c.get('user');
+
     const mentions = cmdResult.targetBotId
       ? [cmdResult.targetBotId]
       : (cmdResult.isCommand ? [] : extractMentions(content, validBots));
@@ -111,7 +113,7 @@ export function registerMessageRoutes(app: HubApp, ctx: HubContext): void {
     });
 
     // TODO(后续在 formatIncrementalMessages 中消费 senderUsername)
-    router.handleUserMessage(id, msgResult.message.id, routerContent, cmdResult.isCommand ? {
+    router.handleUserMessage(id, msgResult.message.id, content, cmdResult.isCommand ? {
       commandText: cmdResult.commandText!,
       targetBotId: cmdResult.targetBotId,
     } : undefined);
