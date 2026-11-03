@@ -14,6 +14,9 @@ import type { NodeConnectionManager } from './ws-hub.js';
 export type AuthContext = Context<{ Variables: { user: UserRecord } }>;
 export type NodeRpc = BirpcReturn<NodeRpcFunctions, HubRpcFunctions>;
 
+export const isObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
 export function requireAdmin(c: AuthContext): Response | null {
   if (c.get('user').role !== 'admin') {
     return c.json({ error: 'Admin only' }, 403);
@@ -51,6 +54,7 @@ export function resolveOwnedNodeRpc(
   return { ok: true as const, node: nodeRes.node, rpc };
 }
 
+/** 鉴权 + 定位归属 BOT：404（不存在）/ 403（非归属）语义与 resolveOwnedNode 一致。 */
 export function resolveOwnedBot(
   c: AuthContext,
   db: HubDatabase,
@@ -72,18 +76,13 @@ export function resolveOwnedBotRpc(
   connections: Pick<NodeConnectionManager, 'getNodeRpc'>,
   botId: string,
 ): { ok: true; bot: BotConfig; rpc: NodeRpc } | { ok: false; response: Response } {
-  const bot = db.getBot(botId);
-  if (!bot) {
-    return { ok: false as const, response: c.json({ error: 'Bot not found' }, 404) };
-  }
-  if (db.getNodeOwner(bot.nodeId) !== c.get('user').id) {
-    return { ok: false as const, response: c.json({ error: 'Forbidden' }, 403) };
-  }
-  const rpc = connections.getNodeRpc(bot.nodeId);
+  const botRes = resolveOwnedBot(c, db, botId);
+  if (!botRes.ok) return botRes;
+  const rpc = connections.getNodeRpc(botRes.bot.nodeId);
   if (!rpc) {
     return { ok: false as const, response: c.json({ error: 'Node is offline' }, 503) };
   }
-  return { ok: true as const, bot, rpc };
+  return { ok: true as const, bot: botRes.bot, rpc };
 }
 
 export function resolveOwnedSession(

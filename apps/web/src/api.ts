@@ -5,7 +5,6 @@ import type {
   SessionRecord,
   CreateSessionInput,
   MessageRecord,
-  SessionSseEvent,
   GlobalSseEvent,
   BgJobRecord,
   PairingResult,
@@ -26,33 +25,17 @@ import type {
   NodeUpgradeResult,
   SessionShareRecord,
   SharedSessionSnapshot,
-  DelegateSessionInput,
-  DelegateSessionResult,
   NotificationChannelRecord,
   CreateNotificationChannelInput,
-  NotificationChannelKind,
-  NotificationEventKind,
   NotificationTellPolicy,
   AutomationEventRecord,
   NotificationOutboxRecord,
   SubagentRunRecord,
   WorkspaceDiffResult,
+  UserRecord,
 } from '@botd/protocol';
-import type { UserInfo } from './types.js';
 
-export type {
-  MessageSearchHit,
-  NotificationChannelRecord,
-  CreateNotificationChannelInput,
-  NotificationChannelKind,
-  NotificationEventKind,
-  NotificationTellPolicy,
-  AutomationEventRecord,
-  NotificationOutboxRecord,
-  TriggerDispatchMode,
-  TriggerEventFilter,
-  SessionParticipantRecord,
-};
+export type { MessageSearchHit } from '@botd/protocol';
 
 export class ApiError extends Error {
   status: number;
@@ -126,15 +109,15 @@ export const api = {
     }
   },
 
-  async login(username: string, password: string): Promise<{ ok: boolean; user: UserInfo }> {
-    return request<{ ok: boolean; user: UserInfo }>('/api/auth/login', {
+  async login(username: string, password: string): Promise<{ ok: boolean; user: UserRecord }> {
+    return request<{ ok: boolean; user: UserRecord }>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     });
   },
 
-  async me(): Promise<{ authenticated: boolean; user: UserInfo }> {
-    return request<{ authenticated: boolean; user: UserInfo }>('/api/auth/me');
+  async me(): Promise<{ authenticated: boolean; user: UserRecord }> {
+    return request<{ authenticated: boolean; user: UserRecord }>('/api/auth/me');
   },
 
   async logout(): Promise<{ ok: boolean }> {
@@ -144,16 +127,16 @@ export const api = {
   },
 
   // Users（仅 admin，后端对非 admin 返回 403）
-  async listUsers(): Promise<UserInfo[]> {
-    return request<UserInfo[]>('/api/users');
+  async listUsers(): Promise<UserRecord[]> {
+    return request<UserRecord[]>('/api/users');
   },
 
   async createUser(input: {
     username: string;
     password: string;
     role?: 'admin' | 'member';
-  }): Promise<UserInfo> {
-    return request<UserInfo>('/api/users', {
+  }): Promise<UserRecord> {
+    return request<UserRecord>('/api/users', {
       method: 'POST',
       body: JSON.stringify(input),
     });
@@ -343,10 +326,6 @@ export const api = {
   },
 
   // BOTs
-  async listBots(): Promise<BotConfig[]> {
-    return request<BotConfig[]>('/api/bots');
-  },
-
   async createBot(input: SaveBotInput): Promise<BotConfig> {
     return request<BotConfig>('/api/bots', {
       method: 'POST',
@@ -369,13 +348,6 @@ export const api = {
 
   async getBotSystem(botId: string): Promise<{ content: string }> {
     return request<{ content: string }>(`/api/bots/${encodeURIComponent(botId)}/system`);
-  },
-
-  async saveBotSystem(botId: string, content: string): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>(`/api/bots/${encodeURIComponent(botId)}/system`, {
-      method: 'PUT',
-      body: JSON.stringify({ content }),
-    });
   },
 
   async getBotMemory(botId: string): Promise<{ content: string }> {
@@ -442,14 +414,6 @@ export const api = {
     });
   },
 
-  async delegateSession(sessionId: string, input: DelegateSessionInput): Promise<DelegateSessionResult> {
-    return request<DelegateSessionResult>(`/api/sessions/${encodeURIComponent(sessionId)}/delegate`, {
-      method: 'POST',
-      body: JSON.stringify(input),
-    });
-  },
-
-
   async updateSession(
     sessionId: string,
     input: Partial<CreateSessionInput>
@@ -465,19 +429,6 @@ export const api = {
     return request<SessionRecord>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
       method: 'PATCH',
       body: JSON.stringify({ archived }),
-    });
-  },
-
-  async updateSessionPinned(sessionId: string, pinned: boolean): Promise<SessionRecord> {
-    return request<SessionRecord>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ pinned }),
-    });
-  },
-
-  async getSessionMessages(sessionId: string, signal?: AbortSignal): Promise<MessageRecord[]> {
-    return request<MessageRecord[]>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
-      signal,
     });
   },
 
@@ -575,19 +526,24 @@ export const api = {
 
   // Share links
   async getSessionShare(sessionId: string): Promise<{ share: SessionShareRecord | null }> {
-    return getSessionShare(sessionId);
+    return request<{ share: SessionShareRecord | null }>(`/api/sessions/${encodeURIComponent(sessionId)}/share`);
   },
 
   async createSessionShare(sessionId: string, regenerate?: boolean): Promise<SessionShareRecord> {
-    return createSessionShare(sessionId, regenerate);
+    return request<SessionShareRecord>(`/api/sessions/${encodeURIComponent(sessionId)}/share`, {
+      method: 'POST',
+      body: JSON.stringify({ regenerate: Boolean(regenerate) }),
+    });
   },
 
   async revokeSessionShare(sessionId: string): Promise<{ ok: boolean }> {
-    return revokeSessionShare(sessionId);
+    return request<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/share`, {
+      method: 'DELETE',
+    });
   },
 
   async getPublicShare(token: string): Promise<SharedSessionSnapshot> {
-    return getPublicShare(token);
+    return request<SharedSessionSnapshot>(`/api/public/shares/${encodeURIComponent(token)}`);
   },
 
   // Artifacts
@@ -847,65 +803,6 @@ export const api = {
     );
   },
 };
-
-/**
- * Connect to SSE stream for a specific session.
- * Returns an unsubscribe callback to cleanly close the connection.
- */
-export function subscribeSessionEvents(
-  sessionId: string,
-  callbacks: {
-    onEvent: (event: SessionSseEvent) => void;
-    onError?: (error: Event) => void;
-    onOpen?: () => void;
-  }
-): () => void {
-  const url = `/api/sessions/${encodeURIComponent(sessionId)}/events`;
-  const eventSource = new EventSource(url, { withCredentials: true });
-
-  eventSource.onopen = () => {
-    callbacks.onOpen?.();
-  };
-
-  eventSource.onmessage = (event) => {
-    try {
-      if (!event.data) return;
-      const parsed = JSON.parse(event.data) as SessionSseEvent;
-      callbacks.onEvent(parsed);
-    } catch (err) {
-      console.warn('[SSE] Failed to parse message data:', err, event.data);
-    }
-  };
-
-  eventSource.onerror = (err) => {
-    callbacks.onError?.(err);
-  };
-
-  return () => {
-    eventSource.close();
-  };
-}
-
-export async function getSessionShare(sessionId: string): Promise<{ share: SessionShareRecord | null }> {
-  return request<{ share: SessionShareRecord | null }>(`/api/sessions/${encodeURIComponent(sessionId)}/share`);
-}
-
-export async function createSessionShare(sessionId: string, regenerate?: boolean): Promise<SessionShareRecord> {
-  return request<SessionShareRecord>(`/api/sessions/${encodeURIComponent(sessionId)}/share`, {
-    method: 'POST',
-    body: JSON.stringify({ regenerate: Boolean(regenerate) }),
-  });
-}
-
-export async function revokeSessionShare(sessionId: string): Promise<{ ok: boolean }> {
-  return request<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/share`, {
-    method: 'DELETE',
-  });
-}
-
-export async function getPublicShare(token: string): Promise<SharedSessionSnapshot> {
-  return request<SharedSessionSnapshot>(`/api/public/shares/${encodeURIComponent(token)}`);
-}
 
 /**
  * Subscribe to the per-user global SSE stream (/api/events):

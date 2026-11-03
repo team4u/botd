@@ -15,7 +15,8 @@ import type {
 } from '@botd/protocol';
 import { api, AuthRequiredError, subscribeGlobalEvents } from './api';
 import { emitGlobalEvent } from './events';
-import type { StreamingAssistantState, ToolExecutionState, ToastItem, MainViewTab, UserInfo } from './types';
+import type { StreamingAssistantState, ToolExecutionState, ToastItem, MainViewTab } from './types';
+import type { UserRecord } from '@botd/protocol';
 import { LoginView } from './components/LoginView';
 import { Sidebar, pickCurrentDirectSession } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
@@ -100,7 +101,7 @@ export const App: React.FC = () => {
   const [authChecking, setAuthChecking] = useState(true);
   const [authenticated, setAuthenticated] = useState(false);
   const authenticatedRef = useRef(false);
-  const [currentUser, setCurrentUser] = useState<UserInfo | null>(null);
+  const [currentUser, setCurrentUser] = useState<UserRecord | null>(null);
 
   // View state（视图/当前会话/弹窗统一进 hash 路由）
   const [route, setRoute] = useState<HashRoute>(parseHash);
@@ -831,10 +832,6 @@ export const App: React.FC = () => {
           break;
         }
 
-        case 'session_updated': {
-          break;
-        }
-
         case 'subagent_status': {
           setSubagentRunsMap((prev) => {
             const list = prev[event.botId] || [];
@@ -953,10 +950,6 @@ export const App: React.FC = () => {
           if (event.status === 'idle' || event.status === 'failed') {
             setCancelling(false);
           }
-          return;
-        }
-
-        if (event.type === 'session_updated') {
           return;
         }
       },

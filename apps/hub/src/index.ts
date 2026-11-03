@@ -43,6 +43,7 @@ import {
   resolveOwnedNode,
   resolveOwnedNodeRpc,
   resolveOwnedSession,
+  isObject,
   type NodeRpc,
 } from './http-helpers.js';
 
@@ -75,7 +76,6 @@ export interface StartHubResult extends HubInstance {
 
 const VALID_MODES = new Set<SessionMode>(['direct']);
 const USERNAME_REGEX = /^[a-zA-Z0-9_-]{2,32}$/;
-const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isText = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
 
 interface MemberValidationSuccess {
@@ -869,7 +869,7 @@ export function createHub(options?: HubOptions): HubInstance {
   });
 
   app.get('/api/sessions', (c) => {
-    const sessions = db.getAccessibleSessions(c.get('user').id);
+    const sessions = db.getAllSessions(c.get('user').id);
     return c.json(
       sessions.map((s) => {
         if (s.status === 'running') {
@@ -1425,20 +1425,17 @@ export function createHub(options?: HubOptions): HubInstance {
 
   registerProviderRoutes(app, db, connections);
   registerArtifactRoutes(app, artifacts);
-  registerShareRoutes(app, db, artifacts, getSessionOwnerId);
+  registerShareRoutes(app, db, getSessionOwnerId);
   const triggerScheduler = registerTriggerRoutes(app, db, router, getSessionOwnerId, { sseHub, artifacts });
   registerBgJobRoutes(app, db, connections);
-  registerSkillSyncAndAskRoutes(app, db, connections, router, getSessionOwnerId);
-  registerDelegationRoutes(app, db, router, sseHub, getSessionOwnerId);
-  const unsubscribeChannels = registerChannelRoutes(app, db, router, sseHub, getSessionOwnerId);
+  registerSkillSyncAndAskRoutes(app, db, connections, router);
+  registerDelegationRoutes(app, db, router, sseHub);
+  const unsubscribeChannels = registerChannelRoutes(app, db, router, sseHub);
 
   // 10. Serve static web files & SPA fallback
   app.use('*', createStaticMiddleware(options?.webDir));
 
   let isClosed = false;
-  const drain = async (timeoutMs?: number): Promise<{ drained: boolean; remaining: number }> => {
-    return router.drain(timeoutMs);
-  };
   const close = async (): Promise<void> => {
     if (isClosed) return;
     isClosed = true;
@@ -1456,7 +1453,7 @@ export function createHub(options?: HubOptions): HubInstance {
     connections,
     router,
     sseHub,
-    drain,
+    drain: (timeoutMs?: number) => router.drain(timeoutMs),
     close,
   };
 }

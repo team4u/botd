@@ -21,6 +21,8 @@ import type { DaemonHandle } from '../../daemon.js';
 import { buildDaemonSpawnSpec } from '../../daemon-launch.js';
 import { checkNodeUpgrade, performNodeUpgrade } from '../../upgrader.js';
 import { installNodeService, uninstallNodeService, getNodeServiceStatus } from '../../service.js';
+import { IPC_TOKEN_HEADER } from '../../local-ipc.js';
+import { sleep } from '../../async-util.js';
 
 // ---------------------------------------------------------------------------
 // Daemon control-plane helpers (Unix socket / Windows named pipe)
@@ -32,7 +34,6 @@ interface SocketResponse {
 }
 
 const IPC_TOKEN_FILE = 'ipc-token';
-const IPC_TOKEN_HEADER = 'x-botd-ipc-token';
 const IPC_VERSION_MISMATCH =
   'Local daemon rejected the IPC request (HTTP 401): daemon and CLI versions do not match. ' +
   'Restart the daemon (botd restart) or upgrade botd to a matching version.';
@@ -317,8 +318,6 @@ interface DaemonStatus {
   version?: string;
 }
 
-const waitMs = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 async function getDaemonStatus(socketPath: string, dataDir?: string): Promise<DaemonStatus | null> {
   try {
     const { status, body } = await requestOverSocket(socketPath, 'GET', '/status', 2_000, dataDir);
@@ -360,7 +359,7 @@ async function stopDaemon(dataDir: string): Promise<'stopped' | 'not-running'> {
       throw new CliError(`Failed to stop daemon: ${(err as Error).message}`);
     }
     for (let i = 0; i < 50; i += 1) {
-      await waitMs(200);
+      await sleep(200);
       if (!isPidAlive(status.pid) || !fs.existsSync(socketPath)) break;
     }
     fs.rmSync(pidFile, { force: true });
@@ -372,7 +371,7 @@ async function stopDaemon(dataDir: string): Promise<'stopped' | 'not-running'> {
   if (pid && isPidAlive(pid)) {
     process.kill(pid, 'SIGTERM');
     for (let i = 0; i < 50; i += 1) {
-      await waitMs(200);
+      await sleep(200);
       if (!isPidAlive(pid)) break;
     }
     fs.rmSync(pidFile, { force: true });

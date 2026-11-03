@@ -5,8 +5,7 @@ import { CliError } from '../errors.js';
 import { HubClient } from '../hub-client.js';
 import { readInput } from '../input.js';
 import { printResult } from '../render.js';
-
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+import { sleep } from '../../async-util.js';
 
 function renderLoginState(state: ProviderLoginState, json: boolean): void {
   if (json) {

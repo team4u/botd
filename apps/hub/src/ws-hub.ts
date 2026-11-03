@@ -455,10 +455,6 @@ export class NodeConnectionManager {
     return true;
   }
 
-  isNodeOnline(nodeId: string): boolean {
-    return this.connections.has(nodeId);
-  }
-
   close(): void {
     for (const conn of this.connections.values()) {
       try {

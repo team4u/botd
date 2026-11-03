@@ -111,7 +111,6 @@ export interface PendingAskRecord {
   answer?: string;
   previewType?: AskPreviewType;
   previewContent?: string;
-  sessionTitle?: string;
   createdAt: string;
   expiresAt?: string;
 }
@@ -441,12 +440,6 @@ export interface DelegateSessionResult {
   initialMessage: MessageRecord;
 }
 
-export interface DelegateSessionWaitResult extends DelegateSessionResult {
-  status: 'done' | 'failed';
-  reply: string;
-  returnedArtifacts: MessageAttachment[];
-}
-
 export type NotificationChannelKind = 'webhook' | 'feishu' | 'slack' | 'telegram';
 export type NotificationEventKind = 'assistant_reply' | 'ask_request' | 'wakeup';
 /** 按需通知策略：always 全量推送；needed 仅异常与人工审批推送；never 静默不推送 */
@@ -521,10 +514,6 @@ export type SessionSseEvent =
       activeBotId?: string;
       activeBotIds?: string[];
       queuePlan?: QueueStageSummary[];
-    }
-  | {
-      type: 'session_updated';
-      sessionId: string;
     }
   | {
       type: 'subagent_status';
@@ -732,7 +721,6 @@ export interface CreateSessionInput {
 }
 export interface NodeIdentity { nodeId: string; name: string; hubUrl: string; token: string }
 export interface PairingResult { code: string; expiresAt: string }
-export interface ApiError { error: string }
 
 export type ProviderAuthType = 'api_key' | 'oauth';
 export interface ModelCatalogEntry {

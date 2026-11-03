@@ -24,9 +24,8 @@ import {
   Square,
   ListChecks,
 } from 'lucide-react';
-import type { SessionRecord, BotConfig, NodeRecord } from '@botd/protocol';
+import type { SessionRecord, BotConfig, NodeRecord, UserRecord } from '@botd/protocol';
 import type { MessageSearchHit } from '../api.js';
-import type { UserInfo } from '../types.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import ThemeToggle from './ThemeToggle.js';
 import { BotAvatarBadge } from './MessageItem.js';
@@ -72,7 +71,7 @@ interface SidebarProps {
   onSetArchived?: (sessionId: string, archived: boolean) => void;
   isOpen: boolean;
   onClose: () => void;
-  currentUser?: UserInfo;
+  currentUser?: UserRecord;
   onOpenUsers?: () => void;
 }
 

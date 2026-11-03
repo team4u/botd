@@ -6,13 +6,11 @@ import type { HubDatabase } from './db.js';
 import type { GroupRouter } from './group-router.js';
 import type { SseHub } from './sse.js';
 import type { ArtifactService } from './artifact-service.js';
-import { resolveOwnedSession } from './http-helpers.js';
+import { resolveOwnedSession, isObject } from './http-helpers.js';
 import { watchSubSessionCompletion } from './delegation.js';
 
 const VALID_KINDS = new Set<TriggerKind>(['webhook', 'cron', 'once']);
 const VALID_DISPATCH_MODES = new Set<string>(['append', 'subsession']);
-const isObject = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === 'object' && !Array.isArray(value);
 
 // Webhook 重放去重 + 频率限制（内存实现，Map 插入序即时间序，惰性淘汰防膨胀）
 const WEBHOOK_DEDUP_WINDOW_MS = 5 * 60 * 1000;

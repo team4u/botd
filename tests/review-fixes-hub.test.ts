@@ -150,8 +150,8 @@ test('Fix 1 — getAllSessions omits participants field while getSession preserv
   assert.equal(bobSessions[0].participants, undefined);
   assert.equal('participants' in bobSessions[0], false);
 
-  // getAccessibleSessions (alias) also matches
-  const accessible = db.getAccessibleSessions('user_alice');
+  // getAccessibleSessions 语义已并入 getAllSessions，同样不含 participants 字段
+  const accessible = db.getAllSessions('user_alice');
   assert.equal(accessible.length, 1);
   assert.equal(accessible[0].participants, undefined);
 });

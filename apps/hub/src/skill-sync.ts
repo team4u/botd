@@ -3,17 +3,13 @@ import type { UserRecord } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
 import type { NodeConnectionManager } from './ws-hub.js';
 import type { GroupRouter } from './group-router.js';
-import { resolveOwnedNodeRpc, resolveOwnedSession } from './http-helpers.js';
-
-const isObject = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === 'object' && !Array.isArray(value);
+import { isObject, resolveOwnedNodeRpc, resolveOwnedSession } from './http-helpers.js';
 
 export function registerSkillSyncAndAskRoutes(
   app: Hono<{ Variables: { user: UserRecord } }>,
   db: HubDatabase,
   connections: NodeConnectionManager,
-  router: GroupRouter,
-  _getSessionOwnerId?: (sessionId: string) => string | undefined
+  router: GroupRouter
 ): void {
   // --- 跨节点技能同步 ---
   app.post('/api/nodes/:nodeId/skills/:skillId/sync', async (c) => {

@@ -843,11 +843,6 @@ export class HubDatabase {
     return row === undefined ? undefined : Number(row.token_epoch);
   }
 
-  /** 递增 token epoch：所有已签发 token 立即失效（改密/重置密码路径调用） */
-  incrementUserTokenEpoch(id: string): void {
-    this.db.prepare('UPDATE users SET token_epoch = token_epoch + 1 WHERE id = ?').run(id);
-  }
-
   getUserByUsername(username: string): UserRecord | undefined {
     const stmt = this.db.prepare('SELECT id, username, role, created_at FROM users WHERE username = ?');
     const row = stmt.get(username) as {
@@ -1349,11 +1344,6 @@ export class HubDatabase {
         lastMessageAt: row.last_message_at ?? undefined,
       };
     });
-  }
-
-  /** 兼容别名：多用户可访问会话查询入口（含参与者） */
-  getAccessibleSessions(userId: string): SessionRecord[] {
-    return this.getAllSessions(userId);
   }
 
   listSubSessions(parentSessionId: string): SessionRecord[] {
