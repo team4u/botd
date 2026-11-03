@@ -5,6 +5,7 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import type { BotConfig, DelegateSessionResult, MessageRecord, SessionRecord } from '../packages/protocol/src/index.js';
 import { createHub, startHub } from '../apps/hub/src/index.js';
+import { AuthManager } from '../apps/hub/src/auth.js';
 import { buildGroupContextPrompt } from '../apps/hub/src/group-router.js';
 import { buildProgram } from '../apps/node/src/cli/program.js';
 
@@ -1002,4 +1003,182 @@ test('buildGroupContextPrompt: 注入可协同的其他主 BOT 与跨 Bot 协同
   // 不传 db 时不注入该区块
   const promptNoDb = buildGroupContextPrompt(session);
   assert.ok(!promptNoDb.includes('可协同的其他主 BOT'));
+});
+
+test('共享 Bot 在他人会话中执行时，节点凭据以会话所有者身份传递（delegate/messages/events/artifacts/cancel）', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'botd-node-identity-'));
+  const artifactsDir = path.join(dir, 'artifacts');
+  const hub = createHub({
+    dbPath: path.join(dir, 'hub.sqlite'),
+    adminPassword: 'admin-password-node-identity',
+    artifactsDir,
+  });
+
+  t.after(async () => {
+    await hub.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const auth = new AuthManager();
+
+  // 用户 A：拥有 nodeA，其上挂团队共享 bot_shared 与私有 bot_a_private
+  hub.db.createUser({ id: 'user_a', username: 'usera', passwordHash: 'hash-a', role: 'member' });
+  // 用户 B：拥有 nodeB 与私有 bot_b_private
+  hub.db.createUser({ id: 'user_b', username: 'userb', passwordHash: 'hash-b', role: 'member' });
+
+  const nodeAToken = 'node-a-raw-token';
+  hub.db.createNode({
+    id: 'node_a',
+    name: 'Node A',
+    platform: 'linux',
+    tokenHash: auth.hashToken(nodeAToken),
+    ownerId: 'user_a',
+  });
+  const baseBot = (id: string, nodeId: string, visibility?: 'team' | 'private'): BotConfig => ({
+    id,
+    nodeId,
+    name: `Bot ${id}`,
+    description: '',
+    modelProvider: 'openai',
+    modelId: 'gpt-4o',
+    thinkingLevel: 'medium',
+    enabledSkills: [],
+    enabledExtensions: [],
+    ...(visibility ? { visibility } : {}),
+    updatedAt: new Date().toISOString(),
+  });
+  hub.db.saveBot(baseBot('bot_shared', 'node_a', 'team'));
+  hub.db.saveBot(baseBot('bot_a_private', 'node_a'));
+
+  hub.db.createNode({
+    id: 'node_b',
+    name: 'Node B',
+    platform: 'linux',
+    tokenHash: auth.hashToken('node-b-raw-token'),
+    ownerId: 'user_b',
+  });
+  hub.db.saveBot(baseBot('bot_b_private', 'node_b'));
+
+  // 用户 B 的私有会话：主控 Bot 是 A 节点上的团队共享 bot_shared
+  hub.db.createSession({
+    id: 'sess_b',
+    title: 'User B session with shared bot',
+    mode: 'direct',
+    leadBotId: 'bot_shared',
+    memberBotIds: ['bot_shared'],
+    ownerId: 'user_b',
+  });
+  // 用户 B 的隔离会话：与 node_a 毫无关系
+  hub.db.createSession({
+    id: 'sess_b_isolated',
+    title: 'User B isolated session',
+    mode: 'direct',
+    leadBotId: 'bot_b_private',
+    memberBotIds: ['bot_b_private'],
+    ownerId: 'user_b',
+  });
+
+  // mock 两个节点的 RPC，回合直接完成
+  const mockRpc: any = {
+    runTurn: async () => ({ replyText: 'done', modelBadge: 'test' }),
+    cancelTurn: async () => {},
+    resetSession: async () => {},
+  };
+  hub.connections.getNodeRpc = (nodeId: string) => (nodeId === 'node_a' || nodeId === 'node_b' ? mockRpc : undefined);
+
+  // node_a 的节点凭据请求头（Node 进程 HubClient 的真实认证方式）
+  const nodeAHeaders = {
+    'x-botd-node-id': 'node_a',
+    'x-botd-node-token': nodeAToken,
+  };
+
+  // 1. node_a 在 sess_b 中 delegate 给 B 自己的私有 bot —— 应以 B 的身份成功，子会话归属于 B
+  const delegateRes = await hub.app.request('/api/sessions/sess_b/delegate', {
+    method: 'POST',
+    headers: { ...nodeAHeaders, 'content-type': 'application/json' },
+    body: JSON.stringify({ botId: 'bot_b_private', prompt: '共享 Bot 委派任务给 B 的私有 Bot' }),
+  });
+  const delegateJson: DelegateSessionResult | { error?: string } | null = await delegateRes.json().catch(() => null);
+  assert.equal(
+    delegateRes.status,
+    201,
+    `Delegate via node creds should succeed: ${JSON.stringify(delegateJson)}`,
+  );
+  const delegateResult = delegateJson as DelegateSessionResult;
+  const childId = delegateResult.childSession.id;
+  assert.equal(delegateResult.childSession.parentSessionId, 'sess_b');
+  assert.equal(hub.db.getSessionOwner(childId), 'user_b', '子会话所有者必须是会话所有者 B，而非节点归属者 A');
+
+  // 等待子会话回合落地，避免与后续 cancel/assert 交错
+  await waitFor(() => hub.db.getSession(childId)?.status === 'idle');
+
+  // 2. node_a 用节点凭据访问子会话的 messages / events / artifacts —— 子会话父链上调度过 node_a 的 Bot，应畅通
+  const messagesRes = await hub.app.request(`/api/sessions/${childId}/messages`, { headers: nodeAHeaders });
+  assert.equal(messagesRes.status, 200, 'node_a 凭据应能读取子会话消息');
+  const messages: MessageRecord[] = await messagesRes.json();
+  assert.ok(messages.length >= 1, '子会话应含初始用户消息');
+
+  const eventsRes = await hub.app.request(`/api/sessions/${childId}/events`, { headers: nodeAHeaders });
+  assert.equal(eventsRes.status, 200, 'node_a 凭据应能订阅子会话事件流');
+  assert.match(eventsRes.headers.get('content-type')!, /text\/event-stream/);
+  {
+    const reader = eventsRes.body!.getReader();
+    const { value } = await reader.read();
+    assert.ok(value, 'SSE 首个事件（session_status）应立即下发');
+    await reader.cancel();
+  }
+
+  const artifactsRes = await hub.app.request(`/api/sessions/${childId}/artifacts`, { headers: nodeAHeaders });
+  assert.equal(artifactsRes.status, 200, 'node_a 凭据应能列出子会话产物');
+
+  // 3. node_a 在子会话上传产物（经身份切换为 user actor + 团队共享 bot 为会话成员）
+  const uploadRes = await hub.app.request(`/api/sessions/${childId}/artifacts`, {
+    method: 'POST',
+    headers: {
+      ...nodeAHeaders,
+      'content-type': 'application/octet-stream',
+      'x-artifact-filename': encodeURIComponent('shared-bot-output.bin'),
+      'x-artifact-bot-id': 'bot_b_private',
+    },
+    body: Buffer.from('shared bot artifact payload'),
+  });
+  const uploadJson: { id?: string; error?: string } | null = await uploadRes.json().catch(() => null);
+  assert.equal(uploadRes.status, 201, `共享 Bot 会话中上传产物应成功: ${JSON.stringify(uploadJson)}`);
+  const uploaded = uploadJson as { id: string };
+
+  // 同一产物可经节点凭据读回
+  const downloadRes = await hub.app.request(`/api/artifacts/${uploaded.id}/content`, { headers: nodeAHeaders });
+  assert.equal(downloadRes.status, 200, 'node_a 凭据应能下载子会话产物');
+
+  // 4. node_a 凭据取消子会话
+  const cancelRes = await hub.app.request(`/api/sessions/${childId}/cancel`, {
+    method: 'POST',
+    headers: nodeAHeaders,
+  });
+  assert.equal(cancelRes.status, 200, 'node_a 凭据应能取消子会话');
+
+  // 5. 安全边界 1：node_a 试图在 sess_b 中委派给 A 未共享的私有 bot_a_private —— 必须被拒绝
+  const forbiddenBotRes = await hub.app.request('/api/sessions/sess_b/delegate', {
+    method: 'POST',
+    headers: { ...nodeAHeaders, 'content-type': 'application/json' },
+    body: JSON.stringify({ botId: 'bot_a_private', prompt: '越权委派尝试' }),
+  });
+  assert.equal(forbiddenBotRes.status, 403, '会话所有者 B 无权使用 bot_a_private，委派必须 403');
+
+  // 6. 安全边界 2：node_a 访问与己无关的 sess_b_isolated —— 必须被拒绝
+  const isoMessagesRes = await hub.app.request('/api/sessions/sess_b_isolated/messages', { headers: nodeAHeaders });
+  assert.equal(isoMessagesRes.status, 403, 'node_a 凭据访问无关会话消息必须 403');
+
+  const isoDelegateRes = await hub.app.request('/api/sessions/sess_b_isolated/delegate', {
+    method: 'POST',
+    headers: { ...nodeAHeaders, 'content-type': 'application/json' },
+    body: JSON.stringify({ botId: 'bot_b_private', prompt: '越权委派尝试' }),
+  });
+  assert.equal(isoDelegateRes.status, 403, 'node_a 凭据对无关会话委派必须 403');
+
+  const isoArtifactsRes = await hub.app.request('/api/sessions/sess_b_isolated/artifacts', { headers: nodeAHeaders });
+  assert.equal(isoArtifactsRes.status, 403, 'node_a 凭据访问无关会话产物必须 403');
+
+  const isoEventsRes = await hub.app.request('/api/sessions/sess_b_isolated/events', { headers: nodeAHeaders });
+  assert.equal(isoEventsRes.status, 403, 'node_a 凭据订阅无关会话事件流必须 403');
 });

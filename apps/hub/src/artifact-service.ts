@@ -82,8 +82,9 @@ export class ArtifactService {
         throw new ArtifactError('Forbidden', 403);
       }
     } else if (actor.type === 'node') {
-      const nodeOwner = this.db.getNodeOwner(actor.nodeId);
-      if (!nodeOwner || nodeOwner !== sessionOwner) {
+      // 共享 Bot 在他人会话中执行时的产物读写：按「调度事实」校验
+      // （会话或其父会话链调度过该节点上的 Bot），而非死板比对节点归属
+      if (!this.db.canNodeActOnSession(actor.nodeId, sessionId)) {
         throw new ArtifactError(`Forbidden: node ${actor.nodeId} does not own session ${sessionId}`, 403);
       }
     }
@@ -107,8 +108,9 @@ export class ArtifactService {
           throw new ArtifactError(`Forbidden: bot ${botId} does not belong to node ${actor.nodeId}`, 403);
         }
       } else if (actor.type === 'user') {
-        const botOwner = this.db.getNodeOwner(bot.nodeId);
-        if (!botOwner || botOwner !== actor.userId) {
+        // 会话可能属于其他用户（如通过节点凭据代理的共享 Bot 会话）：
+        // 只要该用户有权使用此 Bot（团队共享），即可以其身份上传
+        if (!this.db.canUserUseBot(botId, actor.userId)) {
           throw new ArtifactError(`Forbidden: bot ${botId} does not belong to user`, 403);
         }
       }

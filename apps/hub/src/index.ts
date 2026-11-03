@@ -198,9 +198,10 @@ export function createHub(options?: HubOptions): HubInstance {
     const verified = auth.verifyCookie(cookie, (userId) => db.getUserTokenEpoch(userId) ?? 0);
     let user = verified ? db.getUser(verified.userId) : undefined;
     let viaNode = false;
+    let headerNodeId: string | undefined;
     if (!user) {
-      const headerNodeId = c.req.header('x-botd-node-id');
       const headerNodeToken = c.req.header('x-botd-node-token');
+      headerNodeId = c.req.header('x-botd-node-id');
       if (headerNodeId && headerNodeToken) {
         const nodeWithSecret = db.getNodeWithSecret(headerNodeId);
         if (nodeWithSecret && auth.verifyNodeToken(headerNodeToken, nodeWithSecret.tokenHash)) {
@@ -223,6 +224,26 @@ export function createHub(options?: HubOptions): HubInstance {
         (reqPath.startsWith('/api/nodes/pairing') && method === 'POST');
       if (isAdminScoped) {
         return c.json({ error: 'Forbidden: node tokens cannot access user management endpoints' }, 403);
+      }
+
+      // 执行身份传递：团队共享 Bot 在他人会话中运行时（delegate_bot / 跨 Bot Workflow /
+      // 产物读写），节点凭据请求的会话级路由应以「会话所有者」身份生效——前提是该会话
+      // （或其父会话链）确实调度过此节点上的 Bot（canNodeActOnSession 校验调度事实）。
+      // 否则保持节点归属者身份，resolveOwnedSession 会照常拒绝无关会话的访问。
+      if (headerNodeId) {
+        const sessionMatch = reqPath.match(/^\/api\/sessions\/([^/]+)/);
+        const artifactMatch = reqPath.match(/^\/api\/artifacts\/([^/?]+)/);
+        const targetSessionId = sessionMatch
+          ? decodeURIComponent(sessionMatch[1])
+          : artifactMatch
+            ? db.getArtifactWithStoragePath(decodeURIComponent(artifactMatch[1]))?.sessionId
+            : undefined;
+        if (targetSessionId && db.canNodeActOnSession(headerNodeId, targetSessionId)) {
+          const sessionOwnerId = db.getSessionOwner(targetSessionId);
+          if (sessionOwnerId) {
+            user = db.getUser(sessionOwnerId) ?? user;
+          }
+        }
       }
     }
 
