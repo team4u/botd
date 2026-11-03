@@ -14,6 +14,7 @@ import { cliAction, readGlobals } from '../context.js';
 import { CliError } from '../errors.js';
 import { HubClient } from '../hub-client.js';
 import { printResult } from '../render.js';
+import { createDeferred } from '../../async-util.js';
 
 export interface DelegateWaitOutput extends DelegateSessionResult {
   status: 'done' | 'failed';
@@ -195,22 +196,6 @@ async function waitForExistingChildSession(
     if (eventsPromise) void eventsPromise.catch(() => {});
     options.signal?.removeEventListener('abort', externalAbort);
   }
-}
-
-interface Deferred<T = void> {
-  promise: Promise<T>;
-  resolve: (value: T | PromiseLike<T>) => void;
-  reject: (reason?: unknown) => void;
-}
-
-function createDeferred<T = void>(): Deferred<T> {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
 }
 
 /**

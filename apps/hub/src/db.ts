@@ -825,11 +825,6 @@ export class HubDatabase {
     return row === undefined ? undefined : Number(row.token_epoch);
   }
 
-  /** 递增 token epoch：所有已签发 token 立即失效（改密/重置密码路径调用） */
-  incrementUserTokenEpoch(id: string): void {
-    this.db.prepare('UPDATE users SET token_epoch = token_epoch + 1 WHERE id = ?').run(id);
-  }
-
   getUser(id: string): UserRecord | undefined {
     const stmt = this.db.prepare('SELECT id, username, role, created_at FROM users WHERE id = ?');
     const row = stmt.get(id) as {

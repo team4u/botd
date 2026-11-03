@@ -34,6 +34,7 @@ import {
 } from '@tintinweb/pi-subagents/dist/workflow/task.js';
 import { resolveWorkflowScript, resolveWorkflowSource } from '@tintinweb/pi-subagents/dist/workflow/saved.js';
 import type { ExtensionFactory, ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { createDeferred, sleep } from './async-util.js';
 
 /** pi-subagents 扩展工厂：为主 BOT 提供 Agent / SubagentWorkflow 编排底座。 */
 const subagentsExtensionFactory: ExtensionFactory = subagentsExtension as unknown as ExtensionFactory;
@@ -176,22 +177,6 @@ async function connectHubAsNode(dataDir: string): Promise<import('./cli/hub-clie
  * 统一收口到与 SubagentWorkflow 一致的跨 Bot 委派模型，支持前台等待/后台运行/断点续跑（resume），
  * 并向协同面板发射携带 childSessionId 的 subagents:* 事件。
  */
-interface Deferred<T = void> {
-  promise: Promise<T>;
-  resolve: (value: T | PromiseLike<T>) => void;
-  reject: (reason?: unknown) => void;
-}
-
-function createDeferred<T = void>(): Deferred<T> {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
 interface CrossBotSessionRecord {
   childSessionId: string;
   botId: string;
@@ -931,7 +916,6 @@ function createLocalWorkflowManager(
   registry: NonNullable<ReturnType<typeof getGlobalSubagentManager>>,
   pi: ExtensionAPI,
 ): unknown {
-  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
   return {
     getRecord: (id: string) => registry.getRecord?.(id),
     abort: (id: string) => {

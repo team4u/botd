@@ -12,11 +12,11 @@ import {
 } from 'lucide-react';
 import { api } from '../api';
 import { ConfirmDialog } from './ConfirmDialog';
-import type { UserInfo } from '../types';
+import type { UserRecord } from '@botd/protocol';
 
 interface UsersModalProps {
   isOpen: boolean;
-  currentUser: UserInfo;
+  currentUser: UserRecord;
   onClose: () => void;
 }
 
@@ -34,7 +34,7 @@ function formatCreatedAt(iso?: string): string {
 }
 
 export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, currentUser, onClose }) => {
-  const [users, setUsers] = useState<UserInfo[]>([]);
+  const [users, setUsers] = useState<UserRecord[]>([]);
   const [loading, setLoading] = useState(false);
 
   // 新建用户表单
@@ -46,9 +46,9 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, currentUser, onC
   const [error, setError] = useState<string | null>(null);
 
   // ConfirmDialog state
-  const [deleteTarget, setDeleteTarget] = useState<UserInfo | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<UserRecord | null>(null);
   const [deletingUser, setDeletingUser] = useState(false);
-  const [resetTarget, setResetTarget] = useState<UserInfo | null>(null);
+  const [resetTarget, setResetTarget] = useState<UserRecord | null>(null);
   const [resettingPassword, setResettingPassword] = useState(false);
 
   const fetchUsers = useCallback(async () => {
@@ -108,7 +108,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, currentUser, onC
     }
   };
 
-  const handleDeleteUser = async (user: UserInfo) => {
+  const handleDeleteUser = async (user: UserRecord) => {
     if (user.id === currentUser.id) return; // 当前登录用户禁删，后端亦会拦截
     setDeleteTarget(user);
   };
@@ -133,7 +133,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, currentUser, onC
     }
   };
 
-  const handleResetPassword = (user: UserInfo) => {
+  const handleResetPassword = (user: UserRecord) => {
     setResetTarget(user);
   };
 

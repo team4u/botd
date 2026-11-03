@@ -8,7 +8,6 @@ import type {
   UserRecord,
 } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
-import type { ArtifactService } from './artifact-service.js';
 
 interface ShareRow {
   id: string;
@@ -34,7 +33,6 @@ const MAX_SHARE_EXPIRES_IN_HOURS = 720;
 export function registerShareRoutes(
   app: Hono<{ Variables: { user: UserRecord } }>,
   db: HubDatabase,
-  _artifactService: ArtifactService,
   getSessionOwnerId: (sessionId: string) => string | undefined
 ): void {
   // 1. 初始化数据表

@@ -1,7 +1,6 @@
 import { spawnSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
-
-export const isWindows = process.platform === 'win32';
+import { isWindows } from './windows-shell.js';
 
 /**
  * Validates that a PID is a positive integer strictly greater than 1.

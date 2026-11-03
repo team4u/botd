@@ -29,13 +29,6 @@ import { BotEditorModal } from './BotEditorModal';
 import { ConfirmDialog } from './ConfirmDialog';
 import { api } from '../api';
 
-declare module '@botd/protocol' {
-  interface NodeRecord {
-    pid?: number;
-    startedAt?: string;
-  }
-}
-
 /** Max chips visible in a collapsed pool before expanding. */
 const POOL_PREVIEW_COUNT = 6;
 

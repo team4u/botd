@@ -154,8 +154,7 @@ export function registerDelegationRoutes(
   app: Hono<{ Variables: { user: UserRecord } }>,
   db: HubDatabase,
   router: GroupRouter,
-  sseHub: SseHub,
-  _getSessionOwnerId?: (sessionId: string) => string | undefined
+  sseHub: SseHub
 ): void {
   // GET /api/sessions/:id/subsessions
   app.get('/api/sessions/:id/subsessions', async (c) => {

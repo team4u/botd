@@ -527,8 +527,7 @@ export function registerChannelRoutes(
   app: Hono<{ Variables: { user: UserRecord } }>,
   db: HubDatabase,
   router: GroupRouter,
-  sseHub: SseHub,
-  _getSessionOwnerId: (sessionId: string) => string | undefined
+  sseHub: SseHub
 ): () => void {
   // 1. 自包含建表
   db.db.exec(`
