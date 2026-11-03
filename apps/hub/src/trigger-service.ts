@@ -109,6 +109,39 @@ export function extractWebhookEventMeta(
   return { source, eventType, dedupKey, parsed, parsedObject };
 }
 
+/** 点号路径递归求值：segments 逐段下钻；数组穿透（对象数组逐项尝试），末段与 expected 严格相等 */
+function matchBySegments(target: unknown, segments: string[], expected: string | number | boolean): boolean {
+  if (segments.length === 0) {
+    if (target === expected) return true;
+    if (Array.isArray(target)) return target.some((item) => item === expected);
+    return false;
+  }
+  if (Array.isArray(target)) return target.some((item) => matchBySegments(item, segments, expected));
+  if (isObject(target)) {
+    const [head, ...tail] = segments;
+    return matchBySegments(target[head], tail, expected);
+  }
+  return false;
+}
+
+/** payloadMatch 单键求值：字面量顶层键优先（向后兼容），否则按点号路径递归匹配 */
+export function matchPayloadValue(
+  obj: Record<string, unknown>,
+  key: string,
+  expected: string | number | boolean
+): boolean {
+  if (Object.prototype.hasOwnProperty.call(obj, key)) {
+    const actual = obj[key];
+    if (actual === expected) return true;
+    if (Array.isArray(actual) && actual.includes(expected)) return true;
+    return false;
+  }
+  if (key.includes('.')) {
+    return matchBySegments(obj, key.split('.').filter(Boolean), expected);
+  }
+  return false;
+}
+
 /** eventFilter 匹配：source / types / payloadMatch 全部指定条件需同时满足 */
 export function matchesEventFilter(
   filter: TriggerEventFilter,
@@ -119,7 +152,7 @@ export function matchesEventFilter(
   if (filter.payloadMatch !== undefined) {
     if (!isObject(meta.parsedObject)) return false;
     for (const [key, expected] of Object.entries(filter.payloadMatch)) {
-      if (meta.parsedObject[key] !== expected) return false;
+      if (!matchPayloadValue(meta.parsedObject, key, expected)) return false;
     }
   }
   return true;
@@ -215,6 +248,7 @@ export class TriggerService {
       childSession,
       botId: trigger.botId,
       baselineArtifactIds,
+      suppressSkipCallback: true,
     });
 
     // 初始 user 消息：若配置 skillId 且 prompt 未以 / 开头，加 /skill: 前缀

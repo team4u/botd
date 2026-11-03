@@ -2268,7 +2268,8 @@ export class HubDatabase {
       skillId?: string | null;
       /** 传 null 显式清除 */
       secret?: string | null;
-      eventFilter?: TriggerRecord['eventFilter'];
+      /** 传 null 显式清除 */
+      eventFilter?: TriggerRecord['eventFilter'] | null;
     }
   ): TriggerRecord | undefined {
     const existing = this.getTrigger(id);
@@ -2283,7 +2284,7 @@ export class HubDatabase {
       ...(patch.dispatchMode !== undefined ? { dispatchMode: patch.dispatchMode } : {}),
       ...(patch.skillId !== undefined ? { skillId: patch.skillId ?? undefined } : {}),
       ...(patch.secret !== undefined ? { secret: patch.secret ?? undefined } : {}),
-      ...(patch.eventFilter !== undefined ? { eventFilter: patch.eventFilter } : {}),
+      ...(patch.eventFilter !== undefined ? { eventFilter: patch.eventFilter ?? undefined } : {}),
     };
     const stmt = this.db.prepare(`
       UPDATE triggers

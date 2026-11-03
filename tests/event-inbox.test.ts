@@ -19,6 +19,7 @@ import test, { type TestContext } from 'node:test';
 import { createHub } from '../apps/hub/src/index.js';
 import { HubDatabase } from '../apps/hub/src/db.js';
 import { extractWebhookEventMeta, matchesEventFilter } from '../apps/hub/src/triggers.js';
+import { isSilentSkipReply } from '../apps/hub/src/delegation.js';
 import type { AutomationEventRecord, TriggerRecord } from '../packages/protocol/src/index.js';
 
 const ADMIN_PASSWORD = 'admin-pass-event-inbox';
@@ -187,6 +188,75 @@ test('matchesEventFilter: source / types / payloadMatch 组合判定', () => {
     '全部条件同时满足'
   );
   assert.equal(matchesEventFilter({ payloadMatch: { key: 'v' } }, { ...meta, parsedObject: undefined }), false, '无 JSON body 时 payloadMatch 不匹配');
+});
+
+test('matchesEventFilter: 点号嵌套路径、数组包含与对象数组穿透匹配', () => {
+  const meta = {
+    source: 'github',
+    eventType: 'pull_request.opened',
+    parsedObject: {
+      action: 'opened',
+      pull_request: { draft: false, number: 7 },
+      repository: { owner: { login: 'team4u' }, name: 'botd' },
+      issue: { labels: [{ name: 'docs' }, { name: 'bug' }] },
+      tags: ['ci', 'urgent'],
+    },
+  };
+
+  // 点号嵌套路径：布尔/字符串/多级下钻
+  assert.equal(matchesEventFilter({ payloadMatch: { 'pull_request.draft': false } }, meta), true);
+  assert.equal(matchesEventFilter({ payloadMatch: { 'pull_request.draft': true } }, meta), false);
+  assert.equal(matchesEventFilter({ payloadMatch: { 'repository.owner.login': 'team4u' } }, meta), true);
+  assert.equal(matchesEventFilter({ payloadMatch: { 'repository.owner.login': 'other' } }, meta), false);
+  assert.equal(
+    matchesEventFilter({ payloadMatch: { 'pull_request.draft': false, 'repository.owner.login': 'team4u' } }, meta),
+    true,
+    '多个点号路径同时满足'
+  );
+
+  // 路径不存在 / 中段非对象
+  assert.equal(matchesEventFilter({ payloadMatch: { 'pull_request.missing.key': 'x' } }, meta), false);
+  assert.equal(matchesEventFilter({ payloadMatch: { 'action.sub': 'x' } }, meta), false, '标量值无法继续下钻');
+
+  // 顶层标量数组的包含匹配（向后兼容增强：tags 含 urgent）
+  assert.equal(matchesEventFilter({ payloadMatch: { tags: 'urgent' } }, meta), true);
+  assert.equal(matchesEventFilter({ payloadMatch: { tags: 'absent' } }, meta), false);
+
+  // 对象数组穿透：issue.labels[].name 任意命中即匹配（GitHub webhook 典型场景）
+  assert.equal(matchesEventFilter({ payloadMatch: { 'issue.labels.name': 'bug' } }, meta), true);
+  assert.equal(matchesEventFilter({ payloadMatch: { 'issue.labels.name': 'perf' } }, meta), false);
+
+  // 类型严格：数组包含亦严格相等
+  assert.equal(matchesEventFilter({ payloadMatch: { 'pull_request.number': '7' } }, meta), false);
+});
+
+test('matchesEventFilter: 顶层含点号字面量键名优先于路径解析', () => {
+  const meta = {
+    source: 'webhook',
+    eventType: 'webhook.received',
+    parsedObject: { 'a.b': 'literal', a: { b: 'nested' } },
+  };
+  assert.equal(matchesEventFilter({ payloadMatch: { 'a.b': 'literal' } }, meta), true, '字面量键命中');
+  // 顶层字面量键存在但值不匹配：直接判负，不回退到点号路径
+  assert.equal(matchesEventFilter({ payloadMatch: { 'a.b': 'nested' } }, meta), false);
+  // 无字面量键时才走路径
+  const meta2 = { source: 'webhook', eventType: 'webhook.received', parsedObject: { a: { b: 'nested' } } };
+  assert.equal(matchesEventFilter({ payloadMatch: { 'a.b': 'nested' } }, meta2), true);
+});
+
+test('isSilentSkipReply: [PASS]/[IGNORE] 开头（后接空白/标点/结尾）判定', () => {
+  assert.equal(isSilentSkipReply('[PASS]'), true);
+  assert.equal(isSilentSkipReply('[IGNORE]'), true);
+  assert.equal(isSilentSkipReply('[pass]'), true, '大小写不敏感');
+  assert.equal(isSilentSkipReply('  [IGNORE] 非目标分支，忽略\n'), true, '容忍首尾空白');
+  assert.equal(isSilentSkipReply('[IGNORE]：非目标分支'), true);
+  assert.equal(isSilentSkipReply('[PASS]—summary'), true);
+  assert.equal(isSilentSkipReply('[PASS]ing'), false, '后接普通字符不算');
+  assert.equal(isSilentSkipReply('[SKIP]'), false);
+  assert.equal(isSilentSkipReply('正常回复 [PASS]'), false, '非开头不算');
+  assert.equal(isSilentSkipReply(''), false);
+  assert.equal(isSilentSkipReply(undefined), false);
+  assert.equal(isSilentSkipReply(null), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -1030,4 +1100,228 @@ test('markSessionParentNotified 幂等防重：首次返回 true，重复调用�
   const reopened = new HubDatabase({ dbPath });
   t.after(() => reopened.close());
   assert.equal(reopened.markSessionParentNotified('sess_notify'), false, '重启后标记状态持久生效');
+});
+
+// ---------------------------------------------------------------------------
+// 10. PATCH /api/triggers/:id 更新与清除 eventFilter
+// ---------------------------------------------------------------------------
+
+test('PATCH /api/triggers/:id：更新与清除（null）eventFilter', async (t) => {
+  const { hub, cookie, admin } = await setupHub(t);
+  createSessionFixture(hub, admin.id, 'sess_patch_filter', 'bot_patch_filter');
+
+  const trigger = hub.db.createTrigger({
+    id: 'trg_patch_filter',
+    sessionId: 'sess_patch_filter',
+    ownerId: admin.id,
+    name: 'patch filter hook',
+    botId: 'bot_patch_filter',
+    kind: 'webhook',
+    token: 'z'.repeat(36),
+    prompt: 'p',
+    enabled: true,
+    eventFilter: { source: 'github', types: ['push'] },
+  });
+
+  // 更新为新的 eventFilter（含点号路径 payloadMatch）
+  const patched = await hub.app.request(`/api/triggers/${trigger.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ eventFilter: { payloadMatch: { 'pull_request.draft': false } } }),
+  });
+  assert.equal(patched.status, 200);
+  const patchedJson: TriggerRecord = await patched.json();
+  assert.deepEqual(patchedJson.eventFilter, { payloadMatch: { 'pull_request.draft': false } });
+  assert.equal(hub.db.getTrigger(trigger.id)!.eventFilter?.payloadMatch?.['pull_request.draft'], false);
+
+  // 传 null 清除：返回体与 db 回读均无残留
+  const cleared = await hub.app.request(`/api/triggers/${trigger.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ eventFilter: null }),
+  });
+  assert.equal(cleared.status, 200);
+  const clearedJson: TriggerRecord = await cleared.json();
+  assert.equal(clearedJson.eventFilter, undefined);
+  assert.equal(hub.db.getTrigger(trigger.id)!.eventFilter, undefined);
+
+  // 非法 eventFilter：400
+  const bad = await hub.app.request(`/api/triggers/${trigger.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ eventFilter: { types: [1] } }),
+  });
+  assert.equal(bad.status, 400);
+
+  // 非法 payloadMatch key（空串）：400
+  const badKey = await hub.app.request(`/api/triggers/${trigger.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ eventFilter: { payloadMatch: { '  ': 'v' } } }),
+  });
+  assert.equal(badKey.status, 400);
+});
+
+// ---------------------------------------------------------------------------
+// 11. dispatchMode=subsession 静默跳过原语（[PASS] / [IGNORE]）
+// ---------------------------------------------------------------------------
+
+test('dispatchMode=subsession：子会话回复 [IGNORE]/[PASS] 且无新产物时，父会话不收到 callback 消息', async (t) => {
+  const { hub, admin } = await setupHub(t);
+  createSessionFixture(hub, admin.id, 'sess_skip', 'bot_skip');
+
+  hub.connections.getNodeRpc = () =>
+    ({
+      runTurn: async (input: any) => ({ replyText: `[IGNORE] 非目标分支，忽略`, modelBadge: 'test' }),
+      cancelTurn: async () => {},
+      resetSession: async () => {},
+    }) as any;
+
+  const trigger = createWebhookTrigger(hub, admin.id, 'sess_skip', 'bot_skip', {
+    dispatchMode: 'subsession',
+    name: 'skip task',
+  });
+
+  const fire = await fireWebhook(hub, trigger.token, { message: 'watch main only' }, { 'x-botd-dedup': 'skip-1' });
+  assert.equal(fire.status, 200);
+  const { childSessionId } = await fire.json();
+
+  // 子会话自身消息正常落库（user + assistant [IGNORE]）
+  await waitFor(() => hub.db.getMessages(childSessionId).some((m) => m.role === 'assistant'));
+  const childMsgs = hub.db.getMessages(childSessionId);
+  assert.ok(childMsgs.some((m) => m.role === 'assistant' && m.content.startsWith('[IGNORE]')));
+
+  // 等待子会话回合彻底收敛（session idle）
+  await waitFor(() => hub.db.getSession(childSessionId)!.status === 'idle');
+  // 再留足窗口确认父会话未收到任何 callback 消息
+  await new Promise((r) => setTimeout(r, 300));
+  const parentMsgs = hub.db.getMessages('sess_skip');
+  assert.equal(
+    parentMsgs.some((m) => m.role === 'callback'),
+    false,
+    '静默跳过时父会话不应收到 ✅ 子会话 callback'
+  );
+  assert.equal(parentMsgs.length, 0, '父会话不应有任何消息（载荷挂子会话）');
+
+  // [PASS] 纯标记同样静默（新子会话、新 dedup key）
+  hub.connections.getNodeRpc = () =>
+    ({
+      runTurn: async (input: any) => ({ replyText: `[PASS]`, modelBadge: 'test' }),
+      cancelTurn: async () => {},
+      resetSession: async () => {},
+    }) as any;
+  await hub.app.request(`/api/triggers/${trigger.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', cookie: await loginCookie(hub) },
+    body: JSON.stringify({ prompt: 'reset window' }),
+  });
+  const fire2 = await fireWebhook(hub, trigger.token, { message: 'again' }, { 'x-botd-dedup': 'skip-2' });
+  assert.equal(fire2.status, 200);
+  const { childSessionId: child2 } = await fire2.json();
+  await waitFor(() => hub.db.getSession(child2)!.status === 'idle');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(
+    hub.db.getMessages('sess_skip').some((m) => m.role === 'callback'),
+    false,
+    '[PASS] 纯标记同样静默'
+  );
+});
+
+test('dispatchMode=subsession：子会话回复 [IGNORE] 但有新产物时仍正常回传 callback', async (t) => {
+  const { hub, admin } = await setupHub(t);
+  createSessionFixture(hub, admin.id, 'sess_skip_art', 'bot_skip_art');
+
+  hub.connections.getNodeRpc = () =>
+    ({
+      runTurn: async (input: any) => {
+        hub.db.createArtifact({
+          id: `art_skip_${Math.random().toString(36).slice(2, 8)}`,
+          sessionId: input.sessionId,
+          filename: 'report.md',
+          mimeType: 'text/markdown',
+          sizeBytes: 64,
+          senderBotId: 'bot_skip_art',
+          storagePath: '/tmp/botd-test-skip.md',
+        });
+        return { replyText: '[IGNORE] 无需人工介入，但产物已生成', modelBadge: 'test' };
+      },
+      cancelTurn: async () => {},
+      resetSession: async () => {},
+    }) as any;
+
+  const trigger = createWebhookTrigger(hub, admin.id, 'sess_skip_art', 'bot_skip_art', {
+    dispatchMode: 'subsession',
+    name: 'skip with artifact',
+  });
+
+  const fire = await fireWebhook(hub, trigger.token, { message: 'run' }, { 'x-botd-dedup': 'skip-art-1' });
+  assert.equal(fire.status, 200);
+  const { childSessionId } = await fire.json();
+
+  await waitFor(() => {
+    const msgs = hub.db.getMessages('sess_skip_art');
+    return msgs.some((m) => m.role === 'callback' && m.content.includes('📦 产出交付物'));
+  });
+  const callback = hub.db.getMessages('sess_skip_art').find((m) => m.role === 'callback')!;
+  assert.ok(callback.attachments, '回传产物作为附件');
+  assert.equal(callback.attachments!.length, 1);
+  assert.equal(callback.attachments![0].filename, 'report.md');
+  void childSessionId;
+});
+
+// ---------------------------------------------------------------------------
+// 12. channel-notifier：[PASS]/[IGNORE] 助手回复不推送外部通道
+// ---------------------------------------------------------------------------
+
+test('channel-notifier：[PASS]/[IGNORE] 助手回复不推送外部通道（always 与 needed 策略）', async (t) => {
+  const { hub, admin } = await setupHub(t);
+  createSessionFixture(hub, admin.id, 'sess_skip_notify', 'bot_skip_notify');
+
+  const mkChannel = async (name: string, tellPolicy: 'always' | 'needed') => {
+    const res = await hub.app.request('/api/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: ADMIN_PASSWORD }),
+    });
+    const cookie = res.headers.get('set-cookie')!.split(';')[0];
+    const chanRes = await hub.app.request('/api/sessions/sess_skip_notify/channels', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({
+        name,
+        kind: 'webhook',
+        targetUrl: `http://127.0.0.1:9/void/${name}`,
+        events: ['assistant_reply'],
+        tellPolicy,
+      }),
+    });
+    assert.equal(chanRes.status, 201, `通道 ${name} 创建失败`);
+    return (await chanRes.json()).id as string;
+  };
+  await mkChannel('always 通道', 'always');
+  await mkChannel('needed 通道', 'needed');
+
+  const outboxRows = () => {
+    const rows = hub.db.db
+      .prepare('SELECT id FROM notification_outbox WHERE session_id = ?')
+      .all('sess_skip_notify');
+    return rows.length;
+  };
+
+  const broadcastAssistant = (id: string, content: string) => {
+    const msg = hub.db.createMessage({ id, sessionId: 'sess_skip_notify', role: 'assistant', senderBotId: 'bot_skip_notify', content });
+    hub.sseHub.broadcast('sess_skip_notify', { type: 'message_created', message: msg.message });
+  };
+
+  // [PASS] / [IGNORE] 回复：不产生任何 outbox 记录
+  broadcastAssistant('msg_pass_1', '[PASS]');
+  broadcastAssistant('msg_ignore_1', '[IGNORE] 非目标分支，忽略');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(outboxRows(), 0, '[PASS]/[IGNORE] 回复不得推送外部通道');
+
+  // 对照组：普通回复在 always 策略下正常入队（needed 对成功回复静默）
+  broadcastAssistant('msg_normal_1', '巡检完成，一切正常');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(outboxRows(), 1, '普通回复仅 always 通道入队一次');
+  void admin;
 });
