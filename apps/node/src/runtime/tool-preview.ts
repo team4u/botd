@@ -1,4 +1,5 @@
 import type { ToolCallRecord, TurnBlock } from '@botd/protocol';
+import { validateUiSpec, type BotdUiSpec } from '@botd/protocol';
 
 /**
  * 工具调用记录的摘要提取与脱敏：从工具参数 / 输出中提炼出适合落库与流式展示的短文本。
@@ -124,5 +125,17 @@ export function toolBlockFromRecord(tc: ToolCallRecord, index: number): Extract<
     ...(tc.durationMs !== undefined ? { durationMs: tc.durationMs } : {}),
     ...(tc.outputPreview !== undefined ? { outputPreview: tc.outputPreview } : {}),
     ...(tc.isError !== undefined ? { isError: tc.isError } : {}),
+    ...(tc.uiSpec ? { uiSpec: tc.uiSpec } : {}),
   };
+}
+
+/**
+ * 提取工具返回的声明式 UI 规格（tool.view 插槽）：
+ * 优先 details.ui，兼容顶层 ui；支持对象或 JSON 字符串；仅当通过 validateUiSpec 校验时返回归一化 spec。
+ */
+export function extractToolUiSpec(result: any): BotdUiSpec | undefined {
+  const raw = result?.details?.ui ?? result?.ui;
+  if (raw === undefined || raw === null) return undefined;
+  const res = validateUiSpec(raw);
+  return res.ok ? res.spec : undefined;
 }

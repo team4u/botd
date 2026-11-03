@@ -1,6 +1,6 @@
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import type { ToolCallRecord, TurnBlock } from '@botd/protocol';
-import { extractToolSummary, extractToolOutputPreview, sanitizeToolArgs } from './tool-preview.js';
+import { extractToolSummary, extractToolOutputPreview, extractToolUiSpec, sanitizeToolArgs } from './tool-preview.js';
 
 /**
  * 会话事件记录器：订阅 AgentSession 事件流，把思考 / 文本 / 工具调用整理成
@@ -239,6 +239,7 @@ export class TurnEventRecorder {
     const isError = Boolean(event.isError);
     const rawOutput = event.result !== undefined ? event.result : event.output;
     const outputPreview = extractToolOutputPreview(rawOutput, isError);
+    const uiSpec = extractToolUiSpec(rawOutput);
     const durationMs = running ? Math.max(0, Date.now() - running.startMs) : undefined;
 
     const entry = running
@@ -249,6 +250,7 @@ export class TurnEventRecorder {
       if (durationMs !== undefined) entry.durationMs = durationMs;
       entry.isError = isError;
       if (outputPreview) entry.outputPreview = outputPreview;
+      if (uiSpec) entry.uiSpec = uiSpec;
       // 无 start 记录时重新提取摘要/参数（与原实现一致：兜底路径补齐展示字段）
       if (!running && entry) {
         const rawArgs = event.args ?? event.input;
@@ -268,6 +270,7 @@ export class TurnEventRecorder {
       if (durationMs !== undefined) block.durationMs = durationMs;
       block.isError = isError;
       if (outputPreview) block.outputPreview = outputPreview;
+      if (uiSpec) block.uiSpec = uiSpec;
     }
     this.runningBlocks.delete(key);
 
@@ -279,6 +282,7 @@ export class TurnEventRecorder {
       status: isError ? 'error' : 'done',
       ...(durationMs !== undefined ? { durationMs } : {}),
       ...(outputPreview ? { outputPreview } : {}),
+      ...(uiSpec ? { uiSpec } : {}),
       isError,
     };
     this.opts.onTool?.({ status: isError ? 'error' : 'done', toolCall: emitted, outputPreview, durationMs });

@@ -1,5 +1,11 @@
 import type { BirpcReturn } from 'birpc';
-import type { HubRpcFunctions, NodeRpcFunctions, SubagentRunRecord } from '@botd/protocol';
+import type {
+  BotdUiSpec,
+  ExtensionUiStreamPayload,
+  HubRpcFunctions,
+  NodeRpcFunctions,
+  SubagentRunRecord,
+} from '@botd/protocol';
 
 /**
  * Hub 推流 sink：把回合内产生的文本 / 思考 / 工具 / 子代理事件统一发往 Hub 的 onSessionStream。
@@ -48,8 +54,11 @@ export interface HubStreamSink {
       toolOutput?: string;
       toolDurationMs?: number;
       toolIsError?: boolean;
+      toolUiSpec?: BotdUiSpec;
     },
   ): void;
+  /** 扩展 UI 实时事件（notify / setStatus / setWorkingMessage / setWidget / setEditorText） */
+  extensionUi(sessionId: string, botId: string, payload: ExtensionUiStreamPayload): void;
   /** 子代理生命周期 / 进度事件 */
   subagent(sessionId: string, botId: string, payload: SubagentStreamPayload): void;
 }
@@ -82,6 +91,9 @@ export function createHubStreamSink(hubRpc: HubStream): HubStreamSink {
     },
     tool(sessionId, botId, payload) {
       send({ sessionId, botId, ...payload });
+    },
+    extensionUi(sessionId, botId, payload) {
+      send({ sessionId, botId, extensionUiEvent: payload });
     },
     subagent(sessionId, botId, payload) {
       send({ sessionId, botId, subagentEvent: payload });

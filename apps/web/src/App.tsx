@@ -15,7 +15,8 @@ import type {
 } from '@botd/protocol';
 import { api, AuthRequiredError, subscribeGlobalEvents } from './api';
 import { emitGlobalEvent } from './events';
-import type { StreamingAssistantState, ToolExecutionState, ToastItem, MainViewTab, UserInfo } from './types';
+import type { StreamingAssistantState, ToolExecutionState, ToastItem, MainViewTab, UserInfo, SessionExtensionUiState, ExtensionWidgetState } from './types';
+import { EMPTY_EXTENSION_UI_STATE } from './types';
 import { LoginView } from './components/LoginView';
 import { Sidebar, pickCurrentDirectSession } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
@@ -138,6 +139,9 @@ export const App: React.FC = () => {
   // 当前会话待处理的人机协同交互请求（botd ask）
   const [pendingAsks, setPendingAsks] = useState<PendingAskRecord[]>([]);
 
+  // 当前会话扩展 UI 状态（ctx.ui 桥接：statuses / workingMessages / widgets）；切会话时重置
+  const [extensionUiState, setExtensionUiState] = useState<SessionExtensionUiState>(EMPTY_EXTENSION_UI_STATE);
+
   // Toast notifications
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
@@ -248,6 +252,11 @@ export const App: React.FC = () => {
     () => sessions.find((s) => s.id === activeSessionId) || null,
     [sessions, activeSessionId]
   );
+
+  // 切换会话时清空扩展 UI 状态（statuses/widgets 属于会话局部状态）
+  useEffect(() => {
+    setExtensionUiState(EMPTY_EXTENSION_UI_STATE);
+  }, [activeSessionId]);
 
   // 补拉会话列表的防重入标记（记录已尝试补拉过的 activeSessionId）
   const sessionFetchAttemptedRef = useRef<string | null>(null);
@@ -671,6 +680,7 @@ export const App: React.FC = () => {
               outputPreview: event.outputPreview,
               durationMs: event.durationMs,
               isError: event.isError,
+              ...(event.uiSpec ? { uiSpec: event.uiSpec } : {}),
               updatedAt: Date.now(),
             };
 
@@ -705,6 +715,7 @@ export const App: React.FC = () => {
               ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
               ...(event.outputPreview !== undefined ? { outputPreview: event.outputPreview } : {}),
               ...(event.isError !== undefined ? { isError: event.isError } : {}),
+              ...(event.uiSpec ? { uiSpec: event.uiSpec } : {}),
             };
 
             if (existingBlockIdx >= 0) {
@@ -714,6 +725,7 @@ export const App: React.FC = () => {
                 ...toolBlock,
                 args: event.args ?? existing.args,
                 summary: event.summary ?? existing.summary,
+                ...(event.uiSpec || existing.uiSpec ? { uiSpec: event.uiSpec ?? existing.uiSpec } : {}),
               };
             } else {
               currentBlocks.push(toolBlock);
@@ -813,6 +825,12 @@ export const App: React.FC = () => {
               return prevMap;
             });
             setSubagentRunsMap({});
+            // 回合结束：清理 workingMessages（statuses/widgets 保留，由扩展显式清除或用户手动收起）
+            setExtensionUiState((prev) =>
+              Object.keys(prev.workingMessages).length > 0
+                ? { ...prev, workingMessages: {} }
+                : prev,
+            );
             // 不区分当前/其他会话：全局同一时刻只有一个取消动作在飞行中，任一会话结束即复位
             setCancelling(false);
           } else if (event.status === 'running' && event.activeBotIds && event.activeBotIds.length > 1) {
@@ -832,6 +850,53 @@ export const App: React.FC = () => {
         }
 
         case 'session_updated': {
+          break;
+        }
+
+        case 'extension_ui': {
+          // ctx.ui 桥接事件：notify 弹 Toast，status/working_message/widget 更新会话级扩展 UI 状态
+          const ui = event.event;
+          if (ui.kind === 'notify') {
+            addToast(ui.notifyType === 'error' ? 'error' : 'info', ui.message);
+            break;
+          }
+          setExtensionUiState((prev) => {
+            if (ui.kind === 'status') {
+              const next = { ...prev, statuses: { ...prev.statuses } };
+              if (ui.statusText === undefined || ui.statusText === '') {
+                delete next.statuses[ui.statusKey];
+              } else {
+                next.statuses[ui.statusKey] = { botId: event.botId, text: ui.statusText };
+              }
+              return next;
+            }
+            if (ui.kind === 'working_message') {
+              const next = { ...prev, workingMessages: { ...prev.workingMessages } };
+              if (ui.message === undefined || ui.message === '') {
+                delete next.workingMessages[event.botId];
+              } else {
+                next.workingMessages[event.botId] = ui.message;
+              }
+              return next;
+            }
+            // widget：undefined 内容或既无 lines 也无 uiSpec 表示清除
+            if (ui.kind !== 'widget') return prev;
+            const widgets = { ...prev.widgets };
+            if (ui.lines === undefined && ui.uiSpec === undefined) {
+              delete widgets[ui.widgetKey];
+            } else {
+              const widget: ExtensionWidgetState = {
+                key: ui.widgetKey,
+                botId: event.botId,
+                ...(ui.lines !== undefined ? { lines: ui.lines } : {}),
+                ...(ui.uiSpec ? { uiSpec: ui.uiSpec } : {}),
+                placement: ui.placement ?? 'aboveEditor',
+                updatedAt: Date.now(),
+              };
+              widgets[ui.widgetKey] = widget;
+            }
+            return { ...prev, widgets };
+          });
           break;
         }
 
@@ -1464,6 +1529,7 @@ export const App: React.FC = () => {
             onRefreshNodes={handleRefreshNodes}
             streamingStates={Object.values(streamingStatesMap)}
             activeSubagentRuns={subagentRunsMap}
+            extensionUiState={extensionUiState}
             onSendMessage={handleSendMessage}
             onEditMessage={handleEditMessage}
             onCancelSession={handleCancelSession}

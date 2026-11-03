@@ -9,6 +9,8 @@ import {
   isBotConfig,
   isSafeId,
   serializeRpcMessage,
+  validateUiSpec,
+  type ExtensionUiStreamPayload,
   type SubagentRunRecord,
   type SubagentSteerRecord,
   type ToolCallRecord,
@@ -273,6 +275,8 @@ export class NodeConnectionManager {
         }
 
         if (event.toolName && event.toolStatus) {
+          // tool.view 插槽：扩展工具返回的 BotdUiSpec 先校验再透传（非法直接丢弃，不影响事件本身）
+          const toolUiValidation = event.toolUiSpec ? validateUiSpec(event.toolUiSpec) : undefined;
           this.sseHub.broadcast(event.sessionId, {
             type: 'tool_status',
             sessionId: event.sessionId,
@@ -285,7 +289,31 @@ export class NodeConnectionManager {
             ...(event.toolOutput ? { outputPreview: event.toolOutput } : {}),
             ...(event.toolDurationMs !== undefined ? { durationMs: event.toolDurationMs } : {}),
             ...(event.toolIsError !== undefined ? { isError: event.toolIsError } : {}),
+            ...(toolUiValidation?.ok ? { uiSpec: toolUiValidation.spec } : {}),
           });
+        }
+
+        // 扩展 UI 实时事件（notify / status / working_message / widget / editor_text）：
+        // kind 合法性 + widget.uiSpec 校验后广播给会话订阅者
+        if (event.extensionUiEvent) {
+          const uiEvent = event.extensionUiEvent as ExtensionUiStreamPayload;
+          const VALID_KINDS = new Set(['notify', 'status', 'working_message', 'widget', 'editor_text']);
+          if (VALID_KINDS.has(uiEvent.kind)) {
+            if (uiEvent.kind === 'widget' && uiEvent.uiSpec) {
+              const widgetValidation = validateUiSpec(uiEvent.uiSpec);
+              if (widgetValidation.ok) {
+                uiEvent.uiSpec = widgetValidation.spec;
+              } else {
+                delete uiEvent.uiSpec;
+              }
+            }
+            this.sseHub.broadcast(event.sessionId, {
+              type: 'extension_ui',
+              sessionId: event.sessionId,
+              botId: event.botId,
+              event: uiEvent,
+            });
+          }
         }
 
         if (event.subagentEvent && this.router) {
