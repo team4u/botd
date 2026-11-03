@@ -81,6 +81,8 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
   const [enabledSkills, setEnabledSkills] = useState<string[]>([]);
   const [enabledExtensions, setEnabledExtensions] = useState<string[]>([]);
   const [visibility, setVisibility] = useState<'private' | 'team'>('private');
+  // 主 BOT 默认工作区目录（Space Path）：workspaceDir 字段由并行分支写入 protocol，结构化扩展安全读写
+  const [workspaceDir, setWorkspaceDir] = useState('');
   const [systemMd, setSystemMd] = useState(DEFAULT_SYSTEM_MD);
   const [memoryMd, setMemoryMd] = useState('');
   // 打开弹窗时拉取到的记忆初始快照：保存时做 Dirty Check，未改动不回写
@@ -169,6 +171,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       setEnabledSkills(bot.enabledSkills || []);
       setEnabledExtensions(bot.enabledExtensions || []);
       setVisibility(bot.visibility === 'team' ? 'team' : 'private');
+      setWorkspaceDir((bot as BotConfig & { workspaceDir?: string }).workspaceDir || '');
       setIsCustomProvider(false);
       setCustomProviderInput('');
       setColor(bot.color || 'blue');
@@ -253,6 +256,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       setEnabledSkills([]);
       setEnabledExtensions([]);
       setVisibility('private');
+      setWorkspaceDir(parentBot ? (parentBot as BotConfig & { workspaceDir?: string }).workspaceDir || '' : '');
       setIsCustomProvider(false);
       setCustomProviderInput('');
       setMemoryMd('');
@@ -357,6 +361,10 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       enabledExtensions,
       visibility,
       systemMd,
+      // 仅主 BOT 保存默认工作区；子代理跟随主 BOT 工作区
+      ...(!isSubagent && workspaceDir.trim()
+        ? { workspaceDir: workspaceDir.trim() }
+        : {}),
       ...(isSubagent
         ? {
             parentBotId: resolvedParentBotId,
@@ -522,6 +530,8 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                     setColor={setColor}
                     visibility={visibility}
                     setVisibility={setVisibility}
+                    workspaceDir={workspaceDir}
+                    setWorkspaceDir={setWorkspaceDir}
                   />
 
                   {/* Model Provider & Model Section - Visual Noise Reduced */}

@@ -21,6 +21,8 @@ import {
   CheckSquare,
   Square,
   ListChecks,
+  FolderGit2,
+  Radar,
 } from 'lucide-react';
 import type { SessionRecord, BotConfig, NodeRecord, UserRecord } from '@botd/protocol';
 import type { MessageSearchHit } from '@botd/protocol';
@@ -97,6 +99,218 @@ export function pickCurrentDirectSession(
   return latest;
 }
 
+// ---------------------------------------------------------------------------
+// Herdr 注意力优先级（Attention Priority）：纯函数，可独立测试
+// ---------------------------------------------------------------------------
+
+/** 会话注意力级别：idle（静默）之上的三级才值得开发者分神去看 */
+export type SessionAttentionLevel = 'failed' | 'done_unseen' | 'working' | 'idle';
+
+/** 需要打断/吸引注意力的活跃级别 */
+export type ActiveAttention = Exclude<SessionAttentionLevel, 'idle'>;
+
+/** 注意力优先级数值：越大越值得优先关注（failed > done_unseen > working > idle） */
+export const ATTENTION_PRIORITY: Record<SessionAttentionLevel, number> = {
+  failed: 4,
+  done_unseen: 3,
+  working: 2,
+  idle: 1,
+};
+
+/** 各注意力级别的视觉表现：状态灯圆点 + 文案 + 状态胶囊配色 */
+export const ATTENTION_VISUALS: Record<
+  ActiveAttention,
+  { dot: string; label: string; pill: string }
+> = {
+  failed: {
+    dot: 'bg-rose-500',
+    label: '异常',
+    pill: 'bg-rose-100 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400',
+  },
+  done_unseen: {
+    dot: 'bg-emerald-500',
+    label: '待验收',
+    pill: 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400',
+  },
+  working: {
+    dot: 'bg-blue-500 animate-pulse',
+    label: '运行中',
+    pill: 'bg-blue-100 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400',
+  },
+};
+
+/**
+ * 会话注意力优先级判定（纯函数）：
+ * failed(4) > done_unseen(3，刚干完活还没验收) > working(2) > idle(1)。
+ */
+export function getSessionAttention(
+  session: Pick<SessionRecord, 'status'>,
+  unreadCount: number
+): SessionAttentionLevel {
+  if (session.status === 'failed') return 'failed';
+  if (session.status === 'idle' && unreadCount > 0) return 'done_unseen';
+  if (session.status === 'running' || session.status === 'queued') return 'working';
+  return 'idle';
+}
+
+// workspaceDir 字段由并行分支写入 protocol，此处以结构化类型扩展安全读取，避免耦合
+interface WorkspaceAware {
+  workspaceDir?: string;
+}
+
+/** 规范化工作区目录：去首尾空白与多余尾部斜杠；空值返回 null */
+export function normalizeWorkspaceDir(dir?: string | null): string | null {
+  if (typeof dir !== 'string') return null;
+  const trimmed = dir.trim();
+  if (!trimmed) return null;
+  if (trimmed === '/') return '/';
+  return trimmed.replace(/\/+$/, '');
+}
+
+/** Space 展示名取路径最后一段（/root/code/botd -> botd），根目录显示为 / */
+export function getSpaceDisplayName(dir: string): string {
+  const segment = dir.split('/').filter(Boolean).pop();
+  return segment || '/';
+}
+
+/** 会话归属的项目目录：会话自身 workspaceDir 优先，其次其主控 BOT 的默认工作区 */
+export function resolveSessionWorkspaceDir(
+  session: SessionRecord,
+  botsById: Map<string, BotConfig>
+): string | null {
+  const own = normalizeWorkspaceDir((session as SessionRecord & WorkspaceAware).workspaceDir);
+  if (own) return own;
+  const leadBot = botsById.get(session.leadBotId);
+  if (!leadBot) return null;
+  return normalizeWorkspaceDir((leadBot as BotConfig & WorkspaceAware).workspaceDir);
+}
+
+/** 项目空间分组：Space 头部状态灯取组内会话的最高注意力级别（Herdr 汇总哲学） */
+export interface SpaceGroup {
+  /** 规范化后的目录路径（分组 key） */
+  path: string;
+  /** 展示名（路径最后一段） */
+  name: string;
+  /** 组内未归档主控会话（含当前单聊），按活跃时间倒序 */
+  sessions: SessionRecord[];
+  /** 绑定到该 Space 的主 BOT（可能尚无会话） */
+  botIds: string[];
+  /** 组内最高注意力级别 */
+  topAttention: SessionAttentionLevel;
+  /** 组内最近活跃时间戳（ms），无会话时取 BOT 更新时间 */
+  lastActivityAt: number;
+}
+
+const activityTimeOf = (s: SessionRecord) =>
+  new Date(s.lastMessageAt ?? s.updatedAt).getTime() || 0;
+
+/** 从未归档主控会话与主 BOT 的 workspaceDir 提取项目 Space 分组（纯函数） */
+export function buildSpaceGroups(
+  sessions: SessionRecord[],
+  bots: BotConfig[],
+  unreadCounts: Record<string, number> = {}
+): SpaceGroup[] {
+  const botsById = new Map(bots.map((b) => [b.id, b] as const));
+  const groups = new Map<string, SpaceGroup>();
+  const ensureGroup = (dir: string): SpaceGroup => {
+    let group = groups.get(dir);
+    if (!group) {
+      group = {
+        path: dir,
+        name: getSpaceDisplayName(dir),
+        sessions: [],
+        botIds: [],
+        topAttention: 'idle',
+        lastActivityAt: 0,
+      };
+      groups.set(dir, group);
+    }
+    return group;
+  };
+
+  // 先登记绑定了 workspaceDir 的主 BOT，保证「有 Bot 无会话」的 Space 也可被发现
+  for (const bot of bots) {
+    const isSubagent = bot.parentBotId && bots.some((b) => b.id === bot.parentBotId);
+    if (isSubagent) continue;
+    const dir = normalizeWorkspaceDir((bot as BotConfig & WorkspaceAware).workspaceDir);
+    if (!dir) continue;
+    const group = ensureGroup(dir);
+    group.botIds.push(bot.id);
+    group.lastActivityAt = Math.max(
+      group.lastActivityAt,
+      new Date(bot.updatedAt).getTime() || 0
+    );
+  }
+
+  for (const session of sessions) {
+    if (session.archived || session.parentSessionId) continue;
+    const dir = resolveSessionWorkspaceDir(session, botsById);
+    if (!dir) continue;
+    const group = ensureGroup(dir);
+    group.sessions.push(session);
+    group.lastActivityAt = Math.max(group.lastActivityAt, activityTimeOf(session));
+  }
+
+  const list = [...groups.values()];
+  for (const group of list) {
+    group.sessions.sort((a, b) => activityTimeOf(b) - activityTimeOf(a));
+    group.topAttention = group.sessions.reduce<SessionAttentionLevel>((acc, s) => {
+      const level = getSessionAttention(s, unreadCounts[s.id] ?? 0);
+      return ATTENTION_PRIORITY[level] > ATTENTION_PRIORITY[acc] ? level : acc;
+    }, 'idle');
+  }
+  // 排序：先按汇总注意力优先级降序，再按最近活跃时间降序
+  list.sort(
+    (a, b) =>
+      ATTENTION_PRIORITY[b.topAttention] - ATTENTION_PRIORITY[a.topAttention] ||
+      b.lastActivityAt - a.lastActivityAt
+  );
+  return list;
+}
+
+/** 活跃雷达条目 */
+export interface AttentionRadarItem {
+  session: SessionRecord;
+  attention: ActiveAttention;
+  unread: number;
+  /** 会话所属项目 Space 展示名（未绑定目录时为 null） */
+  spaceName: string | null;
+}
+
+/**
+ * 活跃雷达（纯函数）：收集所有未归档会话中需要关注的条目，
+ * 按 failed > done_unseen > working 降序、同级按活跃时间降序，截取前 limit 条。
+ */
+export function buildAttentionRadar(
+  sessions: SessionRecord[],
+  bots: BotConfig[],
+  unreadCounts: Record<string, number> = {},
+  limit = 4
+): AttentionRadarItem[] {
+  const botsById = new Map(bots.map((b) => [b.id, b] as const));
+  return sessions
+    .filter((s) => !s.archived)
+    .map((session): AttentionRadarItem | null => {
+      const unread = unreadCounts[session.id] ?? 0;
+      const attention = getSessionAttention(session, unread);
+      if (attention === 'idle') return null;
+      const dir = resolveSessionWorkspaceDir(session, botsById);
+      return {
+        session,
+        attention,
+        unread,
+        spaceName: dir ? getSpaceDisplayName(dir) : null,
+      };
+    })
+    .filter((item): item is AttentionRadarItem => item !== null)
+    .sort(
+      (a, b) =>
+        ATTENTION_PRIORITY[b.attention] - ATTENTION_PRIORITY[a.attention] ||
+        activityTimeOf(b.session) - activityTimeOf(a.session)
+    )
+    .slice(0, limit);
+}
+
 /** 基于时间字符串生成相对时间描述，字段缺失或非法时返回 null */
 function formatRelativeTime(iso?: string): string | null {
   if (!iso) return null;
@@ -169,6 +383,173 @@ const UnreadBadge: React.FC<{ count: number }> = ({ count }) => {
     <span className="shrink-0 bg-red-500 text-white text-[10px] font-semibold rounded-full min-w-[16px] h-4 px-1 flex items-center justify-center">
       {count > 99 ? '99+' : count}
     </span>
+  );
+};
+
+/** 状态灯：按注意力级别渲染（idle 不渲染） */
+const AttentionDot: React.FC<{ level: SessionAttentionLevel; title?: string }> = ({ level, title }) => {
+  if (level === 'idle') return null;
+  const visual = ATTENTION_VISUALS[level];
+  return <span className={`w-2 h-2 rounded-full shrink-0 ${visual.dot}`} title={title || visual.label} />;
+};
+
+/** 状态胶囊文案：待验收拼上未读数 */
+const attentionPillText = (item: AttentionRadarItem): string => {
+  if (item.attention === 'done_unseen') {
+    return item.unread > 0 ? `待验收 · ${item.unread}未读` : '待验收';
+  }
+  return ATTENTION_VISUALS[item.attention].label;
+};
+
+/**
+ * 活跃雷达：搜索框下方的紧凑区域，按优先序列出最需要关注的会话。
+ * 有 failed / done_unseen / working 才渲染；点击直接切换到该会话。
+ */
+const ActiveRadarBlock: React.FC<{
+  items: AttentionRadarItem[];
+  onSelect: (sessionId: string) => void;
+}> = ({ items, onSelect }) => {
+  if (items.length === 0) return null;
+  return (
+    <section className="px-2 shrink-0">
+      <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800/80 bg-white/70 dark:bg-zinc-900/70 overflow-hidden">
+        <div className="flex items-center gap-1.5 px-2.5 pt-2 pb-1 text-[11px] font-semibold tracking-wide text-zinc-400 dark:text-zinc-500">
+          <Radar className="w-3 h-3" />
+          <span>活跃雷达</span>
+          <span className="font-normal">· {items.length}</span>
+        </div>
+        <div className="space-y-0.5 px-1 pb-1">
+          {items.map((item) => {
+            const visual = ATTENTION_VISUALS[item.attention];
+            return (
+              <button
+                key={item.session.id}
+                type="button"
+                onClick={() => onSelect(item.session.id)}
+                title={item.session.title}
+                className="w-full flex items-center gap-1.5 px-1.5 py-1.5 rounded-lg text-xs transition-colors hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 cursor-pointer"
+              >
+                <AttentionDot level={item.attention} title={visual.label} />
+                {item.spaceName && (
+                  <span className="shrink-0 font-mono text-[10px] text-zinc-400 dark:text-zinc-500 truncate max-w-[72px]">
+                    [{item.spaceName}]
+                  </span>
+                )}
+                <span className="truncate text-zinc-800 dark:text-zinc-200 flex-1 min-w-0 text-left">
+                  {item.session.title}
+                </span>
+                <span
+                  className={`shrink-0 px-1.5 py-0.5 rounded-full text-[10px] font-medium ${visual.pill}`}
+                >
+                  {attentionPillText(item)}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
+};
+
+/**
+ * 单个项目 Space 分组卡片：头部图标 + 项目名 + 汇总状态灯 + 会话数，
+ * 展开后列出该项目下的活跃话题（点击秒切会话）。
+ */
+const SpaceGroupBlock: React.FC<{
+  group: SpaceGroup;
+  open: boolean;
+  activeSessionId: string | null;
+  unreadCounts: Record<string, number>;
+  query: string;
+  onToggle: () => void;
+  onSelect: (sessionId: string) => void;
+}> = ({ group, open, activeSessionId, unreadCounts, query, onToggle, onSelect }) => {
+  const matchedSessions = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return group.sessions;
+    return group.sessions.filter(
+      (s) =>
+        s.title.toLowerCase().includes(q) ||
+        (s.lastMessagePreview || '').toLowerCase().includes(q)
+    );
+  }, [group.sessions, query]);
+
+  // 搜索时强制展开，保证命中可见
+  const effectiveOpen = open || !!query.trim();
+  if (query.trim() && matchedSessions.length === 0) return null;
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={effectiveOpen}
+        title={group.path}
+        className="group w-full flex items-center gap-2 p-2 rounded-xl text-xs transition-all border cursor-pointer hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 border-transparent"
+      >
+        <div className="w-7 h-7 rounded-lg bg-zinc-100 dark:bg-zinc-800 border border-zinc-200/80 dark:border-zinc-800/80 flex items-center justify-center shrink-0 text-zinc-600 dark:text-zinc-300">
+          <FolderGit2 className="w-4 h-4" />
+        </div>
+        <div className="flex-1 min-w-0 text-left">
+          <div className="flex items-center gap-1.5">
+            <span className="truncate font-semibold text-zinc-900 dark:text-zinc-100">{group.name}</span>
+            <span className="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-500">· {group.sessions.length} 话题</span>
+          </div>
+          <div className="truncate font-mono text-[10px] text-zinc-400 dark:text-zinc-500">{group.path}</div>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          <AttentionDot
+            level={group.topAttention}
+            title={group.topAttention === 'idle' ? undefined : ATTENTION_VISUALS[group.topAttention].label}
+          />
+          <ChevronDown
+            className={`w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 transition-transform duration-200 ${
+              effectiveOpen ? '' : '-rotate-90'
+            }`}
+          />
+        </div>
+      </button>
+      {effectiveOpen && (
+        <div className="space-y-0.5">
+          {matchedSessions.map((session) => {
+            const isActive = session.id === activeSessionId;
+            const unread = unreadCounts[session.id] || 0;
+            const attention = getSessionAttention(session, unread);
+            return (
+              <div
+                key={session.id}
+                role="button"
+                tabIndex={0}
+                title={session.title}
+                onClick={() => onSelect(session.id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onSelect(session.id);
+                  }
+                }}
+                className={`group w-full text-left flex items-center gap-2 py-1.5 pl-[18px] pr-2 rounded-lg text-xs transition-all border cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
+                  isActive
+                    ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs'
+                    : 'hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 border-transparent'
+                }`}
+              >
+                <AttentionDot level={attention} />
+                <span
+                  className={`truncate ${
+                    isActive ? 'text-zinc-900 dark:text-zinc-100' : 'text-zinc-700 dark:text-zinc-300'
+                  }`}
+                >
+                  {session.title}
+                </span>
+                {!isActive && <UnreadBadge count={unread} />}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 };
 
@@ -282,6 +663,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [filter, setFilter] = useState('');
   const [botsOpen, setBotsOpen] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // 项目空间分区：默认展开，可折叠；每个 Space 独立记忆折叠状态
+  const [spacesOpen, setSpacesOpen] = useState(true);
+  const [collapsedSpaces, setCollapsedSpaces] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<SessionRecord | null>(null);
   const [deleting, setDeleting] = useState(false);
   // 历史话题批量选择模式：multiSelectOn 后每项前置勾选框，配合底部批量删除栏
@@ -419,6 +803,44 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const openBot = onOpenBotDirect || onOpenBotChat;
 
+  // Herdr 注意力体系：活跃雷达 + 项目 Space 分组
+  const radarItems = useMemo(
+    () => buildAttentionRadar(sessions, bots, unreadCounts, 4),
+    [sessions, bots, unreadCounts]
+  );
+
+  const spaceGroups = useMemo(
+    () => buildSpaceGroups(sessions, bots, unreadCounts),
+    [sessions, bots, unreadCounts]
+  );
+
+  const effectiveSpacesOpen = spacesOpen || !!query;
+
+  const toggleSpace = useCallback((path: string) => {
+    setCollapsedSpaces((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
+  const handleSelectFromRadar = useCallback(
+    (sessionId: string) => {
+      onSelectSession(sessionId);
+      onClose();
+    },
+    [onSelectSession, onClose]
+  );
+
+  const handleSelectFromSpace = useCallback(
+    (sessionId: string) => {
+      onSelectSession(sessionId);
+      onClose();
+    },
+    [onSelectSession, onClose]
+  );
+
   const isBotRunning = useCallback(
     (botId: string) => {
       const currentDirect = currentDirectByBot.get(botId);
@@ -445,7 +867,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, currentDirectIds, query]);
 
-  const isAllEmpty = filteredBots.length === 0 && historySessions.length === 0;
+  const isAllEmpty =
+    filteredBots.length === 0 &&
+    historySessions.length === 0 &&
+    spaceGroups.length === 0;
 
   const handleConfirmDelete = async () => {
     if (!deleteTarget) return;
@@ -624,8 +1049,39 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         )}
 
-        {/* 两分区列表：智能体 / 历史话题 */}
+        {/* 活跃雷达：需要关注的会话按优先级置顶（点击秒切） */}
+        <ActiveRadarBlock items={radarItems} onSelect={handleSelectFromRadar} />
+
+        {/* 两分区列表：项目空间 / 智能体 / 历史话题 */}
         <div className="flex-1 overflow-y-auto px-2 py-2 space-y-2">
+          {/* 分区 0：项目空间（Spaces）——存在绑定 workspaceDir 的会话或 Bot 时展示 */}
+          {spaceGroups.length > 0 && (
+            <section>
+              <SectionHeader
+                label="项目空间"
+                count={spaceGroups.length}
+                open={effectiveSpacesOpen}
+                onToggle={() => setSpacesOpen((v) => !v)}
+              />
+              {effectiveSpacesOpen && (
+                <div className="space-y-0.5">
+                  {spaceGroups.map((group) => (
+                    <SpaceGroupBlock
+                      key={group.path}
+                      group={group}
+                      open={!collapsedSpaces.has(group.path)}
+                      activeSessionId={activeSessionId}
+                      unreadCounts={unreadCounts}
+                      query={query}
+                      onToggle={() => toggleSpace(group.path)}
+                      onSelect={handleSelectFromSpace}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
           {/* 分区 1：智能体（通讯录） */}
           <section>
             <SectionHeader
