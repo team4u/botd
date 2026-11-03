@@ -29,7 +29,7 @@ import {
 import { loadTurnDeps } from './turn-deps.js';
 import { createHubStreamSink, type HubStream } from './hub-stream.js';
 import { runRegistry, purgeStaleSubagentManager, subagentSessionFiles } from './run-registry.js';
-import { resolveEffectiveBot, resolveBotPaths } from './bot-context.js';
+import { resolveEffectiveBot, resolveBotPaths, cleanupEphemeralAgents } from './bot-context.js';
 import { buildMemoryPromptSection, canBotWriteMemory } from './memory-prompt.js';
 import { ensureBotdBinWrapper } from './bin-wrapper.js';
 import { buildAutomationEventEnv } from './automation-event.js';
@@ -81,6 +81,8 @@ export async function executeBotTurn(
   let session: AgentSession | null = null;
   let unsubscribeMain: (() => void) | null = null;
   let bridge: ReturnType<typeof createSubagentBridge> = undefined;
+  // 临时子代理（agents/tmp-*.md）在主 BOT 回合结束时统一清理；主目录不随子代理回合变化，提前解析
+  const mainAgentDir = resolveBotPaths(dataDir, bot).mainAgentDir;
 
   try {
     // 工作区互斥：子代理与其父主 Bot 共享同一 workspace 目录，同一主 Bot 的回合跨会话串行。
@@ -107,7 +109,7 @@ export async function executeBotTurn(
     }
     const parentBotConfig = (parentBotData as any)?.config ?? parentBotData?.bot;
     const effectiveBot = resolveEffectiveBot(bot, parentBotConfig ?? null);
-    const { botDir, workspaceDir, sessionDir, mainAgentDir } = resolveBotPaths(dataDir, bot);
+    const { botDir, workspaceDir, sessionDir } = resolveBotPaths(dataDir, bot);
     const sessionFile = path.join(sessionDir, `${input.sessionId}.jsonl`);
     await ensureDir(workspaceDir);
     await ensureDir(sessionDir);
@@ -436,6 +438,10 @@ export async function executeBotTurn(
     endSubagentHandoffScope(handoffScope);
     if (session) {
       await disposeSession(session);
+    }
+    // 主 BOT 回合结束（含中止/异常）：清理本轮临时子代理定义（子代理回合跑在主回合内，由主回合统一清理）
+    if (!bot.parentBotId) {
+      await cleanupEphemeralAgents(mainAgentDir);
     }
   }
 }
