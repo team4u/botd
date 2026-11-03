@@ -6,7 +6,7 @@ import { readSkill, writeSkill } from './storage.js';
  * survive until the framework ships a newer version.
  */
 export const BUILTIN_SKILL_ID = 'botd-cli';
-export const BUILTIN_SKILL_VERSION = 10;
+export const BUILTIN_SKILL_VERSION = 11;
 const VERSION_MARKER = `<!-- botd-skill: ${BUILTIN_SKILL_ID} v${BUILTIN_SKILL_VERSION} -->`;
 
 export const BUILTIN_SKILL_MD = `${VERSION_MARKER}
@@ -124,14 +124,14 @@ While a subagent runs (or after it finishes), the user may interrupt you mid-tur
 ## Cross-Bot Orchestration (跨主 BOT 协同编排)
 
 Two delegation levels, pick by target:
-- **Same workspace subagents** (your own role subagents): use the \`Agent\` / \`SubagentWorkflow\` tools — they share your workspace and memory.
-- **Other primary BOTs** (across nodes, or isolated workspace/env/memory): use the \`delegate_bot\` tool — the task runs in an isolated sub-session with zero-copy artifact sharing; delegate to \`@<botId>\` of any primary BOT that is not your own subagent.
+- **Same workspace subagents** (your own role subagents): use the \`Agent\` / \`SubagentWorkflow\` tools (\`subagent_type: "<subId>"\`) — they share your workspace and memory.
+- **Other primary BOTs** (across nodes, or isolated workspace/env/memory): also use the \`Agent\` tool (pass \`subagent_type: "@<botId>"\`, \`"bot:<botId>"\`, or \`"<botId>"\`) — the task runs in an isolated sub-session with zero-copy artifact sharing; delegate to \`@<botId>\` of any primary BOT that is not your own subagent.
 
-### Using \`delegate_bot\`
+### Cross-bot delegation via \`Agent\`
 
-- **Inline wait (default)**: omit \`run_in_background\` (or set \`false\`) and pass \`bot_id\`, \`prompt\`, optional \`title\` / \`artifact_ids\` / \`timeout_seconds\`. The call waits for the sub-session to finish and returns its reply plus any returned artifacts. Emit multiple \`delegate_bot\` calls in the same assistant turn to run several BOTs in parallel.
-- **Background (long tasks)**: set \`run_in_background: true\`. The sub-session runs autonomously; the parent session is woken up automatically once all active sub-sessions finish (all-settled barrier).
-- If the user sends a new message while you wait inline, the wait is released and the sub-session keeps running in the background — same handoff semantics as the \`Agent\` tool.
+- **Inline wait (default)**: omit \`run_in_background\` (or set \`false\`) and pass \`subagent_type: "@<botId>"\`, \`prompt\`, optional \`title\` / \`artifact_ids\` / \`timeout_seconds\`. The call waits for the sub-session to finish and returns its reply plus any returned artifacts. Emit multiple \`Agent\` calls in the same assistant turn to run several BOTs in parallel.
+- **Background (long tasks)**: set \`run_in_background: true\`. The sub-session runs asynchronously; the parent session is woken up automatically once all active sub-sessions finish (all-settled barrier).
+- If the user sends a new message while you wait inline, the wait is released and the sub-session keeps running in the background — same handoff semantics as local subagents.
 
 ### Using the CLI
 

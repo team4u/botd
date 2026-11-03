@@ -911,7 +911,7 @@ test('Sub-Session Delegation: autoWakeParent: false 仅落库完成回调，不�
   assert.equal(hub.db.getSession(delegateResult.childSession.id)?.status, 'idle');
 });
 
-test('buildGroupContextPrompt: 注入可协同的其他主 BOT 与 delegate_bot 协同规范', async (t) => {
+test('buildGroupContextPrompt: 注入可协同的其他主 BOT 与跨 Bot 协同规范', async (t) => {
   const ctx = await createTestContext(t);
   const { hub, adminUser } = ctx;
 
@@ -1000,11 +1000,11 @@ test('buildGroupContextPrompt: 注入可协同的其他主 BOT 与 delegate_bot 
   const peerBlock = prompt.split('### 🌐 可协同的其他主 BOT')[1] ?? '';
   assert.ok(!peerBlock.includes('@bot_prompt_me'), '不得把当前 bot 自身列为协同对象');
 
-  // 注入 delegate_bot / SubagentWorkflow 使用规范
+  // 注入 Agent (@<botId>) / SubagentWorkflow 使用规范
   assert.ok(prompt.includes('【跨 BOT 协同规范】'));
-  assert.ok(prompt.includes('`delegate_bot`'));
+  assert.ok(prompt.includes('`Agent` 工具（传入 `subagent_type: "@<botId>"`'));
   assert.ok(prompt.includes('`SubagentWorkflow`'));
-  assert.ok(prompt.includes('agentType: "<botId>"'));
+  assert.ok(prompt.includes('agentType: "@<botId>"'));
   assert.ok(prompt.includes('phase: "<阶段名>"'));
   assert.ok(prompt.includes('优先使用 `Agent` / `SubagentWorkflow`'));
 

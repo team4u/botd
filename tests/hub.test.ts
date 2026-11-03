@@ -255,7 +255,7 @@ test('isolates resources per user', async t => {
   assert.equal((await f.request('/api/users/user_missing', 'DELETE')).status, 404);
 });
 
-test('lead routing, cross-node @relay, public incremental context and SSE', async t => {
+test('lead routing, user @ mention dispatch instructions, public incremental context and SSE', async t => {
   const f = await fixture(t);
   const calls: Parameters<NodeRpcFunctions['runTurn']>[0][] = [];
   const lead = await f.addNode(['lead'], async input => {
@@ -279,61 +279,63 @@ test('lead routing, cross-node @relay, public incremental context and SSE', asyn
     try { while (true) { const next = await reader.read(); if (next.done) return; chunks.push(new TextDecoder().decode(next.value)); } } catch { /* client closed */ }
   })();
   await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: 'Investigate the issue' });
-  const history = await waitFor(() => f.messages(session.id), history => history.filter(m => m.role === 'assistant').length === 2);
+  const history = await waitFor(() => f.messages(session.id), history => history.filter(m => m.role === 'assistant').length === 1);
   await f.idle(session.id);
-  assert.deepEqual(calls.map(call => call.botId), ['lead', 'coder']);
+  assert.deepEqual(calls.map(call => call.botId), ['lead']);
   assert.match(calls[0].incrementalMessages, /Investigate the issue/);
-  assert.match(calls[1].incrementalMessages, /Please review @coder/);
-  assert.deepEqual(history.filter(m => m.role === 'assistant').map(m => m.senderBotId), ['lead', 'coder']);
-  assert.equal(history[2].modelBadge, 'google/coder');
+  assert.deepEqual(history.filter(m => m.role === 'assistant').map(m => m.senderBotId), ['lead']);
   await waitFor(() => chunks.join(''), text => text.includes('text_delta') && text.includes('message_created'));
   controller.abort();
   await consuming;
+  // 用户在普通消息中 @coder：统一路由给 lead，并在 prompt 中注入分派指令
   await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: '@coder second question' });
-  await waitFor(() => f.messages(session.id), history => history.filter(m => m.role === 'assistant').length === 3);
-  assert.equal(calls.at(-1)!.botId, 'coder');
+  await waitFor(() => f.messages(session.id), history => history.filter(m => m.role === 'assistant').length === 2);
+  await f.idle(session.id);
+  assert.equal(calls.at(-1)!.botId, 'lead');
+  assert.match(calls.at(-1)!.groupContextPrompt, /本轮用户 @ 提及分派指令/);
+  assert.match(calls.at(-1)!.groupContextPrompt, /@coder/);
   assert.match(calls.at(-1)!.incrementalMessages, /second question/);
   assert.equal(calls.at(-1)!.incrementalMessages.includes('Investigate the issue'), false);
 });
 
-test('order with prose mentions and bounded recursive @relay', async t => {
+test('user @mentions route to lead with dispatch prompt and assistant mentions do not cascade', async t => {
   const f = await fixture(t);
-  const calls: string[] = [];
-  let relay = false;
+  const calls: Parameters<NodeRpcFunctions['runTurn']>[0][] = [];
   await f.addNode(['lead', 'a', 'b'], async input => {
-    calls.push(input.botId);
-    if (input.botId === 'lead' && !relay) {
-      return { replyText: 'Lead dispatching @a', modelBadge: 'test/model' };
-    }
-    if (input.botId === 'a' && !relay) {
-      return { replyText: 'Next @b', modelBadge: 'test/model' };
-    }
-    return { replyText: relay ? `next @${input.botId === 'a' ? 'b' : 'a'}` : 'A conclusion.', modelBadge: 'test/model' };
+    calls.push(input);
+    return { replyText: `next @${input.botId === 'lead' ? 'a' : 'b'}`, modelBadge: 'test/model' };
   });
   const session = await f.session(['lead', 'a', 'b']);
   await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: 'Discuss' });
-  await waitFor(() => f.messages(session.id), list => list.filter(m => m.role === 'assistant').length === 3);
+  await waitFor(() => f.messages(session.id), list => list.filter(m => m.role === 'assistant').length === 1);
   await f.idle(session.id);
-  assert.deepEqual(calls, ['lead', 'a', 'b']);
-  relay = true;
-  await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: '@a relay' });
-  await waitFor(() => f.messages(session.id), list => list.filter(m => m.role === 'assistant').length >= 5);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].botId, 'lead');
+
+  // 用户发送带多个 @mentions 的消息：统一路由给 lead，并在 prompt 中注入 @a, @b 分派指令
+  await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: 'Please coordinate @a and @b to work together' });
+  await waitFor(() => f.messages(session.id), list => list.filter(m => m.role === 'assistant').length === 2);
   await f.idle(session.id);
-  assert(calls.length <= 10, `Unbounded relay: ${calls.length} turns`);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].botId, 'lead');
+  assert.match(calls[1].groupContextPrompt, /本轮用户 @ 提及分派指令/);
+  assert.match(calls[1].groupContextPrompt, /@a, @b/);
+  // assistant 回复中的 @a 不触发顶层公屏级联接力
+  assert.equal(calls.length, 2);
 });
 
-test('fan-out mentions consume a shared relay limit', async t => {
+test('fan-out mentions in assistant text do not trigger cascading relays', async t => {
   const f = await fixture(t);
   let calls = 0;
   await f.addNode(['a', 'b', 'c'], async () => {
-    if (++calls > 20) throw new Error('Safety stop for an unbounded relay');
+    calls++;
     return { replyText: 'Consult @a @b @c', modelBadge: 'test/model' };
   });
   const session = await f.session(['a', 'b', 'c']);
-  await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: '@a begin' });
-  await waitFor(() => f.messages(session.id), history => history.filter(message => message.role === 'assistant').length >= 2);
+  await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: 'begin' });
+  await waitFor(() => f.messages(session.id), history => history.filter(message => message.role === 'assistant').length === 1);
   await f.idle(session.id);
-  assert(calls <= 6, `Fan-out generated ${calls} turns despite the relay limit`);
+  assert.equal(calls, 1, 'assistant prose mentions must not trigger relay turns');
 });
 
 test('wake queues behind current turn and session cancellation suppresses late replies', async t => {

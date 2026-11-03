@@ -507,9 +507,9 @@ test('Task 1.4: Cross-node incomingArtifacts passed into rpc.runTurn', async (t)
     contentBase64: Buffer.from('PDF_CONTENT').toString('base64'),
   });
 
-  // Trigger turn for bot-bob
+  // Trigger turn for bot-bob (slash command directly routes to target bot)
   await f.json(`/api/sessions/${session.id}/messages`, 'POST', {
-    content: '@bot-bob please check the report',
+    content: '@bot-bob /review please check the report',
   });
 
   // Wait for session to finish running

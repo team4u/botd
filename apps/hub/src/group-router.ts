@@ -43,6 +43,7 @@ export interface QueueItem {
   replyToBotId?: string;
   stageId?: string;
   dispatchedByBotId?: string;
+  mentionedBotIds?: string[];
 }
 
 export interface PreparedTurnItem {
@@ -221,7 +222,7 @@ export function buildGroupContextPrompt(
       prompt +=
         '【跨 BOT 协同规范】：\n' +
         '1. 同工作区内的多角色分工请优先使用 `Agent` / `SubagentWorkflow` 调度你麾下的子代理。\n' +
-        '2. 当任务需要跨机器节点执行、需要其他主 BOT 的独立工作区/专属环境变量、或需调用团队共享主 BOT 时：单步或多并发委派可调用 `delegate_bot` 工具；多阶段流水线、条件分支或需断点续跑（`resumeFromRunId`）的跨 BOT 任务，可直接使用 `SubagentWorkflow` 工具并在脚本的 `agent(prompt, { agentType: "<botId>", phase: "<阶段名>" })` 中指定目标主 BOT ID，支持将本机子代理与跨节点主 BOT 无缝混编。\n';
+        '2. 当任务需要跨机器节点执行、需要其他主 BOT 的独立工作区/专属环境变量、或需调用团队共享主 BOT 时：单步或多并发委派请直接使用 `Agent` 工具（传入 `subagent_type: "@<botId>"`，支持 `run_in_background`、`title`、`artifact_ids`、`timeout_seconds`；在同一轮回复中发出多个 `Agent` 调用即可原生并发委派）；多阶段流水线、条件分支或需断点续跑（`resumeFromRunId`）的跨 BOT 任务，可直接使用 `SubagentWorkflow` 工具并在脚本的 `agent(prompt, { agentType: "@<botId>", phase: "<阶段名>" })` 中指定目标主 BOT ID，支持将本机子代理与跨节点主 BOT 无缝混编。\n';
     }
   }
 
@@ -932,6 +933,7 @@ export class GroupRouter {
     let botIdsToQueue: string[];
     let commandText: string | undefined;
     let commandMessageId: string | undefined;
+    let mentionedBotIds: string[] | undefined;
 
     if (parsedCommand && parsedCommand.commandText) {
       commandText = parsedCommand.commandText;
@@ -939,12 +941,11 @@ export class GroupRouter {
       const target = parsedCommand.targetBotId ?? session.leadBotId;
       botIdsToQueue = [target];
     } else {
-      const mentions = extractMentions(content, validBotIds);
-      if (mentions.length > 0) {
-        botIdsToQueue = mentions;
-      } else {
-        botIdsToQueue = [session.leadBotId];
+      const nonLeadMentions = extractMentions(content, validBotIds).filter((id) => id !== session.leadBotId);
+      if (nonLeadMentions.length > 0) {
+        mentionedBotIds = nonLeadMentions;
       }
+      botIdsToQueue = [session.leadBotId];
     }
 
     const chainBudget = new ChainBudget(MAX_RELAY_TURNS);
@@ -955,9 +956,11 @@ export class GroupRouter {
         generation: state.generation,
         commandText,
         commandMessageId,
+        mentionedBotIds,
       });
       commandText = undefined;
       commandMessageId = undefined;
+      mentionedBotIds = undefined;
     }
 
     this.processQueue(sessionId).catch(() => {});
@@ -1212,28 +1215,19 @@ export class GroupRouter {
 
     if (turnGen !== state.generation) return 'cancelled';
 
-    const isSubagent = Boolean(prep.bot.parentBotId);
-    const isDispatchedSubagent =
-      isSubagent && (session.leadBotId === prep.bot.parentBotId || Boolean(item.dispatchedByBotId));
-    let subagentRun: SubagentRunRecord | undefined;
-    const turnStartTime = Date.now();
+    let effectiveGroupContextPrompt = groupContextPrompt;
+    const mentionedTargets = prep.item.mentionedBotIds && prep.item.mentionedBotIds.length > 0
+      ? prep.item.mentionedBotIds
+      : (() => {
+          const mentions = extractMentions(prep.incrementalText, validBotIds).filter((id) => id !== prep.item.botId);
+          return mentions.length > 0 ? mentions : undefined;
+        })();
 
-    if (isDispatchedSubagent) {
-      subagentRun = {
-        id: `run_${randomUUID()}`,
-        subagentId: prep.bot.id,
-        subagentName: prep.bot.name,
-        color: prep.bot.color,
-        task: prep.incrementalText.trim() || 'Task execution',
-        status: 'running',
-      };
-
-      this.sseHub.broadcast(sessionId, {
-        type: 'subagent_status',
-        sessionId,
-        botId: prep.bot.id,
-        run: subagentRun,
-      });
+    if (mentionedTargets && mentionedTargets.length > 0 && prep.item.botId === session.leadBotId) {
+      effectiveGroupContextPrompt +=
+        `\n\n### 🎯 本轮用户 @ 提及分派指令\n` +
+        `用户在最新消息中显式提及了：${mentionedTargets.map((id) => `@${id}`).join(', ')}。\n` +
+        `请直接调用 \`Agent\` 工具将对应子任务分派给被提及的目标（麾下子代理传 \`subagent_type: "<id>"\`；其他主 BOT 传 \`subagent_type: "@<id>"\`；若提及多个目标请在同一轮并发发出多个 \`Agent\` 调用），并在拿到执行结果后向用户汇总回复。`;
     }
 
     let turnResult: {
@@ -1249,23 +1243,13 @@ export class GroupRouter {
       turnResult = await rpc.runTurn({
         sessionId,
         botId: item.botId,
-        groupContextPrompt,
+        groupContextPrompt: effectiveGroupContextPrompt,
         incrementalMessages: prep.incrementalText,
         ...(item.commandText ? { commandText: item.commandText } : {}),
         ...(prep.attachments.length > 0 ? { attachments: prep.attachments } : {}),
         ...(prep.incomingArtifacts.length > 0 ? { incomingArtifacts: prep.incomingArtifacts } : {}),
       });
     } catch (err: any) {
-      if (isDispatchedSubagent && subagentRun) {
-        subagentRun.status = 'error';
-        subagentRun.durationMs = Date.now() - turnStartTime;
-        this.sseHub.broadcast(sessionId, {
-          type: 'subagent_status',
-          sessionId,
-          botId: prep.bot.id,
-          run: subagentRun,
-        });
-      }
       // 用户中止（取消到达前回合已在飞行）：尽力保留已产生的部分输出，不当作失败丢弃。
       // 此时 generation 已递增，但部分输出消息仍应持久化并广播，屏幕上已展示的内容才能落盘。
       // 用户中止：取消到达时回合可能在任意阶段，节点抛出 cancelled/aborted。
@@ -1327,27 +1311,6 @@ export class GroupRouter {
     if (turnGen !== state.generation && !turnResult.aborted) return 'cancelled';
     const wasAborted = Boolean(turnResult.aborted);
 
-    if (isDispatchedSubagent && subagentRun) {
-      subagentRun.status = 'done';
-      subagentRun.durationMs = Date.now() - turnStartTime;
-      subagentRun.toolCount = turnResult.toolCalls?.length ?? 0;
-      subagentRun.replyPreview = turnResult.replyText.slice(0, 500);
-      subagentRun.replyFull = turnResult.replyText;
-      if (turnResult.blocks && turnResult.blocks.length > 0) {
-        subagentRun.blocks = turnResult.blocks;
-      }
-      if (turnResult.toolCalls && turnResult.toolCalls.length > 0) {
-        subagentRun.toolCalls = turnResult.toolCalls;
-      }
-
-      this.sseHub.broadcast(sessionId, {
-        type: 'subagent_status',
-        sessionId,
-        botId: prep.bot.id,
-        run: subagentRun,
-      });
-    }
-
     // 1. Blackboard extraction（中止的部分输出不参与黑板/路由）
     if (wasAborted) {
       // 落盘部分输出并广播，然后直接结束，不再提取黑板与派发后续 BOT
@@ -1379,10 +1342,6 @@ export class GroupRouter {
       return 'cancelled';
     }
 
-    // Pass check
-    const trimmedReply = turnResult.replyText.trim();
-    const isPass = trimmedReply === '[PASS]' || trimmedReply.startsWith('[PASS]');
-
     const replyMentions = extractMentions(turnResult.replyText, validBotIds).filter((id) => id !== item.botId);
     const maxRowidBeforeInsert = this.db.getMaxMessageRowid(sessionId);
 
@@ -1391,10 +1350,7 @@ export class GroupRouter {
       this.mirroredSubagentRuns.delete(r.id);
       return mirrored ? { ...r, ...mirrored, status: r.status } : r;
     });
-    // 注意：subagentRun 是该子代理「自己这次发言」的镜像记录，而 newMsg 本身就是 item.botId
-    // 在当前会话的直接发言——不再把它挂到自己消息头顶（避免公屏出现自己挂自己的冗余卡片），
-    // 只保留本轮内部真正调用产生的 nativeRuns。
-    const allSubagentRuns: SubagentRunRecord[] = [...nativeRuns];
+    const allSubagentRuns: SubagentRunRecord[] = nativeRuns;
 
     const newMsg = this.db.createMessage({
       id: `msg_${randomUUID()}`,
@@ -1439,33 +1395,6 @@ export class GroupRouter {
           activeBotIds: Array.from(state.activeBotIds),
           queuePlan: this.getQueuePlan(sessionId),
         });
-      }
-    }
-
-    if (!isPass) {
-      // Fallback prose @mentions
-      if (item.replyToBotId && !replyMentions.includes(item.replyToBotId)) {
-        if (item.chainBudget.consumeRelay()) {
-          state.queue.push({
-            botId: item.replyToBotId,
-            chainBudget: item.chainBudget,
-            generation: state.generation,
-          });
-        }
-      }
-
-      if (replyMentions.length > 0) {
-        for (const nextBotId of replyMentions) {
-          const alreadyUpcoming = state.queue.some((q) => q.botId === nextBotId);
-          if (alreadyUpcoming) continue;
-          if (item.chainBudget.consumeRelay()) {
-            state.queue.push({
-              botId: nextBotId,
-              chainBudget: item.chainBudget,
-              generation: state.generation,
-            });
-          }
-        }
       }
     }
 

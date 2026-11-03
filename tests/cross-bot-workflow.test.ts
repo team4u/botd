@@ -353,3 +353,78 @@ test('SubagentWorkflow: resumeFromRunId 指向不存在的 run 时返回明确�
   assert.equal(out.isError, true);
   assert.match(out.text, /Cannot resume workflow "wf_doesnotexist99": run journal not found in/);
 });
+
+test('SubagentWorkflow: 跨 Bot 步骤 resume 能在同一 childSessionId 子会话中继续追问并拿到回复', { timeout: 90_000 }, async (t) => {
+  const env = await createTestEnv(t);
+
+  // bot_step1: 第一次收到任务返回初始结果，第二次（resume）收到跟进 prompt 返回追问结果
+  env.replies.set('bot_step1', (input, call) => {
+    if (call === 1) return 'initial-analysis-done';
+    return `followup-analysis-done: received "${input.incrementalMessages}"`;
+  });
+
+  const parent = createParentSession(env);
+  const { tool, ctx, loader } = await buildWorkflowTool(env, parent.id);
+
+  const script = `
+export const meta = { name: "cross-bot-resume", description: "Test resuming a cross-bot step" }
+phase("Analysis")
+const initial = await agent("please run initial analysis", {
+  agentType: "@bot_step1",
+  label: "step1",
+});
+if (!initial) throw new Error("step1 failed");
+phase("Refinement")
+const refined = await agent("refine with additional depth", {
+  resume: "step1",
+});
+return { initial, refined };
+`.trim();
+
+  const events = { started: [] as any[], completed: [] as any[], failed: [] as any[] };
+  const bus = (loader as any).eventBus as
+    | { on: (ch: string, fn: (d: unknown) => void) => () => void }
+    | undefined;
+  assert.ok(bus, 'resource loader must expose an eventBus');
+  const unsubs = [
+    bus.on('subagents:started', (d: unknown) => events.started.push(d as any)),
+    bus.on('subagents:completed', (d: unknown) => events.completed.push(d as any)),
+    bus.on('subagents:failed', (d: unknown) => events.failed.push(d as any)),
+  ];
+  t.after(() => unsubs.forEach((u) => u()));
+
+  const out = await runWorkflowTool(tool, ctx, { script });
+
+  assert.equal(out.details.status, 'completed', `workflow must complete: ${out.text}`);
+  assert.equal(out.isError, undefined);
+  assert.equal((out.details.value as any).initial, 'initial-analysis-done');
+  assert.ok(
+    String((out.details.value as any).refined).includes('followup-analysis-done'),
+    `refined result: ${(out.details.value as any).refined}`,
+  );
+
+  // bot_step1 经历了两次 live 调用
+  assert.equal(env.turnCounts.get('bot_step1'), 2);
+
+  // 两次 started 与两次 completed
+  assert.equal(events.started.length, 2);
+  assert.equal(events.completed.length, 2);
+  assert.equal(events.failed.length, 0);
+
+  // 关键：两个步骤携带的 childSessionId 必须完全相同（在同一子会话中续跑）
+  const initialChildSessionId = events.started[0].childSessionId;
+  assert.ok(initialChildSessionId, 'initial step must have childSessionId');
+  assert.equal(
+    events.started[1].childSessionId,
+    initialChildSessionId,
+    'resumed step must reuse the same childSessionId',
+  );
+  assert.equal(events.completed[0].childSessionId, initialChildSessionId);
+  assert.equal(events.completed[1].childSessionId, initialChildSessionId);
+
+  // 子会话总数只有 1 个（没有为 resume 派生新的子会话）
+  const subs = await (await HubClient.connect({ dataDir: env.dir })).get<SessionRecord[]>(
+    `/api/sessions/${encodeURIComponent(parent.id)}/subsessions`,
+  );
+  assert.equal(subs.length, 1);
+});

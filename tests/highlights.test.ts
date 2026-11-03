@@ -304,38 +304,33 @@ test('requestHumanInput surfaces a pending ask, resolves on respond and expires 
 
 // --- 4. Mention relay workflow ---
 
-test('prose mentions order: reviewer inspects and lead summarizes', async t => {
+test('user @mentions route to lead with dispatch prompt and no cascading relay', async t => {
   const f = await fixture(t);
   const events: string[] = [];
   const turns = new Map<string, Parameters<NodeRpcFunctions['runTurn']>[0]>();
   await f.addNode(['lead', 'reviewer-a'], async input => {
     turns.set(input.botId, input);
     events.push(input.botId);
-    if (input.botId === 'reviewer-a') {
-      return { replyText: 'Review from reviewer-a: looks good @lead', modelBadge: 'test/model' };
-    }
-    return { replyText: 'Final verdict: ship it', modelBadge: 'test/model' };
+    return { replyText: 'Lead coordinating @reviewer-a', modelBadge: 'test/model' };
   });
 
   const session = await f.session(['lead', 'reviewer-a']);
   await f.json(`/api/sessions/${session.id}/messages`, 'POST', { content: '@reviewer-a Audit the release' });
-  const history = await waitFor(() => f.messages(session.id), list => list.filter(m => m.role === 'assistant').length === 2);
+  const history = await waitFor(() => f.messages(session.id), list => list.filter(m => m.role === 'assistant').length === 1);
   await f.idle(session.id);
 
-  // Execution order: reviewer-a runs first, then relays to lead
-  assert.deepEqual(events, ['reviewer-a', 'lead']);
-
-  const reviewerA = turns.get('reviewer-a')!;
-  assert.match(reviewerA.incrementalMessages, /Audit the release/);
+  // 统一路由给 lead，不会让 reviewer-a 跑顶层回合，也不会级联接力
+  assert.deepEqual(events, ['lead']);
 
   const lead = turns.get('lead')!;
-  assert.match(lead.incrementalMessages, /Review from reviewer-a: looks good/);
+  assert.match(lead.incrementalMessages, /Audit the release/);
+  assert.match(lead.groupContextPrompt, /本轮用户 @ 提及分派指令/);
+  assert.match(lead.groupContextPrompt, /@reviewer-a/);
 
-  // History: reviewer-a first, lead last
+  // History: 只有 lead 的回复
   const assistants = history.filter(m => m.role === 'assistant');
-  assert.equal(assistants[0].senderBotId, 'reviewer-a');
-  assert.equal(assistants[1].senderBotId, 'lead');
-  assert.equal(assistants[1].content, 'Final verdict: ship it');
+  assert.equal(assistants.length, 1);
+  assert.equal(assistants[0].senderBotId, 'lead');
 });
 
 // --- 5. Triggers: incoming webhook + scheduled trigger CRUD ---
@@ -476,8 +471,8 @@ test('skill sync copies a skill between nodes', async t => {
 // --- 7. Builtin skill creator meta-skill ---
 
 test('builtin skill documents the skill creator and botd reload', () => {
-  assert.equal(BUILTIN_SKILL_VERSION, 10, 'version marker bumped to v10');
-  assert.match(BUILTIN_SKILL_MD, /<!-- botd-skill: botd-cli v10 -->/);
+  assert.equal(BUILTIN_SKILL_VERSION, 11, 'version marker bumped to v11');
+  assert.match(BUILTIN_SKILL_MD, /<!-- botd-skill: botd-cli v11 -->/);
   assert.match(BUILTIN_SKILL_MD, /## Subagents/);
   assert.match(BUILTIN_SKILL_MD, /botd bots create reviewer/);
   assert.match(BUILTIN_SKILL_MD, /subagent_type/);
