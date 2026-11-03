@@ -964,3 +964,124 @@ describe('CLI Commands: upgrade & service', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// 5. startAutoUpgradeLoop
+// ---------------------------------------------------------------------------
+
+describe('startAutoUpgradeLoop', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(path.join(tmpdir(), 'botd-auto-upgrade-'));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test('disabled by default: returns inert handle without touching registry', () => {
+    const handle = startAutoUpgradeLoop(tempDir, { onScheduleShutdown: () => {} });
+    handle.stop();
+    // no timer created, nothing scheduled — absence of throw is the contract
+  });
+
+  test('tick runs upgrade pipeline and reports success', async () => {
+    await writeCurrentRelease(tempDir, {
+      version: '0.1.0',
+      entryPath: '/old/cli.js',
+      updatedAt: '2025-01-01T00:00:00Z',
+    });
+
+    const logs: string[] = [];
+    let calls = 0;
+    let shutdownScheduled = false;
+
+    const handle = startAutoUpgradeLoop(tempDir, {
+      enabled: true,
+      intervalMs: 60_000,
+      performUpgrade: async () => {
+        calls++;
+        return { ok: true, previousVersion: '0.1.0', targetVersion: '0.2.0', upgraded: true, pid: 123 };
+      },
+      onScheduleShutdown: () => {
+        shutdownScheduled = true;
+      },
+      log: (msg) => logs.push(msg),
+    });
+
+    try {
+      await handle.tick();
+      assert.equal(calls, 1);
+      assert.match(logs[0] ?? '', /0\.1\.0 -> 0\.2\.0 succeeded/);
+
+      // No newer version → no-op, nothing logged
+      const handle2 = startAutoUpgradeLoop(tempDir, {
+        enabled: true,
+        performUpgrade: async () => {
+          calls++;
+          return { ok: true, previousVersion: '0.2.0', targetVersion: '0.2.0', upgraded: false };
+        },
+        onScheduleShutdown: () => {},
+        log: (msg) => logs.push(msg),
+      });
+      await handle2.tick();
+      handle2.stop();
+      assert.equal(calls, 2);
+      assert.equal(logs.length, 1);
+    } finally {
+      handle.stop();
+    }
+  });
+
+  test('tick swallows upgrade failures (canary/network) for next-cycle retry', async () => {
+    const logs: string[] = [];
+    let calls = 0;
+
+    const handle = startAutoUpgradeLoop(tempDir, {
+      enabled: true,
+      performUpgrade: async () => {
+        calls++;
+        throw new Error('Upgrade to 0.2.0 failed canary check and was rolled back');
+      },
+      onScheduleShutdown: () => {},
+      log: (msg) => logs.push(msg),
+    });
+
+    try {
+      await handle.tick();
+      await handle.tick();
+      assert.equal(calls, 2);
+      assert.match(logs[0] ?? '', /failed canary check/);
+      assert.match(logs[1] ?? '', /failed canary check/);
+    } finally {
+      handle.stop();
+    }
+  });
+
+  test('tick is a no-op while shouldSkip returns true', async () => {
+    let calls = 0;
+    let skip = true;
+
+    const handle = startAutoUpgradeLoop(tempDir, {
+      enabled: true,
+      performUpgrade: async () => {
+        calls++;
+        return { ok: true, previousVersion: '0.1.0', targetVersion: '0.1.0', upgraded: false };
+      },
+      shouldSkip: () => skip,
+      onScheduleShutdown: () => {},
+      log: () => {},
+    });
+
+    try {
+      await handle.tick();
+      assert.equal(calls, 0);
+      skip = false;
+      await handle.tick();
+      assert.equal(calls, 1);
+    } finally {
+      handle.stop();
+    }
+  });
+});

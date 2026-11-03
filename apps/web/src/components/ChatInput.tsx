@@ -48,8 +48,8 @@ interface ChatInputProps {
   onCancelEditing?: () => void;
   /** 外部插入文本请求（如代码变更抽屉引用文件路径 / 扩展 editor_text 事件）；seq 变化时追加到输入框末尾并聚焦；replace=true 时直接替换输入框内容 */
   insertTextRequest?: { text: string; seq: number; replace?: boolean } | null;
-  /** 空输入框按 ↑ 快速回溯编辑上一条消息（未传时降级为本地发送历史回填） */
-  onRecallLastMessage?: () => void;
+  /** 空输入框按 ↑ 快速回溯编辑上一条消息（返回 false 或不传时降级为本地发送历史回填） */
+  onRecallLastMessage?: () => boolean;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -262,9 +262,11 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         !editingMessage
       ) {
         if (onRecallLastMessage) {
-          e.preventDefault();
-          onRecallLastMessage();
-          return;
+          const handled = onRecallLastMessage();
+          if (handled !== false) {
+            e.preventDefault();
+            return;
+          }
         }
         const history = sentHistoryRef.current;
         if (history.length > 0) {

@@ -624,6 +624,9 @@ export interface AutoUpgradeLoopOptions {
 
 export interface AutoUpgradeLoopHandle {
   stop: () => void;
+  /** Fire one check immediately (same guards as the interval tick); exposed
+   *  for tests and future manual triggers. */
+  tick: () => Promise<void>;
 }
 
 /** Periodic auto-upgrade: checks the registry every intervalMs and runs the
@@ -634,7 +637,7 @@ export function startAutoUpgradeLoop(
   dataDir: string,
   options: AutoUpgradeLoopOptions,
 ): AutoUpgradeLoopHandle {
-  if (!options.enabled) return { stop: () => {} };
+  if (!options.enabled) return { stop: () => {}, tick: async () => {} };
 
   const intervalMs = (() => {
     if (options.intervalMs !== undefined) return Math.max(60_000, options.intervalMs);
@@ -672,5 +675,6 @@ export function startAutoUpgradeLoop(
     stop: () => {
       clearInterval(timer);
     },
+    tick,
   };
 }

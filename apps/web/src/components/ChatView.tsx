@@ -818,6 +818,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setEditingMessage(null);
   };
 
+  // 空输入框按 ↑：直接进入「编辑上一条用户消息」流程（复用 Slack 式编辑态）。
+  // 优先级高于 ChatInput 内部的本地发送历史栈；运行中的会话不可编辑，回落到历史栈行为。
+  const lastUserMessage = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') return messages[i];
+    }
+    return null;
+  }, [messages]);
+
+  const handleRecallLastMessage = useCallback(() => {
+    if (session.status === 'running') return false;
+    if (!lastUserMessage) return false;
+    setEditingMessage(lastUserMessage);
+    return true;
+  }, [session.status, lastUserMessage]);
+
   // 从实时 activeSubagentRuns 或已落库 messages 中派生抽屉当前查看的最新子代理运行记录：
   // 后台完成 / resume / stop 更新时，打开的抽屉能实时热更新
   const inspectingRun = useMemo<SubagentRunRecord | null>(() => {
@@ -1443,6 +1459,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onSubmitEditing={handleSubmitEdit}
         onCancelEditing={() => setEditingMessage(null)}
         insertTextRequest={insertTextRequest}
+        onRecallLastMessage={handleRecallLastMessage}
       />
 
       {/* 扩展 UI：输入框下方挂件（placement='belowEditor'） */}
