@@ -6,7 +6,7 @@ import { readSkill, writeSkill } from './storage.js';
  * survive until the framework ships a newer version.
  */
 export const BUILTIN_SKILL_ID = 'botd-cli';
-export const BUILTIN_SKILL_VERSION = 11;
+export const BUILTIN_SKILL_VERSION = 12;
 const VERSION_MARKER = `<!-- botd-skill: ${BUILTIN_SKILL_ID} v${BUILTIN_SKILL_VERSION} -->`;
 
 export const BUILTIN_SKILL_MD = `${VERSION_MARKER}
@@ -80,9 +80,29 @@ and schedule it detached: \`(sleep 5 && botd restart -d & disown; exit 0)\`.
 Each node can host one or more primary BOTs (each with an isolated workspace, memory, and env, such as \`$BOTD_BOT_ID\` on node \`$BOTD_NODE_ID\`), and each primary BOT can have multiple **role subagents (子代理)**.
 Subagents share your workspace by default, appear under you in the Web sidebar, and can be dispatched in parallel via your built-in \`Agent\` and \`SubagentWorkflow\` tools.
 
-### 1. Create & manage subagents via CLI
+### 1. Two kinds of subagents: ephemeral (one-shot) vs persistent (permanent)
 
-When the user asks you to create subagents/personas or you need specialized roles (e.g. coder, reviewer, researcher, writer), create them directly with \`botd bots\`:
+- **1a. Ephemeral (临时一次性)** — 用完即焚，不进 Web 侧栏、不写 Hub 数据库。**默认推荐**用于技能编排与一次性多视角任务（对抗审查小组、专项审计等）。
+- **1b. Persistent (正式持久化)** — 注册进 Hub，出现在 Web 侧栏，可跨回合复用。**仅在用户明确要求创建长期角色时使用**。
+
+#### 1a. Ephemeral subagents (临时子代理 — 用完即焚，不进侧栏，默认推荐用于技能编排与一次性多视角任务)
+
+当技能或任务需要临时角色人设（例如对抗审查小组、一次性专项审计）、且不应永久出现在 Web 侧栏或 Hub 数据库时，在调用 \`Agent\` 或 \`SubagentWorkflow\` 前，直接在同一回合内写入 \`$PI_CODING_AGENT_DIR/agents/tmp-<role>.md\`：
+
+\`\`\`markdown
+---
+name: tmp-skeptic
+description: 红队挑刺审查员（一次性临时子代理）
+tools: read, grep, find, ls
+---
+你是一名挑剔的红队审查专家，专注于证伪方案假设、寻找并发竞态与安全边界漏洞。
+\`\`\`
+
+写完后在**同一回合**内立刻调度：\`Agent(subagent_type: "tmp-skeptic", ...)\` 或 \`SubagentWorkflow\`（\`agent("...", { agentType: "tmp-skeptic" })\`）。运行时在每次调度前重新加载 \`$PI_CODING_AGENT_DIR/agents/*.md\`，并在**回合结束时自动删除所有 \`tmp-*.md\` 文件**（即使回合被中止）。
+
+#### 1b. Persistent subagents (正式子代理 — 持久化到侧栏，仅在用户明确要求创建长期角色时使用)
+
+当用户要求创建长期角色（可跨回合、跨会话复用、出现在 Web 侧栏）时，用 \`botd bots\`：
 
 \`\`\`bash
 # List your current subagents
