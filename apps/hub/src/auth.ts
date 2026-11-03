@@ -91,9 +91,10 @@ export class AuthManager {
         this.pairingCodes.delete(code);
       }
     }
-    // 顺带清理失效的 IP 退避记录，防止 Map 无限增长
+    // 顺带清理退避期满的 IP 记录，防止 Map 无限增长
+    // （count 恒 ≥ 1，只看封禁是否期满即可）
     for (const [ip, entry] of this.ipFailures.entries()) {
-      if (entry.count === 0 && now > entry.blockedUntil) {
+      if (now > entry.blockedUntil) {
         this.ipFailures.delete(ip);
       }
     }
