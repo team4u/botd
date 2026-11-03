@@ -52,9 +52,7 @@ export const useSessionActions = (params: SessionActionsParams) => {
     try {
       const created = await api.createSession({
         title: bot.name || bot.id,
-        mode: 'direct',
         leadBotId: bot.id,
-        memberBotIds: [bot.id],
       });
       setSessions((prev) => [created, ...prev]);
       navigate({ sessionId: created.id, view: 'chat' });
@@ -78,9 +76,7 @@ export const useSessionActions = (params: SessionActionsParams) => {
     try {
       const input: CreateSessionInput = {
         title: botMap.get(session.leadBotId)?.name || session.title,
-        mode: 'direct',
         leadBotId: session.leadBotId,
-        memberBotIds: [session.leadBotId],
       };
 
       const created = await api.createSession(input);

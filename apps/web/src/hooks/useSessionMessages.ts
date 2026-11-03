@@ -467,23 +467,7 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
           setSubagentRunsMap({});
           // 不区分当前/其他会话：全局同一时刻只有一个取消动作在飞行中，任一会话结束即复位
           setCancelling(false);
-        } else if (event.status === 'running' && event.activeBotIds && event.activeBotIds.length > 1) {
-          setStreamingStatesMap((prevMap) => {
-            let updated = false;
-            const nextMap = { ...prevMap };
-            for (const botId of event.activeBotIds!) {
-              if (!nextMap[botId]) {
-                nextMap[botId] = { botId, delta: '', tools: [] };
-                updated = true;
-              }
-            }
-            return updated ? nextMap : prevMap;
-          });
         }
-        break;
-      }
-
-      case 'session_updated': {
         break;
       }
 

@@ -21,13 +21,6 @@ import { DeleteBotDialog, RemoveNodeDialog, RestartNodeDialog } from './NodesBot
 import { EditorModals } from './NodesBotsView/EditorModals';
 import { ViewHeader } from './NodesBotsView/ViewHeader';
 
-declare module '@botd/protocol' {
-  interface NodeRecord {
-    pid?: number;
-    startedAt?: string;
-  }
-}
-
 interface NodesBotsViewProps {
   nodes: NodeWithBots[];
   loading: boolean;

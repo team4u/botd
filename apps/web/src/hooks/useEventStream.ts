@@ -119,10 +119,6 @@ export const useEventStream = (params: EventStreamParams) => {
           }
           return;
         }
-
-        if (event.type === 'session_updated') {
-          return;
-        }
       },
       onOpen: () => {
         // 重连建立后恢复：清空断线期间残留的半截流式状态，并重拉当前会话最新快照

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import type { SessionRecord, NodeWithBots, BotConfig, NodeRecord } from '@botd/protocol';
+import type { SessionRecord, NodeWithBots, BotConfig, NodeRecord, UserRecord } from '@botd/protocol';
 import { api, AuthRequiredError } from './api';
 import { useHashRoute } from './hooks/useHashRoute';
 import { useToasts } from './hooks/useToasts';
@@ -7,7 +7,6 @@ import { useNotifications } from './hooks/useNotifications';
 import { useSessionMessages } from './hooks/useSessionMessages';
 import { useEventStream } from './hooks/useEventStream';
 import { useSessionActions } from './hooks/useSessionActions';
-import type { UserInfo } from './types';
 import { LoginView } from './components/LoginView';
 import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
@@ -23,7 +22,7 @@ export const App: React.FC = () => {
   const [authChecking, setAuthChecking] = useState(true);
   const [authenticated, setAuthenticated] = useState(false);
   const authenticatedRef = useRef(false);
-  const [currentUser, setCurrentUser] = useState<UserInfo | null>(null);
+  const [currentUser, setCurrentUser] = useState<UserRecord | null>(null);
 
   // View state（视图/当前会话/弹窗统一进 hash 路由）
   const { route, navigate } = useHashRoute();
