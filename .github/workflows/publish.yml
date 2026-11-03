@@ -1,0 +1,145 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "发布目标版本号"
+        required: true
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.12.0
+          cache: pnpm
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync Monorepo Versions from Release
+        run: node scripts/bump-version.ts "${{ github.event.release.tag_name || inputs.version }}"
+
+      - name: TypeScript Typecheck
+        run: pnpm typecheck
+
+      - name: Build Packages
+        run: pnpm build
+
+      - name: Run Tests
+        run: pnpm test
+
+  publish-npm:
+    name: Publish to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.12.0
+          cache: pnpm
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync Monorepo Versions from Release
+        run: node scripts/bump-version.ts "${{ github.event.release.tag_name || inputs.version }}"
+
+      - name: Build Packages
+        run: pnpm build
+
+      - name: Publish Packages
+        run: node scripts/publish.ts
+        env:
+          NPM_CONFIG_PROVENANCE: true
+
+  publish-docker:
+    name: Publish Docker Image to GHCR
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # release 事件下显式检出 tag ref，使 GITHUB_REF 指向 refs/tags/<tag>，
+      # metadata-action 的 type=semver 才能解析版本；workflow_dispatch 时留空走默认分支。
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Resolve version (strip v prefix)
+        id: semver
+        run: |
+          TAG="${{ github.event.release.tag_name || inputs.version }}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "major_minor=$(echo "${VERSION}" | cut -d. -f1,2)" >> "$GITHUB_OUTPUT"
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/team4u/botd
+          # latest=auto: 稳定 semver tag 自动打 latest，prerelease 不打；
+          # raw latest 兜底 workflow_dispatch 从默认分支手动发布的场景。
+          # type=semver 仅在 release tag ref 下生效；workflow_dispatch 时由 raw 规则补齐版本 tag。
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ steps.semver.outputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ steps.semver.outputs.major_minor }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=botd
+            org.opencontainers.image.description=Self-hosted bot orchestration platform: hub, web console and node agent
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./deploy/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BOTD_VERSION=${{ steps.semver.outputs.version }}

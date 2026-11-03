@@ -89,7 +89,7 @@ describe('checkNodeUpgrade', () => {
 
   test('detects update available when registry has newer version', async () => {
     const mockFetch: typeof fetch = async (input) => {
-      assert.match(String(input), /(%40botd%2Fnode|@botd\/node)\/latest$/);
+      assert.match(String(input), /\/(?:%40botd%2Fnode|@botd\/node)\/latest$/i);
       return new Response(JSON.stringify({ version: '0.5.0' }), {
         status: 200,
         headers: { 'content-type': 'application/json' },

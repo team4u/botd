@@ -1,9 +1,37 @@
 {
   "name": "@botd/models",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "exports": { ".": { "types": "./src/index.ts", "default": "./dist/index.js" } },
-  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit" },
-  "dependencies": { "@botd/protocol": "workspace:*", "@earendil-works/pi-ai": "1.5.0" }
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/team4u/botd.git",
+    "directory": "packages/models"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@botd/protocol": "workspace:*",
+    "@earendil-works/pi-ai": "1.5.0"
+  }
 }
