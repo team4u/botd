@@ -56,7 +56,7 @@ Docker Compose 的 `--env-file .env` 只提供变量替换值。只有 Compose `
 | `BOTD_BASH_PATH` | 自动查找（见下文） | Windows 上 Bash 的显式路径 |
 | `BOTD_MINGIT_URL` | Git for Windows v2.47.1 的 release 地址 | Windows 托管 MinGit 的下载地址 |
 | `BOTD_WS_MIN_RECONNECT_DELAY_MS` | `200` | 连接 Hub 的 WebSocket 最小重连间隔，单位毫秒 |
-| `BOTD_NPM_PACKAGE` | `botd` | 节点升级查询的 npm 包名 |
+| `BOTD_NPM_PACKAGE` | `@botd/node` | 节点升级查询的 npm 包名 |
 | `BOTD_NPM_REGISTRY` | `https://registry.npmjs.org` | 节点升级查询与下载使用的 registry |
 | `BOTD_UPGRADE_BLOCK_COOLDOWN_MS` | `1800000`（30 分钟） | 金丝雀失败版本的封禁时长，单位毫秒 |
 

@@ -79,7 +79,7 @@ docker compose --env-file .env \
 
 ### Compose 模板说明
 
-`deploy/` 目录提供三个文件。
+`deploy/` 目录提供四个文件：`docker-compose.yml`、`docker-compose.ghcr.yml`、`Dockerfile`、`entrypoint.sh`。除上文 GHCR 镜像模式使用 `docker-compose.ghcr.yml` 外，其余面向本地 build 模式。
 
 #### deploy/docker-compose.yml
 
@@ -102,6 +102,35 @@ docker compose --env-file .env \
 - `command: ["start"]`，启动 Node Agent 守护进程。
 
 两个命名卷：`botd-hub-data` 保存 Hub 数据库，`botd-node-data` 保存节点配置、技能、扩展和 Bot 工作区。
+
+### GHCR 镜像部署
+
+不想 clone 仓库和本地构建时，直接使用发布到 GHCR 的官方镜像 `ghcr.io/team4u/botd`。只需 `deploy/docker-compose.ghcr.yml` 一个文件：
+
+```bash
+mkdir botd && cd botd
+# 从仓库下载 compose 文件
+curl -fLO https://raw.githubusercontent.com/team4u/botd/main/deploy/docker-compose.ghcr.yml
+# 配置管理员密码
+echo 'BOTD_ADMIN_PASSWORD=your-password' > .env
+# 固定版本启动（推荐）
+BOTD_VERSION=1.0.0 docker compose -f docker-compose.ghcr.yml up -d
+```
+
+也可省略 `BOTD_VERSION` 使用 `latest` 标签。生产环境建议固定到具体版本（如 `1.0.0` 或 `1.0`），避免 `latest` 在重启时意外跨版本升级。
+
+镜像随官方 Release 自动构建并推送，版本号与 Release 一致。服务结构、健康检查、数据卷与本地 build 模式完全一致：
+
+- Hub 服务监听 `3000`，数据写入 `botd-hub-data` 卷。
+- `--profile cloud-node` 启动同机节点，数据写入 `botd-node-data` 卷。
+- 升级：修改 `BOTD_VERSION` 后重新 `up -d`，配对身份保存在数据卷中，重建后自动重连。
+
+与本地 build 模式的适用区别：
+
+- GHCR 模式：无需源码和构建环境，拉取即用，适合常规部署服务器；启动快，版本与官方 Release 严格对应。
+- 本地 build 模式（上文 `deploy/docker-compose.yml`）：从源码构建，适合需要修改代码、打补丁或对镜像内容有定制要求的场景。
+
+两种模式的卷名一致，可在同一台机器上切换，但不要同时对同一卷运行两个 Hub。
 
 #### deploy/Dockerfile
 
@@ -468,7 +497,7 @@ botd nodes upgrade node_xxx --version 0.3.0
 
 `nodes upgrade` 复用与网页相同的 Hub 接口，同样要求节点在线。
 
-升级依赖 npm registry 中的包。包名由 `BOTD_NPM_PACKAGE` 指定，默认 `botd`。registry 由 `BOTD_NPM_REGISTRY` 指定，默认 `https://registry.npmjs.org`。不要假设源码仓库已有公开安装包。源码部署的节点优先采用重新构建的方式。
+升级依赖 npm registry 中的包。包名由 `BOTD_NPM_PACKAGE` 指定，默认 `@botd/node`。registry 由 `BOTD_NPM_REGISTRY` 指定，默认 `https://registry.npmjs.org`。不要假设源码仓库已有公开安装包。源码部署的节点优先采用重新构建的方式。
 
 安全约束：
 

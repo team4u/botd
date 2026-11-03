@@ -5,7 +5,9 @@
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@10.34.9",
-  "engines": { "node": ">=24.12.0" },
+  "engines": {
+    "node": ">=24.12.0"
+  },
   "scripts": {
     "dev": "pnpm --parallel --filter @botd/hub --filter @botd/web dev",
     "dev:hub": "pnpm --filter @botd/hub dev",
@@ -14,7 +16,8 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck && tsc -p tsconfig.tests.json",
     "test": "tsx --test tests/*.test.ts",
-    "start": "pnpm --filter @botd/hub start"
+    "start": "pnpm --filter @botd/hub start",
+    "release": "node scripts/release.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

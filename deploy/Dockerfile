@@ -32,6 +32,19 @@ RUN pnpm run build
 FROM base AS runner
 WORKDIR /app
 
+# Build-time version stamp (injected by CI: --build-arg BOTD_VERSION=<release tag without v prefix>)
+ARG BOTD_VERSION=0.0.0-dev
+
+# OCI standard image labels
+LABEL org.opencontainers.image.title="botd" \
+      org.opencontainers.image.description="Self-hosted bot orchestration platform: hub, web console and node agent" \
+      org.opencontainers.image.source=https://github.com/team4u/botd \
+      org.opencontainers.image.licenses=MIT \
+      org.opencontainers.image.version=${BOTD_VERSION}
+
+# Surface the built image version to the node agent's version reporting
+ENV BOTD_VERSION_OVERRIDE=${BOTD_VERSION}
+
 # Install runtime dependencies:
 # - bash: required by Pi SDK / bot tool execution
 # - curl: required for container healthcheck

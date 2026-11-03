@@ -197,7 +197,7 @@ export async function checkNodeUpgrade(
     process.env.BOTD_NPM_REGISTRY ||
     DEFAULT_REGISTRY;
   const registryUrl = rawRegistry.trim().replace(/\/+$/, '');
-  const pkgName = process.env.BOTD_NPM_PACKAGE || 'botd';
+  const pkgName = process.env.BOTD_NPM_PACKAGE || '@botd/node';
 
   const fetchImpl = options?.fetchFn ?? fetch;
   const url = `${registryUrl}/${encodeURIComponent(pkgName)}/latest`;
@@ -392,7 +392,7 @@ export async function stageReleaseFromNpm(
       }
       entryRelative = 'cli.js';
     } else {
-      const pkgName = process.env.BOTD_NPM_PACKAGE || 'botd';
+      const pkgName = process.env.BOTD_NPM_PACKAGE || '@botd/node';
       const rawRegistry =
         options?.registryUrl ||
         process.env.BOTD_NPM_REGISTRY ||
