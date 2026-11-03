@@ -46,7 +46,7 @@ function formatJobDuration(ms: number): string {
   return `${m}m ${s}s`;
 }
 
-/** 单条后台任务的状态徽标样式与文案 */
+/** 单条后台进程的状态徽标样式与文案 */
 function jobStatusBadge(status: BgJobRecord['status']): { label: string; className: string } {
   switch (status) {
     case 'running':
@@ -72,7 +72,7 @@ function jobStatusBadge(status: BgJobRecord['status']): { label: string; classNa
   }
 }
 
-/** 单条后台任务行：点击展开/收起日志，运行中行尾提供终止按钮 */
+/** 单条后台进程行：点击展开/收起日志，运行中行尾提供终止按钮 */
 const BgJobRow: React.FC<{
   job: BgJobRecord;
   nodeId: string;
@@ -185,7 +185,7 @@ const BgJobRow: React.FC<{
               }
             }}
             className="inline-flex items-center gap-1 shrink-0 px-1.5 py-0.5 rounded-md text-xs text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors cursor-pointer"
-            title="终止该后台任务"
+            title="终止该后台进程"
           >
             <Ban className="w-3 h-3" />
             <span>终止</span>
@@ -235,8 +235,8 @@ const BgJobRow: React.FC<{
 
       <ConfirmDialog
         isOpen={killConfirmOpen}
-        title="终止后台任务"
-        message="确定终止后台任务？正在执行的进程会被 kill。"
+        title="终止后台进程"
+        message="确定终止后台进程？正在执行的进程会被 kill。"
         confirmText="终止"
         danger
         busy={killing}
@@ -261,7 +261,7 @@ interface BgJobsDrawerProps {
 }
 
 /**
- * 后台任务抽屉：右侧滑入面板，聚合展示会话成员所在全部节点的 bg 任务。
+ * 后台进程抽屉：右侧滑入面板，聚合展示会话成员所在全部节点的 bg 任务。
  * 打开时按节点聚合查询；存在 running 任务时每 5s 轮询；节点离线按节点降级提示。
  */
 export const BgJobsDrawer: React.FC<BgJobsDrawerProps> = ({
@@ -357,12 +357,12 @@ export const BgJobsDrawer: React.FC<BgJobsDrawerProps> = ({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="后台任务"
+        aria-label="后台进程"
         className="fixed inset-y-0 right-0 z-40 w-[min(24rem,90vw)] bg-white dark:bg-zinc-950 border-l border-zinc-200/90 dark:border-zinc-800/90 shadow-xl flex flex-col animate-in fade-in slide-in-from-right duration-200"
       >
         <div className="flex items-center justify-between gap-2 px-4 h-13 sm:h-14 border-b border-zinc-200/80 dark:border-zinc-800/80 shrink-0">
           <h2 className="text-sm sm:text-base font-semibold text-zinc-900 dark:text-zinc-100 truncate">
-            后台任务
+            后台进程
           </h2>
           <button
             type="button"
@@ -405,13 +405,13 @@ export const BgJobsDrawer: React.FC<BgJobsDrawerProps> = ({
           {loading && jobs.length === 0 && failedNodes.length === 0 ? (
             <div className="py-16 flex flex-col items-center justify-center gap-2 text-zinc-400 dark:text-zinc-500">
               <Loader2 className="w-5 h-5 animate-spin-fast text-blue-600 dark:text-blue-400" />
-              <p className="text-xs">正在加载后台任务...</p>
+              <p className="text-xs">正在加载后台进程...</p>
             </div>
           ) : jobs.length === 0 && failedNodes.length === 0 ? (
             <div className="py-16 flex flex-col items-center justify-center gap-2 text-zinc-400 dark:text-zinc-500 text-center px-4">
               <SquareTerminal className="w-8 h-8" />
               <p className="text-xs leading-relaxed">
-                本会话暂无后台任务。智能体通过 bg 命令启动的后台进程会出现在这里。
+                本会话暂无后台进程。智能体通过 bg 命令启动的后台进程会出现在这里。
               </p>
             </div>
           ) : (

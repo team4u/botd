@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Menu,
-  Users,
   Settings as SettingsIcon,
   Loader2,
   MoreHorizontal,
@@ -15,8 +14,6 @@ import {
   Hourglass,
   Package,
   SquareTerminal,
-  ChevronRight,
-  Plus,
   Share2,
   History as HistoryIcon,
 } from 'lucide-react';
@@ -176,10 +173,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
 }) => {
   const keyboardInset = useKeyboardInset();
 
-  // 临时点名下拉菜单状态
-  const [appendDropdownOpen, setAppendDropdownOpen] = useState(false);
-  const appendDropdownRef = useRef<HTMLDivElement>(null);
-
   // 本会话参会成员（提前声明：蓝点探测/SSE/群设置等多处使用）
   // useMemo 稳定引用：下游 memberNodeIds/fetchBgJobs 等依赖链才不会每次 render 失稳
   const memberBots = useMemo<BotConfig[]>(
@@ -292,7 +285,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   const isDirectNodeOnline = directNode?.status === 'online';
 
-  // ===== 会话产物 / 后台任务抽屉 =====
+  // ===== 会话产物 / 后台进程抽屉 =====
   const [artifactsOpen, setArtifactsOpen] = useState(false);
   const [bgJobsOpen, setBgJobsOpen] = useState(false);
   const [artifactsUnseen, setArtifactsUnseen] = useState(false);
@@ -305,17 +298,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const sessionIdRef = useRef(session.id);
   sessionIdRef.current = session.id;
 
-  // ===== 子会话委派任务列表 =====
-  const [subSessions, setSubSessions] = useState<SessionRecord[]>([]);
-  // 内联检视的子会话 ID：点击子任务药丸 / 消息内 #?s= 链接时打开右侧 SubSessionDrawer，不离开父会话
+  // ===== 子会话内联检视：点击消息内 #?s= 链接或协同面板步骤时打开右侧 SubSessionDrawer，不离开父会话 =====
   const [inspectingSubSessionId, setInspectingSubSessionId] = useState<string | null>(null);
 
+  // 未拉到真实记录前，用匹配的 SubagentRunRecord 合成兜底 SessionRecord，让抽屉立即打开
   const inspectingSubSession = useMemo(() => {
-    const found = subSessions.find((s) => s.id === inspectingSubSessionId);
-    if (found) return found;
-    // 目标子会话尚未出现在列表（轮询未刷新 / 点击历史消息中的工作流步骤）：
-    // 先用匹配的 SubagentRunRecord 合成一条兜底 SessionRecord，让 SubSessionDrawer 立即打开，
-    // listSubSessions 刷新后自然替换为真实记录
     if (!inspectingSubSessionId) return null;
     const matchingRun = findSubagentRunByChildSessionId(
       activeSubagentRuns,
@@ -339,38 +326,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
       createdAt: matchingRun?.startedAt || session.createdAt,
       updatedAt: matchingRun?.startedAt || session.updatedAt,
     };
-  }, [subSessions, inspectingSubSessionId, activeSubagentRuns, messages, session]);
+  }, [inspectingSubSessionId, activeSubagentRuns, messages, session]);
 
-  const loadSubSessions = useCallback(async () => {
-    const capturedSessionId = session.id;
-    try {
-      const subs = await api.listSubSessions(capturedSessionId);
-      if (sessionIdRef.current !== capturedSessionId) return;
-      setSubSessions(subs);
-    } catch {
-      if (sessionIdRef.current !== capturedSessionId) return;
-      setSubSessions([]);
-    }
-  }, [session.id]);
-
-  useEffect(() => {
-    void loadSubSessions();
-  }, [loadSubSessions]);
-
-  // 当 messages 中有包含 #?s=sess_ 的 callback 消息到达时重新拉取子会话列表
-  const lastSubCallbackMsgRef = useRef<string>('');
-  useEffect(() => {
-    const callbackWithSub = messages.find(
-      (m) => m.role === 'callback' && m.content.includes('#?s=sess_')
-    );
-    const key = callbackWithSub ? `${callbackWithSub.id}:${callbackWithSub.content}` : '';
-    if (key && key !== lastSubCallbackMsgRef.current) {
-      lastSubCallbackMsgRef.current = key;
-      void loadSubSessions();
-    }
-  }, [messages, loadSubSessions]);
-
-  // 探测本会话后台任务：成员节点集合派生 join 字符串作稳定依赖，成员不变时 fetchBgJobs 引用不换新
+  // 探测本会话后台进程：成员节点集合派生 join 字符串作稳定依赖，成员不变时 fetchBgJobs 引用不换新
   const memberNodeIds = useMemo(
     () =>
       [...new Set(memberBots.map((b) => b.nodeId).filter(Boolean))],
@@ -401,20 +359,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   }, [memberNodeIdsKey]);
 
   // 最新回调引用：轮询 interval 与 SSE 订阅经 ref 调用，避免依赖函数引用导致订阅被反复拆建
-  const loadSubSessionsRef = useRef(loadSubSessions);
-  loadSubSessionsRef.current = loadSubSessions;
   const fetchBgJobsRef = useRef(fetchBgJobs);
   fetchBgJobsRef.current = fetchBgJobs;
-  const subSessionsRef = useRef(subSessions);
-  subSessionsRef.current = subSessions;
-
-  // 检视目标尚未出现在 subSessions 列表时立即补拉一次（仅随目标 ID 变化触发一次，避免失败重试循环）；
-  // 抽屉先以上面合成的兜底记录打开，listSubSessions 返回后自然替换为真实数据
-  useEffect(() => {
-    if (!inspectingSubSessionId) return;
-    if (subSessionsRef.current.some((s) => s.id === inspectingSubSessionId)) return;
-    void loadSubSessionsRef.current();
-  }, [inspectingSubSessionId]);
 
   // 切换会话时重置抽屉与状态标记
   const prevMessagesLengthRef = useRef(messages.length);
@@ -423,33 +369,28 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setHasRunningBgJobs(false);
     setBgJobs([]);
     setSelectedBgJobId(null);
-    setSubSessions([]);
     setInspectingSubSessionId(null);
-    lastSubCallbackMsgRef.current = '';
     prevMessagesLengthRef.current = messages.length;
   }, [session.id]);
 
-  // 会话或成员节点集合变化时立即探测一次后台任务
+  // 会话或成员节点集合变化时立即探测一次后台进程
   useEffect(() => {
     void fetchBgJobsRef.current();
   }, [session.id, memberNodeIdsKey]);
 
-  // 消息条数实际发生变化（包括 callback 消息到达）时拉取后台任务，避免仅引用变化引起的无效请求
+  // 消息条数实际发生变化（包括 callback 消息到达）时拉取后台进程，避免仅引用变化引起的无效请求
   useEffect(() => {
     if (messages.length === prevMessagesLengthRef.current) return;
     prevMessagesLengthRef.current = messages.length;
     void fetchBgJobsRef.current();
   }, [messages.length]);
 
-  const hasActiveWork =
-    subSessions.some((s) => s.status === 'running') ||
-    bgJobs.some((j) => j.status === 'running');
+  const hasActiveWork = bgJobs.some((j) => j.status === 'running');
 
-  // 统一轮询：存在运行中子任务或后台任务时 5s 轮询，闲置时降频至 30s；
+  // 统一轮询：存在运行中后台进程时 5s 轮询，闲置时降频至 30s；
   // interval 仅依赖 hasActiveWork 布尔值并经 ref 调用最新加载函数，避免被高频重渲染拆建导致降频计时不断重置
   useEffect(() => {
     const interval = window.setInterval(() => {
-      void loadSubSessionsRef.current();
       void fetchBgJobsRef.current();
     }, pickPollIntervalMs(hasActiveWork));
     return () => window.clearInterval(interval);
@@ -482,7 +423,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   artifactsOpenRef.current = artifactsOpen;
   bgJobsOpenRef.current = bgJobsOpen;
 
-  // 全局 SSE：本会话 artifact_created 且抽屉未开时置红点；新回调消息（后台任务完成）到达时重新探测
+  // 全局 SSE：本会话 artifact_created 且抽屉未开时置红点；后台进程完成的回调到达时重新探测
   // 订阅仅依赖 session.id，经 ref 调用最新 fetchBgJobs，不再每 render 退订重订
   useEffect(() => {
     const unsubscribe = onGlobalEvent((e) => {
@@ -491,7 +432,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
       } else if (
         e.type === 'message_created' &&
         e.message.sessionId === session.id &&
-        e.message.role === 'callback'
+        e.message.role === 'callback' &&
+        e.message.content.includes('[Background Job')
       ) {
         if (!bgJobsOpenRef.current) void fetchBgJobsRef.current();
       }
@@ -506,22 +448,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setConfirmAction(null);
     setEditingMessage(null);
     setTriggersOpen(false);
-    setAppendDropdownOpen(false);
   }, [session.id]);
-
-  // 临时点名菜单展开时：点击外部关闭
-  useEffect(() => {
-    if (!appendDropdownOpen) return;
-    const handlePointerDown = (e: MouseEvent) => {
-      if (appendDropdownRef.current && !appendDropdownRef.current.contains(e.target as Node)) {
-        setAppendDropdownOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handlePointerDown);
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown);
-    };
-  }, [appendDropdownOpen]);
 
   // 菜单展开时：点击外部或 ESC 关闭
   useEffect(() => {
@@ -625,15 +552,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setEditingMessage(null);
   };
 
-  // 队列阶段控制
-  const handleSkipStage = async (stageId: string, botId?: string) => {
-    try {
-      await api.skipQueueStage(session.id, { stageId, botId });
-    } catch (err: any) {
-      onAddToast?.('error', err?.message || '跳过阶段失败');
-    }
-  };
-
   // 从实时 activeSubagentRuns 或已落库 messages 中派生抽屉当前查看的最新子代理运行记录：
   // 后台完成 / resume / stop 更新时，打开的抽屉能实时热更新
   const inspectingRun = useMemo<SubagentRunRecord | null>(() => {
@@ -664,30 +582,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return null;
   }, [inspectingRunId, activeSubagentRuns, messages]);
 
-  const handleAppendStage = async (botId: string) => {
-    try {
-      setAppendDropdownOpen(false);
-      await api.appendQueueStage(session.id, `@${botId}`);
-    } catch (err: any) {
-      onAddToast?.('error', err?.message || '临时点名失败');
-    }
-  };
-
-  const hasQueuePlan = Boolean(session.queuePlan && session.queuePlan.length > 0);
-  const showQueueBar = (isRunning || hasQueuePlan) && (session.mode !== 'direct' || hasQueuePlan);
-  const activeBots =
-    session.activeBotIds && session.activeBotIds.length > 0
-      ? session.activeBotIds
-      : session.activeBotId
-        ? [session.activeBotId]
-        : [];
-
-  // 拦截消息正文内指向子会话的 #?s=sess_... 链接：目标是本会话的子任务时就地打开检视抽屉，
+  // 拦截消息正文内指向子会话的 #?s=sess_... 链接：目标是其他会话时就地打开检视抽屉，
   // 不跳转离开父会话；按住修饰键（新标签/窗口）时放行浏览器默认行为
-  const subSessionIds = useMemo(
-    () => new Set(subSessions.map((s) => s.id)),
-    [subSessions]
-  );
   const handleRootClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
@@ -696,29 +592,29 @@ export const ChatView: React.FC<ChatViewProps> = ({
       if (!anchor) return;
       const match = anchor.getAttribute('href')?.match(/^#\?s=(sess_[a-zA-Z0-9_-]+)$/);
       if (!match) return;
-      if (!subSessionIds.has(match[1])) return;
+      if (match[1] === session.id) return;
       e.preventDefault();
       setInspectingSubSessionId(match[1]);
     },
-    [subSessionIds]
+    [session.id]
   );
 
-  // 工作流步骤 / 本地子代理运行的统一检视入口：
+  // 工作流步骤 / 本地子代理运行的统一检视入口（分流逻辑见 resolveRunInspectionTarget）：
   // 带 childSessionId 的编排步骤打开跨BOT子会话抽屉，否则走本地子代理运行抽屉
   const handleInspectRun = useCallback(
     (run: SubagentRunRecord | null) => {
-      if (!run) {
+      const target = resolveRunInspectionTarget(run);
+      if (target.kind === 'none') {
         onInspectSubagentRun?.(null);
         return;
       }
-      const childSid = (run as { childSessionId?: string }).childSessionId;
-      if (childSid) {
+      if (target.kind === 'subsession') {
         onInspectSubagentRun?.(null);
-        setInspectingSubSessionId(childSid);
+        setInspectingSubSessionId(target.childSessionId);
         return;
       }
       setInspectingSubSessionId(null);
-      onInspectSubagentRun?.(run);
+      onInspectSubagentRun?.(target.run);
     },
     [onInspectSubagentRun]
   );
@@ -810,73 +706,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 {session.title}
               </h2>
 
-            {/* 主持模式微标（仅群聊显示） */}
-            {session.mode !== 'direct' && (
-              <span className="text-[11px] font-normal px-1.5 py-0.5 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200/60 dark:border-amber-900/60 rounded-md shrink-0">
-                主持模式
-              </span>
-            )}
-
-            {/* 群聊成员数微标 */}
-            {session.mode !== 'direct' && (
-              <span className="text-[11px] font-normal px-1.5 py-0.5 bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 rounded-md shrink-0 flex items-center gap-0.5">
-                <Users className="w-3 h-3 text-zinc-400 dark:text-zinc-500" />
-                <span>{memberBots.length} 人</span>
-              </span>
-            )}
-
-              {/* 子任务药丸：紧凑内联在顶栏标题区右侧，不单独占一行（点击打开内联检视抽屉） */}
-              {subSessions.length > 0 && (
-                <div className="hidden md:flex items-center gap-1.5 min-w-0 overflow-x-auto py-0.5">
-                  {subSessions.map((sub) => {
-                    let statusIndicator = (
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" title="已完成" />
-                    );
-                    if (sub.status === 'running') {
-                      statusIndicator = (
-                        <span title="运行中" className="shrink-0 flex items-center">
-                          <Loader2 className="w-3 h-3 text-blue-500 animate-spin-fast" />
-                        </span>
-                      );
-                    } else if (sub.status === 'failed') {
-                      statusIndicator = (
-                        <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0" title="失败" />
-                      );
-                    }
-                    return (
-                      <button
-                        key={sub.id}
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation(); // 标题区在单聊模式下可点击打开 BOT 设置，阻断冒泡
-                          setInspectingSubSessionId(sub.id);
-                        }}
-                        className="inline-flex items-center gap-1.5 h-7 px-2.5 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200/90 dark:border-zinc-700/80 rounded-lg text-xs hover:border-blue-400 dark:hover:border-blue-500 hover:bg-blue-50/40 dark:hover:bg-blue-950/30 transition-colors shrink-0 cursor-pointer text-left max-w-[220px]"
-                        title={`${sub.title} (@${sub.leadBotId})`}
-                      >
-                        {statusIndicator}
-                        <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400 shrink-0">
-                          @{sub.leadBotId}
-                        </span>
-                        <span className="truncate text-zinc-800 dark:text-zinc-200 text-xs">
-                          {sub.title.replace(/^\[子任务\]\s*/, '')}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
             </div>
           )}
         </div>
 
-        {/* 右侧操作：高水位一键压缩 + 开启新话题 + 产物/后台任务抽屉入口 + 更多操作下拉菜单 */}
+        {/* 右侧操作：高水位一键压缩 + 开启新话题 + 产物/后台进程抽屉入口 + 更多操作下拉菜单 */}
         <div className="flex items-center gap-1 shrink-0">
           {latestCtxPct >= 75 && (
             <button
               type="button"
               onClick={() => void onSendMessage('/compact')}
-              className="hidden sm:inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/60 text-xs font-medium transition-colors cursor-pointer shrink-0 shadow-2xs mr-0.5"
+              className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/60 text-xs font-medium transition-colors cursor-pointer shrink-0 shadow-2xs mr-0.5"
               title="当前上下文水位较高，点击自动发送 /compact 进行上下文压缩"
             >
               <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
@@ -948,7 +788,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             )}
           </div>
 
-          {/* 后台任务抽屉入口：本会话存在 running 任务时蓝点 */}
+          {/* 后台进程抽屉入口：本会话存在 running 进程时蓝点 */}
           <div className="relative">
             <button
               onClick={() => {
@@ -957,8 +797,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 setHasRunningBgJobs(false);
               }}
               className="h-8 w-8 rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-center transition-colors cursor-pointer"
-              title="后台任务"
-              aria-label="后台任务"
+              title="后台进程"
+              aria-label="后台进程"
             >
               <SquareTerminal className="w-4 h-4" />
             </button>
@@ -1106,32 +946,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         activeSubagentRunsFor={activeSubagentRuns}
       />
 
-      {/* 上下文高水位线报警与一键压缩（小屏或输入框上方常驻） */}
-      {latestCtxPct >= 75 && (
-        <div className="px-3 sm:px-4 pt-1.5 max-w-4xl w-full mx-auto sm:hidden">
-          <div
-            onClick={() => void onSendMessage('/compact')}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                void onSendMessage('/compact');
-              }
-            }}
-            className="flex items-center justify-between gap-2 px-3 py-1.5 bg-amber-50/90 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 rounded-lg text-xs text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/60 transition-colors cursor-pointer shadow-2xs"
-            title="上下文水位较高，点击自动发送 /compact"
-          >
-            <div className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
-              <span className="font-medium">上下文水位 {latestCtxPct}%</span>
-            </div>
-            <span className="font-mono text-[11px] underline">一键压缩 (/compact)</span>
-          </div>
-        </div>
-      )}
-
-      {/* 后台任务运行中状态条 */}
+      {/* 后台进程运行中状态条 */}
       {runningBgJobs.length > 0 && (
         <div className="px-3 sm:px-4 pt-1.5 max-w-4xl w-full mx-auto">
           <div
@@ -1155,7 +970,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             <div className="flex items-center gap-2 min-w-0">
               <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
               <span className="font-medium shrink-0">
-                {runningBgJobs.length} 个后台任务运行中
+                {runningBgJobs.length} 个后台进程运行中
               </span>
               <span className="text-zinc-400 dark:text-zinc-500">·</span>
               <span className="font-mono text-[11px] truncate text-blue-700/90 dark:text-blue-300/90">
@@ -1182,89 +997,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
               }}
             />
           ))}
-        </div>
-      )}
-
-      {/* 实时接力进度条 (Live Workflow Queue Bar) */}
-      {showQueueBar && (
-        <div className="px-3 sm:px-4 pt-1.5 max-w-4xl w-full mx-auto">
-          <div className="px-3 py-1.5 bg-zinc-50/90 dark:bg-zinc-900/80 border border-zinc-200/80 dark:border-zinc-800/80 rounded-lg text-xs flex items-center justify-between gap-2 shadow-2xs">
-            {/* 左侧：当前活跃 + 队列阶段 */}
-            <div className="flex items-center gap-1.5 min-w-0 overflow-x-auto no-scrollbar py-0.5">
-              {activeBots.length > 0 && (
-                <span className="inline-flex items-center gap-1.5 font-medium text-emerald-600 dark:text-emerald-400 shrink-0 text-[11px]">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                  <span className="font-mono">{activeBots.map((id) => `@${id}`).join(', ')}</span>
-                </span>
-              )}
-
-              {session.queuePlan && session.queuePlan.length > 0 && (
-                <>
-                  {activeBots.length > 0 && (
-                    <ChevronRight className="w-3.5 h-3.5 text-zinc-300 dark:text-zinc-600 shrink-0" />
-                  )}
-                  {session.queuePlan.map((stage, idx) => {
-                    const stageLabel = stage.parallel
-                      ? `(@${stage.botIds.join(', @')})`
-                      : `@${stage.botIds[0] || '?'}`;
-
-                    return (
-                      <React.Fragment key={stage.id || idx}>
-                        {idx > 0 && (
-                          <ChevronRight className="w-3.5 h-3.5 text-zinc-300 dark:text-zinc-600 shrink-0" />
-                        )}
-                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md text-[11px] text-zinc-700 dark:text-zinc-300 shrink-0 font-mono">
-                          <Clock className="w-3 h-3 text-zinc-400 dark:text-zinc-500 shrink-0" />
-                          <span>{stageLabel}</span>
-                          <button
-                            type="button"
-                            onClick={() => handleSkipStage(stage.id, stage.botIds[0])}
-                            className="ml-0.5 inline-flex items-center gap-0.5 text-zinc-400 hover:text-rose-500 dark:hover:text-rose-400 font-sans cursor-pointer transition-colors"
-                            title="跳过此阶段"
-                          >
-                            <X className="w-3 h-3" />
-                            <span>跳过</span>
-                          </button>
-                        </span>
-                      </React.Fragment>
-                    );
-                  })}
-                </>
-              )}
-            </div>
-
-            {/* 右侧：临时点名 */}
-            <div className="relative shrink-0" ref={appendDropdownRef}>
-              <button
-                type="button"
-                onClick={() => setAppendDropdownOpen((v) => !v)}
-                className="h-6 px-2 text-[11px] font-medium rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 transition-colors flex items-center gap-1 cursor-pointer shrink-0"
-                title="向队列末尾追加指定智能体"
-              >
-                <Plus className="w-3.5 h-3.5 shrink-0" />
-                <span>临时点名</span>
-              </button>
-
-              {appendDropdownOpen && (
-                <div className="absolute right-0 bottom-full mb-1.5 w-44 max-h-48 overflow-y-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg py-1 z-50 animate-in fade-in">
-                  <div className="px-2 py-1 text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
-                    点名成员追加接力
-                  </div>
-                  {(mentionableBots.length > 0 ? mentionableBots : memberBots).map((bot) => (
-                    <button
-                      key={bot.id}
-                      type="button"
-                      onClick={() => handleAppendStage(bot.id)}
-                      className="w-full text-left px-2.5 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-between text-zinc-700 dark:text-zinc-200 cursor-pointer"
-                    >
-                      <span className="truncate">{bot.name}</span>
-                      <span className="font-mono text-[11px] text-zinc-400">@{bot.id}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
         </div>
       )}
 
@@ -1377,7 +1109,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         />
       )}
 
-      {/* 后台任务抽屉 */}
+      {/* 后台进程抽屉 */}
       <BgJobsDrawer
         isOpen={bgJobsOpen}
         sessionId={session.id}

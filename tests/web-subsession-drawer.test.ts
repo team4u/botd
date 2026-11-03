@@ -122,7 +122,7 @@ test('3. 子会话内联检视遵循字号与控件尺寸约定（AGENTS.md）',
   assert.doesNotMatch(source, /rounded-xl/, '控件不得使用 rounded-xl');
 });
 
-test('4. ChatView 子任务药丸点击打开内联抽屉而非跳转', async () => {
+test('4. ChatView 消息内子会话链接拦截打开内联抽屉而非跳转', async () => {
   const fs = await import('node:fs/promises');
   const path = await import('node:path');
 
@@ -130,19 +130,16 @@ test('4. ChatView 子任务药丸点击打开内联抽屉而非跳转', async ()
   const chatViewPath = path.join(repoRoot, 'apps/web/src/components/ChatView.tsx');
   const source = await fs.readFile(chatViewPath, 'utf-8');
 
-  // 状态与派生逻辑
+  // 状态与派生逻辑：基于 inspectingSubSessionId 与子代理运行记录合成兑底记录
   assert.match(source, /inspectingSubSessionId/, '应持有 inspectingSubSessionId 状态');
   assert.match(
     source,
-    /subSessions\.find\(\(s\) => s\.id === inspectingSubSessionId\)/,
-    '应从 subSessions 派生 inspectingSubSession'
+    /findSubagentRunByChildSessionId\(/,
+    '应通过 findSubagentRunByChildSessionId 构造兑底 SessionRecord'
   );
-  // 药丸按钮：就地打开抽屉，不再 window.location.hash 跳转
-  assert.match(
-    source,
-    /setInspectingSubSessionId\(sub\.id\)/,
-    '子任务药丸点击应调用 setInspectingSubSessionId'
-  );
+  // 已不再平铺子任务药丸与 listSubSessions 轮询
+  assert.doesNotMatch(source, /listSubSessions/, '不应再调用 listSubSessions 轮询');
+  assert.doesNotMatch(source, /setInspectingSubSessionId\(sub\.id\)/, '顶栏子任务药丸应已删除');
   // 消息正文内 #?s=sess_ 链接拦截
   assert.match(
     source,
@@ -156,6 +153,11 @@ test('4. ChatView 子任务药丸点击打开内联抽屉而非跳转', async ()
     source,
     /resolveRunInspectionTarget/,
     '应导出 resolveRunInspectionTarget 纯函数供单测直接验证'
+  );
+  assert.match(
+    source,
+    /resolveRunInspectionTarget\(run\)/,
+    'handleInspectRun 应调用 resolveRunInspectionTarget 分流'
   );
   assert.match(
     source,

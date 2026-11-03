@@ -9,7 +9,7 @@ import { registerNodeCommands } from '../apps/node/src/cli/commands/node.js';
 import { createLocalIpcServer, MAX_ASK_BODY_BYTES } from '../apps/node/src/local-ipc.js';
 import type { BgJobManager } from '../apps/node/src/bg-jobs.js';
 import type { SessionRecord } from '../packages/protocol/src/index.js';
-import type { PendingAskRecord, BotConfig } from '../packages/protocol/src/index.js';
+import type { BotConfig } from '../packages/protocol/src/index.js';
 
 // 拦截 CSS/TSX 导入（Sidebar.tsx 间接引入样式与 React 组件），复用 review-fixes-web 的加载策略
 register(
@@ -200,19 +200,17 @@ test('preview 类型可由文件后缀推断（.diff/.patch→diff，.md→markd
 });
 
 // ---------------------------------------------------------------------------
-// Sidebar pending approvals entry renders only when asks are pending
+// Sidebar global pending-approvals inbox has been removed (session-view AskCard is the sole entry)
 // ---------------------------------------------------------------------------
-test('Sidebar 待确认入口仅在存在 pending ask 时渲染（数据层面约束）', () => {
-  const pending: PendingAskRecord[] = [{
-    id: 'ask_1', sessionId: 'sess_1', botId: 'bot_1', prompt: 'Deploy?',
-    options: ['Yes', 'No'], status: 'pending', previewType: 'diff',
-    previewContent: '+new', createdAt: new Date().toISOString(),
-  }];
-  const answered: PendingAskRecord[] = [{
-    ...pending[0], status: 'answered', answer: 'Yes',
-  }];
-  assert.equal(pending.filter((a) => a.status === 'pending').length, 1);
-  assert.equal(answered.filter((a) => a.status === 'pending').length, 0);
+test('Sidebar 不再包含全局待确认收件箱（含 10s 轮询）', async () => {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const source = await fs.readFile(
+    path.join(process.cwd(), 'apps/web/src/components/Sidebar.tsx'),
+    'utf-8'
+  );
+  assert.doesNotMatch(source, /listPendingApprovals/, '不应再调用 listPendingApprovals');
+  assert.doesNotMatch(source, /AskCard/, '不应再内置 AskCard 收件箱');
 });
 
 // ---------------------------------------------------------------------------

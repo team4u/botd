@@ -1442,6 +1442,104 @@ interface MessageItemProps {
   onInspectSubagentRun?: (run: SubagentRunRecord) => void;
 }
 
+/** 按回调正文语义推导标题（后端已不再产生 📋 过程消息） */
+export function deriveCallbackTitle(content: string): string {
+  if (content.includes('[Background Job')) return '后台进程完成';
+  if (
+    content.includes('[Timer:') ||
+    content.includes('[定时任务:') ||
+    content.includes('[Webhook:') ||
+    content.includes('[手动触发:') ||
+    content.includes('触发器')
+  ) {
+    return '自动触发通知';
+  }
+  if (content.includes('子会话')) return '异步子任务回执';
+  return '系统唤醒通知';
+}
+
+/** 拆分长回执：首行为 headline（去尾冒号），其余为可折叠详情；正文剥去 [Wake-up] 前缀 */
+export function splitCallbackReceipt(content: string): { headline: string; detailBody: string | null } {
+  const normalized = content.startsWith('[Wake-up] ') ? content.slice('[Wake-up] '.length) : content;
+  const sepIdx = normalized.indexOf('\n\n');
+  if (sepIdx < 0) return { headline: normalized, detailBody: null };
+  return {
+    headline: normalized.slice(0, sepIdx).replace(/：$/, ''),
+    detailBody: normalized.slice(sepIdx + 2),
+  };
+}
+
+interface CallbackMessageCardProps {
+  messageId: string;
+  content: string;
+  childSessionId?: string;
+  formattedTime: string;
+  fullTime: string;
+}
+
+/** 回调通知卡：语义化标题 + 长回执默认折叠（父 Bot 随后会汇总，全文不默认平铺） */
+const CallbackMessageCard: React.FC<CallbackMessageCardProps> = ({
+  messageId,
+  content,
+  childSessionId,
+  formattedTime,
+  fullTime,
+}) => {
+  const [expanded, setExpanded] = useState(false);
+  const title = deriveCallbackTitle(content);
+  const { headline, detailBody } = splitCallbackReceipt(content);
+  const collapsible = Boolean(childSessionId) && detailBody !== null;
+
+  return (
+    <div data-message-id={messageId} className="flex justify-center my-3">
+      <div className="max-w-2xl w-full p-2.5 sm:p-3 bg-amber-50/70 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/60 rounded-xl text-xs text-amber-900 dark:text-amber-200 shadow-xs">
+        <div className="flex items-center justify-between font-medium text-amber-800 dark:text-amber-300 mb-1">
+          <div className="flex items-center gap-1.5">
+            <BellRing className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+            <span>{title}</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {childSessionId && (
+              <a
+                href={`#?s=${childSessionId}`}
+                className="text-[11px] font-medium text-amber-700 dark:text-amber-300 hover:underline"
+              >
+                查看对话 / 追问 →
+              </a>
+            )}
+            <span className="text-[11px] text-amber-600/80 dark:text-amber-400/80 font-normal" title={fullTime}>
+              {formattedTime}
+            </span>
+          </div>
+        </div>
+        <div className="text-amber-950 dark:text-amber-200 mt-1">
+          {collapsible ? (
+            <>
+              <p className="leading-relaxed break-words">{headline}</p>
+              {expanded && (
+                <div className="prose-botd prose-botd--xs text-amber-950 dark:text-amber-200 mt-1.5 pt-1.5 border-t border-amber-200/60 dark:border-amber-900/50">
+                  <Markdown>{detailBody}</Markdown>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => setExpanded((v) => !v)}
+                className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 dark:text-amber-300 hover:underline cursor-pointer"
+              >
+                {expanded ? '收起详情 ▴' : '展开回执详情 ▾'}
+              </button>
+            </>
+          ) : (
+            <div className="prose-botd prose-botd--xs text-amber-950 dark:text-amber-200">
+              <Markdown>{headline}</Markdown>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export const MessageItem: React.FC<MessageItemProps> = ({
   message,
   botMap,
@@ -1562,35 +1660,16 @@ export const MessageItem: React.FC<MessageItemProps> = ({
     );
   }
 
-  // 唤醒回调事件：去中英混排，轻量卡片
+  // 唤醒回调事件：语义化标题的轻量通知卡（长回执默认折叠）
   if (isCallback) {
     return (
-      <div data-message-id={message.id} className="flex justify-center my-3">
-        <div className="max-w-2xl w-full p-2.5 sm:p-3 bg-amber-50/70 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/60 rounded-xl text-xs text-amber-900 dark:text-amber-200 shadow-xs">
-          <div className="flex items-center justify-between font-medium text-amber-800 dark:text-amber-300 mb-1">
-            <div className="flex items-center gap-1.5">
-              <BellRing className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
-              <span>后台任务唤醒回调</span>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              {callbackChildSessionId && (
-                <a
-                  href={`#?s=${callbackChildSessionId}`}
-                  className="text-[11px] font-medium text-amber-700 dark:text-amber-300 hover:underline"
-                >
-                  查看对话 / 追问 →
-                </a>
-              )}
-              <span className="text-[11px] text-amber-600/80 dark:text-amber-400/80 font-normal" title={fullTime}>
-                {formattedTime}
-              </span>
-            </div>
-          </div>
-          <div className="prose-botd prose-botd--xs text-amber-950 dark:text-amber-200 mt-1">
-            <Markdown>{message.content}</Markdown>
-          </div>
-        </div>
-      </div>
+      <CallbackMessageCard
+        messageId={message.id}
+        content={message.content}
+        childSessionId={callbackChildSessionId}
+        formattedTime={formattedTime}
+        fullTime={fullTime}
+      />
     );
   }
 

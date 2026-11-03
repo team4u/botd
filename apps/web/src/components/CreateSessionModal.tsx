@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Bot, Loader2 } from 'lucide-react';
 import type { BotConfig, CreateSessionInput } from '@botd/protocol';
-import { orderBotsAsTree } from './GroupMemberPicker.js';
+import { orderBotsAsTree } from '../utils/bots.js';
 
 export interface CreateSessionDraft {
   title: string;

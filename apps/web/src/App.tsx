@@ -36,7 +36,7 @@ import {
 
 // 全局 hash 路由：视图/当前会话/弹窗统一编码进 URL hash（如 #?v=nodes&s=xxx&m=settings），
 // 页面重载/手机后台回收后原样恢复。不引路由库，hash 即状态单一来源。
-type ModalName = 'create' | 'group' | 'settings' | 'users';
+type ModalName = 'create' | 'settings' | 'users';
 
 /** 会话内消息高亮定位：搜索跳转等场景通过 msg 参数携带目标消息 ID */
 interface HashRoute {
@@ -571,7 +571,7 @@ export const App: React.FC = () => {
         const botName = botMapRef.current.get(message.senderBotId || '')?.name || message.senderBotId || '智能体';
         const preview = (message.content || '').replace(/\s+/g, ' ').trim().slice(0, 80);
         const title =
-          message.role === 'callback' ? `${botName} 的后台任务有回调` : `${botName} 已完成回复`;
+          message.role === 'callback' ? `${botName} 有新的异步任务通知` : `${botName} 已完成回复`;
         const body = preview || '回合已结束，点击返回查看';
         const notification = new Notification(title, { body, tag: `botd-${message.sessionId}` });
         notification.onclick = () => {

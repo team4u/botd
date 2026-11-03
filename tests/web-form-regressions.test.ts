@@ -12,7 +12,7 @@ import {
 } from '../apps/web/src/components/CreateSessionModal.js';
 import {
   orderBotsAsTree,
-} from '../apps/web/src/components/GroupMemberPicker.js';
+} from '../apps/web/src/utils/bots.js';
 
 // Dynamically import BotEditorModal so tsc in tsconfig.tests.json does not traverse into
 // sibling web components (it uses bundler-style extensionless imports).
@@ -346,10 +346,10 @@ test('shouldSaveBotMemory: 编辑 Bot 记忆被修改后触发保存', () => {
 
 
 // ==========================================
-// 4. GroupMemberPicker 纯函数测试
+// 4. BOT 树序排序纯函数测试
 // ==========================================
 
-test('GroupMemberPicker: orderBotsAsTree 将子代理紧跟在所属主 BOT 后，且默认草稿选主 BOT 为主持', () => {
+test('orderBotsAsTree: 将子代理紧跟在所属主 BOT 后，且默认草稿选主 BOT 为主持', () => {
   const unorderedBots: BotConfig[] = [
     { ...mockBots[1], id: 'sub-a', name: 'Sub A', parentBotId: 'main-1' },
     { ...mockBots[0], id: 'main-1', name: 'Main 1' },

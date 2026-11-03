@@ -24,12 +24,11 @@ import {
   Square,
   ListChecks,
 } from 'lucide-react';
-import type { SessionRecord, BotConfig, NodeRecord, PendingAskRecord } from '@botd/protocol';
+import type { SessionRecord, BotConfig, NodeRecord } from '@botd/protocol';
 import type { MessageSearchHit } from '../api.js';
 import type { UserInfo } from '../types.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import ThemeToggle from './ThemeToggle.js';
-import { AskCard } from './AskCard.js';
 import { BotAvatarBadge } from './MessageItem.js';
 import { api } from '../api.js';
 
@@ -333,35 +332,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [batchConfirmOpen, setBatchConfirmOpen] = useState(false);
-  const [pendingApprovals, setPendingApprovals] = useState<PendingAskRecord[]>([]);
-  const [showApprovals, setShowApprovals] = useState(false);
-
-  const botMap = useMemo(() => new Map(bots.map((b) => [b.id, b])), [bots]);
-
-  const refreshApprovals = useCallback(async () => {
-    try {
-      const list = await api.listPendingApprovals();
-      setPendingApprovals(Array.isArray(list) ? list : []);
-    } catch {
-      setPendingApprovals([]);
-    }
-  }, []);
-
-  // 审批轮询：以 sessions.length 作为稳定依赖（避免 unreadCounts 高频变更引起轮询频繁重建）；10s 定时轮询
-  useEffect(() => {
-    void refreshApprovals();
-    const interval = setInterval(() => {
-      void refreshApprovals();
-    }, 10000);
-    return () => clearInterval(interval);
-  }, [sessions.length, refreshApprovals]);
-
-  // 侧边栏开启（如移动端抽屉打开）时立即刷新一次最新待办审批
-  useEffect(() => {
-    if (isOpen) {
-      void refreshApprovals();
-    }
-  }, [isOpen, refreshApprovals]);
 
   // 新消息提示音开关（localStorage 持久化，默认关闭）
   const [soundOn, setSoundOn] = useState(() => {
@@ -648,76 +618,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
             )}
           </div>
         </div>
-
-        {/* Global Pending Approvals Inbox */}
-        {pendingApprovals.length > 0 && (
-          <div className="px-3 pt-1 shrink-0">
-            <button
-              type="button"
-              onClick={() => setShowApprovals((v) => !v)}
-              className="w-full h-8 px-2.5 rounded-lg text-xs font-medium flex items-center justify-between bg-amber-500/10 hover:bg-amber-500/15 border border-amber-500/25 text-amber-700 dark:text-amber-300 transition-colors cursor-pointer"
-            >
-              <div className="flex items-center gap-1.5 truncate">
-                <BellRing className="w-3.5 h-3.5 shrink-0 text-amber-600 dark:text-amber-400 animate-pulse" />
-                <span className="truncate">待我确认 ({pendingApprovals.length})</span>
-              </div>
-              <span className="text-[11px] font-normal text-amber-600/80 dark:text-amber-400/80 shrink-0">
-                {showApprovals ? '收起' : '查看'}
-              </span>
-            </button>
-
-            {showApprovals && (
-              <div className="mt-2 p-2 rounded-lg bg-zinc-50 dark:bg-zinc-900/70 border border-zinc-200/80 dark:border-zinc-800 space-y-2.5 max-h-80 overflow-y-auto">
-                <div className="flex items-center justify-between px-0.5">
-                  <span className="text-[11px] font-semibold text-zinc-700 dark:text-zinc-300">
-                    待处理审批 ({pendingApprovals.length})
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setShowApprovals(false)}
-                    className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-0.5 rounded cursor-pointer"
-                    title="收起"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-                {pendingApprovals.map((ask) => {
-                  const bot = botMap.get(ask.botId);
-                  return (
-                    <div
-                      key={ask.id}
-                      className="p-2 rounded-lg bg-white dark:bg-zinc-950 border border-zinc-200/70 dark:border-zinc-800 space-y-1.5 shadow-2xs"
-                    >
-                      <div className="flex items-center justify-between gap-1 text-[11px]">
-                        <span className="truncate font-medium text-zinc-600 dark:text-zinc-300">
-                          {ask.sessionTitle || `会话 ${ask.sessionId.slice(0, 8)}`}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onSelectSession(ask.sessionId);
-                            onClose();
-                          }}
-                          className="text-blue-600 dark:text-blue-400 hover:underline shrink-0 cursor-pointer font-medium text-xs"
-                        >
-                          跳转至会话
-                        </button>
-                      </div>
-                      <AskCard
-                        ask={ask}
-                        bot={bot}
-                        onRespond={async (askId: string, answer: string) => {
-                          await api.respondToAsk(ask.sessionId, askId, answer);
-                          await refreshApprovals();
-                        }}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
 
         {/* Global message search results */}
         {filter.trim() && (
