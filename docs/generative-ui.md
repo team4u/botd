@@ -53,7 +53,7 @@ Spec 的契约定义在 `packages/protocol/src/ui-catalog.ts`。渲染实现位�
 
 | 字段 | 说明 |
 | --- | --- |
-| `type` | 组件类型，必须是 15 个类型之一 |
+| `type` | 组件类型，必须是 17 个类型之一 |
 | `props` | 组件属性，见下文目录 |
 | `children` | 子元素 ID 数组，按顺序渲染 |
 | `slots` | 命名槽位，如 Tabs 用 `{ "tabId": ["child-id"] }` |
@@ -69,9 +69,9 @@ Spec 的契约定义在 `packages/protocol/src/ui-catalog.ts`。渲染实现位�
 
 校验还会拦截：环引用（`Cycle detected in UI tree at element "..."`）、子元素 ID 不存在、未知动作名、各组件的非法属性值。
 
-## 组件目录（15 个）
+## 组件目录（17 个）
 
-类型清单由 `BOTD_UI_COMPONENT_TYPES` 定义，共 15 项。渲染默认值来自 `BotdUiRenderer.tsx`。
+类型清单由 `BOTD_UI_COMPONENT_TYPES` 定义，共 17 项。渲染默认值来自 `BotdUiRenderer.tsx`。
 
 ### 布局与分组
 
@@ -137,7 +137,17 @@ Spec 的契约定义在 `packages/protocol/src/ui-catalog.ts`。渲染实现位�
 
 | 属性 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `items` | array | 是 | 每项含必填 `title`，可选 `content`、`defaultOpen`、`icon`、`badge` |
+| `items` | array | 是 | 每项含必填 `title`，可选 `content`、`defaultOpen`、`icon`、`badge`、`mono` |
+
+条目的 `mono` 为真时正文用等宽字体。除纯文本 `content` 外，条目还可通过 `slots` 嵌套任意组件：以**条目标题**为键放子元素 ID 数组（类似 Tabs 的槽位写法），展开后渲染对应组件：
+
+```json
+{
+  "type": "Accordion",
+  "props": { "items": [{ "title": "高级选项" }, { "title": "命令预览", "content": "rm -rf node_modules", "mono": true }] },
+  "slots": { "高级选项": ["advanced_switch"] }
+}
+```
 
 ```json
 {
@@ -206,6 +216,29 @@ Spec 的契约定义在 `packages/protocol/src/ui-catalog.ts`。渲染实现位�
 }
 ```
 
+#### Table
+
+多列数据表，适合在 `Card` / `Tabs` 内展示结构化列表。
+
+| 属性 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `columns` | string[] | 是 | 列名数组 |
+| `rows` | string[][] | 是 | 行数据，每行长度必须等于列数 |
+| `monoColumns` | number[] | 否 | 以 0 起算的列索引，该列用等宽字体 |
+| `title` | string | 否 | 表格标题 |
+
+```json
+{
+  "type": "Table",
+  "props": {
+    "title": "节点状态",
+    "columns": ["节点", "状态", "CPU"],
+    "rows": [["node-1", "online", "12%"], ["node-2", "offline", "—"]],
+    "monoColumns": [0]
+  }
+}
+```
+
 #### KeyValueList
 
 紧凑的键值对列表，行间有分隔线。
@@ -238,6 +271,7 @@ Spec 的契约定义在 `packages/protocol/src/ui-catalog.ts`。渲染实现位�
 | `title` | string | 否 | — | 无标题 |
 | `variant` | string | 否 | `info` \| `tip` \| `warn` \| `error` | `info` |
 | `icon` | string | 否 | — | 按变体取 `info` / `lightbulb` / `alert-triangle` / `alert-circle` |
+| `mono` | boolean | 否 | — | 为真时正文用等宽字体（命令、日志、Diff） |
 
 ```json
 { "type": "Callout", "props": { "title": "注意", "content": "该操作不可回滚。", "variant": "warn" } }
@@ -270,7 +304,7 @@ Spec 的契约定义在 `packages/protocol/src/ui-catalog.ts`。渲染实现位�
 
 #### TextInput
 
-单行输入框。
+输入框，默认单行；`multiline` 为真时渲染为多行文本域（等宽字体）。
 
 | 属性 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -278,6 +312,8 @@ Spec 的契约定义在 `packages/protocol/src/ui-catalog.ts`。渲染实现位�
 | `value` | string \| 绑定 | 否 | 初始值，或 `{"$state": "/key"}` |
 | `placeholder` | string | 否 | 占位文本 |
 | `hint` | string | 否 | 底部提示 |
+| `multiline` | boolean | 否 | 为真时渲染多行文本域 |
+| `rows` | number | 否 | 可见行数（2-12），仅 multiline 时生效，默认 4 |
 
 ```json
 { "type": "TextInput", "props": { "label": "集群名", "value": { "$state": "/cluster/name" }, "placeholder": "prod-main", "hint": "唯一标识" } }
@@ -321,6 +357,31 @@ Spec 的契约定义在 `packages/protocol/src/ui-catalog.ts`。渲染实现位�
 { "type": "Switch", "props": { "label": "启用告警", "checked": { "$state": "/cluster/alerts" }, "hint": "失败时通知" } }
 ```
 
+#### CheckboxGroup
+
+多选勾选组，绑定 `string[]` 状态路径。
+
+| 属性 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `label` | string | 是 | 字段标签 |
+| `options` | array | 是 | 选项数组，每项含必填 `value`、`label`，可选 `description` |
+| `value` | string[] \| 绑定 | 否 | 初选中值数组，或 `{"$state": "/key"}`（绑定值为 `string[]`） |
+| `hint` | string | 否 | 底部提示 |
+
+```json
+{
+  "type": "CheckboxGroup",
+  "props": {
+    "label": "选择要清理的分支",
+    "value": { "$state": "/cleanup/branches" },
+    "options": [
+      { "value": "feat/a", "label": "feat/a", "description": "已合并，30 天未动" },
+      { "value": "feat/b", "label": "feat/b" }
+    ]
+  }
+}
+```
+
 #### ActionBar
 
 按钮条容器，按 `children` 顺序排列按钮。
@@ -359,7 +420,8 @@ Spec 的契约定义在 `packages/protocol/src/ui-catalog.ts`。渲染实现位�
 Spec 里的 `state` 是状态初值。表单控件用 `{"$state": "/key"}` 绑定状态路径（`$bindState` 等价，渲染器内部会补齐）：
 
 - `TextInput.value`、`Select.value` 绑定字符串；
-- `Switch.checked` 绑定布尔值。
+- `Switch.checked` 绑定布尔值；
+- `CheckboxGroup.value` 绑定字符串数组。
 
 交互模式下的提交行为：
 

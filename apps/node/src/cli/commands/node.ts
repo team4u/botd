@@ -244,6 +244,7 @@ export function buildApprovalCardSpec(input: ApprovalCardInput): BotdUiSpec {
             title: input.diffPreview ? '变更差异预览 (Diff)' : '附加内容预览',
             content: clampAccordionPreview(input.rawPreview),
             defaultOpen: true,
+            mono: true,
           },
         ],
       },

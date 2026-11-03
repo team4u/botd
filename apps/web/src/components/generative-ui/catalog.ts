@@ -61,9 +61,11 @@ export const botdUiCatalog = defineCatalog(schema, {
         value: z.string().optional(),
         placeholder: z.string().optional(),
         hint: z.string().optional(),
+        multiline: z.boolean().optional(),
+        rows: z.number().int().min(2).max(12).optional(),
       }),
       slots: [],
-      description: 'Single-line form input field with label and hint',
+      description: 'Single-line form input field with label and hint; multiline renders a textarea',
     },
     Select: {
       props: z.object({
@@ -88,6 +90,22 @@ export const botdUiCatalog = defineCatalog(schema, {
       slots: [],
       description: 'Compact toggle switch form field',
     },
+    CheckboxGroup: {
+      props: z.object({
+        label: z.string(),
+        options: z.array(
+          z.object({
+            value: z.string(),
+            label: z.string(),
+            description: z.string().optional(),
+          }),
+        ),
+        value: z.array(z.string()).optional(),
+        hint: z.string().optional(),
+      }),
+      slots: [],
+      description: 'Multi-select checkbox group; state binding holds the selected value array',
+    },
     ActionBar: {
       props: z.object({
         align: z.enum(['left', 'right', 'between']).optional(),
@@ -109,9 +127,10 @@ export const botdUiCatalog = defineCatalog(schema, {
         content: z.string(),
         variant: z.enum(['info', 'tip', 'warn', 'error']).optional(),
         icon: z.string().optional(),
+        mono: z.boolean().optional(),
       }),
       slots: [],
-      description: 'Highlighted note or warning box for key definitions and insights',
+      description: 'Highlighted note or warning box; mono renders content in monospace',
     },
     Tabs: {
       props: z.object({
@@ -151,11 +170,22 @@ export const botdUiCatalog = defineCatalog(schema, {
             defaultOpen: z.boolean().optional(),
             icon: z.string().optional(),
             badge: z.string().optional(),
+            mono: z.boolean().optional(),
           }),
         ),
       }),
       slots: [],
-      description: 'Progressive disclosure collapsible list for FAQs and deep-dives',
+      description: 'Progressive disclosure collapsible list; mono renders item content in monospace',
+    },
+    Table: {
+      props: z.object({
+        columns: z.array(z.string()),
+        rows: z.array(z.array(z.string())),
+        monoColumns: z.array(z.number().int().nonnegative()).optional(),
+        title: z.string().optional(),
+      }),
+      slots: [],
+      description: 'Simple multi-column data table with optional monospace columns',
     },
     BarList: {
       props: z.object({

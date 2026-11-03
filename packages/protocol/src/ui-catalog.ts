@@ -12,6 +12,7 @@ export const BOTD_UI_COMPONENT_TYPES = [
   'TextInput',
   'Select',
   'Switch',
+  'CheckboxGroup',
   'ActionBar',
   'Button',
   'Callout',
@@ -19,6 +20,7 @@ export const BOTD_UI_COMPONENT_TYPES = [
   'Steps',
   'Accordion',
   'BarList',
+  'Table',
 ] as const;
 
 export type BotdUiComponentType = (typeof BOTD_UI_COMPONENT_TYPES)[number];
@@ -66,6 +68,10 @@ export interface TextInputElementProps {
   value?: string | UiStateBinding;
   placeholder?: string;
   hint?: string;
+  /** Render a multi-line textarea instead of a single-line input. */
+  multiline?: boolean;
+  /** Textarea visible line count (2-12), only used when multiline is true. */
+  rows?: number;
 }
 
 export interface SelectOptionItem {
@@ -85,6 +91,19 @@ export interface SwitchElementProps {
   hint?: string;
 }
 
+export interface CheckboxOptionItem {
+  value: string;
+  label: string;
+  description?: string;
+}
+
+export interface CheckboxGroupElementProps {
+  label: string;
+  options: CheckboxOptionItem[];
+  value?: string[] | UiStateBinding;
+  hint?: string;
+}
+
 export interface ActionBarElementProps {
   align?: 'left' | 'right' | 'between';
 }
@@ -99,6 +118,8 @@ export interface CalloutElementProps {
   content: string;
   variant?: 'info' | 'tip' | 'warn' | 'error';
   icon?: string;
+  /** Render content in monospace font (commands, logs, diffs). */
+  mono?: boolean;
 }
 
 export interface TabItem {
@@ -130,6 +151,8 @@ export interface AccordionItem {
   defaultOpen?: boolean;
   icon?: string;
   badge?: string;
+  /** Render content in monospace font (commands, logs, diffs). */
+  mono?: boolean;
 }
 
 export interface AccordionElementProps {
@@ -146,6 +169,14 @@ export interface BarListItem {
 
 export interface BarListElementProps {
   items: BarListItem[];
+  title?: string;
+}
+
+export interface TableElementProps {
+  columns: string[];
+  rows: string[][];
+  /** 0-based column indexes rendered in monospace font. */
+  monoColumns?: number[];
   title?: string;
 }
 
@@ -192,6 +223,18 @@ function isStringOrStateBinding(val: unknown): boolean {
 
 function isBooleanOrStateBinding(val: unknown): boolean {
   if (typeof val === 'boolean') return true;
+  if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
+    const obj = val as Record<string, unknown>;
+    return (
+      (typeof obj.$state === 'string' && obj.$state.trim().length > 0) ||
+      (typeof obj.$bindState === 'string' && obj.$bindState.trim().length > 0)
+    );
+  }
+  return false;
+}
+
+function isStringArrayOrStateBinding(val: unknown): boolean {
+  if (Array.isArray(val) && val.every((item) => typeof item === 'string')) return true;
   if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
     const obj = val as Record<string, unknown>;
     return (
@@ -441,6 +484,15 @@ export function validateUiSpec(input: string | unknown): UiValidationResult {
         if (props.hint !== undefined && typeof props.hint !== 'string') {
           errors.push(`Element "${id}" (TextInput) props.hint must be a string`);
         }
+        if (props.multiline !== undefined && typeof props.multiline !== 'boolean') {
+          errors.push(`Element "${id}" (TextInput) props.multiline must be a boolean`);
+        }
+        if (
+          props.rows !== undefined &&
+          (typeof props.rows !== 'number' || !Number.isInteger(props.rows) || props.rows < 2 || props.rows > 12)
+        ) {
+          errors.push(`Element "${id}" (TextInput) props.rows must be an integer between 2 and 12`);
+        }
         break;
       }
       case 'Select': {
@@ -474,6 +526,33 @@ export function validateUiSpec(input: string | unknown): UiValidationResult {
         }
         break;
       }
+      case 'CheckboxGroup': {
+        if (typeof props.label !== 'string' || !props.label.trim()) {
+          errors.push(`Element "${id}" (CheckboxGroup) requires a non-empty string "label" prop`);
+        }
+        if (props.value !== undefined && !isStringArrayOrStateBinding(props.value)) {
+          errors.push(
+            `Element "${id}" (CheckboxGroup) props.value must be a string array or state binding {"$state": "..."}`,
+          );
+        }
+        if (!Array.isArray(props.options) || props.options.length === 0) {
+          errors.push(`Element "${id}" (CheckboxGroup) requires a non-empty array "options" prop`);
+        } else {
+          for (let i = 0; i < props.options.length; i++) {
+            const opt = props.options[i];
+            if (!opt || typeof opt !== 'object' || typeof opt.value !== 'string' || typeof opt.label !== 'string') {
+              errors.push(`Element "${id}" (CheckboxGroup) option at index ${i} must have string "value" and "label"`);
+            }
+            if (opt && opt.description !== undefined && typeof opt.description !== 'string') {
+              errors.push(`Element "${id}" (CheckboxGroup) option at index ${i} "description" must be a string`);
+            }
+          }
+        }
+        if (props.hint !== undefined && typeof props.hint !== 'string') {
+          errors.push(`Element "${id}" (CheckboxGroup) props.hint must be a string`);
+        }
+        break;
+      }
       case 'ActionBar': {
         if (props.align !== undefined && !['left', 'right', 'between'].includes(props.align)) {
           errors.push(`Element "${id}" (ActionBar) props.align must be "left", "right", or "between"`);
@@ -501,6 +580,9 @@ export function validateUiSpec(input: string | unknown): UiValidationResult {
         }
         if (props.icon !== undefined && typeof props.icon !== 'string') {
           errors.push(`Element "${id}" (Callout) props.icon must be a string`);
+        }
+        if (props.mono !== undefined && typeof props.mono !== 'boolean') {
+          errors.push(`Element "${id}" (Callout) props.mono must be a boolean`);
         }
         break;
       }
@@ -569,6 +651,9 @@ export function validateUiSpec(input: string | unknown): UiValidationResult {
             if (acc && acc.badge !== undefined && typeof acc.badge !== 'string') {
               errors.push(`Element "${id}" (Accordion) item at index ${i} "badge" must be a string`);
             }
+            if (acc && acc.mono !== undefined && typeof acc.mono !== 'boolean') {
+              errors.push(`Element "${id}" (Accordion) item at index ${i} "mono" must be a boolean`);
+            }
           }
         }
         break;
@@ -595,6 +680,49 @@ export function validateUiSpec(input: string | unknown): UiValidationResult {
         }
         if (props.title !== undefined && typeof props.title !== 'string') {
           errors.push(`Element "${id}" (BarList) props.title must be a string`);
+        }
+        break;
+      }
+      case 'Table': {
+        if (
+          !Array.isArray(props.columns) ||
+          props.columns.length === 0 ||
+          props.columns.some((c: unknown) => typeof c !== 'string')
+        ) {
+          errors.push(`Element "${id}" (Table) requires a non-empty array "columns" prop of strings`);
+        }
+        if (props.title !== undefined && typeof props.title !== 'string') {
+          errors.push(`Element "${id}" (Table) props.title must be a string`);
+        }
+        if (props.monoColumns !== undefined) {
+          if (
+            !Array.isArray(props.monoColumns) ||
+            props.monoColumns.some((n: unknown) => typeof n !== 'number' || !Number.isInteger(n) || n < 0)
+          ) {
+            errors.push(`Element "${id}" (Table) props.monoColumns must be an array of non-negative integers`);
+          } else if (Array.isArray(props.columns)) {
+            const colCount = props.columns.length;
+            for (const n of props.monoColumns as number[]) {
+              if (n >= colCount) {
+                errors.push(
+                  `Element "${id}" (Table) props.monoColumns index ${n} is out of range (columns: ${colCount})`,
+                );
+              }
+            }
+          }
+        }
+        if (!Array.isArray(props.rows)) {
+          errors.push(`Element "${id}" (Table) requires an array "rows" prop`);
+        } else if (Array.isArray(props.columns)) {
+          const colCount = props.columns.length;
+          for (let i = 0; i < props.rows.length; i++) {
+            const row = props.rows[i];
+            if (!Array.isArray(row) || row.length !== colCount || row.some((cell: unknown) => typeof cell !== 'string')) {
+              errors.push(
+                `Element "${id}" (Table) row at index ${i} must be a string array of length ${colCount} matching columns`,
+              );
+            }
+          }
         }
         break;
       }
@@ -668,7 +796,7 @@ Max Bytes: ${MAX_UI_SPEC_BYTES} (64KB) | Max Elements: ${MAX_UI_ELEMENTS} | Max 
   "root": "root-element-id",
   "elements": {
     "root-element-id": {
-      "type": "Stack | Card | MetricGrid | MetricCard | KeyValueList | TextInput | Select | Switch | ActionBar | Button | Callout | Tabs | Steps | Accordion | BarList",
+      "type": "Stack | Card | MetricGrid | MetricCard | KeyValueList | TextInput | Select | Switch | CheckboxGroup | ActionBar | Button | Callout | Tabs | Steps | Accordion | BarList | Table",
       "props": { ... },
       "children": ["child-id-1", "child-id-2"],
       "slots": { "tab1": ["child-id-1"] },
@@ -686,7 +814,7 @@ Max Bytes: ${MAX_UI_SPEC_BYTES} (64KB) | Max Elements: ${MAX_UI_ELEMENTS} | Max 
 }
 \`\`\`
 
-## Component Catalog (15 Components)
+## Component Catalog (17 Components)
 
 ### 1. Layout & Groups
 1. Stack (Flex layout container)
@@ -702,7 +830,8 @@ Max Bytes: ${MAX_UI_SPEC_BYTES} (64KB) | Max Elements: ${MAX_UI_ELEMENTS} | Max 
    - children: string[] (mapped to tabs 1:1) or slots: { [tabId]: string[] }
 
 4. Accordion (Progressive disclosure collapsible list for FAQs and deep-dives)
-   - props: { items: Array<{ title: string, content?: string, defaultOpen?: boolean, icon?: string, badge?: string }> }
+   - props: { items: Array<{ title: string, content?: string, defaultOpen?: boolean, icon?: string, badge?: string, mono?: boolean }> }
+   - Item content renders as text; to nest arbitrary components inside an item, put child element ids in slots keyed by item title.
 
 ### 2. Metrics & Comparison
 5. MetricGrid (Responsive metric cards grid)
@@ -722,24 +851,27 @@ Max Bytes: ${MAX_UI_SPEC_BYTES} (64KB) | Max Elements: ${MAX_UI_ELEMENTS} | Max 
 9. Callout (Highlighted note/tip/warning box for key definitions)
    - props: { title?: string, content: string, variant?: "info" | "tip" | "warn" | "error", icon?: string }
 
-10. Steps (Vertical timeline / lifecycle flow for algorithms and execution steps)
+11. Steps (Vertical timeline / lifecycle flow for algorithms and execution steps)
     - props: { items: Array<{ title: string, description?: string, status?: "done" | "current" | "pending", icon?: string, badge?: string }> }
 
 ### 4. Interactive Forms & Actions
-11. TextInput (Single-line input)
-    - props: { label: string, value?: string | { "$state": "/key" }, placeholder?: string, hint?: string }
+12. TextInput (Single-line input, or multi-line textarea when multiline is true)
+    - props: { label: string, value?: string | { "$state": "/key" }, placeholder?: string, hint?: string, multiline?: boolean, rows?: number (2-12) }
 
-12. Select (Dropdown selector)
+13. Select (Dropdown selector)
     - props: { label: string, value?: string | { "$state": "/key" }, options: Array<{ value: string, label: string }> }
 
-13. Switch (Toggle switch)
+14. Switch (Toggle switch)
     - props: { label: string, checked?: boolean | { "$state": "/key" }, hint?: string }
 
-14. ActionBar (Horizontal action button bar)
+15. CheckboxGroup (Multi-select checkbox list, binds string[] to state)
+    - props: { label: string, options: Array<{ value: string, label: string, description?: string }>, value?: string[] | { "$state": "/key" }, hint?: string }
+
+16. ActionBar (Horizontal action button bar)
     - props: { align?: "left" | "right" | "between" }
     - children: string[]
 
-15. Button (Action trigger)
+17. Button (Action trigger)
     - props: { label: string, variant?: "primary" | "secondary" | "danger" }
     - on.press: { action: "submit", params?: { decision?: string, [k: string]: unknown } }
 

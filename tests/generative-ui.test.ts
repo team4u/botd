@@ -348,6 +348,139 @@ test('validateUiSpec 拦截非法情况：超长字节限制', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 2b. botd.v1 扩展能力：CheckboxGroup / Table / multiline / mono / Accordion 槽位
+// ---------------------------------------------------------------------------
+
+test('validateUiSpec 接受新组件与属性：CheckboxGroup(string[] 绑定)、Table、TextInput.multiline、Callout/Accordion mono、Accordion 槽位', () => {
+  const spec = {
+    root: 'form_card',
+    elements: {
+      form_card: {
+        type: 'Card',
+        props: { title: '清理分支' },
+        children: ['branches_check', 'reason_input', 'mono_callout', 'detail_accordion', 'nodes_table', 'btn_ok'],
+      },
+      branches_check: {
+        type: 'CheckboxGroup',
+        props: {
+          label: '选择要删除的分支',
+          value: { $state: '/cleanup/branches' },
+          options: [
+            { value: 'feat/a', label: 'feat/a', description: '已合并，30 天未动' },
+            { value: 'feat/b', label: 'feat/b' },
+          ],
+          hint: '至少选一个',
+        },
+      },
+      reason_input: {
+        type: 'TextInput',
+        props: { label: '补充说明', multiline: true, rows: 4, value: { $state: '/cleanup/note' } },
+      },
+      mono_callout: {
+        type: 'Callout',
+        props: { content: 'git branch -D feat/a', mono: true, variant: 'tip' },
+      },
+      detail_accordion: {
+        type: 'Accordion',
+        props: {
+          items: [
+            { title: '高级选项', defaultOpen: false },
+            { title: '命令预览', content: 'rm -rf node_modules', mono: true },
+          ],
+        },
+        slots: { 高级选项: ['advanced_switch'] },
+      },
+      advanced_switch: {
+        type: 'Switch',
+        props: { label: '同时清理工作区', checked: { $state: '/cleanup/workspace' } },
+      },
+      nodes_table: {
+        type: 'Table',
+        props: {
+          title: '节点状态',
+          columns: ['节点', '状态', 'CPU'],
+          rows: [
+            ['node-1', 'online', '12%'],
+            ['node-2', 'offline', '—'],
+          ],
+          monoColumns: [0],
+        },
+      },
+      btn_ok: {
+        type: 'Button',
+        props: { label: '执行', variant: 'primary' },
+        on: { press: { action: 'submit', params: { decision: 'apply' } } },
+      },
+    },
+    state: { cleanup: { branches: ['feat/a'], note: '', workspace: false } },
+  };
+
+  const res = validateUiSpec(spec);
+  assert.equal(res.ok, true, res.ok ? '' : res.errors.join('; '));
+  if (res.ok) {
+    // 槽位子元素参与深度计算（Accordion 槽内 Switch：Card→Accordion→Switch 共 3 层，未超限）
+    assert.equal(res.spec.root, 'form_card');
+  }
+});
+
+test('validateUiSpec 拦截新组件的非法用法：Table 列数不匹配 / monoColumns 越界 / CheckboxGroup 非 string[] / rows 越界', () => {
+  // Table row length mismatch
+  const badTable = validateUiSpec({
+    root: 't',
+    elements: { t: { type: 'Table', props: { columns: ['a', 'b'], rows: [['only-one']] } } },
+  });
+  assert.equal(badTable.ok, false);
+  if (!badTable.ok) {
+    assert.ok(badTable.errors.some((e) => e.includes('(Table) row at index 0 must be a string array of length 2')));
+  }
+
+  // monoColumns out of range
+  const badMonoCol = validateUiSpec({
+    root: 't',
+    elements: { t: { type: 'Table', props: { columns: ['a'], rows: [['x']], monoColumns: [3] } } },
+  });
+  assert.equal(badMonoCol.ok, false);
+  if (!badMonoCol.ok) {
+    assert.ok(badMonoCol.errors.some((e) => e.includes('monoColumns index 3 is out of range')));
+  }
+
+  // CheckboxGroup value must be string[] or binding
+  const badCheck = validateUiSpec({
+    root: 'c',
+    elements: {
+      c: {
+        type: 'CheckboxGroup',
+        props: { label: '选', options: [{ value: 'a', label: 'A' }], value: 42 },
+      },
+    },
+  });
+  assert.equal(badCheck.ok, false);
+  if (!badCheck.ok) {
+    assert.ok(badCheck.errors.some((e) => e.includes('(CheckboxGroup) props.value must be a string array')));
+  }
+
+  // TextInput rows out of range
+  const badRows = validateUiSpec({
+    root: 'i',
+    elements: { i: { type: 'TextInput', props: { label: 'L', multiline: true, rows: 99 } } },
+  });
+  assert.equal(badRows.ok, false);
+  if (!badRows.ok) {
+    assert.ok(badRows.errors.some((e) => e.includes('(TextInput) props.rows must be an integer between 2 and 12')));
+  }
+
+  // Callout mono must be boolean
+  const badMono = validateUiSpec({
+    root: 'k',
+    elements: { k: { type: 'Callout', props: { content: 'x', mono: 'yes' } } },
+  });
+  assert.equal(badMono.ok, false);
+  if (!badMono.ok) {
+    assert.ok(badMono.errors.some((e) => e.includes('(Callout) props.mono must be a boolean')));
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 3. Local IPC /ask: previewType: 'ui' support and validation
 // ---------------------------------------------------------------------------
 

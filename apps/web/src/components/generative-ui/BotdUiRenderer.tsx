@@ -284,6 +284,8 @@ const TextInputComponent: React.FC<
     value?: string;
     placeholder?: string;
     hint?: string;
+    multiline?: boolean;
+    rows?: number;
   }>
 > = (ctx) => {
   const props = ctx.props ?? (ctx as any).element?.props ?? {};
@@ -299,26 +301,40 @@ const TextInputComponent: React.FC<
     ? ((store.get(statePath) as string | undefined) ?? (typeof props.value === 'string' ? props.value : ''))
     : localVal;
   const isDisabled = disabled || mode === 'display';
+  const sharedInputClass =
+    'w-full px-2.5 text-xs rounded-lg bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50';
+
+  const handleChange = (newVal: string) => {
+    if (statePath) {
+      store.set(statePath, newVal);
+      setBoundVal(newVal);
+    } else {
+      setLocalVal(newVal);
+    }
+  };
 
   return (
     <div className="space-y-1 w-full">
       <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">{props.label}</label>
-      <input
-        type="text"
-        value={val ?? ''}
-        placeholder={props.placeholder}
-        disabled={isDisabled}
-        onChange={(e) => {
-          const newVal = e.target.value;
-          if (statePath) {
-            store.set(statePath, newVal);
-            setBoundVal(newVal);
-          } else {
-            setLocalVal(newVal);
-          }
-        }}
-        className="h-8 w-full px-2.5 text-xs rounded-lg bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
-      />
+      {props.multiline ? (
+        <textarea
+          value={val ?? ''}
+          placeholder={props.placeholder}
+          disabled={isDisabled}
+          rows={props.rows ?? 4}
+          onChange={(e) => handleChange(e.target.value)}
+          className={`${sharedInputClass} py-2 leading-relaxed resize-y font-mono`}
+        />
+      ) : (
+        <input
+          type="text"
+          value={val ?? ''}
+          placeholder={props.placeholder}
+          disabled={isDisabled}
+          onChange={(e) => handleChange(e.target.value)}
+          className={`h-8 ${sharedInputClass}`}
+        />
+      )}
       {props.hint && <p className="text-[11px] text-zinc-400 dark:text-zinc-500">{props.hint}</p>}
     </div>
   );
@@ -430,6 +446,80 @@ const SwitchComponent: React.FC<
   );
 };
 
+const CheckboxGroupComponent: React.FC<
+  BaseComponentProps<{
+    label: string;
+    options: Array<{ value: string; label: string; description?: string }>;
+    value?: string[];
+    hint?: string;
+  }>
+> = (ctx) => {
+  const props = ctx.props ?? (ctx as any).element?.props ?? {};
+  const bindings = ctx.bindings;
+  const { mode, disabled } = useUiRenderContext();
+  const rawProp = props.value;
+  const statePath = extractStatePath(rawProp, bindings?.value);
+  const store = useStateStore();
+  const [, setBoundVal] = useBoundProp<string[]>(props.value, statePath);
+  const options = Array.isArray(props.options) ? props.options : [];
+  const [localVal, setLocalVal] = useState<string[]>(Array.isArray(props.value) ? props.value : []);
+
+  const selected = statePath
+    ? ((store.get(statePath) as string[] | undefined) ?? (Array.isArray(props.value) ? props.value : []))
+    : localVal;
+  const isDisabled = disabled || mode === 'display';
+
+  const toggle = (optValue: string) => {
+    if (isDisabled) return;
+    const next = selected.includes(optValue) ? selected.filter((v) => v !== optValue) : [...selected, optValue];
+    if (statePath) {
+      store.set(statePath, next);
+      setBoundVal(next);
+    } else {
+      setLocalVal(next);
+    }
+  };
+
+  return (
+    <div className="space-y-1.5 w-full">
+      <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">{props.label}</label>
+      <div className="rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900/40 divide-y divide-zinc-100 dark:divide-zinc-800/80 overflow-hidden">
+        {options.map((opt, idx) => {
+          const checked = selected.includes(opt.value);
+          return (
+            <button
+              key={idx}
+              type="button"
+              role="checkbox"
+              aria-checked={checked}
+              disabled={isDisabled}
+              onClick={() => toggle(opt.value)}
+              className="w-full flex items-start gap-2 px-2.5 py-2 text-left hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+            >
+              <span
+                className={`mt-0.5 w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 transition-colors ${
+                  checked
+                    ? 'bg-blue-600 border-blue-600 text-white'
+                    : 'border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900'
+                }`}
+              >
+                {checked && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+              </span>
+              <span className="min-w-0">
+                <span className="block text-xs font-medium text-zinc-800 dark:text-zinc-200">{opt.label}</span>
+                {opt.description && (
+                  <span className="block text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">{opt.description}</span>
+                )}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {props.hint && <p className="text-[11px] text-zinc-400 dark:text-zinc-500">{props.hint}</p>}
+    </div>
+  );
+};
+
 const ActionBarComponent: React.FC<BaseComponentProps<{ align?: 'left' | 'right' | 'between' }>> = (ctx) => {
   const props = ctx.props ?? (ctx as any).element?.props ?? {};
   const justify =
@@ -499,6 +589,7 @@ const CalloutComponent: React.FC<
     content: string;
     variant?: 'info' | 'tip' | 'warn' | 'error';
     icon?: string;
+    mono?: boolean;
   }>
 > = (ctx) => {
   const props = ctx.props ?? (ctx as any).element?.props ?? {};
@@ -537,7 +628,11 @@ const CalloutComponent: React.FC<
         <UiIcon name={iconName} className={`w-4 h-4 shrink-0 ${variantStyles.iconColor}`} />
         {props.title && <span>{props.title}</span>}
       </div>
-      <div className="text-xs leading-relaxed opacity-90 break-words whitespace-pre-wrap pl-5.5">
+      <div
+        className={`text-xs leading-relaxed opacity-90 break-words whitespace-pre-wrap pl-5.5 ${
+          props.mono ? 'font-mono' : ''
+        }`}
+      >
         {props.content}
       </div>
     </div>
@@ -661,6 +756,7 @@ const AccordionComponent: React.FC<
       defaultOpen?: boolean;
       icon?: string;
       badge?: string;
+      mono?: boolean;
     }>;
   }>
 > = (ctx) => {
@@ -688,6 +784,7 @@ const AccordionComponent: React.FC<
     <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 divide-y divide-zinc-100 dark:divide-zinc-800/80 overflow-hidden w-full shadow-2xs">
       {items.map((item, idx) => {
         const isOpen = openSet.has(idx);
+        const slotContent = ctx.slots?.[item.title];
         return (
           <div key={idx} className="transition-colors">
             <button
@@ -710,9 +807,10 @@ const AccordionComponent: React.FC<
                 }`}
               />
             </button>
-            {isOpen && item.content && (
+            {isOpen && (item.content || slotContent) && (
               <div className="px-3 py-2 text-xs text-zinc-600 dark:text-zinc-300 bg-zinc-50/40 dark:bg-zinc-950/40 border-t border-zinc-100 dark:border-zinc-800/80 leading-relaxed whitespace-pre-wrap">
-                {item.content}
+                {slotContent ?? item.content}
+                {slotContent && item.content && <div className="mt-2">{item.content}</div>}
               </div>
             )}
           </div>
@@ -722,8 +820,7 @@ const AccordionComponent: React.FC<
   );
 };
 
-const BarListComponent: React.FC<
-  BaseComponentProps<{
+const BarListComponent: React.FC<  BaseComponentProps<{
     items: Array<{
       label: string;
       value: number;
@@ -780,6 +877,62 @@ const BarListComponent: React.FC<
   );
 };
 
+const TableComponent: React.FC<
+  BaseComponentProps<{
+    columns: string[];
+    rows: string[][];
+    monoColumns?: number[];
+    title?: string;
+  }>
+> = (ctx) => {
+  const props = ctx.props ?? (ctx as any).element?.props ?? {};
+  const columns = Array.isArray(props.columns) ? props.columns : [];
+  const rows = Array.isArray(props.rows) ? props.rows : [];
+  const monoSet = new Set(Array.isArray(props.monoColumns) ? props.monoColumns : []);
+
+  return (
+    <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/80 w-full overflow-hidden shadow-2xs">
+      {props.title && (
+        <h4 className="px-3 py-2 text-xs font-semibold text-zinc-900 dark:text-zinc-100 border-b border-zinc-100 dark:border-zinc-800/80 truncate">
+          {props.title}
+        </h4>
+      )}
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="bg-zinc-50/70 dark:bg-zinc-800/50 text-left">
+              {columns.map((col, idx) => (
+                <th
+                  key={idx}
+                  className={`px-2.5 py-1.5 font-semibold text-zinc-500 dark:text-zinc-400 whitespace-nowrap ${
+                    monoSet.has(idx) ? 'font-mono' : ''
+                  }`}
+                >
+                  {col}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800/80">
+            {rows.map((row, rIdx) => (
+              <tr key={rIdx} className="hover:bg-zinc-50/50 dark:hover:bg-zinc-800/30 transition-colors">
+                {row.map((cell, cIdx) => (
+                  <td
+                    key={cIdx}
+                    className={`px-2.5 py-1.5 text-zinc-800 dark:text-zinc-200 ${monoSet.has(cIdx) ? 'font-mono' : ''}`}
+                  >
+                    {cell}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
 const { registry: botdRegistry } = defineRegistry(botdUiCatalog, {
   components: {
     Stack: StackComponent as any,
@@ -790,6 +943,7 @@ const { registry: botdRegistry } = defineRegistry(botdUiCatalog, {
     TextInput: TextInputComponent as any,
     Select: SelectComponent as any,
     Switch: SwitchComponent as any,
+    CheckboxGroup: CheckboxGroupComponent as any,
     ActionBar: ActionBarComponent as any,
     Button: ButtonComponent as any,
     Callout: CalloutComponent as any,
@@ -797,6 +951,7 @@ const { registry: botdRegistry } = defineRegistry(botdUiCatalog, {
     Steps: StepsComponent as any,
     Accordion: AccordionComponent as any,
     BarList: BarListComponent as any,
+    Table: TableComponent as any,
   },
   actions: {
     submit: async () => {},
@@ -826,7 +981,7 @@ export const BotdUiRenderer: React.FC<BotdUiRendererProps> = ({
       if (!el || !el.props) continue;
       const p = el.props as Record<string, unknown>;
       let nextProps = p;
-      if (el.type === 'TextInput' || el.type === 'Select') {
+      if (el.type === 'TextInput' || el.type === 'Select' || el.type === 'CheckboxGroup') {
         if (p.value && typeof p.value === 'object' && ('$state' in p.value) && !('$bindState' in p.value)) {
           nextProps = { ...nextProps, value: { ...p.value, $bindState: (p.value as any).$state } };
           changed = true;

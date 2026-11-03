@@ -29,8 +29,8 @@ test('ensureBuiltinSkill seeds the builtin CLI skill and stays idempotent', asyn
   assert.equal(await readFile(skillFile(dir), 'utf8'), BUILTIN_SKILL_MD);
 });
 
-test('builtin skill documents ephemeral tmp-* subagents at version 12', () => {
-  assert.equal(BUILTIN_SKILL_VERSION, 12);
+test('builtin skill documents ephemeral tmp-* subagents at version 13', () => {
+  assert.equal(BUILTIN_SKILL_VERSION, 13);
   assert.match(BUILTIN_SKILL_MD, /tmp-<role>\.md/);
   assert.match(BUILTIN_SKILL_MD, /tmp-skeptic/);
   assert.match(BUILTIN_SKILL_MD, /Ephemeral subagents/);
