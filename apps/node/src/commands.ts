@@ -172,14 +172,402 @@ async function connectHubAsNode(dataDir: string): Promise<import('./cli/hub-clie
  * （steerBotTurn → triggerActiveSubagentHandoff），等待立即解除，返回提示文本让主 Bot
  * 接管新消息并用 stop_subagent / steer_subagent / get_subagent_result 控制子代理。
  *
- * 实现方式：先以 run_in_background: true 调原 Agent.execute 拿到 agentId，
- * 再立即用扩展注册的 get_subagent_result（wait: true）等待。waitSignal 被接管触发时，
- * get_subagent_result 只退出等待、子代理继续后台运行且保留完成通知；父级会话取消信号
- * （用户点了整个会话的停止）则额外停掉该子代理。
+ * 同时支持跨 Bot 子会话委派（subagent_type 传 @botId / bot:botId 或其他主 BOT ID）：
+ * 统一收口到与 SubagentWorkflow 一致的跨 Bot 委派模型，支持前台等待/后台运行/断点续跑（resume），
+ * 并向协同面板发射携带 childSessionId 的 subagents:* 事件。
  */
-function wrapAgentToolForHandoff(tool: any, handoffScope: SubagentHandoffScope | undefined, botDir?: string): any {
+interface Deferred<T = void> {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+}
+
+function createDeferred<T = void>(): Deferred<T> {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+interface CrossBotSessionRecord {
+  childSessionId: string;
+  botId: string;
+  label: string;
+  phaseTitle?: string;
+}
+
+/** 跨 Bot 子会话全局映射表：支持按 agentId、runId、label 或 childSessionId 查找 */
+const crossBotSessionMap = new Map<string, CrossBotSessionRecord>();
+
+/**
+ * 向跨 Bot 子会话发送跟进消息并等待该会话回到 idle / failed。
+ * 时序与 delegateSessionAndWait 对齐：先订阅子会话 SSE 确认流已激活，再 POST 消息。
+ */
+async function sendSessionMessageAndWait(
+  client: import('./cli/hub-client.js').HubClient,
+  childSessionId: string,
+  prompt: string,
+  options: {
+    waitSeconds: number;
+    signal?: AbortSignal;
+  },
+): Promise<{ ok: boolean; status: 'done' | 'failed'; reply: string }> {
+  const abortController = new AbortController();
+  const externalAbort = () => abortController.abort();
+  if (options.signal?.aborted) externalAbort();
+  else options.signal?.addEventListener('abort', externalAbort, { once: true });
+
+  const streamReady = createDeferred<void>();
+  let streamReadySettled = false;
+  let sawInitialSnapshot = false;
+  let sawRunningOrQueued = false;
+  let sawActivity = false;
+  const completion = createDeferred<{ status: 'done' | 'failed' }>();
+  let completionSettled = false;
+
+  const eventsPromise = client
+    .events(childSessionId, {
+      signal: abortController.signal,
+      onEvent: (event: any) => {
+        if (!streamReadySettled) {
+          streamReadySettled = true;
+          streamReady.resolve();
+        }
+        if (event.type === 'message_created') {
+          sawActivity = true;
+        }
+        if (event.type === 'session_status') {
+          if (!sawInitialSnapshot) {
+            sawInitialSnapshot = true;
+            return;
+          }
+          if (event.status === 'running' || event.status === 'queued') {
+            sawRunningOrQueued = true;
+          } else if ((sawRunningOrQueued || sawActivity) && (event.status === 'idle' || event.status === 'failed')) {
+            if (!completionSettled) {
+              completionSettled = true;
+              completion.resolve({ status: event.status === 'failed' ? 'failed' : 'done' });
+            }
+          }
+        }
+      },
+    })
+    .catch((err: unknown) => {
+      if (!streamReadySettled) {
+        streamReadySettled = true;
+        streamReady.reject(err);
+      }
+    });
+
+  try {
+    let streamTimer: ReturnType<typeof setTimeout> | undefined;
+    const streamTimeout = new Promise<never>((_, reject) => {
+      streamTimer = setTimeout(() => {
+        reject(new Error('Timed out opening child session event stream'));
+      }, 10_000);
+    });
+    try {
+      await Promise.race([streamReady.promise, streamTimeout]);
+    } finally {
+      if (streamTimer) clearTimeout(streamTimer);
+    }
+
+    await client.post(`/api/sessions/${encodeURIComponent(childSessionId)}/messages`, {
+      content: prompt,
+    });
+
+    if (!completionSettled) {
+      let waitTimer: ReturnType<typeof setTimeout> | undefined;
+      const waitTimeout = new Promise<never>((_, reject) => {
+        waitTimer = setTimeout(() => {
+          reject(new Error(`Timed out after ${options.waitSeconds}s waiting for child session turn`));
+        }, options.waitSeconds * 1000);
+      });
+      const onAbort = () => {
+        if (!completionSettled) {
+          completionSettled = true;
+          completion.resolve({ status: 'failed' });
+        }
+      };
+      abortController.signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        await Promise.race([completion.promise, waitTimeout]);
+      } finally {
+        if (waitTimer) clearTimeout(waitTimer);
+        abortController.signal.removeEventListener('abort', onAbort);
+      }
+    }
+
+    const completionResult = await completion.promise;
+    const messages = await client
+      .get<any[]>(`/api/sessions/${encodeURIComponent(childSessionId)}/messages`)
+      .catch(() => []);
+    const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+    const lastSystem = [...messages].reverse().find((m) => m.role === 'system');
+    const reply = lastAssistant?.content?.trim() || lastSystem?.content?.trim() || '';
+
+    return {
+      ok: completionResult.status === 'done',
+      status: completionResult.status,
+      reply,
+    };
+  } finally {
+    abortController.abort();
+    await eventsPromise;
+  }
+}
+
+interface CrossBotSessionOptions {
+  client: import('./cli/hub-client.js').HubClient;
+  pi: ExtensionAPI;
+  parentSessionId: string;
+  botId: string;
+  prompt: string;
+  title?: string;
+  artifactIds?: string[];
+  runInBackground?: boolean;
+  timeoutSeconds?: number;
+  handoffScope?: SubagentHandoffScope;
+  signal?: AbortSignal;
+  stepRunId: string;
+  label?: string;
+  phaseTitle?: string;
+  skipCompletionEvent?: boolean;
+  onChildCreated?: (created: DelegateSessionResult) => void;
+}
+
+interface CrossBotExecutionResult {
+  ok: boolean;
+  status: 'done' | 'failed' | 'aborted' | 'background';
+  reply: string;
+  formattedText: string;
+  childSessionId?: string;
+  returnedArtifacts: Array<{ id: string; filename: string; mimeType: string; sizeBytes: number; url: string }>;
+  details: Record<string, unknown>;
+  handedOff?: boolean;
+  durationMs?: number;
+}
+
+/**
+ * 跨 Bot 子会话执行共用函数：供 Agent 工具与 SubagentWorkflow 共同复用。
+ * 支持前台等待（autoWakeParent: false）与后台运行（autoWakeParent: true）、
+ * 父级取消联动与用户新消息接管（handoff）、以及生命周期事件桥接。
+ */
+async function executeCrossBotSession(options: CrossBotSessionOptions): Promise<CrossBotExecutionResult> {
+  const {
+    client,
+    pi,
+    parentSessionId,
+    botId,
+    prompt,
+    title,
+    artifactIds,
+    runInBackground,
+    timeoutSeconds,
+    handoffScope,
+    signal,
+    stepRunId,
+    label,
+    phaseTitle,
+    skipCompletionEvent,
+    onChildCreated,
+  } = options;
+
+  const startMs = Date.now();
+  const description = label || prompt.slice(0, 80);
+
+  // 后台模式：立即派发，子会话完成后 Hub 自动唤醒父会话
+  if (runInBackground === true || handoffScope?.wasTriggered()) {
+    const res = await client.post<DelegateSessionResult>(
+      `/api/sessions/${encodeURIComponent(parentSessionId)}/delegate`,
+      {
+        botId,
+        prompt,
+        title,
+        artifactIds,
+        autoWakeParent: true,
+      },
+    );
+    const rec: CrossBotSessionRecord = {
+      childSessionId: res.childSession.id,
+      botId,
+      label: label || botId,
+      ...(phaseTitle !== undefined ? { phaseTitle } : {}),
+    };
+    crossBotSessionMap.set(stepRunId, rec);
+    crossBotSessionMap.set(res.childSession.id, rec);
+    if (label) crossBotSessionMap.set(label, rec);
+
+    onChildCreated?.(res);
+    pi.events.emit('subagents:started', {
+      id: stepRunId,
+      type: botId,
+      description,
+      ...(phaseTitle !== undefined ? { phase: phaseTitle } : {}),
+      childSessionId: res.childSession.id,
+    });
+
+    const formattedText = `Delegated background sub-session "${res.childSession.id}" (${res.childSession.title}) to @${botId}. The parent session will be woken up automatically when all active sub-sessions complete.`;
+    return {
+      ok: true,
+      status: 'background',
+      reply: '',
+      formattedText,
+      childSessionId: res.childSession.id,
+      returnedArtifacts: [],
+      details: { ...res, agentId: stepRunId, childSessionId: res.childSession.id },
+    };
+  }
+
+  // 前台模式：等待子会话执行完成，支持接管转后台与父级取消
+  const { delegateSessionAndWait } = await import('./cli/commands/sessions.js');
+  let childSessionId = '';
+  let handedOff = false;
+  const combo = new AbortController();
+
+  const onParentAbort = () => {
+    if (childSessionId) {
+      void client
+        .post(`/api/sessions/${encodeURIComponent(childSessionId)}/cancel`)
+        .catch(() => {});
+    }
+    combo.abort();
+  };
+  const onHandoff = () => {
+    handedOff = true;
+    combo.abort();
+  };
+
+  if (signal?.aborted) onParentAbort();
+  else signal?.addEventListener('abort', onParentAbort, { once: true });
+
+  const handoffPoll = setInterval(() => {
+    if (handoffScope?.wasTriggered()) onHandoff();
+  }, 80);
+  const cleanupListeners = () => {
+    clearInterval(handoffPoll);
+    signal?.removeEventListener?.('abort', onParentAbort);
+  };
+
+  let waitRes: Awaited<ReturnType<typeof delegateSessionAndWait>> | undefined;
+  try {
+    waitRes = await delegateSessionAndWait(
+      client,
+      parentSessionId,
+      {
+        botId,
+        prompt,
+        title,
+        artifactIds,
+        autoWakeParent: false,
+      },
+      {
+        waitSeconds: timeoutSeconds ?? 600,
+        signal: combo.signal,
+        onChildCreated: (r) => {
+          childSessionId = r.childSession.id;
+          const rec: CrossBotSessionRecord = {
+            childSessionId,
+            botId,
+            label: label || botId,
+            ...(phaseTitle !== undefined ? { phaseTitle } : {}),
+          };
+          crossBotSessionMap.set(stepRunId, rec);
+          crossBotSessionMap.set(childSessionId, rec);
+          if (label) crossBotSessionMap.set(label, rec);
+
+          onChildCreated?.(r);
+          pi.events.emit('subagents:started', {
+            id: stepRunId,
+            type: botId,
+            description,
+            ...(phaseTitle !== undefined ? { phase: phaseTitle } : {}),
+            childSessionId: r.childSession.id,
+          });
+        },
+      },
+    );
+  } catch (err) {
+    if (handedOff || signal?.aborted || combo.signal.aborted) {
+      waitRes = undefined;
+    } else {
+      cleanupListeners();
+      throw err;
+    }
+  } finally {
+    cleanupListeners();
+  }
+
+  const durationMs = Date.now() - startMs;
+
+  if (!waitRes) {
+    const formattedText = handedOff
+      ? `Delegated sub-session "${childSessionId}" (@${botId}) has been moved to the background because the user sent a new message in the session. It is STILL RUNNING.`
+      : `Delegated sub-session "${childSessionId}" (@${botId}) wait was aborted.`;
+    return {
+      ok: false,
+      status: 'aborted',
+      reply: formattedText,
+      formattedText,
+      childSessionId,
+      returnedArtifacts: [],
+      details: { agentId: stepRunId, childSessionId },
+      handedOff,
+      durationMs,
+    };
+  }
+
+  const isFailed = waitRes.status === 'failed';
+  if (!skipCompletionEvent) {
+    pi.events.emit(isFailed ? 'subagents:failed' : 'subagents:completed', {
+      id: stepRunId,
+      type: botId,
+      description,
+      ...(phaseTitle !== undefined ? { phase: phaseTitle } : {}),
+      childSessionId: waitRes.childSession.id,
+      status: isFailed ? 'error' : 'completed',
+      ...(isFailed ? { error: waitRes.reply || 'Cross-bot sub-session failed' } : { result: waitRes.reply }),
+      durationMs,
+    });
+  }
+
+  const lines = [`Sub-session: ${waitRes.childSession.id} (@${botId}) — ${waitRes.status}`, waitRes.reply];
+  if (waitRes.returnedArtifacts.length > 0) {
+    lines.push('Returned artifacts:');
+    for (const artifact of waitRes.returnedArtifacts) {
+      lines.push(`- ${artifact.filename} (id: ${artifact.id}, url: ${artifact.url})`);
+    }
+  }
+
+  return {
+    ok: !isFailed,
+    status: isFailed ? 'failed' : 'done',
+    reply: waitRes.reply,
+    formattedText: lines.join('\n'),
+    childSessionId: waitRes.childSession.id,
+    returnedArtifacts: waitRes.returnedArtifacts,
+    details: { ...waitRes, agentId: stepRunId, childSessionId: waitRes.childSession.id },
+    durationMs,
+  };
+}
+
+interface WrapAgentToolDeps {
+  dataDir: string;
+  bot: BotConfig;
+  botDir: string;
+  workspaceDir: string;
+  sessionId?: string;
+  pi: ExtensionAPI;
+  handoffScope: SubagentHandoffScope | undefined;
+}
+
+function wrapAgentToolForHandoff(tool: any, deps: WrapAgentToolDeps): any {
   const originalExecute = tool.execute?.bind(tool);
   if (typeof originalExecute !== 'function') return tool;
+  const { dataDir, botDir, pi, handoffScope } = deps;
 
   const dispatchWithThisBotsAgents = (
     toolCallId: string,
@@ -209,6 +597,47 @@ function wrapAgentToolForHandoff(tool: any, handoffScope: SubagentHandoffScope |
     return undefined;
   };
 
+  // 扩展参数定义与工具描述
+  const parameters = tool.parameters ? { ...tool.parameters } : { type: 'object', properties: {} };
+  const properties = { ...(parameters.properties || {}) };
+
+  if (properties.subagent_type) {
+    properties.subagent_type = {
+      ...properties.subagent_type,
+      description:
+        'The subagent type to spawn (local role subagent ID sharing this workspace) or target primary BOT ID ' +
+        '(e.g. "@botId", "bot:botId", or "botId") to delegate via an isolated sub-session with zero-copy artifact sharing.',
+    };
+  }
+  if (!properties.title) {
+    properties.title = {
+      type: 'string',
+      description: 'Optional short title for cross-bot sub-session (defaults to description).',
+    };
+  }
+  if (!properties.artifact_ids) {
+    properties.artifact_ids = {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'Optional list of parent session artifact IDs to share with the sub-session. Omit to share all current session artifacts.',
+    };
+  }
+  if (!properties.timeout_seconds) {
+    properties.timeout_seconds = {
+      type: 'number',
+      description: 'Maximum seconds to wait when run_in_background is false (default: 600).',
+    };
+  }
+  parameters.properties = properties;
+
+  const description =
+    'Spawn an autonomous subagent or delegate to another primary BOT. ' +
+    'For subagent_type, you can pass either a local role subagent ID (shares your workspace) ' +
+    'or another primary BOT ID (prefixed with "@", "bot:", or direct bot ID, runs in an isolated sub-session with zero-copy artifact sharing). ' +
+    'Defaults to run_in_background: false (waits for completion inline; emit multiple Agent calls in one turn to run in parallel). ' +
+    'Set run_in_background: true for long-running tasks that wake the parent session when done.';
+
   const wrappedExecute = async (
     toolCallId: string,
     params: any,
@@ -216,78 +645,169 @@ function wrapAgentToolForHandoff(tool: any, handoffScope: SubagentHandoffScope |
     onUpdate: ((update: unknown) => void) | undefined,
     ctx: any,
   ) => {
-    const wantsForeground = params?.run_in_background === false || params?.run_in_background === undefined;
-    // 仅拦截“新前台调用且非 resume”：resume / 后台 / 定时调用走原路径
-    if (!wantsForeground || params?.resume || params?.schedule) {
-      return dispatchWithThisBotsAgents(toolCallId, params, signal, onUpdate, ctx);
-    }
-
-    // 已被接管（用户已发新消息）：这次调用直接按后台跑，不再阻塞
-    if (handoffScope?.wasTriggered()) {
-      return dispatchWithThisBotsAgents(toolCallId, { ...params, run_in_background: true }, signal, onUpdate, ctx);
-    }
-
-    const getResultTool = findTool(ctx, 'get_subagent_result');
-    if (!getResultTool) {
-      // 找不到等待工具（扩展未激活）：退回原生行为
-      return dispatchWithThisBotsAgents(toolCallId, params, signal, onUpdate, ctx);
-    }
-
-    // 以后台方式启动子代理，拿到 agentId
-    const bgResult = await dispatchWithThisBotsAgents(toolCallId, { ...params, run_in_background: true }, signal, onUpdate, ctx);
-    const agentId = String((bgResult as any)?.details?.agentId || '').trim();
-    if (!agentId) {
-      // 启动失败（未知类型等）：原样返回错误/结果
-      return bgResult;
-    }
-
-    // 组合信号：父级取消（整会话停止）或用户接管（主会话新消息）
-    const combo = new AbortController();
-    const onParentAbort = () => {
-      // 用户点了整个会话的停止：同时停掉该子代理
-      const manager = getGlobalSubagentManager();
-      manager?.abort?.(agentId);
-      combo.abort();
-    };
-    const onHandoff = () => {
-      handedOff = true;
-      combo.abort();
-    };
-    if (signal?.aborted) {
-      onParentAbort();
-    } else {
-      signal?.addEventListener('abort', onParentAbort, { once: true });
-    }
-
-    let handedOff = false;
-    const handoffPoll = setInterval(onHandoff, 80);
-    const cleanupListeners = () => {
-      clearInterval(handoffPoll);
-      signal?.removeEventListener?.('abort', onParentAbort);
-    };
-
-    try {
-      // get_subagent_result(wait: true)：正常跑完会自动标记 resultConsumed 并取消完成通知，
-      // 向主 Bot 返回完整结果；信号被取消时仅退出等待，子代理在后台继续运行。
-      const waitResult = await getResultTool.execute(
-        `wait_${toolCallId}`,
-        { agent_id: agentId, wait: true },
-        combo.signal,
-        undefined,
-        ctx,
-      );
-      if (handedOff) {
-        return makeTextResult(
-          `Agent "${agentId}" (${params.subagent_type}) has been moved to the background because the user sent a new message in the session. It is STILL RUNNING. Read the user's new message and use stop_subagent, steer_subagent, or get_subagent_result with agent_id "${agentId}" as needed.`
-        );
+    // 1) 跨 Bot 子会话 resume 判定
+    if (params?.resume) {
+      const resumeRef = String(params.resume).trim();
+      const remote =
+        crossBotSessionMap.get(resumeRef) ??
+        (resumeRef.startsWith('sess_')
+          ? { childSessionId: resumeRef, botId: 'remote', label: resumeRef }
+          : undefined);
+      if (remote) {
+        const runId = `sub_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+        const startMs = Date.now();
+        const desc = String(params.description || params.prompt || '').slice(0, 80);
+        pi.events.emit('subagents:started', {
+          id: runId,
+          type: remote.botId,
+          description: desc,
+          childSessionId: remote.childSessionId,
+        });
+        const client = await connectHubAsNode(dataDir);
+        const res = await sendSessionMessageAndWait(client, remote.childSessionId, String(params.prompt || ''), {
+          waitSeconds: params.timeout_seconds ?? 600,
+          signal,
+        });
+        pi.events.emit(res.ok ? 'subagents:completed' : 'subagents:failed', {
+          id: runId,
+          type: remote.botId,
+          description: desc,
+          childSessionId: remote.childSessionId,
+          status: res.ok ? 'completed' : 'error',
+          ...(res.ok ? { result: res.reply } : { error: res.reply || 'Resume failed' }),
+          durationMs: Date.now() - startMs,
+        });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Sub-session: ${remote.childSessionId} (@${remote.botId}) — ${res.status}\n${res.reply}`,
+            },
+          ],
+          details: { ...res, agentId: runId, childSessionId: remote.childSessionId },
+          ...(res.ok ? {} : { isError: true }),
+        } as any;
       }
-      return waitResult;
-    } finally {
-      cleanupListeners();
+      return dispatchWithThisBotsAgents(toolCallId, params, signal, onUpdate, ctx);
     }
+
+    // 2) 路由判定：本地子代理 vs 跨 Bot 子会话
+    const rawType = String(params?.subagent_type || '').trim();
+    const cleanType = rawType.replace(/^(?:@|bot:)/, '');
+    const forceRemote = rawType.startsWith('@') || rawType.startsWith('bot:');
+
+    if (botDir) rebindSubagentGlobalsForBot(botDir);
+    const localDispatch = !forceRemote ? resolveSpawnType(cleanType) : { ok: false as const };
+
+    // Branch A：本地子代理
+    if (localDispatch.ok) {
+      const wantsForeground = params?.run_in_background === false || params?.run_in_background === undefined;
+      // 仅拦截“新前台调用且非 resume”：resume / 后台 / 定时调用走原路径
+      if (!wantsForeground || params?.schedule) {
+        return dispatchWithThisBotsAgents(toolCallId, params, signal, onUpdate, ctx);
+      }
+
+      // 已被接管（用户已发新消息）：这次调用直接按后台跑，不再阻塞
+      if (handoffScope?.wasTriggered()) {
+        return dispatchWithThisBotsAgents(toolCallId, { ...params, run_in_background: true }, signal, onUpdate, ctx);
+      }
+
+      const getResultTool = findTool(ctx, 'get_subagent_result');
+      if (!getResultTool) {
+        // 找不到等待工具（扩展未激活）：退回原生行为
+        return dispatchWithThisBotsAgents(toolCallId, params, signal, onUpdate, ctx);
+      }
+
+      // 以后台方式启动子代理，拿到 agentId
+      const bgResult = await dispatchWithThisBotsAgents(toolCallId, { ...params, run_in_background: true }, signal, onUpdate, ctx);
+      const agentId = String((bgResult as any)?.details?.agentId || '').trim();
+      if (!agentId) {
+        return bgResult;
+      }
+
+      // 组合信号：父级取消（整会话停止）或用户接管（主会话新消息）
+      const combo = new AbortController();
+      let handedOff = false;
+      const onParentAbort = () => {
+        const manager = getGlobalSubagentManager();
+        manager?.abort?.(agentId);
+        combo.abort();
+      };
+      const onHandoff = () => {
+        handedOff = true;
+        combo.abort();
+      };
+      if (signal?.aborted) {
+        onParentAbort();
+      } else {
+        signal?.addEventListener('abort', onParentAbort, { once: true });
+      }
+
+      const handoffPoll = setInterval(() => {
+        if (handoffScope?.wasTriggered()) onHandoff();
+      }, 80);
+      const cleanupListeners = () => {
+        clearInterval(handoffPoll);
+        signal?.removeEventListener?.('abort', onParentAbort);
+      };
+
+      try {
+        const waitResult = await getResultTool.execute(
+          `wait_${toolCallId}`,
+          { agent_id: agentId, wait: true },
+          combo.signal,
+          undefined,
+          ctx,
+        );
+        if (handedOff) {
+          return makeTextResult(
+            `Agent "${agentId}" (${params.subagent_type}) has been moved to the background because the user sent a new message in the session. It is STILL RUNNING. Read the user's new message and use stop_subagent, steer_subagent, or get_subagent_result with agent_id "${agentId}" as needed.`
+          );
+        }
+        return waitResult;
+      } finally {
+        cleanupListeners();
+      }
+    }
+
+    // Branch B：跨 Bot 子会话委派
+    const parentSessionId = deps.sessionId || process.env.BOTD_SESSION_ID || '';
+    if (!parentSessionId) {
+      return makeTextResult('Missing session context: cannot resolve the parent session ID for subagent dispatch.', true);
+    }
+    if (!cleanType) {
+      return makeTextResult('Missing required parameter: subagent_type.', true);
+    }
+    if (!params?.prompt || String(params.prompt).trim() === '') {
+      return makeTextResult('Missing required parameter: prompt is required.', true);
+    }
+
+    const runId = `sub_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const client = await connectHubAsNode(dataDir);
+    const execRes = await executeCrossBotSession({
+      client,
+      pi,
+      parentSessionId,
+      botId: cleanType,
+      prompt: String(params.prompt).trim(),
+      title: params?.title || params?.description,
+      artifactIds: params?.artifact_ids,
+      runInBackground: params?.run_in_background === true,
+      timeoutSeconds: params?.timeout_seconds ?? 600,
+      handoffScope,
+      signal,
+      stepRunId: runId,
+      label: params?.description || cleanType,
+    });
+
+    return {
+      content: [{ type: 'text', text: execRes.formattedText }],
+      details: execRes.details,
+      ...(execRes.status === 'failed' ? { isError: true } : {}),
+    } as any;
   };
 
-  return { ...tool, execute: wrappedExecute };
+  return { ...tool, description, parameters, execute: wrappedExecute };
 }
 
 /** 从文本回复中提取结构化 JSON：优先整体解析，其次 ```json 围栏，最后首尾大括号截取 */
@@ -565,7 +1085,6 @@ function wrapWorkflowToolForCrossBot(
         if (!effectiveSessionId) {
           return { ok: false, error: 'Missing sessionId for cross-bot delegation in workflow.' };
         }
-        const { delegateSessionAndWait } = await import('./cli/commands/sessions.js');
         const client = await connectHubAsNode(dataDir);
 
         let effectivePrompt = request.prompt;
@@ -575,65 +1094,57 @@ function wrapWorkflowToolForCrossBot(
         }
 
         const startMs = Date.now();
-        let waitRes: Awaited<ReturnType<typeof delegateSessionAndWait>> | undefined;
-        try {
-          waitRes = await delegateSessionAndWait(
-            client,
-            effectiveSessionId,
-            {
+        const execRes = await executeCrossBotSession({
+          client,
+          pi,
+          parentSessionId: effectiveSessionId,
+          botId: cleanType,
+          prompt: effectivePrompt,
+          title: `[${request.phaseTitle || validated.meta.name}] ${request.label || cleanType}`,
+          runInBackground: false,
+          timeoutSeconds: 600,
+          handoffScope,
+          signal: workflowAbortController.signal,
+          stepRunId,
+          label: request.label || cleanType,
+          phaseTitle: request.phaseTitle,
+          skipCompletionEvent: true,
+          onChildCreated: (created) => {
+            const rec = {
+              childSessionId: created.childSession.id,
               botId: cleanType,
-              prompt: effectivePrompt,
-              title: `[${request.phaseTitle || validated.meta.name}] ${request.label || cleanType}`,
-              autoWakeParent: false,
-            },
-            {
-              waitSeconds: 600,
-              signal: workflowAbortController.signal,
-              onChildCreated: (created) => {
-                remoteSessions.set(request.agentId, {
-                  childSessionId: created.childSession.id,
-                  botId: cleanType,
-                  label: request.label || cleanType,
-                  ...(request.phaseTitle !== undefined ? { phaseTitle: request.phaseTitle } : {}),
-                });
-                request.onResolved?.({ recordId: created.childSession.id, modelId: cleanType });
-                pi.events.emit('subagents:started', {
-                  id: stepRunId,
-                  type: cleanType,
-                  description: request.label || request.prompt.slice(0, 80),
-                  ...(request.phaseTitle !== undefined ? { phase: request.phaseTitle } : {}),
-                  childSessionId: created.childSession.id,
-                });
-              },
-            },
-          );
-        } catch (err) {
-          // 接管 / 父级取消不算步骤失败：工作流 abort 已在 flight 中，直接返回失败占位
-          const message = err instanceof Error ? err.message : String(err);
-          return { ok: false, error: handedOff || workflowAbortController.signal.aborted ? 'Workflow aborted.' : message };
-        }
+              label: request.label || cleanType,
+              ...(request.phaseTitle !== undefined ? { phaseTitle: request.phaseTitle } : {}),
+            };
+            remoteSessions.set(request.agentId, rec);
+            if (request.label) remoteSessions.set(request.label, rec);
+            request.onResolved?.({ recordId: created.childSession.id, modelId: cleanType });
+          },
+        });
 
-        if (waitRes.status === 'failed') {
+        if (!execRes.ok) {
+          const message = execRes.reply || 'Cross-bot sub-session failed';
+          const error = handedOff || workflowAbortController.signal.aborted ? 'Workflow aborted.' : message;
           pi.events.emit('subagents:failed', {
             id: stepRunId,
             type: cleanType,
             description: request.label || cleanType,
             ...(request.phaseTitle !== undefined ? { phase: request.phaseTitle } : {}),
-            childSessionId: waitRes.childSession.id,
+            ...(execRes.childSessionId ? { childSessionId: execRes.childSessionId } : {}),
             status: 'error',
-            error: waitRes.reply || 'Cross-bot sub-session failed',
-            durationMs: Date.now() - startMs,
+            error,
+            durationMs: execRes.durationMs ?? (Date.now() - startMs),
           });
-          return { ok: false, error: waitRes.reply || 'Cross-bot sub-session failed' };
+          return { ok: false, error };
         }
 
-        let outText = waitRes.reply;
-        if (waitRes.returnedArtifacts.length > 0 && request.schema === undefined) {
+        let outText = execRes.reply;
+        if (execRes.returnedArtifacts.length > 0 && request.schema === undefined) {
           outText +=
-            `\n\n[Returned Artifacts]\n${waitRes.returnedArtifacts.map((a) => `- ${a.filename} (id: ${a.id}, url: ${a.url})`).join('\n')}`;
+            `\n\n[Returned Artifacts]\n${execRes.returnedArtifacts.map((a) => `- ${a.filename} (id: ${a.id}, url: ${a.url})`).join('\n')}`;
         }
         if (request.schema !== undefined) {
-          const parsedJson = extractJsonFromText(waitRes.reply);
+          const parsedJson = extractJsonFromText(execRes.reply);
           if (parsedJson === undefined) {
             const error = 'Structured output schema validation failed: the sub-session reply was not valid JSON.';
             pi.events.emit('subagents:failed', {
@@ -641,10 +1152,10 @@ function wrapWorkflowToolForCrossBot(
               type: cleanType,
               description: request.label || cleanType,
               ...(request.phaseTitle !== undefined ? { phase: request.phaseTitle } : {}),
-              childSessionId: waitRes.childSession.id,
+              childSessionId: execRes.childSessionId,
               status: 'error',
               error,
-              durationMs: Date.now() - startMs,
+              durationMs: execRes.durationMs ?? (Date.now() - startMs),
             });
             return { ok: false, error };
           }
@@ -656,10 +1167,10 @@ function wrapWorkflowToolForCrossBot(
               type: cleanType,
               description: request.label || cleanType,
               ...(request.phaseTitle !== undefined ? { phase: request.phaseTitle } : {}),
-              childSessionId: waitRes.childSession.id,
+              childSessionId: execRes.childSessionId,
               status: 'error',
               error,
-              durationMs: Date.now() - startMs,
+              durationMs: execRes.durationMs ?? (Date.now() - startMs),
             });
             return { ok: false, error };
           }
@@ -671,16 +1182,16 @@ function wrapWorkflowToolForCrossBot(
           type: cleanType,
           description: request.label || cleanType,
           ...(request.phaseTitle !== undefined ? { phase: request.phaseTitle } : {}),
-          childSessionId: waitRes.childSession.id,
+          childSessionId: execRes.childSessionId,
           status: 'completed',
           result: outText,
-          durationMs: Date.now() - startMs,
+          durationMs: execRes.durationMs ?? (Date.now() - startMs),
         });
         return { ok: true, text: outText };
       },
 
       abortAgent(agentId: string) {
-        const remote = remoteSessions.get(agentId);
+        const remote = remoteSessions.get(agentId) ?? crossBotSessionMap.get(agentId);
         if (remote) {
           connectHubAsNode(dataDir)
             .then((client) =>
@@ -693,9 +1204,39 @@ function wrapWorkflowToolForCrossBot(
       },
 
       async resumeAgent(agentId: string, prompt: string, onResolved?: (info: { recordId?: string }) => void) {
-        const remote = remoteSessions.get(agentId);
-        if (remote && !localHost) {
-          return { ok: false, error: `Cannot resume "${agentId}": cross-bot sub-session "${remote.childSessionId}" has no resumable in-process context. Use a new agent() step to follow up with @${remote.botId}.` };
+        const remote =
+          remoteSessions.get(agentId) ??
+          crossBotSessionMap.get(agentId) ??
+          (agentId.startsWith('sess_')
+            ? { childSessionId: agentId, botId: 'remote', label: agentId }
+            : undefined);
+        if (remote) {
+          const stepRunId = `${runId}_${agentId}_resume_${Date.now().toString(36)}`;
+          const startMs = Date.now();
+          onResolved?.({ recordId: remote.childSessionId });
+          pi.events.emit('subagents:started', {
+            id: stepRunId,
+            type: remote.botId,
+            description: prompt.slice(0, 80),
+            ...(remote.phaseTitle !== undefined ? { phase: remote.phaseTitle } : {}),
+            childSessionId: remote.childSessionId,
+          });
+          const client = await connectHubAsNode(dataDir);
+          const res = await sendSessionMessageAndWait(client, remote.childSessionId, prompt, {
+            waitSeconds: 600,
+            signal: workflowAbortController.signal,
+          });
+          pi.events.emit(res.ok ? 'subagents:completed' : 'subagents:failed', {
+            id: stepRunId,
+            type: remote.botId,
+            description: prompt.slice(0, 80),
+            ...(remote.phaseTitle !== undefined ? { phase: remote.phaseTitle } : {}),
+            childSessionId: remote.childSessionId,
+            status: res.ok ? 'completed' : 'error',
+            ...(res.ok ? { result: res.reply } : { error: res.reply || 'Resume failed' }),
+            durationMs: Date.now() - startMs,
+          });
+          return { ok: res.ok, text: res.reply, ...(res.ok ? {} : { error: res.reply || 'Resume failed' }) };
         }
         if (!localHost?.resumeAgent) {
           return { ok: false, error: 'Resume not supported' };
@@ -902,7 +1443,15 @@ export async function loadBotResources(
         if (tool?.name !== 'Agent') {
           return realRegisterTool(tool);
         }
-        const wrappedTool = wrapAgentToolForHandoff(tool, handoffScope, botDir);
+        const wrappedTool = wrapAgentToolForHandoff(tool, {
+          dataDir,
+          bot,
+          botDir,
+          workspaceDir,
+          sessionId: options?.sessionId,
+          pi,
+          handoffScope,
+        });
         return realRegisterTool(wrappedTool);
       }) as typeof pi.registerTool;
       const scopedPi = new Proxy(pi as ExtensionAPI, {
@@ -984,196 +1533,6 @@ export async function loadBotResources(
                   : `Could not stop agent "${ref}": not found or not running.`,
               },
             ],
-          } as any;
-        },
-      } as any);
-
-      // 注册 delegate_bot：跨主 BOT 协同编排——把任务委派给另一个主 BOT（跨节点或隔离工作区）
-      // 的子会话执行，支持零拷贝产物共享。前台等待模式与 Agent 工具对齐：用户在主会话发新消息
-      // 时接管解除等待、子会话继续后台运行；用户取消整个会话时同步取消子会话。
-      realRegisterTool({
-        name: 'delegate_bot',
-        label: 'Delegate to Bot',
-        description:
-          'Delegate a task to another primary BOT (across nodes or in an isolated workspace) via a sub-session with zero-copy artifact sharing. ' +
-          'Defaults to run_in_background: false (waits for completion and returns the bot reply and returned artifacts inline; emit multiple delegate_bot calls in one turn to run them in parallel). ' +
-          'Set run_in_background: true for long-running tasks that will automatically wake this session when all active sub-sessions finish.',
-        promptSnippet: 'Delegate a task to another primary BOT in an isolated sub-session',
-        parameters: {
-          type: 'object',
-          properties: {
-            bot_id: {
-              type: 'string',
-              description: 'Target primary bot ID (e.g. "ops-bot", without leading @).',
-            },
-            prompt: {
-              type: 'string',
-              description: 'Self-contained task instructions for the target bot.',
-            },
-            title: {
-              type: 'string',
-              description: 'Optional short title for the sub-session.',
-            },
-            artifact_ids: {
-              type: 'array',
-              items: { type: 'string' },
-              description:
-                'Optional list of parent session artifact IDs to share with the sub-session. Omit to share all current session artifacts.',
-            },
-            run_in_background: {
-              type: 'boolean',
-              description:
-                'Defaults to false (wait inline and return reply + artifacts). Set true to run asynchronously and wake parent session when done.',
-            },
-            timeout_seconds: {
-              type: 'number',
-              description: 'Maximum seconds to wait when run_in_background is false (default: 600).',
-            },
-          },
-          required: ['bot_id', 'prompt'],
-        } as any,
-        execute: async (
-          _toolCallId: string,
-          params: {
-            bot_id?: string;
-            prompt?: string;
-            title?: string;
-            artifact_ids?: string[];
-            run_in_background?: boolean;
-            timeout_seconds?: number;
-          },
-          signal?: AbortSignal,
-        ) => {
-          const parentSessionId = options?.sessionId || process.env.BOTD_SESSION_ID || '';
-          if (!parentSessionId) {
-            return {
-              content: [{ type: 'text', text: 'Missing session context: cannot resolve the parent session ID for delegate_bot.' }],
-              isError: true,
-            } as any;
-          }
-          const botId = String(params?.bot_id || '').trim().replace(/^@+/, '');
-          const prompt = String(params?.prompt || '').trim();
-          if (!botId || !prompt) {
-            return {
-              content: [{ type: 'text', text: 'Missing required parameters: bot_id and prompt are required.' }],
-              isError: true,
-            } as any;
-          }
-
-          const { delegateSessionAndWait } = await import('./cli/commands/sessions.js');
-          const client = await connectHubAsNode(dataDir);
-
-          // 后台模式：立即返回，子会话完成后由 Hub 自动唤醒父会话（all-settled 汇总）
-          if (params?.run_in_background === true) {
-            const res = await client.post<DelegateSessionResult>(
-              `/api/sessions/${encodeURIComponent(parentSessionId)}/delegate`,
-              {
-                botId,
-                prompt,
-                title: params?.title,
-                artifactIds: params?.artifact_ids,
-                autoWakeParent: true,
-              },
-            );
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: `Delegated background sub-session "${res.childSession.id}" (${res.childSession.title}) to @${botId}. The parent session will be woken up automatically when all active sub-sessions complete.`,
-                },
-              ],
-              details: res,
-            } as any;
-          }
-
-          // 前台模式：组合信号——父级取消（用户取消会话）取消子会话；接管（用户新消息）仅解除等待
-          let childSessionId = '';
-          let handedOff = false;
-          const combo = new AbortController();
-          const handoffScope = getActiveSubagentHandoffScope();
-          const onParentAbort = () => {
-            if (childSessionId) {
-              void client
-                .post(`/api/sessions/${encodeURIComponent(childSessionId)}/cancel`)
-                .catch(() => {});
-            }
-            combo.abort();
-          };
-          const onHandoff = () => {
-            handedOff = true;
-            combo.abort();
-          };
-          if (signal?.aborted) {
-            onParentAbort();
-          } else {
-            signal?.addEventListener('abort', onParentAbort, { once: true });
-          }
-          const handoffPoll = setInterval(() => {
-            if (handoffScope?.wasTriggered()) onHandoff();
-          }, 80);
-          const cleanupListeners = () => {
-            clearInterval(handoffPoll);
-            signal?.removeEventListener?.('abort', onParentAbort);
-          };
-
-          let waitRes: Awaited<ReturnType<typeof delegateSessionAndWait>> | undefined;
-          try {
-            waitRes = await delegateSessionAndWait(
-              client,
-              parentSessionId,
-              {
-                botId,
-                prompt,
-                title: params?.title,
-                artifactIds: params?.artifact_ids,
-                autoWakeParent: false,
-              },
-              {
-                waitSeconds: params?.timeout_seconds ?? 600,
-                signal: combo.signal,
-                onChildCreated: (r) => {
-                  childSessionId = r.childSession.id;
-                },
-              },
-            );
-          } catch (err) {
-            // 等待被解除的两种非错误情形：接管（用户新消息，子会话继续后台跑）与父级取消
-            // （子会话已被 fire-and-forget cancel，终端态尚未来得及落库）。均不向前台抛错。
-            if (handedOff || signal?.aborted || combo.signal.aborted) {
-              waitRes = undefined;
-            } else {
-              cleanupListeners();
-              throw err;
-            }
-          } finally {
-            cleanupListeners();
-          }
-
-          if (!waitRes) {
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text:
-                    handedOff
-                  ? `Delegated sub-session "${childSessionId}" (@${botId}) has been moved to the background because the user sent a new message in the session. It is STILL RUNNING.`
-                  : `Delegated sub-session "${childSessionId}" (@${botId}) wait was aborted.`,
-                },
-              ],
-            } as any;
-          }
-
-          const lines = [`Sub-session: ${waitRes.childSession.id} (@${botId}) — ${waitRes.status}`, waitRes.reply];
-          if (waitRes.returnedArtifacts.length > 0) {
-            lines.push('Returned artifacts:');
-            for (const artifact of waitRes.returnedArtifacts) {
-              lines.push(`- ${artifact.filename} (id: ${artifact.id}, url: ${artifact.url})`);
-            }
-          }
-          return {
-            content: [{ type: 'text', text: lines.join('\n') }],
-            details: waitRes,
-            ...(waitRes.status === 'failed' ? { isError: true } : {}),
           } as any;
         },
       } as any);

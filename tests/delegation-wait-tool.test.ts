@@ -210,7 +210,7 @@ test('delegateSessionAndWait: 快速完成的子会话不因 SSE 开流竞态漏
   assert.equal(result.reply, '子任务完成：报告已生成。');
 });
 
-test('loadBotResources: 主 BOT 注册 delegate_bot（含 Agent/stop_subagent），子代理不注册', { timeout: 60_000 }, async (t) => {
+test('loadBotResources: 主 BOT 注册 Agent（含 stop_subagent 且统一支持跨 Bot 委派），子代理不注册', { timeout: 60_000 }, async (t) => {
   const env = await createTestEnv(t);
   const { piAgent } = await loadTurnDeps();
   const { SettingsManager, ExtensionRunner, SessionManager, ModelRegistry, ModelRuntime } = piAgent;
@@ -230,7 +230,7 @@ test('loadBotResources: 主 BOT 注册 delegate_bot（含 Agent/stop_subagent）
       refreshOnCreate: false,
     });
     const runner = new ExtensionRunner(extensions, runtime, env.dir, SessionManager.inMemory(env.dir), new ModelRegistry(models));
-    return runner;
+    return { runner, loader };
   };
 
   const leadBot: BotConfig = {
@@ -245,25 +245,38 @@ test('loadBotResources: 主 BOT 注册 delegate_bot（含 Agent/stop_subagent）
   };
   const parent = createParentSession(env);
 
-  const primaryRunner = await buildRunner(leadBot, { enableSubagents: true, sessionId: parent.id });
-  const delegateTool: any = primaryRunner.getToolDefinition('delegate_bot');
-  assert.ok(delegateTool, 'primary bot must register delegate_bot');
-  assert.ok(primaryRunner.getToolDefinition('Agent'), 'primary bot must register Agent');
+  const { runner: primaryRunner, loader: primaryLoader } = await buildRunner(leadBot, { enableSubagents: true, sessionId: parent.id });
+  assert.ok(!primaryRunner.getToolDefinition('delegate_bot'), 'delegate_bot should no longer be registered');
+  const agentTool: any = primaryRunner.getToolDefinition('Agent');
+  assert.ok(agentTool, 'primary bot must register Agent');
   assert.ok(primaryRunner.getToolDefinition('stop_subagent'), 'primary bot must register stop_subagent');
-  assert.ok((delegateTool.parameters as any).required, 'parameters must declare required fields');
-  assert.deepEqual((delegateTool.parameters as any).required, ['bot_id', 'prompt']);
+  assert.ok((agentTool.parameters as any).properties.title, 'Agent parameters must include title');
+  assert.ok((agentTool.parameters as any).properties.artifact_ids, 'Agent parameters must include artifact_ids');
+  assert.ok((agentTool.parameters as any).properties.timeout_seconds, 'Agent parameters must include timeout_seconds');
 
-  const subRunner = await buildRunner(
+  const { runner: subRunner } = await buildRunner(
     { ...leadBot, id: 'bot_sub', parentBotId: 'bot_lead' },
     { enableSubagents: false, sessionId: parent.id },
   );
   assert.ok(!subRunner.getToolDefinition('delegate_bot'), 'subagent (parentBotId set) must NOT register delegate_bot');
   assert.ok(!subRunner.getToolDefinition('Agent'), 'subagent must not register Agent');
 
-  // 前台执行：等待完成并返回 reply（autoWakeParent=false 不触发父会话汇总回合）
-  const fg = await delegateTool.execute(
+  const events = { started: [] as any[], completed: [] as any[], failed: [] as any[] };
+  const bus = (primaryLoader as any).eventBus as
+    | { on: (ch: string, fn: (d: unknown) => void) => () => void }
+    | undefined;
+  assert.ok(bus, 'resource loader must expose an eventBus');
+  const unsubs = [
+    bus.on('subagents:started', (d: unknown) => events.started.push(d as any)),
+    bus.on('subagents:completed', (d: unknown) => events.completed.push(d as any)),
+    bus.on('subagents:failed', (d: unknown) => events.failed.push(d as any)),
+  ];
+  t.after(() => unsubs.forEach((u) => u()));
+
+  // 前台执行：通过 Agent 工具传入 subagent_type: '@bot_worker' 等待完成并返回 reply（autoWakeParent=false 不触发父会话汇总回合）
+  const fg = await agentTool.execute(
     'tc_fg',
-    { bot_id: '@bot_worker', prompt: '前台任务' },
+    { subagent_type: '@bot_worker', prompt: '前台任务' },
     undefined,
     undefined,
     primaryRunner.createToolContext('tc_fg', undefined),
@@ -276,10 +289,18 @@ test('loadBotResources: 主 BOT 注册 delegate_bot（含 Agent/stop_subagent）
   assert.equal(env.leadTurns.length, 0, 'autoWakeParent=false must not wake the parent lead bot');
   assert.equal(env.workerTurns.length, 1);
 
-  // 后台执行：立即返回子会话已派发的提示，autoWakeParent=true 在完成后唤醒父会话
-  const bg = await delegateTool.execute(
+  // 断言 loader.eventBus 收到携带 childSessionId 的事件
+  assert.equal(events.started.length, 1);
+  assert.equal(events.completed.length, 1);
+  assert.ok(events.started[0].childSessionId);
+  assert.equal(events.started[0].childSessionId, events.completed[0].childSessionId);
+  assert.equal(events.started[0].type, 'bot_worker');
+  assert.equal(events.completed[0].status, 'completed');
+
+  // 后台执行：通过 Agent 工具传入 subagent_type: 'bot_worker'（不带 @ 也自动跨 Bot），run_in_background: true
+  const bg = await agentTool.execute(
     'tc_bg',
-    { bot_id: 'bot_worker', prompt: '后台任务', run_in_background: true },
+    { subagent_type: 'bot_worker', prompt: '后台任务', run_in_background: true },
     undefined,
     undefined,
     primaryRunner.createToolContext('tc_bg', undefined),
@@ -287,6 +308,9 @@ test('loadBotResources: 主 BOT 注册 delegate_bot（含 Agent/stop_subagent）
   const bgText: string = bg.content[0].text;
   assert.match(bgText, /Delegated background sub-session ".+" \(.+\) to @bot_worker\. The parent session will be woken up automatically/);
   assert.ok((bg.details as DelegateSessionResult).childSession.id);
+  assert.equal(events.started.length, 2);
+  assert.ok(events.started[1].childSessionId);
+  assert.equal(events.started[1].childSessionId, (bg.details as DelegateSessionResult).childSession.id);
 
   await waitFor(() => env.leadTurns.length > 0, 8000);
   assert.equal(env.workerTurns.length, 2, 'background delegation must also execute the worker turn');
