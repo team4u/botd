@@ -288,7 +288,7 @@ Bot 或脚本调用 `botd ask` 后，输入框上方显示确认卡片：
 扩展与 Web UI 无缝融合，无需为网页单独适配：
 
 - 扩展命令直接出现在输入框 `/` 命令浮层，带「扩展」徽标，像内置命令一样选中执行；
-- 扩展用 `ctx.ui` 发起的确认、选择、表单与自定义卡片在网页上原生渲染（桥接机制见[生成式 UI](generative-ui.md)），`ctx.ui.setWidget` 还能在输入框上下挂载实时面板与交互按钮；
+- 扩展用 `ctx.ui` 发起的确认、选择、表单与自定义卡片在网页上原生渲染（桥接机制见[生成式 UI](generative-ui.md)），`ctx.ui.setWidget` 还能在输入框上下挂载实时面板与交互按钮；自己动手写扩展见[扩展开发指南](extensions.md)；
 - 扩展工具返回的 `details.ui` 自动渲染为工具卡的可视化视图（`tool.view` 插槽）。
 
 输入框快捷命令胶囊（Composer Pills）：扩展通过 `ctx.ui.setWidget(key, uiSpec, { placement: 'aboveEditor' | 'belowEditor' })` 在输入框上方或下方挂载声明式面板，面板中的 `Button` 可直接点击交互；也可传等宽文本行展示日志尾巴、构建进度。面板可手动收起，会话切换时自动重置。

@@ -21,6 +21,7 @@
 | [触发器](triggers.md) | 定时 Cron 与 Webhook 触发，让会话自动开始 |
 | [外部渠道](channels.md) | 接入 Telegram、Slack、飞书和 Webhook 通知 |
 | [生成式 UI](generative-ui.md) | 让 Bot 在回复中输出确认卡片、表单和命令面板 |
+| [扩展开发](extensions.md) | 给 Bot 写扩展：拦截钩子、自定义工具、/ 命令与 Web 交互界面 |
 | [部署指南](deployment.md) | 源码生产部署、Docker Compose、反向代理、升级与备份恢复 |
 | [配置参考](configuration.md) | 查 Hub、Node Agent 和 CLI 的环境变量与数据目录 |
 | [安全边界](security.md) | 理解系统权限、共享访问、凭据和部署要求 |
