@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import {
-  validateUiSpec,
   type AskPreviewType,
   type IncomingArtifactRef,
   type MessageRecord,
@@ -8,7 +7,6 @@ import {
   type QueueStageSummary,
   type SessionRecord,
   type SubagentRunRecord,
-  type SubagentSteerRecord,
   type ToolCallRecord,
   type TurnBlock,
   type TurnUsage,
@@ -16,6 +14,8 @@ import {
 import type { HubDatabase } from './db.js';
 import type { NodeConnectionManager } from './ws-hub.js';
 import type { SseHub } from './sse.js';
+import { AskCoordinator } from './ask-coordinator.js';
+import { SubagentRunMirror, type SubagentStreamEvent } from './subagent-run-mirror.js';
 
 const MENTION_REGEX = /(?:^|\s)@([a-zA-Z0-9_-]+)/g;
 const MAX_RELAY_TURNS = 5;
@@ -236,16 +236,8 @@ export class GroupRouter {
   private connections: NodeConnectionManager;
   private sseHub: SseHub;
   private states = new Map<string, SessionRuntimeState>();
-  private mirroredSubagentRuns = new Map<string, { sessionId: string; directSessionId: string; parentBotId?: string; run: SubagentRunRecord }>();
-  private pendingAsks = new Map<
-    string,
-    {
-      record: PendingAskRecord;
-      resolve: (answer: string) => void;
-      reject: (err: Error) => void;
-      timer?: NodeJS.Timeout;
-    }
-  >();
+  private askCoordinator: AskCoordinator;
+  private runMirror: SubagentRunMirror;
   private closed = false;
   private draining = false;
 
@@ -253,6 +245,8 @@ export class GroupRouter {
     this.db = db;
     this.connections = connections;
     this.sseHub = sseHub;
+    this.askCoordinator = new AskCoordinator(db, sseHub);
+    this.runMirror = new SubagentRunMirror(db, connections, sseHub, (sessionId) => this.getActiveBotId(sessionId));
   }
 
   isDraining(): boolean {
@@ -407,154 +401,15 @@ export class GroupRouter {
 
   handleNativeSubagentStreamEvent(
     sessionId: string,
-    _parentBotId: string,
-    subEvent: {
-      id: string;
-      subagentId: string;
-      task: string;
-      status: 'running' | 'done' | 'error' | 'stopped';
-      result?: string;
-      error?: string;
-      durationMs?: number;
-      toolUses?: number;
-      currentTool?: string;
-      phase?: string;
-      childSessionId?: string;
-      startedAt?: string;
-      blocks?: TurnBlock[];
-      toolCalls?: ToolCallRecord[];
-      steers?: SubagentSteerRecord[];
-    }
+    parentBotId: string,
+    subEvent: SubagentStreamEvent
   ): SubagentRunRecord | undefined {
-    const session = this.db.getSession(sessionId);
-    if (!session) return undefined;
-    const subBot = this.db.getBot(subEvent.subagentId);
-
-    let entry = this.mirroredSubagentRuns.get(subEvent.id);
-    if (!entry) {
-      const run: SubagentRunRecord = {
-        id: subEvent.id,
-        subagentId: subEvent.subagentId,
-        subagentName: subBot?.name || subEvent.subagentId,
-        ...(subBot?.color ? { color: subBot.color } : {}),
-        task: subEvent.task,
-        status: subEvent.status,
-        ...(subEvent.phase ? { phase: subEvent.phase } : {}),
-        ...(subEvent.childSessionId ? { childSessionId: subEvent.childSessionId } : {}),
-      };
-      entry = {
-        sessionId,
-        directSessionId: '',
-        parentBotId: _parentBotId || undefined,
-        run,
-      };
-      this.mirroredSubagentRuns.set(subEvent.id, entry);
-    }
-    if (_parentBotId) entry.parentBotId = _parentBotId;
-    entry.run.status = subEvent.status;
-    if (typeof subEvent.durationMs === 'number') entry.run.durationMs = subEvent.durationMs;
-    if (typeof subEvent.toolUses === 'number') entry.run.toolCount = subEvent.toolUses;
-    if (subEvent.currentTool !== undefined) entry.run.currentTool = subEvent.currentTool;
-    if (subEvent.phase) entry.run.phase = subEvent.phase;
-    if (subEvent.childSessionId) entry.run.childSessionId = subEvent.childSessionId;
-    if (subEvent.startedAt) entry.run.startedAt = subEvent.startedAt;
-    if (subEvent.blocks) entry.run.blocks = subEvent.blocks;
-    if (subEvent.toolCalls) entry.run.toolCalls = subEvent.toolCalls;
-    if (subEvent.steers) {
-      // 合并追加 steer / resume 记录（按 timestamp+message 去重）
-      const existing = entry.run.steers ?? [];
-      const seen = new Set(existing.map((s) => `${s.timestamp}|${s.message}`));
-      for (const steer of subEvent.steers) {
-        if (!seen.has(`${steer.timestamp}|${steer.message}`)) existing.push(steer);
-      }
-      entry.run.steers = existing;
-    }
-    if (subEvent.status !== 'running') {
-      const replyContent = subEvent.result || subEvent.error || '（已完成执行）';
-      entry.run.replyFull = replyContent;
-      entry.run.replyPreview = replyContent.slice(0, 500);
-      entry.run.currentTool = undefined;
-    }
-    this.sseHub.broadcast(sessionId, {
-      type: 'subagent_status',
-      sessionId,
-      botId: subEvent.subagentId,
-      run: { ...entry.run },
-    });
-
-    // 父消息已落库（子代理后台完成 / 抽屉内 resume / stop 等）：同步持久化更新该消息的 subagentRuns
-    this.persistSubagentRunUpdate(sessionId, { ...entry.run });
-
-    return entry.run;
-  }
-
-  /** 查找会话最近包含该 runId 的消息并持久化更新其 subagentRuns */
-  private persistSubagentRunUpdate(sessionId: string, run: SubagentRunRecord): void {
-    try {
-      const page = this.db.getMessagesPage(sessionId, { limit: 30 });
-      for (let i = page.messages.length - 1; i >= 0; i--) {
-        const msg = page.messages[i];
-        if (!msg.subagentRuns || msg.subagentRuns.length === 0) continue;
-        const idx = msg.subagentRuns.findIndex((r) => r.id === run.id);
-        if (idx < 0) continue;
-        const updated = [...msg.subagentRuns];
-        updated[idx] = { ...updated[idx], ...run };
-        this.db.updateMessageSubagentRuns(msg.id, updated);
-        // 广播更新后的消息，让已落库卡片与打开的抽屉热更新
-        const refreshed = this.db.getMessageById(msg.id);
-        if (refreshed) {
-          this.sseHub.broadcast(sessionId, { type: 'message_created', message: refreshed.message });
-        }
-        return;
-      }
-    } catch {
-      // 持久化失败不影响流事件
-    }
+    return this.runMirror.handleNativeSubagentStreamEvent(sessionId, parentBotId, subEvent);
   }
 
   /** 单独停掉某个运行中的子代理（转发到对应节点，含已落库消息的状态同步） */
   async stopSubagent(sessionId: string, runId: string): Promise<{ ok: boolean; error?: string }> {
-    const session = this.db.getSession(sessionId);
-    if (!session) throw new Error(`Session ${sessionId} not found`);
-
-    // 定位 runId 归属的主 BOT：活跃回合的 activeBotId → 流事件镜像记录的 parentBotId → 最近包含该 runId 的消息 sender
-    let parentBotId = this.getActiveBotId(sessionId);
-    if (!parentBotId) parentBotId = this.mirroredSubagentRuns.get(runId)?.parentBotId;
-    if (!parentBotId) {
-      const page = this.db.getMessagesPage(sessionId, { limit: 30 });
-      for (let i = page.messages.length - 1; i >= 0; i--) {
-        const msg = page.messages[i];
-        if (msg.subagentRuns?.some((r) => r.id === runId) && msg.senderBotId) {
-          parentBotId = msg.senderBotId;
-          break;
-        }
-      }
-    }
-    if (!parentBotId) return { ok: false, error: `Cannot determine the parent bot of subagent run ${runId}.` };
-
-    const bot = this.db.getBot(parentBotId);
-    if (!bot) return { ok: false, error: `Bot @${parentBotId} not found.` };
-    const rpc = this.connections.getNodeRpc(bot.nodeId);
-    if (!rpc?.stopSubagent) {
-      return { ok: false, error: 'Node is offline or does not support stopping subagents.' };
-    }
-    const result = await rpc.stopSubagent(sessionId, parentBotId, runId);
-    if (result.ok) {
-      // 立即同步本地镜像与已落库消息状态（节点流事件随后到达作准）
-      const entry = this.mirroredSubagentRuns.get(runId);
-      if (entry) {
-        entry.run.status = 'stopped';
-        entry.run.currentTool = undefined;
-        this.sseHub.broadcast(sessionId, {
-          type: 'subagent_status',
-          sessionId,
-          botId: entry.run.subagentId,
-          run: { ...entry.run },
-        });
-        this.persistSubagentRunUpdate(sessionId, { ...entry.run });
-      }
-    }
-    return result;
+    return this.runMirror.stopSubagent(sessionId, runId);
   }
 
   /** 向某个子代理发送 steer（运行中插话）或 resume（结束后追问） */
@@ -565,54 +420,7 @@ export class GroupRouter {
     mode: 'steer' | 'resume',
     subagentId?: string,
   ): Promise<{ ok: boolean; run?: SubagentRunRecord; error?: string }> {
-    const session = this.db.getSession(sessionId);
-    if (!session) throw new Error(`Session ${sessionId} not found`);
-
-    let parentBotId = this.getActiveBotId(sessionId);
-    if (!parentBotId) parentBotId = this.mirroredSubagentRuns.get(runId)?.parentBotId;
-    if (!parentBotId) {
-      const page = this.db.getMessagesPage(sessionId, { limit: 30 });
-      for (let i = page.messages.length - 1; i >= 0; i--) {
-        const msg = page.messages[i];
-        if (msg.subagentRuns?.some((r) => r.id === runId) && msg.senderBotId) {
-          parentBotId = msg.senderBotId;
-          break;
-        }
-      }
-    }
-    if (!parentBotId) return { ok: false, error: `Cannot determine the parent bot of subagent run ${runId}.` };
-
-    const bot = this.db.getBot(parentBotId);
-    if (!bot) return { ok: false, error: `Bot @${parentBotId} not found.` };
-    const rpc = this.connections.getNodeRpc(bot.nodeId);
-    if (!rpc?.interactSubagent) {
-      return { ok: false, error: 'Node is offline or does not support subagent interaction.' };
-    }
-    const result = await rpc.interactSubagent({
-      sessionId,
-      botId: parentBotId,
-      runId,
-      ...(subagentId ? { subagentId } : {}),
-      message,
-      mode,
-    });
-    if (result.ok && result.run) {
-      // 同步本地镜像与已落库消息（节点流事件随后到达作准）
-      const entry = this.mirroredSubagentRuns.get(runId);
-      if (entry) {
-        Object.assign(entry.run, result.run);
-        this.sseHub.broadcast(sessionId, {
-          type: 'subagent_status',
-          sessionId,
-          botId: entry.run.subagentId,
-          run: { ...entry.run },
-        });
-        this.persistSubagentRunUpdate(sessionId, { ...entry.run });
-      } else {
-        this.persistSubagentRunUpdate(sessionId, result.run);
-      }
-    }
-    return result;
+    return this.runMirror.interactSubagent(sessionId, runId, message, mode, subagentId);
   }
 
   onNodeOnline(nodeId: string): void {
@@ -678,132 +486,15 @@ export class GroupRouter {
     previewType?: AskPreviewType;
     previewContent?: string;
   }): Promise<{ answer: string }> {
-    if (this.closed) throw new Error('Hub is shutting down');
-    const session = this.db.getSession(input.sessionId);
-    if (!session) throw new Error(`Session ${input.sessionId} not found`);
-
-    let previewContent = input.previewContent;
-    if (input.previewType === 'ui') {
-      if (!previewContent || !previewContent.trim()) {
-        throw new Error('Invalid UI spec: Missing UI previewContent');
-      }
-      const validation = validateUiSpec(previewContent);
-      if (!validation.ok) {
-        throw new Error(`Invalid UI spec: ${validation.errors.join('; ')}`);
-      }
-      previewContent = validation.normalizedJson;
-    }
-
-    const askId = `ask_${randomUUID()}`;
-    const now = new Date();
-    const isIndefinite = input.timeoutSeconds === 0;
-    const timeoutSec = isIndefinite
-      ? 0
-      : (input.timeoutSeconds && input.timeoutSeconds > 0 ? input.timeoutSeconds : 300);
-    const expiresAt = isIndefinite ? undefined : new Date(now.getTime() + timeoutSec * 1000).toISOString();
-
-    const record: PendingAskRecord = {
-      id: askId,
-      sessionId: input.sessionId,
-      botId: input.botId,
-      prompt: input.prompt,
-      options: input.options ?? [],
-      status: 'pending',
-      createdAt: now.toISOString(),
-      ...(expiresAt ? { expiresAt } : {}),
-      ...(input.previewType ? { previewType: input.previewType } : {}),
-      ...(previewContent ? { previewContent } : {}),
-    };
-    this.db.savePendingAsk(record);
-
-    return new Promise<{ answer: string }>((resolve, reject) => {
-      let timer: NodeJS.Timeout | undefined;
-      if (!isIndefinite) {
-        timer = setTimeout(() => {
-          const entry = this.pendingAsks.get(askId);
-          if (entry) {
-            entry.record.status = 'expired';
-            this.db.updatePendingAskStatus(askId, 'expired');
-            this.pendingAsks.delete(askId);
-            entry.reject(new Error(`Interactive ask timed out after ${timeoutSec}s`));
-          }
-        }, timeoutSec * 1000);
-      }
-
-      this.pendingAsks.set(askId, {
-        record,
-        resolve: (ans: string) => resolve({ answer: ans }),
-        reject,
-        timer,
-      });
-
-      this.sseHub.broadcast(input.sessionId, {
-        type: 'interaction_request',
-        sessionId: input.sessionId,
-        ask: record,
-      });
-    });
+    return this.askCoordinator.requestHumanInput(input);
   }
 
   getPendingAsks(sessionId: string): PendingAskRecord[] {
-    const result: PendingAskRecord[] = [];
-    const seen = new Set<string>();
-    for (const entry of this.pendingAsks.values()) {
-      if (entry.record.sessionId === sessionId && entry.record.status === 'pending') {
-        seen.add(entry.record.id);
-        result.push(entry.record);
-      }
-    }
-    const dbAsks = this.db.getPendingAsksForSession(sessionId);
-    for (const ask of dbAsks) {
-      if (!seen.has(ask.id)) {
-        seen.add(ask.id);
-        result.push(ask);
-      }
-    }
-    return result;
+    return this.askCoordinator.getPendingAsks(sessionId);
   }
 
   respondToAsk(sessionId: string, askId: string, answer: string): PendingAskRecord | undefined {
-    const entry = this.pendingAsks.get(askId);
-    if (entry) {
-      if (entry.record.sessionId !== sessionId) return undefined;
-      if (entry.record.status !== 'pending') return undefined;
-
-      if (entry.timer) clearTimeout(entry.timer);
-      entry.record.status = 'answered';
-      entry.record.answer = answer;
-      this.db.updatePendingAskStatus(askId, 'answered', answer);
-      this.pendingAsks.delete(askId);
-
-      entry.resolve(answer);
-
-      this.sseHub.broadcast(sessionId, {
-        type: 'interaction_resolved',
-        sessionId,
-        askId,
-        answer,
-      });
-
-      return entry.record;
-    }
-
-    const dbAsks = this.db.getPendingAsksForSession(sessionId);
-    const dbAsk = dbAsks.find((a) => a.id === askId);
-    if (dbAsk && dbAsk.status === 'pending') {
-      dbAsk.status = 'answered';
-      dbAsk.answer = answer;
-      this.db.updatePendingAskStatus(askId, 'answered', answer);
-      this.sseHub.broadcast(sessionId, {
-        type: 'interaction_resolved',
-        sessionId,
-        askId,
-        answer,
-      });
-      return dbAsk;
-    }
-
-    return undefined;
+    return this.askCoordinator.respondToAsk(sessionId, askId, answer);
   }
 
   handleUserMessage(
@@ -979,19 +670,7 @@ export class GroupRouter {
     for (const b of state.activeBotIds) activeBotsToCancel.add(b);
 
     // Reject any pending asks
-    for (const [askId, entry] of this.pendingAsks.entries()) {
-      if (entry.record.sessionId === sessionId) {
-        if (entry.timer) clearTimeout(entry.timer);
-        this.pendingAsks.delete(askId);
-        entry.record.status = 'expired';
-        this.db.updatePendingAskStatus(askId, 'expired');
-        entry.reject(new Error('Session cancelled'));
-      }
-    }
-    const dbAsks = this.db.getPendingAsksForSession(sessionId);
-    for (const ask of dbAsks) {
-      this.db.updatePendingAskStatus(ask.id, 'expired');
-    }
+    this.askCoordinator.rejectPendingForSession(sessionId, 'Session cancelled');
 
     // Advance generation so current turn & queued items of this generation are discarded
     state.generation++;
@@ -1291,8 +970,7 @@ export class GroupRouter {
     const maxRowidBeforeInsert = this.db.getMaxMessageRowid(sessionId);
 
     const nativeRuns: SubagentRunRecord[] = (turnResult.subagentRuns || []).map((r) => {
-      const mirrored = this.mirroredSubagentRuns.get(r.id)?.run;
-      this.mirroredSubagentRuns.delete(r.id);
+      const mirrored = this.runMirror.takeMirroredRun(r.id);
       return mirrored ? { ...r, ...mirrored, status: r.status } : r;
     });
     const allSubagentRuns: SubagentRunRecord[] = nativeRuns;
@@ -1571,11 +1249,7 @@ export class GroupRouter {
   close(): void {
     this.closed = true;
     this.draining = true;
-    for (const entry of this.pendingAsks.values()) {
-      if (entry.timer) clearTimeout(entry.timer);
-      entry.reject(new Error('Hub closed'));
-    }
-    this.pendingAsks.clear();
+    this.askCoordinator.close();
 
     for (const state of this.states.values()) {
       state.generation++;
