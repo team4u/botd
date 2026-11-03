@@ -46,7 +46,7 @@ export interface IncrementalMessageResult {
   rowid: number;
 }
 
-export const HUB_SCHEMA_VERSION = 4;
+export const HUB_SCHEMA_VERSION = 5;
 
 const PREVIEW_MAX_LENGTH = 60;
 
@@ -600,10 +600,6 @@ export class HubDatabase {
       `ALTER TABLE bots ADD COLUMN tool_scope TEXT`,
       `ALTER TABLE bots ADD COLUMN custom_tools_json TEXT`,
       `ALTER TABLE bots ADD COLUMN isolation TEXT`,
-      `ALTER TABLE sessions ADD COLUMN member_roles_json TEXT NOT NULL DEFAULT '{}'`,
-      `ALTER TABLE sessions ADD COLUMN blackboard TEXT NOT NULL DEFAULT ''`,
-      `ALTER TABLE messages ADD COLUMN whisper_target_bot_ids_json TEXT`,
-      `ALTER TABLE messages ADD COLUMN orchestration_plan TEXT`,
       `ALTER TABLE messages ADD COLUMN subagent_runs_json TEXT`,
       `ALTER TABLE messages ADD COLUMN blocks_json TEXT`,
       `ALTER TABLE messages ADD COLUMN aborted INTEGER NOT NULL DEFAULT 0`,

@@ -18,31 +18,13 @@ import { AskCoordinator } from './ask-coordinator.js';
 import { SubagentRunMirror, type SubagentStreamEvent } from './subagent-run-mirror.js';
 
 const MENTION_REGEX = /(?:^|\s)@([a-zA-Z0-9_-]+)/g;
-const MAX_RELAY_TURNS = 5;
-
-export class ChainBudget {
-  constructor(public remainingRelays: number = MAX_RELAY_TURNS) {}
-
-  consumeRelay(): boolean {
-    if (this.remainingRelays > 0) {
-      this.remainingRelays--;
-      return true;
-    }
-    return false;
-  }
-}
 
 export interface QueueItem {
   botId: string;
-  chainBudget: ChainBudget;
   wakeupMessage?: string;
   generation: number;
   commandText?: string;
   commandMessageId?: string;
-  parallelGroupId?: string;
-  replyToBotId?: string;
-  stageId?: string;
-  dispatchedByBotId?: string;
   mentionedBotIds?: string[];
 }
 
@@ -335,32 +317,10 @@ export class GroupRouter {
   getQueuePlan(sessionId: string): QueueStageSummary[] {
     const state = this.states.get(sessionId);
     if (!state || state.queue.length === 0) return [];
-    const stages: QueueStageSummary[] = [];
-    let i = 0;
-    while (i < state.queue.length) {
-      const item = state.queue[i];
-      if (item.parallelGroupId) {
-        const pId = item.parallelGroupId;
-        const botIds: string[] = [];
-        const stageId = item.stageId || pId;
-        while (i < state.queue.length && state.queue[i].parallelGroupId === pId) {
-          botIds.push(state.queue[i].botId);
-          i++;
-        }
-        stages.push({
-          id: stageId,
-          botIds,
-          parallel: true,
-        });
-      } else {
-        stages.push({
-          id: item.stageId || `stage_${i}_${item.botId}`,
-          botIds: [item.botId],
-        });
-        i++;
-      }
-    }
-    return stages;
+    return state.queue.map((item, i) => ({
+      id: `stage_${i}_${item.botId}`,
+      botIds: [item.botId],
+    }));
   }
 
   private getOrCreateState(sessionId: string): SessionRuntimeState {
@@ -448,7 +408,6 @@ export class GroupRouter {
       // 补发任务只携带旧的 wakeupMessage/commandText 引用，但 prepareTurnInput 按增量游标（cursorMap）重新收集全部未读消息，因此补发回合的语义等于"执行最新未读增量"，与内存队列路径一致，不会重复消费历史。
       state.queue.push({
         botId: task.botId,
-        chainBudget: new ChainBudget(),
         generation: state.generation,
         wakeupMessage: payload.wakeupMessage,
         commandText: payload.commandText,
@@ -462,15 +421,8 @@ export class GroupRouter {
 
     for (const [sessionId, state] of this.states.entries()) {
       if (state.queue.length > 0 && !state.isRunning) {
-        const frontItem = state.queue[0];
-        const batch = frontItem.parallelGroupId
-          ? state.queue.filter((item) => item.parallelGroupId === frontItem.parallelGroupId)
-          : [frontItem];
-        const anyBelongsToNode = batch.some((item) => {
-          const bot = this.db.getBot(item.botId);
-          return bot && bot.nodeId === nodeId;
-        });
-        if (anyBelongsToNode) {
+        const frontBot = this.db.getBot(state.queue[0].botId);
+        if (frontBot && frontBot.nodeId === nodeId) {
           this.processQueue(sessionId).catch(() => {});
         }
       }
@@ -584,11 +536,9 @@ export class GroupRouter {
       botIdsToQueue = [session.leadBotId];
     }
 
-    const chainBudget = new ChainBudget(MAX_RELAY_TURNS);
     for (const botId of botIdsToQueue) {
       state.queue.push({
         botId,
-        chainBudget,
         generation: state.generation,
         commandText,
         commandMessageId,
@@ -648,13 +598,10 @@ export class GroupRouter {
       return;
     }
 
-    const chainBudget = new ChainBudget(MAX_RELAY_TURNS);
     state.queue.push({
       botId,
-      chainBudget,
       wakeupMessage,
       generation: state.generation,
-      replyToBotId: isValidReplyTo ? replyToBotId : undefined,
     });
 
     this.processQueue(sessionId).catch(() => {});
@@ -787,8 +734,7 @@ export class GroupRouter {
     prep: PreparedTurnItem,
     groupContextPrompt: string,
     validBotIds: Set<string>,
-    turnGen: number,
-    isParallel: boolean
+    turnGen: number
   ): Promise<'success' | 'failed' | 'cancelled'> {
     const { item, rpc } = prep;
     const sessionId = session.id;
@@ -808,31 +754,16 @@ export class GroupRouter {
           content: `Error resetting session for @${item.botId}: ${errorText}`,
         });
         this.sseHub.broadcast(sessionId, { type: 'message_created', message: sysMsg.message });
-        if (!isParallel) {
-          this.db.updateSessionStatus(sessionId, 'failed', undefined);
-          this.sseHub.broadcast(sessionId, {
-            type: 'session_status',
-            sessionId,
-            status: 'failed',
-            activeBotId: undefined,
-            activeBotIds: [],
-            queuePlan: this.getQueuePlan(sessionId),
-          });
-          state.queue = [];
-        } else {
-          state.activeBotIds.delete(item.botId);
-          if (state.activeBotIds.size > 0) {
-            state.activeBotId = state.activeBotIds.values().next().value;
-            this.sseHub.broadcast(sessionId, {
-              type: 'session_status',
-              sessionId,
-              status: 'running',
-              activeBotId: state.activeBotId,
-              activeBotIds: Array.from(state.activeBotIds),
-              queuePlan: this.getQueuePlan(sessionId),
-            });
-          }
-        }
+        this.db.updateSessionStatus(sessionId, 'failed', undefined);
+        this.sseHub.broadcast(sessionId, {
+          type: 'session_status',
+          sessionId,
+          status: 'failed',
+          activeBotId: undefined,
+          activeBotIds: [],
+          queuePlan: this.getQueuePlan(sessionId),
+        });
+        state.queue = [];
         return 'failed';
       }
     }
@@ -890,7 +821,6 @@ export class GroupRouter {
           aborted: true,
         });
         this.sseHub.broadcast(sessionId, { type: 'message_created', message: partialMsg.message });
-        if (isParallel) state.activeBotIds.delete(item.botId);
         return 'cancelled';
       }
       if (turnGen !== state.generation) return 'cancelled';
@@ -902,31 +832,16 @@ export class GroupRouter {
         content: `Error executing turn for @${item.botId}: ${errorText}`,
       });
       this.sseHub.broadcast(sessionId, { type: 'message_created', message: sysMsg.message });
-      if (!isParallel) {
-        this.db.updateSessionStatus(sessionId, 'failed', undefined);
-        this.sseHub.broadcast(sessionId, {
-          type: 'session_status',
-          sessionId,
-          status: 'failed',
-          activeBotId: undefined,
-          activeBotIds: [],
-          queuePlan: this.getQueuePlan(sessionId),
-        });
-        state.queue = [];
-      } else {
-        state.activeBotIds.delete(item.botId);
-        if (state.activeBotIds.size > 0) {
-          state.activeBotId = state.activeBotIds.values().next().value;
-          this.sseHub.broadcast(sessionId, {
-            type: 'session_status',
-            sessionId,
-            status: 'running',
-            activeBotId: state.activeBotId,
-            activeBotIds: Array.from(state.activeBotIds),
-            queuePlan: this.getQueuePlan(sessionId),
-          });
-        }
-      }
+      this.db.updateSessionStatus(sessionId, 'failed', undefined);
+      this.sseHub.broadcast(sessionId, {
+        type: 'session_status',
+        sessionId,
+        status: 'failed',
+        activeBotId: undefined,
+        activeBotIds: [],
+        queuePlan: this.getQueuePlan(sessionId),
+      });
+      state.queue = [];
       return 'failed';
     }
 
@@ -960,9 +875,6 @@ export class GroupRouter {
           aborted: true,
         },
       });
-      if (isParallel) {
-        state.activeBotIds.delete(item.botId);
-      }
       return 'cancelled';
     }
 
@@ -1006,21 +918,6 @@ export class GroupRouter {
       },
     });
 
-    if (isParallel) {
-      state.activeBotIds.delete(item.botId);
-      if (state.activeBotIds.size > 0) {
-        state.activeBotId = state.activeBotIds.values().next().value;
-        this.sseHub.broadcast(sessionId, {
-          type: 'session_status',
-          sessionId,
-          status: 'running',
-          activeBotId: state.activeBotId,
-          activeBotIds: Array.from(state.activeBotIds),
-          queuePlan: this.getQueuePlan(sessionId),
-        });
-      }
-    }
-
     return 'success';
   }
 
@@ -1032,20 +929,8 @@ export class GroupRouter {
 
     try {
       while (!this.closed && !this.draining && state.queue.length > 0) {
-        const frontItem = state.queue[0];
-        const isParallel = Boolean(frontItem.parallelGroupId);
-        const rawBatch: QueueItem[] = [];
-        if (isParallel) {
-          const groupId = frontItem.parallelGroupId!;
-          while (state.queue.length > 0 && state.queue[0].parallelGroupId === groupId) {
-            rawBatch.push(state.queue.shift()!);
-          }
-        } else {
-          rawBatch.push(state.queue.shift()!);
-        }
-
-        const validBatch = rawBatch.filter((item) => item.generation === state.generation);
-        if (validBatch.length === 0) continue;
+        const item = state.queue.shift()!;
+        if (item.generation !== state.generation) continue;
 
         const session = this.db.getSession(sessionId);
         if (!session) break;
@@ -1053,83 +938,51 @@ export class GroupRouter {
         const validBotIds = this.getValidBotIds(session);
         const sessionOwner = this.getSessionOwner(sessionId, session);
 
-        const activeBatch: QueueItem[] = [];
-        if (!isParallel) {
-          const item = validBatch[0];
-          if (!validBotIds.has(item.botId)) {
-            console.warn(`[group-router] Skipping turn for bot @${item.botId}: no longer a member of session ${sessionId}`);
-            continue;
-          }
-          const bot = this.db.getBot(item.botId);
-          if (!bot) {
-            const sysMsg = this.db.createMessage({
-              id: `msg_${randomUUID()}`,
-              sessionId,
-              role: 'system',
-              content: `Bot @${item.botId} not found.`,
-            });
-            this.sseHub.broadcast(sessionId, { type: 'message_created', message: sysMsg.message });
-            this.db.updateSessionStatus(sessionId, 'failed', undefined);
-            this.sseHub.broadcast(sessionId, {
-              type: 'session_status',
-              sessionId,
-              status: 'failed',
-              activeBotId: undefined,
-              activeBotIds: [],
-              queuePlan: this.getQueuePlan(sessionId),
-            });
-            state.queue = [];
-            break;
-          }
-          const botOwner = this.db.getNodeOwner(bot.nodeId);
-          if (sessionOwner && botOwner && botOwner !== sessionOwner && !this.db.canUserUseBot(item.botId, sessionOwner)) {
-            console.warn(`[group-router] Skipping turn for bot @${item.botId}: owner mismatch (session: ${sessionOwner}, bot: ${botOwner})`);
-            continue;
-          }
-          activeBatch.push(item);
-        } else {
-          for (const item of validBatch) {
-            if (!validBotIds.has(item.botId)) {
-              console.warn(`[group-router] Skipping turn for bot @${item.botId}: no longer a member of session ${sessionId}`);
-              continue;
-            }
-            const bot = this.db.getBot(item.botId);
-            if (!bot) continue;
-            const botOwner = this.db.getNodeOwner(bot.nodeId);
-            if (sessionOwner && botOwner && botOwner !== sessionOwner && !this.db.canUserUseBot(item.botId, sessionOwner)) continue;
-            activeBatch.push(item);
-          }
+        if (!validBotIds.has(item.botId)) {
+          console.warn(`[group-router] Skipping turn for bot @${item.botId}: no longer a member of session ${sessionId}`);
+          continue;
+        }
+        const bot = this.db.getBot(item.botId);
+        if (!bot) {
+          const sysMsg = this.db.createMessage({
+            id: `msg_${randomUUID()}`,
+            sessionId,
+            role: 'system',
+            content: `Bot @${item.botId} not found.`,
+          });
+          this.sseHub.broadcast(sessionId, { type: 'message_created', message: sysMsg.message });
+          this.db.updateSessionStatus(sessionId, 'failed', undefined);
+          this.sseHub.broadcast(sessionId, {
+            type: 'session_status',
+            sessionId,
+            status: 'failed',
+            activeBotId: undefined,
+            activeBotIds: [],
+            queuePlan: this.getQueuePlan(sessionId),
+          });
+          state.queue = [];
+          break;
+        }
+        const botOwner = this.db.getNodeOwner(bot.nodeId);
+        if (sessionOwner && botOwner && botOwner !== sessionOwner && !this.db.canUserUseBot(item.botId, sessionOwner)) {
+          console.warn(`[group-router] Skipping turn for bot @${item.botId}: owner mismatch (session: ${sessionOwner}, bot: ${botOwner})`);
+          continue;
         }
 
-        if (activeBatch.length === 0) continue;
-
-        let anyOffline = false;
-        for (const item of activeBatch) {
-          const bot = this.db.getBot(item.botId)!;
-          const rpc = this.connections.getNodeRpc(bot.nodeId);
-          if (!rpc) {
-            anyOffline = true;
-            break;
-          }
-        }
-        if (anyOffline) {
-          for (const item of activeBatch) {
-            const bot = this.db.getBot(item.botId);
-            if (bot && !this.connections.getNodeRpc(bot.nodeId)) {
-              this.db.enqueueOutboundTask({
-                nodeId: bot.nodeId,
-                botId: item.botId,
-                sessionId,
-                taskType: 'turn',
-                payload: {
-                  generation: item.generation,
-                  wakeupMessage: item.wakeupMessage,
-                  commandText: item.commandText,
-                },
-              });
-            }
-          }
-          state.queue.unshift(...activeBatch);
+        const rpc = this.connections.getNodeRpc(bot.nodeId);
+        if (!rpc) {
+          this.db.enqueueOutboundTask({
+            nodeId: bot.nodeId,
+            botId: item.botId,
+            sessionId,
+            taskType: 'turn',
+            payload: {
+              generation: item.generation,
+              wakeupMessage: item.wakeupMessage,
+              commandText: item.commandText,
+            },
+          });
+          state.queue.unshift(item);
           this.db.updateSessionStatus(sessionId, 'queued', undefined);
           this.sseHub.broadcast(sessionId, {
             type: 'session_status',
@@ -1142,74 +995,33 @@ export class GroupRouter {
           break;
         }
 
-        if (isParallel) {
-          state.activeBotId = activeBatch[0].botId;
-          state.activeBotIds = new Set(activeBatch.map((item) => item.botId));
-          this.db.updateSessionStatus(sessionId, 'running', state.activeBotId);
-          this.sseHub.broadcast(sessionId, {
-            type: 'session_status',
-            sessionId,
-            status: 'running',
-            activeBotId: state.activeBotId,
-            activeBotIds: Array.from(state.activeBotIds),
-            queuePlan: this.getQueuePlan(sessionId),
-          });
-        } else {
-          const item = activeBatch[0];
-          state.activeBotId = item.botId;
-          state.activeBotIds = new Set([item.botId]);
-          this.db.updateSessionStatus(sessionId, 'running', item.botId);
-          this.sseHub.broadcast(sessionId, {
-            type: 'session_status',
-            sessionId,
-            status: 'running',
-            activeBotId: item.botId,
-            activeBotIds: [item.botId],
-            queuePlan: this.getQueuePlan(sessionId),
-          });
-        }
+        state.activeBotId = item.botId;
+        state.activeBotIds = new Set([item.botId]);
+        this.db.updateSessionStatus(sessionId, 'running', item.botId);
+        this.sseHub.broadcast(sessionId, {
+          type: 'session_status',
+          sessionId,
+          status: 'running',
+          activeBotId: item.botId,
+          activeBotIds: [item.botId],
+          queuePlan: this.getQueuePlan(sessionId),
+        });
 
         const turnGen = state.generation;
 
-        const preparedItems: PreparedTurnItem[] = activeBatch.map((item) => {
-          const turnInput = this.prepareTurnInput(session, item);
-          const bot = this.db.getBot(item.botId)!;
-          const rpc = this.connections.getNodeRpc(bot.nodeId)!;
-          return {
-            item,
-            bot,
-            rpc,
-            ...turnInput,
-          };
-        });
+        const turnInput = this.prepareTurnInput(session, item);
+        const prep: PreparedTurnItem = { item, bot, rpc, ...turnInput };
 
-        if (isParallel) {
-          await Promise.all(
-            preparedItems.map((prep) =>
-              this.executeTurn(
-                session,
-                state,
-                prep,
-                buildGroupContextPrompt(session, this.db, prep.item.botId),
-                validBotIds,
-                turnGen,
-                true
-              )
-            )
-          );
-        } else {
-          const result = await this.executeTurn(
-            session,
-            state,
-            preparedItems[0],
-            buildGroupContextPrompt(session, this.db, preparedItems[0].item.botId),
-            validBotIds,
-            turnGen,
-            false
-          );
-          if (result === 'failed') {
-            break;
-          }
+        const result = await this.executeTurn(
+          session,
+          state,
+          prep,
+          buildGroupContextPrompt(session, this.db, item.botId),
+          validBotIds,
+          turnGen
+        );
+        if (result === 'failed') {
+          break;
         }
 
         state.activeBotIds.clear();

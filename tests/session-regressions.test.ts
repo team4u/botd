@@ -378,7 +378,7 @@ test('4. 持久 db 重新打开 pending mark 仍在', async () => {
   }
 });
 
-test('5. remove 成员后 trigger disabled/webhook 403/直接 handleWakeup 拒绝、调度阶段不 run 移除成员', async (t) => {
+test('5. remove 成员后 webhook 403/直接 handleWakeup 拒绝、调度阶段不 run 移除成员', async (t) => {
   const ctx = await createTestContext(t);
   const { user, cookie } = ctx;
   ctx.registerNodeWithBots(user.id, 'node_rem', ['bot_lead', 'bot_stay', 'bot_rem']);
@@ -402,7 +402,7 @@ test('5. remove 成员后 trigger disabled/webhook 403/直接 handleWakeup 拒�
   const triggerId = trgRes.json.id;
   const token = trgRes.json.token;
 
-  let trgInDb = ctx.hub.db.getTrigger(triggerId)!;
+  const trgInDb = ctx.hub.db.getTrigger(triggerId)!;
   assert.equal(trgInDb.enabled, true);
 
   // Remove bot_rem by changing lead to bot_stay via PATCH
@@ -411,11 +411,7 @@ test('5. remove 成员后 trigger disabled/webhook 403/直接 handleWakeup 拒�
   }, cookie);
   assert.equal(patchRes.status, 200);
 
-  // 1. Verify trigger was disabled in DB
-  trgInDb = ctx.hub.db.getTrigger(triggerId)!;
-  assert.equal(trgInDb.enabled, false);
-
-  // 2. Webhook call returns 403
+  // 1. Webhook call returns 403（调度阶段 canRunBot 防线拒绝并停用 trigger）
   const hookRes1 = await ctx.jsonRequest(`/api/webhooks/${token}`, 'POST', { message: 'hello' });
   assert.equal(hookRes1.status, 403);
 
