@@ -201,7 +201,7 @@ test('db.savePendingAsk / getPendingAsksForSession 持久化、状态更新与�
   assert.equal(db2.getPendingAsksForSession('sess_test').length, 0, 'deleteSession 应同步清理 pending_asks 行');
 });
 
-test('并行工作流执行时，session_status SSE 事件携带完整 activeBotIds 数组与动态收敛', async (t: TestContext) => {
+test('会话运行时，session_status SSE 事件携带 activeBotIds 数组', async (t: TestContext) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-parallel-sse-'));
   const dbPath = path.join(dir, 'hub.sqlite');
 

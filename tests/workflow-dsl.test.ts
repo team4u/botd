@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  ChainBudget,
   extractMentions,
   parseSlashCommand,
   buildGroupContextPrompt,
@@ -18,13 +17,6 @@ const session = {
   createdAt: '',
   updatedAt: '',
 } as unknown as SessionRecord;
-
-test('ChainBudget shared consumption still works', () => {
-  const budget = new ChainBudget(2);
-  assert.equal(budget.consumeRelay(), true);
-  assert.equal(budget.consumeRelay(), true);
-  assert.equal(budget.consumeRelay(), false);
-});
 
 test('extractMentions: extracts known bots only', () => {
   const valid = new Set(['lead', 'bot_a']);

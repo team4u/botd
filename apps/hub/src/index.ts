@@ -966,19 +966,6 @@ export function createHub(options?: HubOptions): HubInstance {
       await router.cancelSession(id);
     }
 
-    // 成员移除时禁用相应 trigger，避免旧任务造成跨用户调用
-    const oldMemberIds = new Set([session.leadBotId, ...session.memberBotIds]);
-    const newMemberIds = new Set(memberBotIds);
-    const removedBotIds = [...oldMemberIds].filter((botId) => !newMemberIds.has(botId));
-    if (removedBotIds.length > 0) {
-      const triggers = db.listSessionTriggers(id);
-      for (const trg of triggers) {
-        if (removedBotIds.includes(trg.botId) && trg.enabled) {
-          db.updateTrigger(trg.id, { enabled: false });
-        }
-      }
-    }
-
     const updated = db.updateSession(id, {
       title: body.title?.trim(),
       mode,
