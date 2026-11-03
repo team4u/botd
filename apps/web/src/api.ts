@@ -36,6 +36,7 @@ import type {
   AutomationEventRecord,
   NotificationOutboxRecord,
   SubagentRunRecord,
+  WorkspaceDiffResult,
 } from '@botd/protocol';
 import type { UserInfo } from './types.js';
 
@@ -831,6 +832,18 @@ export const api = {
     return request<{ job: BgJobRecord }>(
       `/api/nodes/${encodeURIComponent(nodeId)}/bg-jobs/${encodeURIComponent(jobId)}/kill`,
       { method: 'POST', body: JSON.stringify({}) }
+    );
+  },
+
+  // BOT 工作区代码变更（只读 Git diff）
+  async getWorkspaceDiff(
+    nodeId: string,
+    botId: string,
+    sessionId?: string
+  ): Promise<WorkspaceDiffResult> {
+    const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : '';
+    return request<WorkspaceDiffResult>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/bots/${encodeURIComponent(botId)}/diff${query}`
     );
   },
 };

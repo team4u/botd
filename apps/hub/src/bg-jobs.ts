@@ -1,5 +1,5 @@
 import type { Hono } from 'hono';
-import type { BgJobRecord, UserRecord } from '@botd/protocol';
+import { isSafeId, type BgJobRecord, type UserRecord, type WorkspaceDiffResult } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
 import type { NodeConnectionManager } from './ws-hub.js';
 import { resolveOwnedNodeRpc } from './http-helpers.js';
@@ -68,5 +68,32 @@ export function registerBgJobRoutes(
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to kill background job' }, 500);
     }
+  });
+
+  // BOT 工作区代码变更（只读）：节点 owner 或可使用该 BOT 的用户（共享团队 BOT）可查
+  app.get('/api/nodes/:nodeId/bots/:botId/diff', async (c) => {
+    const { nodeId, botId } = c.req.param();
+    if (!isSafeId(botId)) {
+      return c.json({ error: 'Invalid bot ID' }, 400);
+    }
+
+    // 先按 BOT 归属鉴权（共享团队 BOT 也放行），否则回退节点 owner 校验
+    const bot = db.getBot(botId);
+    let rpc: ReturnType<NodeConnectionManager['getNodeRpc']>;
+    if (bot && bot.nodeId === nodeId && db.canUserUseBot(botId, c.get('user').id)) {
+      rpc = connections.getNodeRpc(nodeId);
+      if (!rpc) return c.json({ error: 'Node is offline' }, 503);
+    } else {
+      const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+      if (!nodeRpc.ok) return nodeRpc.response;
+      rpc = nodeRpc.rpc;
+    }
+
+    const sessionId = c.req.query('sessionId') || undefined;
+    const result = (await rpc.getWorkspaceDiff?.({ botId, sessionId }).catch(() => undefined)) ?? undefined;
+    if (!result) {
+      return c.json({ error: '节点版本过旧，不支持代码变更查询' }, 503);
+    }
+    return c.json(result satisfies WorkspaceDiffResult);
   });
 }

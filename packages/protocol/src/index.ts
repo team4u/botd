@@ -196,6 +196,30 @@ export interface AutomationEventRecord {
 
 export type BgJobStatus = 'running' | 'done' | 'failed' | 'killed';
 
+/** 工作区代码变更文件状态：M 修改 / A 新增 / D 删除 / R 重命名 / U 冲突 */
+export type WorkspaceDiffStatus = 'M' | 'A' | 'D' | 'R' | 'U';
+
+/** 工作区单个文件的变更摘要（含 unified diff 文本，可能截断） */
+export interface WorkspaceDiffFile {
+  path: string;
+  status: WorkspaceDiffStatus;
+  additions: number;
+  deletions: number;
+  diff: string;
+  truncated?: boolean;
+}
+
+/** 工作区代码变更查询结果：非 Git 工作区时 files 为空数组 */
+export interface WorkspaceDiffResult {
+  isGitRepo: boolean;
+  repoRoot: string;
+  branch?: string;
+  files: WorkspaceDiffFile[];
+  totalAdditions: number;
+  totalDeletions: number;
+  truncated?: boolean;
+}
+
 export interface BgJobRecord {
   id: string;
   sessionId: string;
@@ -692,6 +716,8 @@ export interface NodeRpcFunctions {
   listBgJobs?(filter?: { sessionId?: string; botId?: string }): Promise<BgJobRecord[]>;
   getBgJobLogs?(jobId: string, tailLines?: number): Promise<{ job: BgJobRecord; logs: string }>;
   killBgJob?(jobId: string): Promise<BgJobRecord>;
+  /** 查询 BOT 工作区的 Git 净变更（或会话触碰文件），供前端「代码变更」抽屉展示 */
+  getWorkspaceDiff?(input: { botId: string; sessionId?: string }): Promise<WorkspaceDiffResult>;
 }
 
 // HTTP shapes shared by the browser and Hub. Responses contain these values directly.

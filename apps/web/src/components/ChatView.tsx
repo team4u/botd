@@ -14,6 +14,7 @@ import {
   Hourglass,
   Package,
   SquareTerminal,
+  FileDiff,
   Share2,
   History as HistoryIcon,
 } from 'lucide-react';
@@ -36,6 +37,7 @@ import { AskCard } from './AskCard';
 import { TriggersModal } from './TriggersModal';
 import { ArtifactsDrawer } from './ArtifactsDrawer';
 import { BgJobsDrawer } from './BgJobsDrawer';
+import { WorkspaceDiffDrawer } from './WorkspaceDiffDrawer';
 import { ShareSessionModal } from './ShareSessionModal';
 import { BotHistoryDrawer } from './BotHistoryDrawer';
 import { SubagentRunDrawer } from './SubagentRunDrawer';
@@ -292,6 +294,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [hasRunningBgJobs, setHasRunningBgJobs] = useState(false);
   const [bgJobs, setBgJobs] = useState<BgJobRecord[]>([]);
   const [selectedBgJobId, setSelectedBgJobId] = useState<string | null>(null);
+
+  // ===== 代码变更抽屉 =====
+  const [diffDrawerOpen, setDiffDrawerOpen] = useState(false);
+  const [insertTextRequest, setInsertTextRequest] = useState<{ text: string; seq: number } | null>(null);
 
   // ===== 会话切换守卫 =====
   // 异步响应提交前校验会话未变，防止 A 会话的在途响应覆盖 B 会话的界面
@@ -810,6 +816,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
             )}
           </div>
 
+          {/* 代码变更抽屉入口：查看 BOT 工作区 Git 净变更 */}
+          <button
+            type="button"
+            onClick={() => setDiffDrawerOpen(true)}
+            className="h-8 w-8 rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-center transition-colors cursor-pointer"
+            title="代码变更"
+            aria-label="代码变更"
+          >
+            <FileDiff className="w-4 h-4" />
+          </button>
+
           {/* 更多操作下拉菜单：收纳分享、重命名、定时与触发器、清空、删除等低频操作（绝不与外显图标重复） */}
           <div className="relative" ref={menuRef}>
             <button
@@ -1016,6 +1033,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         editingMessage={editingMessage}
         onSubmitEditing={handleSubmitEdit}
         onCancelEditing={() => setEditingMessage(null)}
+        insertTextRequest={insertTextRequest}
       />
 
       {/* 移动端软键盘动态避让垫片：iOS Safari 键盘弹起时垫起输入框，消除悬空与空白 */}
@@ -1065,6 +1083,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
         sessionId={session.id}
         botMap={botMap}
         onClose={() => setArtifactsOpen(false)}
+      />
+
+      {/* 代码变更抽屉：查看工作区 Git 净变更，引用文件路径插入输入框 */}
+      <WorkspaceDiffDrawer
+        isOpen={diffDrawerOpen}
+        sessionId={session.id}
+        bot={directBot || botMap.get(session.leadBotId)}
+        messages={messages}
+        onClose={() => setDiffDrawerOpen(false)}
+        onQuoteFile={(filePath) => {
+          setInsertTextRequest({ text: `\`${filePath}\` `, seq: Date.now() });
+        }}
       />
 
       {/* 分享对话弹窗 */}

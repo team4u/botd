@@ -38,3 +38,4 @@ export {
   installResourceToNode,
   type InstallInput,
 } from './installer.js';
+export { getWorkspaceDiff } from './workspace-diff.js';
