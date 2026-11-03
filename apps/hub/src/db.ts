@@ -19,8 +19,6 @@ import type {
   PendingAskRecord,
   PlatformType,
   ResourceVisibility,
-  SessionMode,
-  SessionParticipantRecord,
   SessionRecord,
   SessionStatus,
   SubagentColor,
@@ -46,7 +44,7 @@ export interface IncrementalMessageResult {
   rowid: number;
 }
 
-export const HUB_SCHEMA_VERSION = 4;
+export const HUB_SCHEMA_VERSION = 5;
 
 const PREVIEW_MAX_LENGTH = 60;
 
@@ -436,9 +434,7 @@ export class HubDatabase {
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
-        mode TEXT NOT NULL DEFAULT 'direct',
         lead_bot_id TEXT NOT NULL,
-        member_bot_ids_json TEXT NOT NULL DEFAULT '[]',
         cursor_map_json TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL DEFAULT 'idle',
         active_bot_id TEXT,
@@ -560,15 +556,6 @@ export class HubDatabase {
         expires_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_outbound_task_queue_node ON outbound_task_queue(node_id, status);
-
-      CREATE TABLE IF NOT EXISTS session_participants (
-        session_id TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        role TEXT NOT NULL DEFAULT 'member',
-        joined_at TEXT NOT NULL,
-        PRIMARY KEY (session_id, user_id)
-      );
-      CREATE INDEX IF NOT EXISTS idx_session_participants_user ON session_participants(user_id);
     `);
 
     const migrations = [
@@ -580,7 +567,6 @@ export class HubDatabase {
       `ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE nodes ADD COLUMN owner_id TEXT`,
       `ALTER TABLE sessions ADD COLUMN owner_id TEXT`,
-      `ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE messages ADD COLUMN tool_calls_json TEXT`,
       `ALTER TABLE messages ADD COLUMN usage_json TEXT`,
       `ALTER TABLE messages ADD COLUMN attachments_json TEXT`,
@@ -848,23 +834,6 @@ export class HubDatabase {
     this.db.prepare('UPDATE users SET token_epoch = token_epoch + 1 WHERE id = ?').run(id);
   }
 
-  getUserByUsername(username: string): UserRecord | undefined {
-    const stmt = this.db.prepare('SELECT id, username, role, created_at FROM users WHERE username = ?');
-    const row = stmt.get(username) as {
-      id: string;
-      username: string;
-      role: string;
-      created_at: string;
-    } | undefined;
-    if (!row) return undefined;
-    return {
-      id: row.id,
-      username: row.username,
-      role: row.role as UserRole,
-      createdAt: row.created_at,
-    };
-  }
-
   getUser(id: string): UserRecord | undefined {
     const stmt = this.db.prepare('SELECT id, username, role, created_at FROM users WHERE id = ?');
     const row = stmt.get(id) as {
@@ -921,10 +890,8 @@ export class HubDatabase {
         this.db.prepare(`DELETE FROM automation_events WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM artifacts WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM pending_asks WHERE session_id IN (${placeholders})`).run(...sessionIds);
-        this.db.prepare(`DELETE FROM session_participants WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM outbound_task_queue WHERE session_id IN (${placeholders})`).run(...sessionIds);
       }
-      this.db.prepare('DELETE FROM session_participants WHERE user_id = ?').run(id);
       this.db.prepare('DELETE FROM sessions WHERE owner_id = ?').run(id);
       this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
     });
@@ -1225,24 +1192,20 @@ export class HubDatabase {
   createSession(input: {
     id: string;
     title: string;
-    mode: SessionMode;
     leadBotId: string;
-    memberBotIds: string[];
     ownerId: string;
     parentSessionId?: string;
   }): SessionRecord {
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
-      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id)
-      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?)
+      INSERT INTO sessions (id, title, lead_bot_id, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id)
+      VALUES (?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?)
     `);
     const leadBotId = input.leadBotId;
     stmt.run(
       input.id,
       input.title,
-      'direct',
       leadBotId,
-      JSON.stringify([leadBotId]),
       now,
       now,
       input.ownerId,
@@ -1251,9 +1214,7 @@ export class HubDatabase {
     return {
       id: input.id,
       title: input.title,
-      mode: 'direct',
       leadBotId,
-      memberBotIds: [leadBotId],
       status: 'idle',
       activeBotId: undefined,
       createdAt: now,
@@ -1263,18 +1224,15 @@ export class HubDatabase {
   }
 
   getSession(id: string): (SessionRecord & { cursorMap: Record<string, number> }) | undefined {
-    const stmt = this.db.prepare('SELECT id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, archived, pinned, parent_session_id, owner_id, created_at, updated_at FROM sessions WHERE id = ?');
+    const stmt = this.db.prepare('SELECT id, title, lead_bot_id, cursor_map_json, status, active_bot_id, archived, parent_session_id, owner_id, created_at, updated_at FROM sessions WHERE id = ?');
     const row = stmt.get(id) as {
       id: string;
       title: string;
-      mode: string;
       lead_bot_id: string;
-      member_bot_ids_json: string;
       cursor_map_json: string;
       status: string;
       active_bot_id: string | null;
       archived: number;
-      pinned: number;
       parent_session_id: string | null;
       owner_id: string | null;
       created_at: string;
@@ -1284,17 +1242,13 @@ export class HubDatabase {
     return {
       id: row.id,
       title: row.title,
-      mode: 'direct',
       leadBotId: row.lead_bot_id,
-      memberBotIds: JSON.parse(row.member_bot_ids_json || '[]'),
       cursorMap: JSON.parse(row.cursor_map_json || '{}'),
       status: row.status as SessionStatus,
       activeBotId: row.active_bot_id ?? undefined,
       archived: Boolean(row.archived),
-      pinned: Boolean(row.pinned),
       parentSessionId: row.parent_session_id ?? undefined,
       ...(row.owner_id ? { ownerId: row.owner_id } : {}),
-      participants: this.listSessionParticipants(row.id),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -1302,25 +1256,21 @@ export class HubDatabase {
 
   getAllSessions(ownerId: string): SessionRecord[] {
     const stmt = this.db.prepare(`
-      SELECT DISTINCT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.pinned, s.parent_session_id, s.owner_id, s.created_at, s.updated_at,
+      SELECT s.id, s.title, s.lead_bot_id, s.status, s.active_bot_id, s.archived, s.parent_session_id, s.owner_id, s.created_at, s.updated_at,
         (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
         (SELECT m.content FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_content,
         (SELECT m.created_at FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_at
       FROM sessions s
-      LEFT JOIN session_participants sp ON sp.session_id = s.id
-      WHERE s.owner_id = ? OR sp.user_id = ?
+      WHERE s.owner_id = ?
       ORDER BY s.updated_at DESC
     `);
-    const rows = stmt.all(ownerId, ownerId) as {
+    const rows = stmt.all(ownerId) as {
       id: string;
       title: string;
-      mode: string;
       lead_bot_id: string;
-      member_bot_ids_json: string;
       status: string;
       active_bot_id: string | null;
       archived: number;
-      pinned: number;
       parent_session_id: string | null;
       owner_id: string | null;
       created_at: string;
@@ -1333,13 +1283,10 @@ export class HubDatabase {
       return {
         id: row.id,
         title: row.title,
-        mode: 'direct',
         leadBotId: row.lead_bot_id,
-        memberBotIds: JSON.parse(row.member_bot_ids_json || '[]'),
         status: row.status as SessionStatus,
         activeBotId: row.active_bot_id ?? undefined,
         archived: Boolean(row.archived),
-        pinned: Boolean(row.pinned),
         parentSessionId: row.parent_session_id ?? undefined,
         ...(row.owner_id ? { ownerId: row.owner_id } : {}),
         createdAt: row.created_at,
@@ -1351,14 +1298,14 @@ export class HubDatabase {
     });
   }
 
-  /** 兼容别名：多用户可访问会话查询入口（含参与者） */
+  /** 兼容别名：多用户可访问会话查询入口 */
   getAccessibleSessions(userId: string): SessionRecord[] {
     return this.getAllSessions(userId);
   }
 
   listSubSessions(parentSessionId: string): SessionRecord[] {
     const stmt = this.db.prepare(`
-      SELECT s.id, s.title, s.mode, s.lead_bot_id, s.member_bot_ids_json, s.status, s.active_bot_id, s.archived, s.pinned, s.parent_session_id, s.created_at, s.updated_at,
+      SELECT s.id, s.title, s.lead_bot_id, s.status, s.active_bot_id, s.archived, s.parent_session_id, s.created_at, s.updated_at,
         (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
         (SELECT m.content FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_content,
         (SELECT m.created_at FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_at
@@ -1369,13 +1316,10 @@ export class HubDatabase {
     const rows = stmt.all(parentSessionId) as {
       id: string;
       title: string;
-      mode: string;
       lead_bot_id: string;
-      member_bot_ids_json: string;
       status: string;
       active_bot_id: string | null;
       archived: number;
-      pinned: number;
       parent_session_id: string | null;
       created_at: string;
       updated_at: string;
@@ -1387,13 +1331,10 @@ export class HubDatabase {
       return {
         id: row.id,
         title: row.title,
-        mode: 'direct',
         leadBotId: row.lead_bot_id,
-        memberBotIds: JSON.parse(row.member_bot_ids_json || '[]'),
         status: row.status as SessionStatus,
         activeBotId: row.active_bot_id ?? undefined,
         archived: Boolean(row.archived),
-        pinned: Boolean(row.pinned),
         parentSessionId: row.parent_session_id ?? undefined,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
@@ -1432,7 +1373,6 @@ export class HubDatabase {
       deleteArtifacts.run(id);
       const deletePendingAsks = this.db.prepare('DELETE FROM pending_asks WHERE session_id = ?');
       deletePendingAsks.run(id);
-      this.db.prepare('DELETE FROM session_participants WHERE session_id = ?').run(id);
       this.db.prepare('DELETE FROM outbound_task_queue WHERE session_id = ?').run(id);
       // session_shares / notification_channels 由 share.ts / channels.ts 路由注册时自建，
       // 未注册过这些路由的部署（如纯 DB 使用方）里表不存在，跳过即可
@@ -1448,55 +1388,8 @@ export class HubDatabase {
     });
   }
 
-  // --- Session Participants ---
-  listSessionParticipants(sessionId: string): SessionParticipantRecord[] {
-    const stmt = this.db.prepare(`
-      SELECT sp.session_id, sp.user_id, sp.role, sp.joined_at, u.username
-      FROM session_participants sp
-      LEFT JOIN users u ON u.id = sp.user_id
-      WHERE sp.session_id = ?
-      ORDER BY sp.joined_at ASC
-    `);
-    const rows = stmt.all(sessionId) as {
-      session_id: string;
-      user_id: string;
-      role: 'owner' | 'member';
-      joined_at: string;
-      username: string | null;
-    }[];
-    return rows.map((r) => ({
-      sessionId: r.session_id,
-      userId: r.user_id,
-      role: r.role,
-      joinedAt: r.joined_at,
-      ...(r.username ? { username: r.username } : {}),
-    }));
-  }
-
-  addSessionParticipant(sessionId: string, userId: string, role: 'owner' | 'member' = 'member'): void {
-    const now = new Date().toISOString();
-    const stmt = this.db.prepare(`
-      INSERT INTO session_participants (session_id, user_id, role, joined_at)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(session_id, user_id) DO UPDATE SET role = excluded.role
-    `);
-    stmt.run(sessionId, userId, role, now);
-  }
-
-  removeSessionParticipant(sessionId: string, userId: string): void {
-    const stmt = this.db.prepare('DELETE FROM session_participants WHERE session_id = ? AND user_id = ?');
-    stmt.run(sessionId, userId);
-  }
-
-  isSessionParticipant(sessionId: string, userId: string): boolean {
-    const stmt = this.db.prepare('SELECT 1 FROM session_participants WHERE session_id = ? AND user_id = ? LIMIT 1');
-    return stmt.get(sessionId, userId) !== undefined;
-  }
-
   canUserAccessSession(sessionId: string, userId: string): boolean {
-    const ownerId = this.getSessionOwner(sessionId);
-    if (ownerId === userId) return true;
-    return this.isSessionParticipant(sessionId, userId);
+    return this.getSessionOwner(sessionId) === userId;
   }
 
   /**
@@ -1519,17 +1412,14 @@ export class HubDatabase {
     // 只要链上任一会话调度过该节点上的 Bot，节点即可继续操作派生出的子会话
     let current: SessionRecord | undefined = session;
     for (let depth = 0; current && depth < 8; depth++) {
-      const memberBotIds = [current.leadBotId, ...current.memberBotIds];
-      for (const botId of memberBotIds) {
-        const bot = this.getBot(botId);
-        if (!bot) continue;
+      const bot = this.getBot(current.leadBotId);
+      if (bot) {
         // bot 本体或其父 Bot（子代理随主 Bot 所在节点执行）位于该节点
         const botOnNode =
           bot.nodeId === nodeId ||
           Boolean(bot.parentBotId && this.getBot(bot.parentBotId)?.nodeId === nodeId);
-        if (!botOnNode) continue;
         // 会话所有者必须有权使用该 Bot（私有 Bot 不得借节点凭据越权进入他人会话）
-        if (this.canUserUseBot(botId, sessionOwner)) return true;
+        if (botOnNode && this.canUserUseBot(current.leadBotId, sessionOwner)) return true;
       }
       current = current.parentSessionId ? this.getSession(current.parentSessionId) : undefined;
     }
@@ -1715,8 +1605,8 @@ export class HubDatabase {
     const now = new Date().toISOString();
     const newSessionId = `sess_${randomUUID()}`;
     const insertSession = this.db.prepare(`
-      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id)
-      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?)
+      INSERT INTO sessions (id, title, lead_bot_id, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id)
+      VALUES (?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?)
     `);
 
     const rows = this.db.prepare(`
@@ -1755,9 +1645,7 @@ export class HubDatabase {
       insertSession.run(
         newSessionId,
         `${source.title}（分叉）`,
-        'direct',
         source.leadBotId,
-        JSON.stringify([source.leadBotId]),
         now,
         now,
         ownerId,
@@ -1832,13 +1720,10 @@ export class HubDatabase {
     id: string,
     patch: {
       title?: string;
-      mode?: SessionMode;
       leadBotId?: string;
-      memberBotIds?: string[];
       status?: SessionStatus;
       activeBotId?: string;
       archived?: boolean;
-      pinned?: boolean;
       parentSessionId?: string;
     }
   ): SessionRecord | undefined {
@@ -1846,29 +1731,23 @@ export class HubDatabase {
     if (!session) return undefined;
     const now = new Date().toISOString();
     const title = patch.title ?? session.title;
-    const mode = 'direct';
     const leadBotId = patch.leadBotId ?? session.leadBotId;
-    const memberBotIds = [leadBotId];
     const status = patch.status ?? session.status;
     const activeBotId = patch.activeBotId !== undefined ? patch.activeBotId : session.activeBotId;
     const archived = patch.archived ?? session.archived ?? false;
-    const pinned = patch.pinned ?? session.pinned ?? false;
     const parentSessionId = patch.parentSessionId !== undefined ? patch.parentSessionId : session.parentSessionId;
 
     const stmt = this.db.prepare(`
       UPDATE sessions
-      SET title = ?, mode = ?, lead_bot_id = ?, member_bot_ids_json = ?, status = ?, active_bot_id = ?, archived = ?, pinned = ?, parent_session_id = ?, updated_at = ?
+      SET title = ?, lead_bot_id = ?, status = ?, active_bot_id = ?, archived = ?, parent_session_id = ?, updated_at = ?
       WHERE id = ?
     `);
     stmt.run(
       title,
-      mode,
       leadBotId,
-      JSON.stringify(memberBotIds),
       status,
       activeBotId ?? null,
       archived ? 1 : 0,
-      pinned ? 1 : 0,
       parentSessionId ?? null,
       now,
       id
@@ -1877,13 +1756,10 @@ export class HubDatabase {
     return {
       id,
       title,
-      mode,
       leadBotId,
-      memberBotIds,
       status,
       activeBotId: activeBotId ?? undefined,
       archived,
-      pinned,
       parentSessionId: parentSessionId ?? undefined,
       createdAt: session.createdAt,
       updatedAt: now,
@@ -2141,7 +2017,7 @@ export class HubDatabase {
     const selectCols = MESSAGE_SELECT_COLUMNS.split(', ').map(c => `m.${c}`).join(', ');
     let sql = `
       SELECT ${selectCols},
-        s.title AS session_title, s.mode AS session_mode, s.archived AS session_archived
+        s.title AS session_title, s.archived AS session_archived
       FROM messages m JOIN sessions s ON m.session_id = s.id
       WHERE s.owner_id = ?
     `;
@@ -2153,13 +2029,11 @@ export class HubDatabase {
     params.push(pattern, limit);
     const rows = this.db.prepare(sql).all(...params) as (MessageRow & {
       session_title: string;
-      session_mode: string;
       session_archived: number;
     })[];
     return rows.map((row) => ({
       message: mapMessageRow(row),
       sessionTitle: row.session_title,
-      sessionMode: row.session_mode as SessionMode,
       sessionArchived: Boolean(row.session_archived),
     }));
   }

@@ -54,9 +54,7 @@ test('Session reset pending table persists and cleans up with session/user delet
   db.createSession({
     id: 'sess_1',
     title: 'Test Session',
-    mode: 'direct',
     leadBotId: 'bot_1',
-    memberBotIds: ['bot_1'],
     ownerId: 'user_1',
   });
 
@@ -85,9 +83,7 @@ test('Session reset pending table persists and cleans up with session/user delet
   db.createSession({
     id: 'sess_2',
     title: 'Session 2',
-    mode: 'direct',
     leadBotId: 'bot_1',
-    memberBotIds: ['bot_1'],
     ownerId: 'user_1',
   });
   db.markSessionResetPending('sess_2', 'bot_1');
@@ -112,9 +108,7 @@ test('Database helper contracts: getSessionOwner and row mappings', async (t) =>
   db.createSession({
     id: 'sess_contract',
     title: 'Owner Test',
-    mode: 'direct',
     leadBotId: 'bot_1',
-    memberBotIds: ['bot_1'],
     ownerId: 'user_1',
   });
 
@@ -232,9 +226,7 @@ test('Access control: cross-user owner rejected, same-owner cross-node allowed',
   db.createSession({
     id: 'session_1',
     title: 'Shared Session',
-    mode: 'direct',
     leadBotId: 'bot_1a',
-    memberBotIds: ['bot_1a'],
     ownerId: 'user_1',
   });
 
@@ -316,9 +308,7 @@ test('Upload size limit and validation are unified', async (t) => {
   db.createSession({
     id: 'sess_size',
     title: 'Size Check',
-    mode: 'direct',
     leadBotId: 'bot_lead',
-    memberBotIds: ['bot_lead'],
     ownerId: 'user_u',
   });
 
@@ -391,9 +381,7 @@ test('Fork session: attachments rewritten, cross-owner clone rejected, survives 
   db.createSession({
     id: 'sess_victim',
     title: 'Victim Session',
-    mode: 'direct',
     leadBotId: 'bot_victim',
-    memberBotIds: ['bot_victim'],
     ownerId: 'user_victim',
   });
   const victimArt = service.uploadArtifact(
@@ -409,9 +397,7 @@ test('Fork session: attachments rewritten, cross-owner clone rejected, survives 
   db.createSession({
     id: 'sess_attacker',
     title: 'Attacker Session',
-    mode: 'direct',
     leadBotId: 'bot_lead',
-    memberBotIds: ['bot_lead'],
     ownerId: 'user_f',
   });
 

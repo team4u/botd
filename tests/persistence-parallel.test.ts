@@ -192,9 +192,7 @@ test('db.savePendingAsk / getPendingAsksForSession 持久化、状态更新与�
   db2.createSession({
     id: 'sess_test',
     title: 'Test Session',
-    mode: 'direct',
     leadBotId: 'bot_gamma',
-    memberBotIds: ['bot_gamma'],
     ownerId: 'user_admin',
   });
   db2.deleteSession('sess_test');
@@ -319,9 +317,7 @@ test('并行工作流执行时，session_status SSE 事件携带完整 activeBot
   // 创建单主控会话
   const session = await json<SessionRecord>('/api/sessions', 'POST', {
     title: 'Workflow Session',
-    mode: 'direct',
     leadBotId: 'lead-judge',
-    memberBotIds: ['lead-judge'],
   });
 
   // 监听会话 SSE 事件流

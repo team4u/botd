@@ -815,18 +815,6 @@ export const App: React.FC = () => {
             setSubagentRunsMap({});
             // 不区分当前/其他会话：全局同一时刻只有一个取消动作在飞行中，任一会话结束即复位
             setCancelling(false);
-          } else if (event.status === 'running' && event.activeBotIds && event.activeBotIds.length > 1) {
-            setStreamingStatesMap((prevMap) => {
-              let updated = false;
-              const nextMap = { ...prevMap };
-              for (const botId of event.activeBotIds!) {
-                if (!nextMap[botId]) {
-                  nextMap[botId] = { botId, delta: '', tools: [] };
-                  updated = true;
-                }
-              }
-              return updated ? nextMap : prevMap;
-            });
           }
           break;
         }
@@ -1144,9 +1132,7 @@ export const App: React.FC = () => {
     try {
       const created = await api.createSession({
         title: bot.name || bot.id,
-        mode: 'direct',
         leadBotId: bot.id,
-        memberBotIds: [bot.id],
       });
       setSessions((prev) => [created, ...prev]);
       navigate({ sessionId: created.id, view: 'chat' });
@@ -1171,9 +1157,7 @@ export const App: React.FC = () => {
     try {
       const input: CreateSessionInput = {
         title: botMap.get(session.leadBotId)?.name || session.title,
-        mode: 'direct',
         leadBotId: session.leadBotId,
-        memberBotIds: [session.leadBotId],
       };
 
       const created = await api.createSession(input);

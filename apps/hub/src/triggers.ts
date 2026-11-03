@@ -176,9 +176,7 @@ export function registerTriggerRoutes(
     const childSession = db.createSession({
       id: childSessionId,
       title: childTitle,
-      mode: 'direct',
       leadBotId: trigger.botId,
-      memberBotIds: [trigger.botId],
       ownerId: trigger.ownerId,
       parentSessionId: trigger.sessionId,
     });
@@ -416,8 +414,7 @@ export function registerTriggerRoutes(
     const kind = body.kind as TriggerKind;
 
     // botId 必须是会话成员
-    const memberIds = new Set([session.leadBotId, ...session.memberBotIds]);
-    if (!memberIds.has(body.botId)) {
+    if (body.botId !== session.leadBotId) {
       return c.json({ error: `Bot ${body.botId} is not a member of the session` }, 400);
     }
 

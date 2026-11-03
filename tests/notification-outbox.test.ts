@@ -195,9 +195,7 @@ test('tellPolicy=needed：仅放行 ask_request 与失败回调，静默普通�
 
   const sessionRes = await jsonRequest('/api/sessions', 'POST', {
     title: 'needed 策略会话',
-    mode: 'direct',
     leadBotId: 'bot-outbox',
-    memberBotIds: ['bot-outbox'],
   });
   assert.equal(sessionRes.status, 200);
   const sessionId = sessionRes.json.id;
@@ -289,9 +287,7 @@ test('tellPolicy=never：完全静默不推送', async (t) => {
 
   const sessionRes = await jsonRequest('/api/sessions', 'POST', {
     title: 'never 策略会话',
-    mode: 'direct',
     leadBotId: 'bot-outbox',
-    memberBotIds: ['bot-outbox'],
   });
   const sessionId = sessionRes.json.id;
 
@@ -336,17 +332,13 @@ test('子会话事件向上继承：命中父会话配置的通知通道', async
   const parent = hub.db.createSession({
     id: 'sess_parent_inherit',
     title: '父会话',
-    mode: 'direct',
     leadBotId: 'bot-outbox',
-    memberBotIds: ['bot-outbox'],
     ownerId: adminUser.id,
   });
   const child = hub.db.createSession({
     id: 'sess_child_inherit',
     title: '自动化子会话',
-    mode: 'direct',
     leadBotId: 'bot-outbox',
-    memberBotIds: ['bot-outbox'],
     ownerId: adminUser.id,
     parentSessionId: parent.id,
   });
@@ -424,9 +416,7 @@ test('子会话事件向上继承：命中父会话配置的通知通道', async
   const stranger = hub.db.createSession({
     id: 'sess_stranger',
     title: '无关会话',
-    mode: 'direct',
     leadBotId: 'bot-outbox',
-    memberBotIds: ['bot-outbox'],
     ownerId: adminUser.id,
   });
   mock.requests.length = 0;
@@ -460,9 +450,7 @@ test('Outbox 重试闭环：首投 500 落 pending，退避重试后转 sent', a
 
   const sessionRes = await jsonRequest('/api/sessions', 'POST', {
     title: 'Outbox 重试会话',
-    mode: 'direct',
     leadBotId: 'bot-outbox',
-    memberBotIds: ['bot-outbox'],
   });
   const sessionId = sessionRes.json.id;
 
@@ -523,9 +511,7 @@ test('PATCH 通道支持更新 tellPolicy 且校验非法值', async (t) => {
 
   const sessionRes = await jsonRequest('/api/sessions', 'POST', {
     title: '策略更新会话',
-    mode: 'direct',
     leadBotId: 'bot-outbox',
-    memberBotIds: ['bot-outbox'],
   });
   const sessionId = sessionRes.json.id;
 

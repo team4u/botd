@@ -194,9 +194,7 @@ test('Task 2.1 & 2.2: pending_asks with previewType, previewContent, timeoutSeco
   // Create session
   const session = await f.json<SessionRecord>('/api/sessions', 'POST', {
     title: 'Code Review Session',
-    mode: 'direct',
     leadBotId: 'ask-bot',
-    memberBotIds: ['ask-bot'],
   });
 
   // Node triggers an interactive human input ask with diff preview and timeoutSeconds = 0
@@ -256,9 +254,7 @@ test('Task 2.3: outbound_task_queue store-and-forward when node is offline and a
 
   const session = await f.json<SessionRecord>('/api/sessions', 'POST', {
     title: 'Offline Queue Test',
-    mode: 'direct',
     leadBotId: 'offline-worker',
-    memberBotIds: ['offline-worker'],
   });
 
   // Disconnect node so it goes offline
@@ -356,9 +352,7 @@ test('Task 3.1: visibility = "team" bot sharing across users and access control'
     'POST',
     {
       title: 'Bob Shared Chat',
-      mode: 'direct',
       leadBotId: 'shared-bot',
-      memberBotIds: ['shared-bot'],
     },
     bob.cookie
   );
@@ -384,98 +378,6 @@ test('Task 3.1: visibility = "team" bot sharing across users and access control'
   assert.match(botReply.content, /Reply from @shared-bot/);
 });
 
-test('Task 3.2: session_participants multi-user group session collaboration', async (t) => {
-  const f = await createMeshFixture(t);
-
-  // Create node for admin
-  await f.addNode(['bot-lead', 'bot-helper']);
-
-  // Admin creates a session
-  const groupSession = await f.json<SessionRecord>('/api/sessions', 'POST', {
-    title: 'War Room Discussion',
-    mode: 'direct',
-    leadBotId: 'bot-lead',
-    memberBotIds: ['bot-lead'],
-  });
-
-  // Create member user 'alice'
-  const alice = await f.createUser('alice', 'alice-pass', 'member');
-
-  // Alice cannot view or access the session initially -> 403 Forbidden
-  const aliceInitialAccess = await f.request(
-    `/api/sessions/${groupSession.id}/messages`,
-    'GET',
-    undefined,
-    alice.cookie
-  );
-  assert.equal(aliceInitialAccess.status, 403);
-
-  // Admin invites Alice to the session
-  const inviteRes = await f.json<{ ok: boolean; participant: any }>(
-    `/api/sessions/${groupSession.id}/participants`,
-    'POST',
-    { username: 'alice' }
-  );
-  assert.equal(inviteRes.ok, true);
-  assert.equal(inviteRes.participant.username, 'alice');
-  assert.equal(inviteRes.participant.role, 'member');
-
-  // View participants list
-  const participants = await f.json<any[]>(`/api/sessions/${groupSession.id}/participants`);
-  assert(participants.some((p) => p.userId === alice.user.id && p.username === 'alice'));
-
-  // Alice lists sessions: groupSession is now included!
-  const aliceSessions = await f.json<SessionRecord[]>('/api/sessions', 'GET', undefined, alice.cookie);
-  assert(aliceSessions.some((s) => s.id === groupSession.id));
-
-  // Alice can now read messages
-  const aliceMessages = await f.json<MessageRecord[]>(
-    `/api/sessions/${groupSession.id}/messages`,
-    'GET',
-    undefined,
-    alice.cookie
-  );
-  assert.equal(Array.isArray(aliceMessages), true);
-
-  // Alice posts a message in the session
-  await f.json(
-    `/api/sessions/${groupSession.id}/messages`,
-    'POST',
-    { content: 'Here to help debug' },
-    alice.cookie
-  );
-
-  // Check the message in DB: multi-user session stores clean content and structured sender info
-  const updatedMsgs = await f.json<MessageRecord[]>(`/api/sessions/${groupSession.id}/messages`);
-  const aliceMsg = updatedMsgs.find((m) => m.role === 'user');
-  assert(aliceMsg);
-  assert.equal(aliceMsg.content, 'Here to help debug');
-  assert.equal(aliceMsg.senderUsername, 'alice');
-  assert.equal(aliceMsg.senderUserId, alice.user.id);
-
-  // Alice tries to delete the session -> 403 Forbidden (only owner can delete)
-  const aliceDeleteRes = await f.request(`/api/sessions/${groupSession.id}`, 'DELETE', undefined, alice.cookie);
-  assert.equal(aliceDeleteRes.status, 403);
-
-  // Alice leaves the session
-  const leaveRes = await f.json<{ ok: boolean }>(
-    `/api/sessions/${groupSession.id}/participants/${alice.user.id}`,
-    'DELETE',
-    undefined,
-    alice.cookie
-  );
-  assert.equal(leaveRes.ok, true);
-
-  // After leaving, Alice can no longer access the session
-  const aliceAccessAfter = await f.request(
-    `/api/sessions/${groupSession.id}/messages`,
-    'GET',
-    undefined,
-    alice.cookie
-  );
-  assert.equal(aliceAccessAfter.status, 403);
-});
-
 test('Task 1.4: Cross-node incomingArtifacts passed into rpc.runTurn', async (t) => {
   const f = await createMeshFixture(t);
 
@@ -492,9 +394,7 @@ test('Task 1.4: Cross-node incomingArtifacts passed into rpc.runTurn', async (t)
 
   const session = await f.json<SessionRecord>('/api/sessions', 'POST', {
     title: 'Cross Node Artifacts',
-    mode: 'direct',
     leadBotId: 'bot-alice',
-    memberBotIds: ['bot-alice'],
   });
 
   // Alice uploads an artifact into the session

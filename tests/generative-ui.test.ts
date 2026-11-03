@@ -656,9 +656,7 @@ test('Hub GroupRouter.requestHumanInput 校验 UI Spec：拒绝非法 Spec，放
   db.createSession({
     id: 'sess_hub_ui',
     title: 'UI Test Session',
-    mode: 'direct',
     leadBotId: 'bot_1',
-    memberBotIds: ['bot_1'],
     ownerId: 'user_1',
   });
 

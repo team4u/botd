@@ -179,7 +179,7 @@ export function registerShareRoutes(
       return c.json({ error: 'Share link not found or expired' }, 404);
     }
 
-    const botIds = [...new Set([session.leadBotId, ...(session.memberBotIds || [])])];
+    const botIds = [session.leadBotId];
     const bots: SharedBotSummary[] = [];
     for (const botId of botIds) {
       const bot = db.getBot(botId);
@@ -213,9 +213,7 @@ export function registerShareRoutes(
       session: {
         id: session.id,
         title: session.title,
-        mode: session.mode,
         leadBotId: session.leadBotId,
-        memberBotIds: session.memberBotIds,
         createdAt: session.createdAt,
         updatedAt: session.updatedAt,
       },

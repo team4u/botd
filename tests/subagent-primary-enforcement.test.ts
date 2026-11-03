@@ -151,7 +151,7 @@ test('Multiple primary bots per node: POST /api/bots allows multiple primary bot
   assert.equal(promoteSubagent.json.parentBotId, undefined);
 });
 
-test('Session validation: rejects non-direct mode and validates lead bot', async (t) => {
+test('Session validation: validates lead bot', async (t) => {
   const ctx = await createTestContext(t);
 
   ctx.hub.db.createNode({
@@ -185,41 +185,17 @@ test('Session validation: rejects non-direct mode and validates lead bot', async
     updatedAt: new Date().toISOString(),
   });
 
-  // 1. Creating session with mode 'roundtable' is rejected with 400
-  const rtRes = await ctx.jsonRequest('/api/sessions', 'POST', {
-    title: 'Roundtable Attempt',
-    mode: 'roundtable',
-    leadBotId: 'bot_lead',
-    memberBotIds: ['bot_lead'],
-  });
-  assert.equal(rtRes.status, 400);
-  assert.equal(rtRes.json.error, 'Invalid session mode');
-
-  // 2. Creating lead mode session is rejected with 400
-  const leadRes = await ctx.jsonRequest('/api/sessions', 'POST', {
-    title: 'Lead Attempt',
-    mode: 'lead',
-    leadBotId: 'bot_lead',
-    memberBotIds: ['bot_lead'],
-  });
-  assert.equal(leadRes.status, 400);
-  assert.equal(leadRes.json.error, 'Invalid session mode');
-
-  // 3. Creating direct mode session succeeds
+  // 1. Creating session with valid lead succeeds
   const validDirect = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Valid Direct Session',
-    mode: 'direct',
     leadBotId: 'bot_lead',
-    memberBotIds: ['bot_lead'],
   });
   assert.equal(validDirect.status, 200);
 
-  // 4. Non-existent bot is rejected
+  // 2. Non-existent bot is rejected
   const invalidBot = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Invalid Bot Session',
-    mode: 'direct',
     leadBotId: 'bot_nonexistent',
-    memberBotIds: ['bot_nonexistent'],
   });
   assert.equal(invalidBot.status, 400);
   assert.match(invalidBot.json.error, /not found/);

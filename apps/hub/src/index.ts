@@ -17,7 +17,6 @@ import type {
   MessageAttachment,
   PlatformType,
   SaveBotInput,
-  SessionMode,
   UserRecord,
   UserRole,
 } from '@botd/protocol';
@@ -73,7 +72,6 @@ export interface StartHubResult extends HubInstance {
   port: number;
 }
 
-const VALID_MODES = new Set<SessionMode>(['direct']);
 const USERNAME_REGEX = /^[a-zA-Z0-9_-]{2,32}$/;
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isText = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
@@ -81,7 +79,6 @@ const isText = (value: unknown): value is string => typeof value === 'string' &&
 interface MemberValidationSuccess {
   ok: true;
   leadBotId: string;
-  memberBotIds: string[];
 }
 
 interface MemberValidationFailure {
@@ -95,13 +92,8 @@ type MemberValidationResult = MemberValidationSuccess | MemberValidationFailure;
 function validateSessionMembers(
   db: HubDatabase,
   userId: string,
-  mode: SessionMode,
-  leadBotIdInput: unknown,
-  _memberBotIdsInput?: unknown
+  leadBotIdInput: unknown
 ): MemberValidationResult {
-  if (mode !== 'direct') {
-    return { ok: false, error: 'Invalid session mode', status: 400 };
-  }
   if (!isSafeId(leadBotIdInput)) {
     return { ok: false, error: 'Invalid lead BOT', status: 400 };
   }
@@ -113,7 +105,7 @@ function validateSessionMembers(
     return { ok: false, error: 'Forbidden', status: 403 };
   }
 
-  return { ok: true, leadBotId: leadBotIdInput, memberBotIds: [leadBotIdInput] };
+  return { ok: true, leadBotId: leadBotIdInput };
 }
 
 export function createHub(options?: HubOptions): HubInstance {
@@ -890,23 +882,18 @@ export function createHub(options?: HubOptions): HubInstance {
     if (!body || !body.title || typeof body.title !== 'string' || !body.title.trim()) {
       return c.json({ error: 'Invalid session title' }, 400);
     }
-    if (!VALID_MODES.has(body.mode)) {
-      return c.json({ error: 'Invalid session mode' }, 400);
-    }
 
-    const validation = validateSessionMembers(db, user.id, body.mode, body.leadBotId, body.memberBotIds);
+    const validation = validateSessionMembers(db, user.id, body.leadBotId);
     if (!validation.ok) {
       return c.json({ error: validation.error }, validation.status);
     }
-    const { leadBotId, memberBotIds } = validation;
+    const { leadBotId } = validation;
 
     const sessionId = `sess_${randomUUID()}`;
     const session = db.createSession({
       id: sessionId,
       title: body.title.trim(),
-      mode: body.mode,
       leadBotId,
-      memberBotIds,
       ownerId: user.id,
       parentSessionId: body.parentSessionId,
     });
@@ -922,58 +909,38 @@ export function createHub(options?: HubOptions): HubInstance {
 
     const body = await c.req.json<{
       title?: string;
-      mode?: SessionMode;
       leadBotId?: string;
-      memberBotIds?: string[];
       archived?: boolean;
-      pinned?: boolean;
     }>().catch(() => null);
     if (!isObject(body)) return c.json({ error: 'Invalid session configuration' }, 400);
     // 归档是纯 UI 分类标记，允许在运行中修改（如「开启新话题」时旧会话仍在后台执行）；
-    // 标题/模式/负责人/成员会改变调度行为，运行中仍需拒绝。
+    // 标题/负责人会改变调度行为，运行中仍需拒绝。
     const touchesConfig =
       body.title !== undefined ||
-      body.mode !== undefined ||
-      body.leadBotId !== undefined ||
-      body.memberBotIds !== undefined;
+      body.leadBotId !== undefined;
     if (session.status === 'running' && touchesConfig) {
       return c.json({ error: 'Stop the session before changing its configuration' }, 409);
     }
     if (body.archived !== undefined && typeof body.archived !== 'boolean') return c.json({ error: 'Invalid archived flag' }, 400);
-    if (body.pinned !== undefined && typeof body.pinned !== 'boolean') return c.json({ error: 'Invalid pinned flag' }, 400);
     if (body.title !== undefined && !isText(body.title)) return c.json({ error: 'Invalid session title' }, 400);
     if (body.leadBotId !== undefined && !isSafeId(body.leadBotId)) return c.json({ error: 'Invalid lead BOT' }, 400);
-    if (body.memberBotIds !== undefined && (!Array.isArray(body.memberBotIds) || !body.memberBotIds.every(isSafeId))) {
-      return c.json({ error: 'Invalid memberBotIds' }, 400);
-    }
 
-    if (body.mode !== undefined && !VALID_MODES.has(body.mode)) {
-      return c.json({ error: 'Invalid session mode' }, 400);
-    }
-
-    const mode = body.mode ?? session.mode;
-    const targetLead = body.leadBotId ?? session.leadBotId;
-    const targetMembers = body.memberBotIds ?? session.memberBotIds;
-
-    const validation = validateSessionMembers(db, c.get('user').id, mode, targetLead, targetMembers);
+    const validation = validateSessionMembers(db, c.get('user').id, body.leadBotId ?? session.leadBotId);
     if (!validation.ok) {
       return c.json({ error: validation.error }, validation.status);
     }
-    const { leadBotId, memberBotIds } = validation;
+    const { leadBotId } = validation;
 
-    // 配置成员变更时统一失效旧队列，复用 cancelSession，防止 queued 任务绕过新配置
+    // 配置变更时统一失效旧队列，复用 cancelSession，防止 queued 任务绕过新配置
     if (touchesConfig) {
       await router.cancelSession(id);
     }
 
     // 成员移除时禁用相应 trigger，避免旧任务造成跨用户调用
-    const oldMemberIds = new Set([session.leadBotId, ...session.memberBotIds]);
-    const newMemberIds = new Set(memberBotIds);
-    const removedBotIds = [...oldMemberIds].filter((botId) => !newMemberIds.has(botId));
-    if (removedBotIds.length > 0) {
+    if (body.leadBotId !== undefined && body.leadBotId !== session.leadBotId) {
       const triggers = db.listSessionTriggers(id);
       for (const trg of triggers) {
-        if (removedBotIds.includes(trg.botId) && trg.enabled) {
+        if (trg.botId === session.leadBotId && trg.enabled) {
           db.updateTrigger(trg.id, { enabled: false });
         }
       }
@@ -981,11 +948,8 @@ export function createHub(options?: HubOptions): HubInstance {
 
     const updated = db.updateSession(id, {
       title: body.title?.trim(),
-      mode,
       leadBotId,
-      memberBotIds,
       archived: body.archived,
-      pinned: body.pinned,
     });
     return c.json(updated);
   });
@@ -1058,12 +1022,6 @@ export function createHub(options?: HubOptions): HubInstance {
     }
 
     const user = c.get('user');
-    const participants = db.listSessionParticipants(id);
-    const isMultiUser = participants.length > 0 || (session.ownerId !== undefined && user.id !== session.ownerId);
-
-    const routerContent = isMultiUser && !content.startsWith(`[User: ${user.username}]`)
-      ? `[User: ${user.username}]: ${content}`
-      : content;
 
     const mentions = cmdResult.targetBotId
       ? [cmdResult.targetBotId]
@@ -1086,7 +1044,7 @@ export function createHub(options?: HubOptions): HubInstance {
     });
 
     // TODO(后续在 formatIncrementalMessages 中消费 senderUsername)
-    router.handleUserMessage(id, msgResult.message.id, routerContent, cmdResult.isCommand ? {
+    router.handleUserMessage(id, msgResult.message.id, content, cmdResult.isCommand ? {
       commandText: cmdResult.commandText!,
       targetBotId: cmdResult.targetBotId,
     } : undefined);
@@ -1279,57 +1237,7 @@ export function createHub(options?: HubOptions): HubInstance {
     return c.json({ ok: true });
   });
 
-  // Session Participants API
-  app.get('/api/sessions/:id/participants', (c) => {
-    const id = c.req.param('id');
-    const sRes = resolveOwnedSession(c, db, id);
-    if (!sRes.ok) return sRes.response;
-    return c.json(db.listSessionParticipants(id));
-  });
-
-  app.post('/api/sessions/:id/participants', async (c) => {
-    const id = c.req.param('id');
-    const sRes = resolveOwnedSession(c, db, id);
-    if (!sRes.ok) return sRes.response;
-    if (db.getSessionOwner(id) !== c.get('user').id) {
-      return c.json({ error: 'Only session owner can add participants' }, 403);
-    }
-    const body = await c.req.json<{ userId?: string; username?: string; role?: 'owner' | 'member' }>().catch(() => null);
-    if (!body || (!body.userId && !body.username)) {
-      return c.json({ error: 'userId or username required' }, 400);
-    }
-    const targetUser = body.username ? db.getUserByUsername(body.username) : db.getUser(body.userId!);
-    if (!targetUser) {
-      return c.json({ error: 'User not found' }, 404);
-    }
-    const role = body.role === 'owner' ? 'owner' : 'member';
-    db.addSessionParticipant(id, targetUser.id, role);
-    return c.json({
-      ok: true,
-      participant: {
-        sessionId: id,
-        userId: targetUser.id,
-        username: targetUser.username,
-        role,
-        joinedAt: new Date().toISOString(),
-      },
-    });
-  });
-
-  app.delete('/api/sessions/:id/participants/:userId', (c) => {
-    const id = c.req.param('id');
-    const userId = c.req.param('userId');
-    const sRes = resolveOwnedSession(c, db, id);
-    if (!sRes.ok) return sRes.response;
-    const callerId = c.get('user').id;
-    const isOwner = db.getSessionOwner(id) === callerId;
-    const isSelf = callerId === userId;
-    if (!isOwner && !isSelf) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    db.removeSessionParticipant(id, userId);
-    return c.json({ ok: true });
-  });
+  // Session Participants API 已随多人协同功能废弃移除
 
   // 9. SSE Streaming
   app.get('/api/sessions/:id/events', async (c) => {

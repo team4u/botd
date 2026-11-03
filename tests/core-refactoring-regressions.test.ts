@@ -339,9 +339,7 @@ test('删除会话与删除用户时物理清理磁盘上的 Artifact 文件', a
   const sessionA = f.hub.db.createSession({
     id: 'sess_art_session_del',
     title: 'Artifact Session Deletion Test',
-    mode: 'direct',
     leadBotId: 'bot_dummy',
-    memberBotIds: ['bot_dummy'],
     ownerId: 'user_admin',
   });
 
@@ -379,9 +377,7 @@ test('删除会话与删除用户时物理清理磁盘上的 Artifact 文件', a
   const memberSession = f.hub.db.createSession({
     id: 'sess_art_user_del',
     title: 'Member User Artifact Session',
-    mode: 'direct',
     leadBotId: 'bot_dummy',
-    memberBotIds: ['bot_dummy'],
     ownerId: memberUser.id,
   });
 
@@ -611,9 +607,7 @@ test('GroupRouter 串/并行统一管线的回合执行与错误隔离验证', a
 
   const normalSession = await f.json<SessionRecord>('/api/sessions', 'POST', {
     title: 'Normal Direct Session',
-    mode: 'direct',
     leadBotId: 'lead_bot',
-    memberBotIds: ['lead_bot'],
   });
 
   await f.json(`/api/sessions/${normalSession.id}/messages`, 'POST', {
@@ -640,9 +634,7 @@ test('GroupRouter 串/并行统一管线的回合执行与错误隔离验证', a
 
   const failSession = await f.json<SessionRecord>('/api/sessions', 'POST', {
     title: 'Failing Direct Session',
-    mode: 'direct',
     leadBotId: 'lead_bot',
-    memberBotIds: ['lead_bot'],
   });
 
   await f.json(`/api/sessions/${failSession.id}/messages`, 'POST', {

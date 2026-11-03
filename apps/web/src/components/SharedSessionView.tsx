@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo } from 'react';
 import {
   Bot,
   MessageSquare,
-  Users,
   Eye,
   Loader2,
   AlertCircle,
@@ -14,7 +13,6 @@ import type {
   SharedSessionSnapshot,
   BotConfig,
   NodeRecord,
-  SessionMode,
 } from '@botd/protocol';
 import { api } from '../api';
 import { MessageItem, formatShortModel, formatChatDayLabel, isSameCalendarDay } from './MessageItem';
@@ -25,10 +23,6 @@ interface SharedSessionViewProps {
 }
 
 const sameDay = isSameCalendarDay;
-
-function formatModeLabel(_mode: SessionMode): string {
-  return '单聊';
-}
 
 export const SharedSessionView: React.FC<SharedSessionViewProps> = ({ token }) => {
   const [snapshot, setSnapshot] = useState<SharedSessionSnapshot | null>(null);
@@ -137,24 +131,15 @@ export const SharedSessionView: React.FC<SharedSessionViewProps> = ({ token }) =
       {/* 顶部展示栏 */}
       <header className="shrink-0 z-20 border-b border-zinc-200/80 dark:border-zinc-800/80 bg-white/95 dark:bg-zinc-950/95 px-3 sm:px-6 py-2.5">
         <div className="max-w-4xl mx-auto flex flex-col gap-2">
-          {/* 第一行：标题 + 模式标签 + 只读回放标识 + ThemeToggle */}
+          {/* 第一行：标题 + 只读回放标识 + ThemeToggle */}
           <div className="flex items-center justify-between gap-3 min-w-0">
             <div className="flex items-center gap-2 min-w-0">
               <div className="w-7 h-7 rounded-lg bg-zinc-100 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800 flex items-center justify-center text-zinc-600 dark:text-zinc-400 shrink-0">
-                {session.mode === 'direct' ? (
-                  <MessageSquare className="w-4 h-4" />
-                ) : (
-                  <Users className="w-4 h-4" />
-                )}
+                <MessageSquare className="w-4 h-4" />
               </div>
               <h1 className="text-sm sm:text-base font-semibold truncate text-zinc-900 dark:text-zinc-100">
                 {session.title || '会话回放'}
               </h1>
-
-              {/* 模式标签 */}
-              <span className="shrink-0 px-2 py-0.5 rounded-md text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 border border-zinc-200/60 dark:border-zinc-700/60">
-                {formatModeLabel(session.mode)}
-              </span>
 
               {/* 只读分享回放标识 */}
               <span className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-50 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/60 text-amber-700 dark:text-amber-300">

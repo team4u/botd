@@ -72,9 +72,7 @@ export const BotHistoryDrawer: React.FC<BotHistoryDrawerProps> = ({
     setLoadError(null);
     try {
       const all = await api.listSessions();
-      const mine = all.filter(
-        (s) => s.mode === 'direct' && s.memberBotIds?.length === 1 && s.memberBotIds[0] === botId
-      );
+      const mine = all.filter((s) => s.leadBotId === botId);
       setSessions(mine);
     } catch (err: any) {
       setLoadError(err?.message || '加载历史话题失败');

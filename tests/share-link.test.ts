@@ -109,9 +109,7 @@ test('Session share link: full lifecycle and authorization', async (t) => {
   const session = hub.db.createSession({
     id: 'sess_share_test',
     title: 'Distributed System Design Review',
-    mode: 'direct',
     leadBotId: 'bot_lead',
-    memberBotIds: ['bot_lead'],
     ownerId: adminUser.id,
   });
 
@@ -274,9 +272,7 @@ test('Session share link: full lifecycle and authorization', async (t) => {
   // Verify session metadata
   assert.equal(snapshot.session.id, session.id);
   assert.equal(snapshot.session.title, 'Distributed System Design Review');
-  assert.equal(snapshot.session.mode, 'direct');
   assert.equal(snapshot.session.leadBotId, 'bot_lead');
-  assert.deepEqual(snapshot.session.memberBotIds, ['bot_lead']);
 
   // Verify bot summaries (sensitive fields like prompt / env stripped)
   assert.equal(snapshot.bots.length, 1);
@@ -386,9 +382,7 @@ test('CLI: botd sessions share command supports create, regenerate, and revoke',
   const session = hubInstance.db.createSession({
     id: 'sess_cli_test',
     title: 'CLI Share Test Session',
-    mode: 'direct',
     leadBotId: 'bot_dummy',
-    memberBotIds: ['bot_dummy'],
     ownerId: adminUser.id,
   });
 

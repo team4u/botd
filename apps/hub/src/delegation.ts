@@ -4,15 +4,12 @@ import type {
   DelegateSessionInput,
   DelegateSessionResult,
   MessageAttachment,
-  SessionMode,
   UserRecord,
 } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
 import type { GroupRouter } from './group-router.js';
 import type { SseHub } from './sse.js';
 import { resolveOwnedSession } from './http-helpers.js';
-
-const VALID_MODES = new Set<SessionMode>(['direct']);
 
 export interface WatchSubSessionOptions {
   db: HubDatabase;
@@ -188,10 +185,6 @@ export function registerDelegationRoutes(
       return c.json({ error: 'botId and non-empty prompt are required' }, 400);
     }
 
-    if (body.mode && !VALID_MODES.has(body.mode)) {
-      return c.json({ error: 'Invalid session mode' }, 400);
-    }
-
     const botId = body.botId.trim();
     const bot = db.getBot(botId);
     if (!bot) {
@@ -202,16 +195,12 @@ export function registerDelegationRoutes(
     }
 
     const title = body.title?.trim() || `[子任务] ${body.prompt.trim().slice(0, 28)}`;
-    const mode: SessionMode = 'direct';
-    const memberBotIds = [botId];
 
     const childSessionId = `sess_${randomUUID()}`;
     const childSession = db.createSession({
       id: childSessionId,
       title,
-      mode,
       leadBotId: botId,
-      memberBotIds,
       ownerId: user.id,
       parentSessionId: id,
     });

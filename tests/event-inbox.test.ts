@@ -70,9 +70,7 @@ function createSessionFixture(hub: ReturnType<typeof createHub>, userId: string,
   hub.db.createSession({
     id: sessionId,
     title: `Session ${sessionId}`,
-    mode: 'direct',
     leadBotId: botId,
-    memberBotIds: [botId],
     ownerId: userId,
   });
 }
@@ -427,8 +425,6 @@ test('dispatchMode=subsession：Webhook 触发自动派生子会话、父会话�
   const childSession = hub.db.getSession(childSessionId)!;
   assert.equal(childSession.parentSessionId, 'sess_sub');
   assert.equal(childSession.leadBotId, 'bot_sub');
-  assert.deepEqual(childSession.memberBotIds, ['bot_sub']);
-  assert.equal(childSession.mode, 'direct');
   assert.equal(childSession.title, '[自动任务] nightly report');
 
   // 子会话被真实启动（runTurn 被调用）
@@ -1017,9 +1013,7 @@ test('markSessionParentNotified 幂等防重：首次返回 true，重复调用�
   db.createSession({
     id: 'sess_notify',
     title: 'notify test',
-    mode: 'direct',
     leadBotId: 'bot_x',
-    memberBotIds: ['bot_x'],
     ownerId: 'user_admin',
   });
 

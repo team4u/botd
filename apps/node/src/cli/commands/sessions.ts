@@ -448,9 +448,7 @@ export function registerSessionsCommands(program: Command): void {
 
         const session = await client.post<SessionRecord>('/api/sessions', {
           title,
-          mode: 'direct',
           leadBotId,
-          memberBotIds: [leadBotId],
         });
         printResult(session, g.json);
       }),
@@ -473,7 +471,6 @@ export function registerSessionsCommands(program: Command): void {
         }
         if (typeof options.lead === 'string') {
           body.leadBotId = options.lead.trim();
-          body.memberBotIds = [options.lead.trim()];
         }
         if (typeof options.archive === 'boolean') {
           body.archived = options.archive;
@@ -652,7 +649,6 @@ export function registerSessionsCommands(program: Command): void {
         const input: DelegateSessionInput & { autoWakeParent?: boolean } = {
           botId: String(options.bot).trim(),
           prompt: String(options.prompt).trim(),
-          mode: 'direct',
         };
         if (typeof options.title === 'string' && options.title.trim()) {
           input.title = options.title.trim();

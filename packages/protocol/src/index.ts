@@ -2,7 +2,6 @@ export * from './cron.js';
 export * from './ui-catalog.js';
 
 export type PlatformType = 'darwin' | 'linux' | 'win32';
-export type SessionMode = 'direct';
 export type SessionStatus = 'idle' | 'running' | 'queued' | 'failed';
 export type MessageRole = 'user' | 'assistant' | 'callback' | 'system';
 
@@ -73,14 +72,6 @@ export interface OutboundTaskRecord {
   status: OutboundTaskStatus;
   createdAt: string;
   expiresAt: string;
-}
-
-export interface SessionParticipantRecord {
-  sessionId: string;
-  userId: string;
-  username?: string;
-  role: 'owner' | 'member';
-  joinedAt: string;
 }
 
 export interface ArtifactRecord {
@@ -239,7 +230,6 @@ export interface BgJobRecord {
 export interface MessageSearchHit {
   message: MessageRecord;
   sessionTitle: string;
-  sessionMode: SessionMode;
   sessionArchived: boolean;
 }
 
@@ -369,9 +359,7 @@ export interface ChatCommand {
 export interface SessionRecord {
   id: string;
   title: string;
-  mode: SessionMode;
   leadBotId: string;
-  memberBotIds: string[];
   status: SessionStatus;
   activeBotId?: string;
   /** 圆桌并发盲评或并行工作流阶段同时处于活跃推理中的 BOT ID 列表 */
@@ -390,12 +378,8 @@ export interface SessionRecord {
   lastMessageAt?: string;
   /** 是否已归档（如「开启新话题」后旧会话自动归档，在历史话题区展示） */
   archived?: boolean;
-  /** 是否置顶（会话列表顶部固定展示的纯 UI 标记） */
-  pinned?: boolean;
   /** 会话创建者 ID */
   ownerId?: string;
-  /** 多人协同会话参与者列表 */
-  participants?: SessionParticipantRecord[];
 }
 
 export interface SessionShareRecord {
@@ -418,7 +402,7 @@ export interface SharedSessionSnapshot {
   share: SessionShareRecord;
   session: Pick<
     SessionRecord,
-    'id' | 'title' | 'mode' | 'leadBotId' | 'memberBotIds' | 'createdAt' | 'updatedAt'
+    'id' | 'title' | 'leadBotId' | 'createdAt' | 'updatedAt'
   >;
   bots: SharedBotSummary[];
   messages: MessageRecord[];
@@ -429,7 +413,6 @@ export interface DelegateSessionInput {
   botId: string;
   title?: string;
   prompt: string;
-  mode?: SessionMode;
   artifactIds?: string[];
   /** 是否在子会话完成后自动唤醒父会话的主控 Bot（默认 true；同步等待或静默委派时传 false） */
   autoWakeParent?: boolean;
@@ -725,9 +708,7 @@ export interface NodeWithBots extends NodeRecord { bots: BotConfig[] }
 export interface SaveBotInput extends Omit<BotConfig, 'updatedAt'> { systemMd: string }
 export interface CreateSessionInput {
   title: string;
-  mode: SessionMode;
   leadBotId: string;
-  memberBotIds: string[];
   parentSessionId?: string;
 }
 export interface NodeIdentity { nodeId: string; name: string; hubUrl: string; token: string }

@@ -89,73 +89,6 @@ async function createTestEnv(t: TestContext): Promise<TestContextEnv> {
   };
 }
 
-test('Fix 1 — getAllSessions omits participants field while getSession preserves participants', async (t) => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'botd-participants-test-'));
-  const dbPath = path.join(dir, 'test-hub.sqlite');
-  const db = new HubDatabase({ dbPath });
-
-  t.after(async () => {
-    db.close();
-    await rm(dir, { recursive: true, force: true });
-  });
-
-  db.createUser({
-    id: 'user_alice',
-    username: 'alice',
-    passwordHash: 'hash_alice',
-    role: 'member',
-  });
-  db.createUser({
-    id: 'user_bob',
-    username: 'bob',
-    passwordHash: 'hash_bob',
-    role: 'member',
-  });
-
-  const session = db.createSession({
-    id: 'sess_collab_1',
-    title: 'Collab Session',
-    mode: 'direct',
-    leadBotId: 'bot_1',
-    memberBotIds: ['bot_1'],
-    ownerId: 'user_alice',
-  });
-
-  // Before participant: participants array in getSession is empty
-  const singleBefore = db.getSession(session.id);
-  assert.ok(singleBefore);
-  assert.deepEqual(singleBefore.participants, []);
-
-  // Add participant
-  db.addSessionParticipant(session.id, 'user_bob', 'member');
-
-  // getSession includes participants
-  const singleAfter = db.getSession(session.id);
-  assert.ok(singleAfter);
-  assert.ok(singleAfter.participants);
-  assert.equal(singleAfter.participants.length, 1);
-  assert.equal(singleAfter.participants[0].userId, 'user_bob');
-
-  // getAllSessions for session owner (alice) DOES NOT include participants field (must be undefined)
-  const aliceSessions = db.getAllSessions('user_alice');
-  assert.equal(aliceSessions.length, 1);
-  assert.equal(aliceSessions[0].id, session.id);
-  assert.equal(aliceSessions[0].participants, undefined);
-  assert.equal('participants' in aliceSessions[0], false);
-
-  // getAllSessions for participant (bob) also DOES NOT include participants field
-  const bobSessions = db.getAllSessions('user_bob');
-  assert.equal(bobSessions.length, 1);
-  assert.equal(bobSessions[0].id, session.id);
-  assert.equal(bobSessions[0].participants, undefined);
-  assert.equal('participants' in bobSessions[0], false);
-
-  // getAccessibleSessions (alias) also matches
-  const accessible = db.getAccessibleSessions('user_alice');
-  assert.equal(accessible.length, 1);
-  assert.equal(accessible[0].participants, undefined);
-});
-
 test('Fix 4 — Delegation artifact copy shares storagePath and deletion does not unlink while child references it', async (t) => {
   const env = await createTestEnv(t);
   const { hub, dir, adminUser, adminCookie, registerNodeWithBots, jsonRequest } = env;
@@ -173,9 +106,7 @@ test('Fix 4 — Delegation artifact copy shares storagePath and deletion does no
   const parentSession = hub.db.createSession({
     id: 'sess_del_parent',
     title: 'Parent Session for Delegation',
-    mode: 'direct',
     leadBotId: botLead,
-    memberBotIds: [botLead, botWorker],
     ownerId: adminUser.id,
   });
 
@@ -266,18 +197,14 @@ test('Fix 4 — reclaimUnreferencedFiles invariant: shared storagePath kept unti
   db.createSession({
     id: 'sess_alpha',
     title: 'Session Alpha',
-    mode: 'direct',
     leadBotId: 'bot_1',
-    memberBotIds: ['bot_1'],
     ownerId: 'user_owner',
   });
 
   db.createSession({
     id: 'sess_beta',
     title: 'Session Beta',
-    mode: 'direct',
     leadBotId: 'bot_1',
-    memberBotIds: ['bot_1'],
     ownerId: 'user_owner',
   });
 

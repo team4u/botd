@@ -62,9 +62,7 @@ function createSessionFixture(hub: ReturnType<typeof createHub>, userId: string,
   hub.db.createSession({
     id: sessionId,
     title: `Session ${sessionId}`,
-    mode: 'direct',
     leadBotId: botId,
-    memberBotIds: [botId],
     ownerId: userId,
   });
 }
@@ -178,9 +176,7 @@ test('artifact service rejects filename containing path components', async (t) =
   db.createSession({
     id: 'sess_p',
     title: 'P',
-    mode: 'direct',
     leadBotId: 'bot_p',
-    memberBotIds: ['bot_p'],
     ownerId: 'user_p',
   });
 
@@ -320,9 +316,7 @@ test('share link: expiresInHours sets expiresAt, validation rejects bad input, d
   hub.db.createSession({
     id: 'sess_share_exp',
     title: 'Share Expiry',
-    mode: 'direct',
     leadBotId: 'bot_share',
-    memberBotIds: ['bot_share'],
     ownerId: admin.id,
   });
 
@@ -379,9 +373,7 @@ test('share link: regenerate with expiresInHours=undefined keeps NULL semantics'
   hub.db.createSession({
     id: 'sess_share_reg',
     title: 'Share Regenerate',
-    mode: 'direct',
     leadBotId: 'bot_reg',
-    memberBotIds: ['bot_reg'],
     ownerId: admin.id,
   });
 

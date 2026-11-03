@@ -175,19 +175,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
 }) => {
   const keyboardInset = useKeyboardInset();
 
-  // 本会话参会成员（提前声明：蓝点探测/SSE/群设置等多处使用）
+  // 本会话主控智能体（提前声明：蓝点探测/SSE/设置等多处使用）
   // useMemo 稳定引用：下游 memberNodeIds/fetchBgJobs 等依赖链才不会每次 render 失稳
   const memberBots = useMemo<BotConfig[]>(
-    () =>
-      (session.memberBotIds || [])
-        .map((id) => botMap.get(id))
-        .filter((b): b is BotConfig => Boolean(b)),
-    [session.memberBotIds, botMap]
+    () => {
+      const lead = botMap.get(session.leadBotId);
+      return lead ? [lead] : [];
+    },
+    [session.leadBotId, botMap]
   );
 
-  // 输入框 @ 可提及的智能体列表：
-  // - 单聊 (direct)：排除当前单聊对象自己（不能 @ 自己）；优先展示同门子代理与主 BOT，其次展示其他可用 BOT
-  // - 群聊 (lead)：展示群内所有成员 BOT 及其麾下子代理，其次展示其他可用 BOT
+  // 输入框 @ 可提及的智能体列表：排除当前单聊对象自己（不能 @ 自己）；
+  // 优先展示同门子代理与主 BOT，其次展示其他可用 BOT
   const mentionableBots = useMemo<BotConfig[]>(() => {
     const allBots = Array.from(botMap.values());
     const result: BotConfig[] = [];
@@ -198,49 +197,35 @@ export const ChatView: React.FC<ChatViewProps> = ({
       result.push(b);
     };
 
-    if (session.mode === 'direct') {
-      // 单聊中绝不允许 @ 当前对话对象自己
-      seen.add(session.leadBotId);
-      const leadBot = botMap.get(session.leadBotId);
-      if (leadBot) {
-        if (!leadBot.parentBotId) {
-          // 当前是主 BOT：优先展示它麾下的子代理
-          for (const b of allBots) {
-            if (b.parentBotId === leadBot.id) pushBot(b);
-          }
-        } else {
-          // 当前是子代理：优先展示它的主 BOT 及同门兄弟子代理
-          pushBot(botMap.get(leadBot.parentBotId));
-          for (const b of allBots) {
-            if (b.parentBotId === leadBot.parentBotId) pushBot(b);
-          }
+    // 单聊中绝不允许 @ 当前对话对象自己
+    seen.add(session.leadBotId);
+    const leadBot = botMap.get(session.leadBotId);
+    if (leadBot) {
+      if (!leadBot.parentBotId) {
+        // 当前是主 BOT：优先展示它麾下的子代理
+        for (const b of allBots) {
+          if (b.parentBotId === leadBot.id) pushBot(b);
+        }
+      } else {
+        // 当前是子代理：优先展示它的主 BOT 及同门兄弟子代理
+        pushBot(botMap.get(leadBot.parentBotId));
+        for (const b of allBots) {
+          if (b.parentBotId === leadBot.parentBotId) pushBot(b);
         }
       }
-      // 其余 BOT 按主从顺序追加，方便随时 @ 其他 BOT/子代理接力
-      for (const b of allBots) {
-        if (!b.parentBotId) {
-          pushBot(b);
-          for (const sub of allBots) {
-            if (sub.parentBotId === b.id) pushBot(sub);
-          }
-        }
-      }
-      for (const b of allBots) pushBot(b);
-      return result;
     }
-
-    for (const member of memberBots) {
-      pushBot(member);
-      if (!member.parentBotId) {
+    // 其余 BOT 按主从顺序追加，方便随时 @ 其他 BOT/子代理接力
+    for (const b of allBots) {
+      if (!b.parentBotId) {
+        pushBot(b);
         for (const sub of allBots) {
-          if (sub.parentBotId === member.id) {
-            pushBot(sub);
-          }
+          if (sub.parentBotId === b.id) pushBot(sub);
         }
       }
     }
+    for (const b of allBots) pushBot(b);
     return result;
-  }, [session.mode, session.leadBotId, memberBots, botMap]);
+  }, [session.leadBotId, botMap]);
 
   // 头部更多操作菜单 / 行内重命名 / 清空与删除确认
   const [menuOpen, setMenuOpen] = useState(false);
@@ -262,9 +247,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   // 单聊对应的目标智能体（主 BOT 或子代理）
   const directBot = useMemo<BotConfig | undefined>(() => {
-    if (session.mode !== 'direct') return undefined;
     return memberBots[0] || (session.leadBotId ? botMap.get(session.leadBotId) : undefined);
-  }, [session.mode, session.leadBotId, memberBots, botMap]);
+  }, [session.leadBotId, memberBots, botMap]);
 
   const directNode = useMemo<NodeWithBots | null>(() => {
     if (!directBot) return null;
@@ -319,9 +303,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return {
       id: inspectingSubSessionId,
       title: matchingRun?.task || inspectingSubSessionId,
-      mode: 'direct' as const,
       leadBotId: leadId,
-      memberBotIds: [leadId],
       status:
         matchingRun?.status === 'running'
           ? ('running' as const)
@@ -1143,7 +1125,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       <BgJobsDrawer
         isOpen={bgJobsOpen}
         sessionId={session.id}
-        memberBotIds={session.memberBotIds || []}
+        memberBotIds={[session.leadBotId]}
         botMap={botMap}
         nodeMap={nodeMap}
         initialJobId={selectedBgJobId}

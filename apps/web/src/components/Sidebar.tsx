@@ -15,8 +15,6 @@ import {
   ShieldCheck,
   Loader2,
   MoreHorizontal,
-  Pin,
-  PinOff,
   ArchiveRestore,
   Bell,
   BellRing,
@@ -78,7 +76,7 @@ interface SidebarProps {
 
 /**
  * 选取某个 bot「当前」的单聊会话：
- * 在 mode === 'direct'、未归档、成员仅含该 bot 的会话中，取 updatedAt 最新的一个。
+ * 在未归档、主控为该 bot 的会话中，取 updatedAt 最新的一个。
  * 通讯录指向、active 高亮、「历史话题」分类与 App 的 handleOpenBotChat 共用此规则，避免逻辑漂移。
  */
 export function pickCurrentDirectSession(
@@ -88,10 +86,9 @@ export function pickCurrentDirectSession(
   let latest: SessionRecord | undefined;
   let latestTime = -Infinity;
   for (const s of sessions) {
-    if (s.mode !== 'direct' || s.archived) continue;
+    if (s.archived) continue;
     if (s.parentSessionId) continue;
-    const members = s.memberBotIds || [];
-    if (members.length !== 1 || members[0] !== botId) continue;
+    if (s.leadBotId !== botId) continue;
     const time = new Date(s.updatedAt).getTime();
     if (Number.isFinite(time) && time > latestTime) {
       latest = s;
@@ -177,17 +174,14 @@ const UnreadBadge: React.FC<{ count: number }> = ({ count }) => {
 };
 
 /**
- * 会话项 hover「⋯」操作菜单：
- * 群聊区 = 置顶/取消置顶 + 归档 + 删除；历史话题区 = 恢复 + 删除。
+ * 会话项 hover「⋯」操作菜单：恢复 + 删除。
  * 点击外部 / Esc 关闭；菜单项点击需 stopPropagation，避免冒泡触发会话切换。
  */
 const SessionItemMenu: React.FC<{
   session: SessionRecord;
-  variant: 'group' | 'history';
-  onTogglePinned?: (sessionId: string, pinned: boolean) => void;
   onSetArchived?: (sessionId: string, archived: boolean) => void;
   onDelete: (session: SessionRecord) => void;
-}> = ({ session, variant, onTogglePinned, onSetArchived, onDelete }) => {
+}> = ({ session, onSetArchived, onDelete }) => {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -234,55 +228,19 @@ const SessionItemMenu: React.FC<{
           role="menu"
           className="absolute right-0 top-5 z-50 min-w-[124px] py-1 rounded-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 shadow-md"
         >
-          {variant === 'group' && (
-            <>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onTogglePinned?.(session.id, !session.pinned);
-                  setOpen(false);
-                }}
-                className={menuItemClass}
-              >
-                {session.pinned ? (
-                  <PinOff className="w-3.5 h-3.5 shrink-0" />
-                ) : (
-                  <Pin className="w-3.5 h-3.5 shrink-0" />
-                )}
-                <span>{session.pinned ? '取消置顶' : '置顶'}</span>
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onSetArchived?.(session.id, true);
-                  setOpen(false);
-                }}
-                className={menuItemClass}
-              >
-                <Archive className="w-3.5 h-3.5 shrink-0" />
-                <span>归档</span>
-              </button>
-            </>
-          )}
-          {variant === 'history' && (
-            <button
-              type="button"
-              role="menuitem"
-              onClick={(e) => {
-                e.stopPropagation();
-                onSetArchived?.(session.id, false);
-                setOpen(false);
-              }}
-              className={menuItemClass}
-            >
-              <ArchiveRestore className="w-3.5 h-3.5 shrink-0" />
-              <span>恢复</span>
-            </button>
-          )}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={(e) => {
+              e.stopPropagation();
+              onSetArchived?.(session.id, false);
+              setOpen(false);
+            }}
+            className={menuItemClass}
+          >
+            <ArchiveRestore className="w-3.5 h-3.5 shrink-0" />
+            <span>恢复</span>
+          </button>
           <button
             type="button"
             role="menuitem"
@@ -475,30 +433,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
     [currentDirectByBot, sessions]
   );
 
-  // 分区 2：群聊（非单聊且未归档），置顶会话排前（sort 稳定，组内保持既有活跃时间序）
-  const groupSessions = useMemo(
-    () =>
-      sessions
-        .filter((s) => s.mode !== 'direct' && !s.archived && sessionMatchesQuery(s))
-        .sort((a, b) => Number(b.pinned === true) - Number(a.pinned === true)),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sessions, query]
-  );
-
-  // 分区 3：历史话题 = 已归档会话 + 非当前的单聊会话，按活跃时间倒序
+  // 分区 2：历史话题 = 已归档会话 + 非当前的单聊会话，按活跃时间倒序
   const historySessions = useMemo(() => {
     const timeOf = (s: SessionRecord) => new Date(s.lastMessageAt ?? s.updatedAt).getTime() || 0;
     return sessions
       .filter(
         (s) =>
-          (s.archived || (s.mode === 'direct' && !currentDirectIds.has(s.id))) &&
+          (s.archived || !currentDirectIds.has(s.id)) &&
           sessionMatchesQuery(s)
       )
       .sort((a, b) => timeOf(b) - timeOf(a));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, currentDirectIds, query]);
 
-  const isAllEmpty = filteredBots.length === 0 && groupSessions.length === 0 && historySessions.length === 0;
+  const isAllEmpty = filteredBots.length === 0 && historySessions.length === 0;
 
   const handleConfirmDelete = async () => {
     if (!deleteTarget) return;
@@ -677,7 +625,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         )}
 
-        {/* 三分区列表：智能体 / 群聊 / 历史话题 */}
+        {/* 两分区列表：智能体 / 历史话题 */}
         <div className="flex-1 overflow-y-auto px-2 py-2 space-y-2">
           {/* 分区 1：智能体（通讯录） */}
           <section>
@@ -1000,7 +948,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         )}
                         <SessionItemMenu
                           session={session}
-                          variant="history"
                           onSetArchived={onSetArchived}
                           onDelete={setDeleteTarget}
                         />

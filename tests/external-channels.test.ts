@@ -190,9 +190,7 @@ test('外部消息通道桥接：通道 CRUD、测试推送、事件自动推送
     'POST',
     {
       title: '外部通知测试会话',
-      mode: 'direct',
       leadBotId: 'bot-lead',
-      memberBotIds: ['bot-lead'],
     },
     adminCookie
   );

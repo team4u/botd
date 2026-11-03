@@ -974,9 +974,7 @@ test('session fork clones config and history up to the anchor without touching t
   const fork1 = await f.json<SessionRecord>(`/api/sessions/${session.id}/fork`, 'POST', { anchorMessageId: anchor.id });
   assert(fork1.title.endsWith('（分叉）'));
   assert.notEqual(fork1.id, session.id);
-  assert.equal(fork1.mode, session.mode);
   assert.equal(fork1.leadBotId, session.leadBotId);
-  assert.deepEqual(fork1.memberBotIds, session.memberBotIds);
   assert.equal(fork1.messageCount, 1);
 
   // 3. The forked session holds exactly the anchor message (same content/createdAt, new id)
@@ -1032,9 +1030,9 @@ test('archiving is allowed while a session is running, but config patches are st
   assert.equal(archivedWhileRunning.archived, true);
   assert.equal(archivedWhileRunning.status, 'running', 'archiving must not disturb the running status');
 
-  // 混入配置字段（标题/模式/负责人/成员）时，running 仍拒绝
+  // 混入配置字段（标题/负责人）时，running 仍拒绝
   assert.equal((await f.request(`/api/sessions/${session.id}`, 'PATCH', { archived: false, title: 'nope' })).status, 409);
-  assert.equal((await f.request(`/api/sessions/${session.id}`, 'PATCH', { memberBotIds: ['busy'] })).status, 409);
+  assert.equal((await f.request(`/api/sessions/${session.id}`, 'PATCH', { leadBotId: 'busy' })).status, 409);
 
   // 后台回合继续完成，归档状态保持
   finish.resolve({ replyText: 'Late reply', modelBadge: 'test/model' });
@@ -1114,73 +1112,6 @@ test('message pagination: no params stays full, before/around windows and hasMor
   );
   assert.deepEqual(tailPage.messages.map(m => m.content), ['paging message 18', 'paging message 19', 'paging message 20']);
   assert.equal(tailPage.hasMore, true);
-});
-
-test('PATCH /api/sessions/:id pinned toggles, validates and migrates legacy databases', async t => {
-  const f = await fixture(t);
-  await f.addNode(['solo']);
-  const session = await f.session(['solo'], 'direct');
-
-  // 1. 置顶与取消：响应与会话列表均反映 pinned
-  const pinned = await f.json<SessionRecord>(`/api/sessions/${session.id}`, 'PATCH', { pinned: true });
-  assert.equal(pinned.pinned, true);
-  assert.equal((await f.json<SessionRecord[]>('/api/sessions')).find(s => s.id === session.id)!.pinned, true);
-  const unpinned = await f.json<SessionRecord>(`/api/sessions/${session.id}`, 'PATCH', { pinned: false });
-  assert.equal(unpinned.pinned, false);
-  assert.equal((await f.json<SessionRecord[]>('/api/sessions')).find(s => s.id === session.id)!.pinned, false);
-
-  // patch 其他字段不重置 pinned
-  await f.json(`/api/sessions/${session.id}`, 'PATCH', { pinned: true });
-  const retitled = await f.json<SessionRecord>(`/api/sessions/${session.id}`, 'PATCH', { title: 'Renamed' });
-  assert.equal(retitled.pinned, true, 'patching other fields must not reset the pinned flag');
-
-  // 2. 非布尔值拒绝
-  const bad = await f.request(`/api/sessions/${session.id}`, 'PATCH', { pinned: 'yes' });
-  assert.equal(bad.status, 400);
-  assert.deepEqual(await bad.json(), { error: 'Invalid pinned flag' });
-
-  // 3. running 中允许置顶（纯 UI 标记，与 archived 同类）
-  const finish = deferred<{ replyText: string; modelBadge: string }>();
-  await f.addNode(['busy'], async () => finish.promise);
-  const busySession = await f.session(['busy'], 'direct');
-  await f.json(`/api/sessions/${busySession.id}/messages`, 'POST', { content: 'long work' });
-  await waitFor(() => f.json<SessionRecord[]>('/api/sessions'), list => list.find(s => s.id === busySession.id)?.status === 'running');
-  const pinnedWhileRunning = await f.json<SessionRecord>(`/api/sessions/${busySession.id}`, 'PATCH', { pinned: true });
-  assert.equal(pinnedWhileRunning.pinned, true);
-  assert.equal(pinnedWhileRunning.status, 'running', 'pinning must not disturb the running status');
-  finish.resolve({ replyText: 'done', modelBadge: 'test/model' });
-  await f.idle(busySession.id);
-
-  // 4. 旧库自动补 pinned 列
-  const dir = await mkdtemp(path.join(tmpdir(), 'botd-hub-pinned-migration-'));
-  const dbPath = path.join(dir, 'legacy.sqlite');
-  const setupDb = new DatabaseSync(dbPath);
-  setupDb.exec(`
-    CREATE TABLE sessions (
-      id TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
-      mode TEXT NOT NULL DEFAULT 'direct',
-      lead_bot_id TEXT NOT NULL,
-      member_bot_ids_json TEXT NOT NULL DEFAULT '[]',
-      cursor_map_json TEXT NOT NULL DEFAULT '{}',
-      status TEXT NOT NULL DEFAULT 'idle',
-      active_bot_id TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-    INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at)
-    VALUES ('legacy-sess', 'Legacy Session', 'direct', 'legacy-bot', '[]', '{}', 'idle', NULL, '2025-01-01T00:00:00.000Z', '2025-01-01T00:00:00.000Z');
-  `);
-  setupDb.close();
-  const hubDb = new HubDatabase({ dbPath });
-  t.after(async () => {
-    hubDb.close();
-    await rm(dir, { recursive: true, force: true });
-  });
-  const columns = hubDb.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
-  assert(columns.some(c => c.name === 'pinned'), 'sessions table must gain the pinned column');
-  assert.equal(hubDb.getSession('legacy-sess')!.pinned, false, 'migrated rows default to pinned = false');
-  assert.equal(hubDb.updateSession('legacy-sess', { pinned: true })!.pinned, true);
 });
 
 test('POST /api/triggers/:triggerId/run fires a wakeup turn into the session', async t => {

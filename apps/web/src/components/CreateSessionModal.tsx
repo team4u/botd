@@ -164,9 +164,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
     try {
       await onCreateSession({
         title: finalTitle,
-        mode: 'direct',
         leadBotId,
-        memberBotIds: [leadBotId],
       });
       onClose();
     } catch (err: any) {

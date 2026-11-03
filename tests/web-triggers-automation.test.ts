@@ -382,7 +382,6 @@ const mockSession: any = {
   id: 'sess_test',
   title: 'Test Session',
   leadBotId: 'bot-1',
-  memberBotIds: ['bot-1'],
   mode: 'single',
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),

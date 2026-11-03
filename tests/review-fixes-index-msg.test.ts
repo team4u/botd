@@ -157,10 +157,9 @@ test('Fix 1 — D2: dead routes POST /api/nodes/:nodeId/bots and PUT /api/nodes/
   assert.equal(putRes.status, 404, 'PUT /api/nodes/:nodeId/bots/:botId must return 404');
 });
 
-test('Fix 2 & 4 — D3: multi-user message stores clean content and structured senderUserId/senderUsername; smoke tests mock runTurn', async (t) => {
+test('Fix 2 & 4 — D3: message stores clean content and structured senderUserId/senderUsername; smoke tests mock runTurn', async (t) => {
   const ctx = await createTestContext(t);
   const userA = ctx.adminUser;
-  const { user: userB, cookie: userBCookie } = await ctx.createUser('alice_user', 'alice-pass');
 
   ctx.registerNodeWithBots(userA.id, 'node_main', [
     { id: 'lead_bot', visibility: 'team' },
@@ -181,30 +180,18 @@ test('Fix 2 & 4 — D3: multi-user message stores clean content and structured s
 
   // UserA creates a session
   const sessionRes = await ctx.jsonRequest('/api/sessions', 'POST', {
-    title: 'Multi User Collab Session',
-    mode: 'direct',
+    title: 'Collab Session',
     leadBotId: 'lead_bot',
-    memberBotIds: ['lead_bot'],
   }, ctx.adminCookie);
   assert.equal(sessionRes.status, 200);
   const session: SessionRecord = sessionRes.json;
 
-  // Add userB as participant
-  const addPartRes = await ctx.jsonRequest(
-    `/api/sessions/${session.id}/participants`,
-    'POST',
-    { username: userB.username },
-    ctx.adminCookie
-  );
-  assert.equal(addPartRes.status, 200);
-  assert.equal(addPartRes.json.ok, true);
-
-  // UserB posts a message in the session
+  // UserA posts a message in the session
   const postMsgRes = await ctx.jsonRequest(
     `/api/sessions/${session.id}/messages`,
     'POST',
-    { content: 'Hello team, this is userB speaking' },
-    userBCookie
+    { content: 'Hello team, this is userA speaking' },
+    ctx.adminCookie
   );
   assert.equal(postMsgRes.status, 202);
 
@@ -223,17 +210,17 @@ test('Fix 2 & 4 — D3: multi-user message stores clean content and structured s
   assert(userMsg, 'User message must exist in DB');
 
   // Verify: clean content with NO [User: ...] prefix
-  assert.equal(userMsg.content, 'Hello team, this is userB speaking');
+  assert.equal(userMsg.content, 'Hello team, this is userA speaking');
   assert.doesNotMatch(userMsg.content, /^\[User:/);
 
   // Verify: structured fields are populated
-  assert.equal(userMsg.senderUserId, userB.id);
-  assert.equal(userMsg.senderUsername, userB.username);
+  assert.equal(userMsg.senderUserId, userA.id);
+  assert.equal(userMsg.senderUsername, userA.username);
 
   assert(runTurnCalls.length > 0, 'runTurn must have been called');
   const runTurnInput = runTurnCalls[0];
   // Incremental messages read from DB contains clean content
-  assert.match(runTurnInput.incrementalMessages, /Hello team, this is userB speaking/);
+  assert.match(runTurnInput.incrementalMessages, /Hello team, this is userA speaking/);
 
   // Verify assistant replied
   const assistantMsg = dbMessages.find((m) => m.role === 'assistant');
@@ -257,9 +244,7 @@ test('Fix 2 — D3: single-user message also stores senderUserId/senderUsername 
 
   const sessionRes = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Single User Session',
-    mode: 'direct',
     leadBotId: 'solo_bot',
-    memberBotIds: ['solo_bot'],
   }, ctx.adminCookie);
   assert.equal(sessionRes.status, 200);
   const session: SessionRecord = sessionRes.json;
