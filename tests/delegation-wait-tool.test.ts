@@ -97,9 +97,7 @@ const createParentSession = (env: TestEnv): SessionRecord =>
   env.hub.db.createSession({
     id: `sess_parent_${Math.random().toString(36).slice(2, 8)}`,
     title: '跨 BOT 协同',
-    mode: 'direct',
     leadBotId: 'bot_lead',
-    memberBotIds: ['bot_lead'],
     ownerId: env.adminUser.id,
   });
 

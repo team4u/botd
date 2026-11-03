@@ -196,9 +196,7 @@ export class TriggerService {
     const childSession = this.db.createSession({
       id: childSessionId,
       title: childTitle,
-      mode: 'direct',
       leadBotId: trigger.botId,
-      memberBotIds: [trigger.botId],
       ownerId: trigger.ownerId,
       parentSessionId: trigger.sessionId,
     });

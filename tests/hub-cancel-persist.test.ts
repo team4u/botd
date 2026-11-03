@@ -40,9 +40,7 @@ test('cancelSession 后飞行中的 runTurn 返回 aborted=true：部分输出�
   db.createSession({
     id: 'sess_c',
     title: 'cancel',
-    mode: 'direct',
     leadBotId: 'bot1',
-    memberBotIds: ['bot1'],
     ownerId: 'u1',
   });
   db.createMessage({

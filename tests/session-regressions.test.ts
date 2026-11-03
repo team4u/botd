@@ -120,27 +120,21 @@ test('1. POST/PATCH 跨 user 拒绝', async (t) => {
   // 1a: POST with lead belonging to other user -> 403
   const post1 = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Cross lead',
-    mode: 'direct',
     leadBotId: 'bot_user2',
-    memberBotIds: ['bot_user2'],
   }, adminCookie);
   assert.equal(post1.status, 403);
 
-  // 1b: POST with non-direct mode -> 400
+  // 1b: 非法 leadBotId -> 400
   const post2 = await ctx.jsonRequest('/api/sessions', 'POST', {
-    title: 'Invalid mode',
-    mode: 'lead' as any,
-    leadBotId: 'bot_admin',
-    memberBotIds: ['bot_admin'],
+    title: 'Invalid lead',
+    leadBotId: 'bot_missing!',
   }, adminCookie);
   assert.equal(post2.status, 400);
 
   // 1d: Valid session creation by admin
   const postValid = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Admin Session',
-    mode: 'direct',
     leadBotId: 'bot_admin',
-    memberBotIds: ['bot_admin'],
   }, adminCookie);
   assert.equal(postValid.status, 200);
   const sessionId = postValid.json.id;
@@ -168,9 +162,7 @@ test('2. queued clear/edited 后旧 task 失效，新编辑只执行一次', asy
 
   const created = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Queued Invalidation Test',
-    mode: 'direct',
     leadBotId: 'bot_1',
-    memberBotIds: ['bot_1'],
   }, cookie);
   assert.equal(created.status, 200);
   const sessionId = created.json.id;
@@ -251,9 +243,7 @@ test('3. 离线 clear 保留 pending mark，下一 runTurn 前 reset 成功才 r
   // --- Part 1: Serial mode ---
   const sRes = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Serial Reset Test',
-    mode: 'direct',
     leadBotId: 'bot_s',
-    memberBotIds: ['bot_s'],
   }, cookie);
   const sId = sRes.json.id;
 
@@ -306,17 +296,13 @@ test('3. 离线 clear 保留 pending mark，下一 runTurn 前 reset 成功才 r
   // --- Part 2: Offline clear & reset failure vs success ---
   const p1Res = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Reset Fail Test',
-    mode: 'direct',
     leadBotId: 'bot_p1',
-    memberBotIds: ['bot_p1'],
   }, cookie);
   const p1Id = p1Res.json.id;
 
   const p2Res = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Reset Success Test',
-    mode: 'direct',
     leadBotId: 'bot_p2',
-    memberBotIds: ['bot_p2'],
   }, cookie);
   const p2Id = p2Res.json.id;
 
@@ -385,9 +371,7 @@ test('5. remove 成员后 webhook 403/直接 handleWakeup 拒绝、调度阶段�
 
   const sRes = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Trigger Remove Test',
-    mode: 'direct',
     leadBotId: 'bot_rem',
-    memberBotIds: ['bot_rem'],
   }, cookie);
   const sessionId = sRes.json.id;
 
@@ -438,9 +422,7 @@ test('6. reset 异步中被取消/再次 clear 时老 reset 完成不能抹掉�
 
   const sRes = await ctx.jsonRequest('/api/sessions', 'POST', {
     title: 'Race Condition Test',
-    mode: 'direct',
     leadBotId: 'bot_race',
-    memberBotIds: ['bot_race'],
   }, cookie);
   const sessionId = sRes.json.id;
 

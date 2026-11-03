@@ -127,9 +127,7 @@ function createHubHarness() {
   db.createSession({
     id: 'sess_mirror',
     title: 'mirror',
-    mode: 'direct',
     leadBotId: 'bot_parent',
-    memberBotIds: ['bot_parent'],
     ownerId: 'u1',
   });
   // 预先落库一条包含该 run 的父消息，验证字段会被持久化回 subagentRuns

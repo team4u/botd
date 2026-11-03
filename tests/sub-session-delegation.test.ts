@@ -151,9 +151,7 @@ test('Sub-Session Delegation: 创建子会话、父会话通知、subsessions �
   // 1. 创建父会话
   const parentRes = await jsonRequest('/api/sessions', 'POST', {
     title: '主项目群',
-    mode: 'direct',
     leadBotId: botLead,
-    memberBotIds: [botLead],
   }, adminCookie);
   assert.equal(parentRes.status, 200);
   const parentSession: SessionRecord = parentRes.json;
@@ -170,7 +168,6 @@ test('Sub-Session Delegation: 创建子会话、父会话通知、subsessions �
   assert.ok(delegateResult.childSession);
   assert.equal(delegateResult.childSession.parentSessionId, parentSession.id);
   assert.equal(delegateResult.childSession.leadBotId, botWorker);
-  assert.deepEqual(delegateResult.childSession.memberBotIds, [botWorker]);
   assert.equal(delegateResult.childSession.title, '[子任务] 请分析近期的系统错误日志并提供优化建议');
   assert.equal(delegateResult.initialMessage.role, 'user');
   assert.equal(delegateResult.initialMessage.content, '请分析近期的系统错误日志并提供优化建议');
@@ -224,7 +221,7 @@ test('Sub-Session Delegation: 创建子会话、父会话通知、subsessions �
   assert.equal(childMessages[1].content, '子任务执行完毕：已成功处理 42 条数据。');
 });
 
-test('Sub-Session Delegation: 自定义标题与模式，多个子会话按 created_at 排序', async (t) => {
+test('Sub-Session Delegation: 自定义标题，多个子会话按 created_at 排序', async (t) => {
   const ctx = await createTestContext(t);
   const { adminUser, adminCookie, mockRpcs, registerNodeWithBots, jsonRequest } = ctx;
 
@@ -242,9 +239,7 @@ test('Sub-Session Delegation: 自定义标题与模式，多个子会话按 crea
 
   const parentRes = await jsonRequest('/api/sessions', 'POST', {
     title: '复杂项目',
-    mode: 'direct',
     leadBotId: botLead,
-    memberBotIds: [botLead],
   }, adminCookie);
   const parentSession: SessionRecord = parentRes.json;
 
@@ -252,24 +247,19 @@ test('Sub-Session Delegation: 自定义标题与模式，多个子会话按 crea
   const sub1 = await jsonRequest(`/api/sessions/${parentSession.id}/delegate`, 'POST', {
     botId: botWorker1,
     title: '自定义子任务一',
-    mode: 'direct',
     prompt: 'Prompt 1',
   }, adminCookie);
   assert.equal(sub1.status, 201);
   assert.equal(sub1.json.childSession.title, '自定义子任务一');
-  assert.equal(sub1.json.childSession.mode, 'direct');
 
-  // 第二个子会话（指定 mode）
+  // 第二个子会话
   const sub2 = await jsonRequest(`/api/sessions/${parentSession.id}/delegate`, 'POST', {
     botId: botWorker2,
     title: '自定义子任务二',
-    mode: 'direct',
     prompt: 'Prompt 2',
   }, adminCookie);
   assert.equal(sub2.status, 201);
   assert.equal(sub2.json.childSession.title, '自定义子任务二');
-  assert.equal(sub2.json.childSession.mode, 'direct');
-  assert.deepEqual(sub2.json.childSession.memberBotIds, [botWorker2]);
 
   // 验证 subsessions 包含两个且顺序正确
   const listRes = await jsonRequest(`/api/sessions/${parentSession.id}/subsessions`, 'GET', undefined, adminCookie);
@@ -291,9 +281,7 @@ test('Sub-Session Delegation: 权限与校验边界测试', async (t) => {
 
   const parentRes = await jsonRequest('/api/sessions', 'POST', {
     title: 'Admin Parent',
-    mode: 'direct',
     leadBotId: 'bot_admin',
-    memberBotIds: ['bot_admin'],
   }, adminCookie);
   const adminParentId = parentRes.json.id;
 
@@ -338,19 +326,11 @@ test('Sub-Session Delegation: 权限与校验边界测试', async (t) => {
   }, adminCookie);
   assert.equal(resMissingBot.status, 400);
 
-  // 7. 无效的 mode -> 400
-  const resInvalidMode = await jsonRequest(`/api/sessions/${adminParentId}/delegate`, 'POST', {
-    botId: 'bot_admin',
-    prompt: 'Test',
-    mode: 'invalid_mode' as any,
-  }, adminCookie);
-  assert.equal(resInvalidMode.status, 400);
-
-  // 8. 其他用户请求 subsessions -> 403
+  // 7. 其他用户请求 subsessions -> 403
   const resSubForbidden = await jsonRequest(`/api/sessions/${adminParentId}/subsessions`, 'GET', undefined, user2Cookie);
   assert.equal(resSubForbidden.status, 403);
 
-  // 9. 不存在的 session 请求 subsessions -> 404
+  // 8. 不存在的 session 请求 subsessions -> 404
   const resSubNotFound = await jsonRequest('/api/sessions/sess_ghost/subsessions', 'GET', undefined, adminCookie);
   assert.equal(resSubNotFound.status, 404);
 });
@@ -364,9 +344,7 @@ test('POST /api/sessions 透传 parentSessionId 与 updateSession 字段映射',
   // 通过 POST /api/sessions 透传 parentSessionId 创建
   const res = await jsonRequest('/api/sessions', 'POST', {
     title: '透传测试',
-    mode: 'direct',
     leadBotId: 'bot_pass',
-    memberBotIds: ['bot_pass'],
     parentSessionId: 'sess_custom_parent_123',
   }, adminCookie);
   assert.equal(res.status, 200);
@@ -432,9 +410,7 @@ test('CLI: botd sessions delegate 与 subsessions', async (t) => {
   const parent = hub.db.createSession({
     id: 'sess_cli_parent',
     title: 'CLI Parent Session',
-    mode: 'direct',
     leadBotId: 'cli_bot',
-    memberBotIds: ['cli_bot'],
     ownerId: adminUser.id,
   });
 
@@ -533,9 +509,7 @@ test('Sub-Session Delegation: 子会话执行失败时向父会话回传失败�
 
   const parentRes = await jsonRequest('/api/sessions', 'POST', {
     title: '失败测试群',
-    mode: 'direct',
     leadBotId: botLead,
-    memberBotIds: [botLead],
   }, adminCookie);
   const parentSession: SessionRecord = parentRes.json;
 
@@ -590,9 +564,7 @@ test('Sub-Session Delegation: 产物文件关联/复制至子会话', async (t) 
 
   const parentRes = await jsonRequest('/api/sessions', 'POST', {
     title: '产物传递测试群',
-    mode: 'direct',
     leadBotId: botLead,
-    memberBotIds: [botLead],
   }, adminCookie);
   const parentSession: SessionRecord = parentRes.json;
 
@@ -646,9 +618,7 @@ test('Sub-Session Delegation: 显式 artifactIds: [] 不携带产物，undefined
 
   const parentRes = await jsonRequest('/api/sessions', 'POST', {
     title: '空产物测试群',
-    mode: 'direct',
     leadBotId: botLead,
-    memberBotIds: [botLead],
   }, adminCookie);
   const parentSession: SessionRecord = parentRes.json;
 
@@ -706,9 +676,7 @@ test('Sub-Session Delegation: 团队共享 bot 可被其他用户委派，私有
   // 管理员自己的父会话
   const parentRes = await jsonRequest('/api/sessions', 'POST', {
     title: '跨用户团队协同',
-    mode: 'direct',
     leadBotId: 'bot_admin_x',
-    memberBotIds: ['bot_admin_x'],
   }, adminCookie);
   assert.equal(parentRes.status, 200);
   const parentSession: SessionRecord = parentRes.json;
@@ -767,9 +735,7 @@ test('Sub-Session Delegation: 并发多子会话 All-Settled Barrier —— 全�
 
   const parentRes = await jsonRequest('/api/sessions', 'POST', {
     title: 'Barrier 测试群',
-    mode: 'direct',
     leadBotId: botLead,
-    memberBotIds: [botLead],
   }, adminCookie);
   const parentSession: SessionRecord = parentRes.json;
 
@@ -864,9 +830,7 @@ test('Sub-Session Delegation: autoWakeParent: false 不落库完成回调，亦�
 
   const parentRes = await jsonRequest('/api/sessions', 'POST', {
     title: '静默委派测试群',
-    mode: 'direct',
     leadBotId: botLead,
-    memberBotIds: [botLead],
   }, adminCookie);
   const parentSession: SessionRecord = parentRes.json;
 
@@ -968,9 +932,7 @@ test('buildGroupContextPrompt: 注入可协同的其他主 BOT 与跨 Bot 协同
   const session = hub.db.createSession({
     id: 'sess_prompt_ctx',
     title: 'Prompt 注入测试',
-    mode: 'direct',
     leadBotId: 'bot_prompt_me',
-    memberBotIds: ['bot_prompt_me'],
     ownerId: adminUser.id,
   });
 
@@ -1063,18 +1025,14 @@ test('共享 Bot 在他人会话中执行时，节点凭据以会话所有者身
   hub.db.createSession({
     id: 'sess_b',
     title: 'User B session with shared bot',
-    mode: 'direct',
     leadBotId: 'bot_shared',
-    memberBotIds: ['bot_shared'],
     ownerId: 'user_b',
   });
   // 用户 B 的隔离会话：与 node_a 毫无关系
   hub.db.createSession({
     id: 'sess_b_isolated',
     title: 'User B isolated session',
-    mode: 'direct',
     leadBotId: 'bot_b_private',
-    memberBotIds: ['bot_b_private'],
     ownerId: 'user_b',
   });
 

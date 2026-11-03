@@ -84,9 +84,8 @@ function parseTriggerCreate(
   }
   const kind = b.kind as TriggerKind;
 
-  // botId 必须是会话成员
-  const memberIds = new Set([session.leadBotId, ...session.memberBotIds]);
-  if (!memberIds.has(b.botId)) {
+  // botId 必须是会话主控
+  if (b.botId !== session.leadBotId) {
     return { ok: false, error: `Bot ${b.botId} is not a member of the session` };
   }
 

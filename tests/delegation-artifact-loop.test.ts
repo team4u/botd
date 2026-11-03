@@ -131,9 +131,7 @@ test('交付物闭环: 子会话新产物在完成时零拷贝回传父会话，
   // 1. 创建父会话并预置一条父会话产物（用于验证继承产物不回传）
   const parentRes = await jsonRequest('/api/sessions', 'POST', {
     title: '交付物闭环测试',
-    mode: 'direct',
     leadBotId: botLead,
-    memberBotIds: [botLead],
   });
   assert.equal(parentRes.status, 200, JSON.stringify(parentRes.json));
   const parentSession: SessionRecord = parentRes.json;
@@ -256,9 +254,7 @@ test('交付物闭环: 子代理（parentBotId）可在主 Bot 所属会话上�
   db.createSession({
     id: 'sess_sub',
     title: 'Subagent Session',
-    mode: 'direct',
     leadBotId: 'bot_primary',
-    memberBotIds: ['bot_primary'],
     ownerId: 'user_1',
   });
 

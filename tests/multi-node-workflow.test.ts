@@ -236,9 +236,7 @@ const createCoordinatorSession = (env: TestEnv): SessionRecord =>
   env.hub.db.createSession({
     id: `sess_mn_${Math.random().toString(36).slice(2, 8)}`,
     title: '跨节点多阶段发布',
-    mode: 'direct',
     leadBotId: 'bot_coord',
-    memberBotIds: ['bot_coord'],
     ownerId: env.adminUser.id,
   });
 

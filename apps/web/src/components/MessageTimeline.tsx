@@ -10,7 +10,6 @@ import {
   ChevronUp,
   ArrowDown,
   Bot,
-  Users,
   Loader2,
   RefreshCw,
 } from 'lucide-react';
@@ -342,22 +341,16 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
           ) : messages.length === 0 && effectiveStreamingStates.length === 0 && session ? (
             <div className="h-full flex flex-col items-center justify-center text-center p-6 max-w-md mx-auto">
               <div className="w-12 h-12 rounded-2xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-200/80 dark:border-zinc-800/80 flex items-center justify-center text-zinc-700 dark:text-zinc-300 mb-3 shadow-xs">
-                {session.mode === 'direct' ? (
-                  <Bot className="w-6 h-6" />
-                ) : (
-                  <Users className="w-6 h-6" />
-                )}
+                <Bot className="w-6 h-6" />
               </div>
               <h3 className="text-sm sm:text-base font-semibold text-zinc-800 dark:text-zinc-200 mb-1">
-                {session.mode === 'direct' ? `开启与 ${session.title} 的对话` : session.title}
+                {`开启与 ${session.title} 的对话`}
               </h3>
               <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4 leading-relaxed">
-                {session.mode === 'direct'
-                  ? '发送消息开始对话。智能体将根据配置的角色与技能为你提供协助。输入 /new 可随时开启新话题。'
-                  : '发送消息开始对话。在群聊中输入 @ 提及成员接力发言与协作。'}
+                {'发送消息开始对话。智能体将根据配置的角色与技能为你提供协助。输入 /new 可随时开启新话题。'}
               </p>
               <div className="flex flex-wrap justify-center gap-1.5">
-                {session.memberBotIds.map((bid) => {
+                {[session.leadBotId].map((bid) => {
                   const b = botMap.get(bid);
                   return (
                     <span

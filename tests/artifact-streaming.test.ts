@@ -91,9 +91,7 @@ async function setupTestContext(t: TestContext): Promise<TestContextBundle> {
   hub.db.createSession({
     id: sessionId,
     title: 'Streaming Test Session',
-    mode: 'direct',
     leadBotId: botId,
-    memberBotIds: [botId],
     ownerId: userId,
   });
 
@@ -422,9 +420,7 @@ test('Binary upload validations and error handling', async (t) => {
   ctx.hub.db.createSession({
     id: otherSessionId,
     title: 'Bob Session',
-    mode: 'direct',
     leadBotId: ctx.bot.id,
-    memberBotIds: [ctx.bot.id],
     ownerId: otherUserId,
   });
 

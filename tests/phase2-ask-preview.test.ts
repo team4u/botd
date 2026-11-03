@@ -40,11 +40,11 @@ test('pickCurrentDirectSession 排除带 parentSessionId 的子会话，防止�
   const { pickCurrentDirectSession } = await loadSidebarModule();
   const now = new Date().toISOString();
   const main = {
-    id: 'sess_main', mode: 'direct', archived: false, memberBotIds: ['bot_1'],
+    id: 'sess_main', archived: false, leadBotId: 'bot_1',
     updatedAt: new Date(Date.now() - 60_000).toISOString(),
   } as any;
   const child = {
-    id: 'sess_child', mode: 'direct', archived: false, memberBotIds: ['bot_1'],
+    id: 'sess_child', archived: false, leadBotId: 'bot_1',
     parentSessionId: 'sess_parent', updatedAt: now,
   } as any;
 
@@ -54,8 +54,8 @@ test('pickCurrentDirectSession 排除带 parentSessionId 的子会话，防止�
 
 test('pickCurrentDirectSession 无子会话时仍正常取最新主单聊', async () => {
   const { pickCurrentDirectSession } = await loadSidebarModule();
-  const a = { id: 'sess_a', mode: 'direct', archived: false, memberBotIds: ['bot_1'], updatedAt: new Date(Date.now() - 60_000).toISOString() } as any;
-  const b = { id: 'sess_b', mode: 'direct', archived: false, memberBotIds: ['bot_1'], updatedAt: new Date().toISOString() } as any;
+  const a = { id: 'sess_a', archived: false, leadBotId: 'bot_1', updatedAt: new Date(Date.now() - 60_000).toISOString() } as any;
+  const b = { id: 'sess_b', archived: false, leadBotId: 'bot_1', updatedAt: new Date().toISOString() } as any;
   assert.equal(pickCurrentDirectSession([a, b], 'bot_1')?.id, 'sess_b');
 });
 

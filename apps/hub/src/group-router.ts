@@ -145,13 +145,10 @@ export function buildGroupContextPrompt(
 
   if (db) {
     prompt += '\n### 成员信息\n';
-    const allMemberIds = [session.leadBotId, ...session.memberBotIds.filter((id) => id !== session.leadBotId)];
-    for (const memberId of allMemberIds) {
-      const bot = db.getBot(memberId);
-      const desc = bot?.description ? ` - ${bot.description}` : '';
-      const skills = bot?.enabledSkills?.length ? ` (技能: ${bot.enabledSkills.join(', ')})` : '';
-      prompt += `- @${memberId} (${bot?.name || memberId})${desc}${skills}\n`;
-    }
+    const bot = db.getBot(session.leadBotId);
+    const desc = bot?.description ? ` - ${bot.description}` : '';
+    const skills = bot?.enabledSkills?.length ? ` (技能: ${bot.enabledSkills.join(', ')})` : '';
+    prompt += `- @${session.leadBotId} (${bot?.name || session.leadBotId})${desc}${skills}\n`;
   }
 
   // 子代理感知：主 BOT 始终注入子代理引导与规范，让主 BOT 知道如何调度与创建子代理
@@ -284,23 +281,21 @@ export class GroupRouter {
     if (!session) return false;
     const bot = this.db.getBot(botId);
     if (!bot) return false;
-    const sessionMembers = [session.leadBotId, ...session.memberBotIds];
-    if (sessionMembers.includes(botId)) return true;
-    if (bot.parentBotId && sessionMembers.includes(bot.parentBotId)) return true;
+    if (session.leadBotId === botId) return true;
+    if (bot.parentBotId && bot.parentBotId === session.leadBotId) return true;
     return false;
   }
 
   getValidBotIds(session: SessionRecord): Set<string> {
-    const valid = new Set<string>([session.leadBotId, ...session.memberBotIds]);
+    const valid = new Set<string>([session.leadBotId]);
     const ownerId = this.getSessionOwner(session.id, session);
     const allBots = this.db.getAllBots();
     for (const b of allBots) {
       if (b.parentBotId && valid.has(b.parentBotId)) {
         valid.add(b.id);
       }
-      // 单聊中 owner 可用的具他 BOT/子代理也可被 @ 接力；群聊仅限成员及其子代理
+      // owner 可用的其他 BOT/子代理也可被 @ 接力
       if (
-        session.mode === 'direct' &&
         ownerId &&
         !b.parentBotId &&
         this.db.canUserUseBot(b.id, ownerId)
@@ -662,7 +657,7 @@ export class GroupRouter {
     const session = this.db.getSession(sessionId);
     if (!session) return;
 
-    const memberIds = [...new Set([session.leadBotId, ...session.memberBotIds])];
+    const memberIds = [session.leadBotId];
     const state = this.getOrCreateState(sessionId);
     const generation = state.generation;
     for (const botId of memberIds) {

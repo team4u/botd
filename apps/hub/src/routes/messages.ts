@@ -90,14 +90,6 @@ export function registerMessageRoutes(app: HubApp, ctx: HubContext): void {
       return c.json({ error: cmdResult.error }, 400);
     }
 
-    const user = c.get('user');
-    const participants = db.listSessionParticipants(id);
-    const isMultiUser = participants.length > 0 || (session.ownerId !== undefined && user.id !== session.ownerId);
-
-    const routerContent = isMultiUser && !content.startsWith(`[User: ${user.username}]`)
-      ? `[User: ${user.username}]: ${content}`
-      : content;
-
     const mentions = cmdResult.targetBotId
       ? [cmdResult.targetBotId]
       : (cmdResult.isCommand ? [] : extractMentions(content, validBots));

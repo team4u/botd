@@ -16,7 +16,6 @@ import type {
   ArtifactRecord,
   MessageAttachment,
   PendingAskRecord,
-  SessionParticipantRecord,
   TriggerRecord,
   CreateTriggerInput,
   TriggerDispatchMode,
@@ -51,7 +50,6 @@ export type {
   NotificationOutboxRecord,
   TriggerDispatchMode,
   TriggerEventFilter,
-  SessionParticipantRecord,
 };
 
 export class ApiError extends Error {
@@ -468,13 +466,6 @@ export const api = {
     });
   },
 
-  async updateSessionPinned(sessionId: string, pinned: boolean): Promise<SessionRecord> {
-    return request<SessionRecord>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ pinned }),
-    });
-  },
-
   async getSessionMessages(sessionId: string, signal?: AbortSignal): Promise<MessageRecord[]> {
     return request<MessageRecord[]>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
       signal,
@@ -628,35 +619,6 @@ export const api = {
       {
         method: 'POST',
         body: JSON.stringify({ answer }),
-      }
-    );
-  },
-
-  // Session Participants
-  async listSessionParticipants(sessionId: string): Promise<SessionParticipantRecord[]> {
-    return request<SessionParticipantRecord[]>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/participants`
-    );
-  },
-
-  async addSessionParticipant(
-    sessionId: string,
-    usernameOrUserId: string
-  ): Promise<SessionParticipantRecord[]> {
-    return request<SessionParticipantRecord[]>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/participants`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ userId: usernameOrUserId, username: usernameOrUserId }),
-      }
-    );
-  },
-
-  async removeSessionParticipant(sessionId: string, userId: string): Promise<void> {
-    return request<void>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/participants/${encodeURIComponent(userId)}`,
-      {
-        method: 'DELETE',
       }
     );
   },

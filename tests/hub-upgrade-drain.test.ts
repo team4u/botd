@@ -446,9 +446,7 @@ test('4. Hub drain() 优雅排空：当有一个慢速 runTurn 正在执行时�
   // Create session with drain-bot
   const session = await f.json<SessionRecord>('/api/sessions', 'POST', {
     title: 'Drain Test Session',
-    mode: 'direct',
     leadBotId: 'drain-bot',
-    memberBotIds: ['drain-bot'],
   });
 
   // Initial health check: not draining, 0 active turns

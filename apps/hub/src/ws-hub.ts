@@ -234,7 +234,6 @@ export class NodeConnectionManager {
         }
 
         const isMember =
-          session.memberBotIds.includes(event.botId) ||
           session.leadBotId === event.botId ||
           Boolean(this.router?.canRunBot(event.sessionId, event.botId));
         if (!isMember) {
@@ -432,7 +431,7 @@ export class NodeConnectionManager {
       throw new Error(`Session ${sessionId} not found`);
     }
 
-    const isMember = session.memberBotIds.includes(botId) || session.leadBotId === botId;
+    const isMember = session.leadBotId === botId;
     if (!isMember) {
       throw new Error(`Forbidden: bot ${botId} is not a member of session ${sessionId}`);
     }

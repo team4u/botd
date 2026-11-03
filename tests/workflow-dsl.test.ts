@@ -10,9 +10,7 @@ import type { SessionRecord } from '../packages/protocol/src/index.js';
 const session = {
   id: 'sess_test',
   title: 'Direct Session',
-  mode: 'direct',
   leadBotId: 'lead',
-  memberBotIds: ['lead'],
   status: 'idle',
   createdAt: '',
   updatedAt: '',
