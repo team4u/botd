@@ -897,8 +897,11 @@ export const SingleToolView: React.FC<{
   initialExpanded?: boolean;
 }> = ({ tool, initialExpanded }) => {
   const isError = tool.status === 'error' || Boolean(tool.isError);
-  // 带声明式 UI 规格（tool.view 插槽）的工具默认展开，直接呈现富视图
-  const [expanded, setExpanded] = useState<boolean>(() => Boolean(initialExpanded || tool.uiSpec || isError));
+  // 带声明式 UI 规格（tool.view 插槽）的工具默认展开；edit 工具默认展开红绿内联 Diff，
+  // 开发者无需手动点开即可看到最近变更
+  const [expanded, setExpanded] = useState<boolean>(
+    () => Boolean(initialExpanded || tool.uiSpec || isError || tool.name === 'edit')
+  );
 
   useEffect(() => {
     if (isError) {
@@ -948,6 +951,18 @@ export const ToolGroupView: React.FC<{
     tools.forEach((t, i) => {
       if (t.status === 'error' || t.isError) initial.add(i);
     });
+    // 含 edit 工具时默认展开最后一个 edit（若正在运行或刚完成），内联红绿 Diff 直接可见
+    for (let i = tools.length - 1; i >= 0; i--) {
+      const t = tools[i];
+      if (
+        t.name === 'edit' &&
+        (t.status === 'running' || t.status === 'done') &&
+        !tools.slice(i + 1).some((later) => later.name === 'edit')
+      ) {
+        initial.add(i);
+        break;
+      }
+    }
     return initial;
   });
 
@@ -987,6 +1002,21 @@ export const ToolGroupView: React.FC<{
   const summaryText = isRunning ? `正在执行 ${tools.length} 项操作` : `已执行 ${tools.length} 项操作`;
   const breakdown = computeToolBreakdown(tools);
 
+  // 汇总本组 edit 工具的增删行数：折叠态也能一眼看到这组操作改了多少行代码
+  const groupEditStats = useMemo(() => {
+    let added = 0;
+    let removed = 0;
+    for (const t of tools) {
+      if (t.name !== 'edit') continue;
+      const entries = normalizeEditEntries(t.args);
+      if (!entries) continue;
+      const stats = countEditDiffStats(entries);
+      added += stats.added;
+      removed += stats.removed;
+    }
+    return added > 0 || removed > 0 ? { added, removed } : null;
+  }, [tools]);
+
   return (
     <div className="my-2 max-w-2xl">
       <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/40 overflow-hidden shadow-xs">
@@ -1017,6 +1047,7 @@ export const ToolGroupView: React.FC<{
           <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate hidden sm:inline">
             {breakdown}
           </span>
+          {groupEditStats && <DiffStatsBadge added={groupEditStats.added} removed={groupEditStats.removed} />}
           {errorCount > 0 && (
             <span className="text-[11px] font-medium text-rose-500 dark:text-rose-400 shrink-0">
               · {errorCount} 项失败

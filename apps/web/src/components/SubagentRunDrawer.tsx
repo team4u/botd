@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { X, Loader2, Send, CircleStop } from 'lucide-react';
+import { X, Loader2, Send, CircleStop, Pin, PinOff } from 'lucide-react';
 import type {
   BotConfig,
   MessageRecord,
@@ -20,6 +20,9 @@ interface SubagentRunDrawerProps {
   nodeMap: Map<string, NodeRecord>;
   onClose: () => void;
   onToast: (type: ToastItem['type'], message: string) => void;
+  /** 固定分栏（Pin）模式：不渲染遮罩、Esc 不关闭，由父级横向分栏承载 */
+  pinned?: boolean;
+  onTogglePin?: () => void;
 };
 
 /** 状态徽章配色 */
@@ -133,6 +136,8 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
   nodeMap,
   onClose,
   onToast,
+  pinned = false,
+  onTogglePin,
 }) => {
   const [inputValue, setInputValue] = useState('');
   const [sending, setSending] = useState(false);
@@ -165,15 +170,15 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
     return next;
   }, [botMap, run]);
 
-  // Esc 关闭
+  // Esc 关闭（固定分栏模式下 Esc 不关闭，避免打断左栏输入）
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || pinned) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isOpen, onClose]);
+  }, [isOpen, pinned, onClose]);
 
   const handleStop = async () => {
     if (!run || stopping) return;
@@ -214,24 +219,10 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
 
   if (!isOpen || !run) return null;
 
-  return (
+  const panelBody = (
     <>
-      {/* 遮罩：点击关闭 */}
-      <div
-        className="fixed inset-0 z-40 bg-black/30 dark:bg-black/50"
-        onClick={onClose}
-        aria-hidden="true"
-      />
-
-      {/* 右侧滑入面板 */}
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={`子代理运行详情 ${run.id}`}
-        className="fixed inset-y-0 right-0 z-40 w-[min(38rem,96vw)] bg-white dark:bg-zinc-950 border-l border-zinc-200/90 dark:border-zinc-800/90 shadow-xl flex flex-col animate-in fade-in slide-in-from-right duration-200"
-      >
-        {/* 顶部栏：子代理身份 + 状态徽章 + 耗时 + 停止按钮 */}
-        <div className="flex items-center justify-between gap-2 px-4 h-13 sm:h-14 border-b border-zinc-200/80 dark:border-zinc-800/80 shrink-0">
+      {/* 顶部栏：子代理身份 + 状态徽章 + 耗时 + 停止按钮 */}
+      <div className="flex items-center justify-between gap-2 px-4 h-13 sm:h-14 border-b border-zinc-200/80 dark:border-zinc-800/80 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
             <BotAvatarBadge
               botId={run.subagentId}
@@ -277,6 +268,21 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
                   <CircleStop className="w-3.5 h-3.5" />
                 )}
                 <span>停止子代理</span>
+              </button>
+            )}
+            {onTogglePin && (
+              <button
+                type="button"
+                onClick={onTogglePin}
+                aria-label={pinned ? '取消固定分栏' : '固定为常驻分栏'}
+                title={pinned ? '取消固定：恢复为浮层抽屉' : '固定分栏：与主对话并排展示，不遮挡输入'}
+                className={`hidden lg:inline-flex p-1.5 rounded-lg transition-colors cursor-pointer ${
+                  pinned
+                    ? 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/50'
+                    : 'text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                }`}
+              >
+                {pinned ? <PinOff className="w-4 h-4" /> : <Pin className="w-4 h-4" />}
               </button>
             )}
             <button
@@ -333,6 +339,39 @@ export const SubagentRunDrawer: React.FC<SubagentRunDrawerProps> = ({
             </button>
           </div>
         </div>
+      </>
+  );
+
+  // 固定分栏模式：无遮罩、无动画，由父级横向分栏容器承载高度与宽度
+  if (pinned) {
+    return (
+      <div
+        role="dialog"
+        aria-label={`子代理运行详情 ${run.id}`}
+        className="h-full w-full flex flex-col bg-white dark:bg-zinc-950 overflow-hidden"
+      >
+        {panelBody}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {/* 遮罩：点击关闭 */}
+      <div
+        className="fixed inset-0 z-40 bg-black/30 dark:bg-black/50"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+
+      {/* 右侧滑入面板 */}
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`子代理运行详情 ${run.id}`}
+        className="fixed inset-y-0 right-0 z-40 w-[min(38rem,96vw)] bg-white dark:bg-zinc-950 border-l border-zinc-200/90 dark:border-zinc-800/90 shadow-xl flex flex-col animate-in fade-in slide-in-from-right duration-200"
+      >
+        {panelBody}
       </div>
     </>
   );
