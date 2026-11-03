@@ -2,7 +2,11 @@
 
 ## 设计原则
 
-符合 UNIX 设计原则。
+- **简洁优雅**：用最少的代码解决问题，拒绝不必要的抽象和配置。优雅的方案通常也是正确的方案——如果实现感觉笨重，先怀疑设计而非动手修补。
+- **第一性原理**：从问题本质出发推理方案，而非类比现有实现或照搬惯例。写代码前先问：这个问题到底是什么？最直接的解法是什么？
+- **遵循好的设计原则**：遵循 UNIX 设计原则（Do One Thing Well、组合优于聚合、机制与策略分离）、KISS、YAGNI、最小惊讶原则。高内聚低耦合，让边界清晰、让修改安全。
+- **可读性优先**：代码是写给人看的。命名表达意图，结构自解释，必要时才写注释（解释 Why，而非 What）。
+- **子代理开发默认 worktree 后台模式**：委派子代理做开发（写代码、改文件）时，默认使用 `worktree` 隔离 + 后台运行，避免与主工作区互相污染；纯研究、只读调查类任务不需要 worktree。
 
 ## 端口约定（重要，3000 被外部占用）
 
@@ -26,21 +30,3 @@ pnpm dev:web
 ```
 
 `BOTD_PORT=3002` 必须带上；Vite 端口（3001）与代理目标（3002）已固化在 `apps/web/vite.config.ts`（`strictPort: true`，被占直接报错不漂移）。
-
-## 前端设计与字号规范（apps/web）
-
-参考 Linear / Vercel 现代管理后台设计系统，全站统一使用 Tailwind 内置规范阶梯，杜绝控件文字突兀放大：
-
-| 用途 | 标准类 | 视觉效果 |
-|---|---|---|
-| 表单单行控件（input / select / SearchableSelect 触发器） | `h-8 px-2.5 text-xs rounded-lg` | 32px 高度紧凑精致，文字 12px，与周围 Label 完全同阶 |
-| 表单多行文本域（textarea / prompt 编辑） | `p-2.5 text-xs rounded-lg` | 紧凑 12px，行高 1.5 |
-| 字段标签（Label）、按钮、正文导航 | `text-xs font-medium` | 12px（字重 500 次级色阶，与输入框自然区分） |
-| 次级小字（说明提示 Hint、时间戳、mono 标识） | `text-[11px]` 或 `text-xs` | 11px~12px 次级灰，提供清晰层次 |
-| 弹窗/页面标题 | `text-sm sm:text-base font-semibold` | 14px~16px |
-| 登录页大标题 | `text-xl font-bold` | 20px |
-| 配对码等展示型大字符 | `text-3xl font-bold` | 30px |
-
-约束：
-- 控件高度严格收敛为 `h-8`（32px），圆角统一使用现代克制的 `rounded-lg`，禁止滥用 `rounded-xl`
-- 消息正文字号只在 `index.css` 的 `.prose-botd` 定义，组件内不得叠加字号类
