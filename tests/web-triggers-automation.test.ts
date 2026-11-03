@@ -293,13 +293,24 @@ test('api.updateChannel: passes tellPolicy in PATCH body', async () => {
 });
 
 // ============================================================
-// 3. TriggersModal.tsx: 源码级回归 —— 新增表单字段、徽章与区块
+// 3. TriggersModal（components/TriggersModal/ 目录）: 源码级回归
+//    —— 新增表单字段、徽章与区块
 // ============================================================
 
-const componentPath = path.resolve(__dirname, '../apps/web/src/components/TriggersModal.tsx');
+const componentDir = path.resolve(__dirname, '../apps/web/src/components/TriggersModal');
+const modalSource = [
+  'TriggersTab.tsx',
+  'TriggerForm.tsx',
+  'ChannelsTab.tsx',
+  'ChannelForm.tsx',
+  'InboxSection.tsx',
+  'OutboxSection.tsx',
+]
+  .map((f) => readFileSync(path.join(componentDir, f), 'utf8'))
+  .join('\n');
 
 test('TriggersModal source: imports new protocol types and renders dispatchMode selector', () => {
-  const source = readFileSync(componentPath, 'utf8');
+  const source = modalSource;
 
   // 类型引入
   for (const t of [
@@ -355,7 +366,7 @@ test('TriggersModal source: imports new protocol types and renders dispatchMode 
 });
 
 test('TriggersModal source: tell policy options, badge and outbox section', () => {
-  const source = readFileSync(componentPath, 'utf8');
+  const source = modalSource;
 
   // 通知打扰策略文案
   assert(source.includes('按需打扰'), 'tellPolicy needed label');
