@@ -4,10 +4,11 @@ Bot 在回复中输出一份结构化 JSON Spec，Web 前端把它渲染成可�
 
 ## 这是什么
 
-生成式 UI 有两条使用路径：
+生成式 UI 有三条使用路径：
 
 1. **聊天内展示**：Bot 在回复正文里输出 ` ```ui `（或 ` ```json-render `）代码围栏。前端把围栏内容渲染成只读卡片。输入控件不可编辑，按钮不可点击。
 2. **人工交互**：脚本或 Bot 调用 `botd ask "<提示>" --ui`，把 Spec 作为确认卡发给会话。参与者在网页上填写表单、点击按钮。提交结果以单行 JSON 写入 stdout。
+3. **扩展全栈 UI**：Pi 扩展通过 `ctx.ui` 与三大声明式插槽（`tool.view`、`composer.widget`、`dialog.custom`）在网页上直接渲染交互界面，见下文[在 Pi 扩展中使用全栈 UI](#在-pi-扩展中使用全栈-ui-ctxui-与三大插槽)。
 
 Spec 在三个层级被校验，非法 Spec 不会到达浏览器：
 
@@ -538,14 +539,168 @@ botd ask --ui-schema --json
 
 每个 Bot 都内置 `botd-cli` 技能（`apps/node/src/builtin-skill.ts`），其中已包含这份组件目录与 `--ui` 用法，主控 Bot 无需额外安装即可使用。
 
+## 在 Pi 扩展中使用全栈 UI（ctx.ui 与三大插槽）
+
+Pi 扩展（`~/.botd/extensions/<id>/index.ts`）运行在网页会话时，`ctx.ui` 由 `createWebExtensionUIContext`（`apps/node/src/web-command-ui.ts`）桥接到 Web 前端，不再需要终端。扩展一次编写，终端与网页都能跑。
+
+### ctx.ui 的 Web 桥接
+
+| 方法 | Web 端行为 |
+| --- | --- |
+| `confirm(title, message, opts)` | 转为「确认 / 取消」选项卡，返回布尔。支持 `timeout` / `AbortSignal`，超时或中止回退 `false` |
+| `select(title, options, opts)` | 转为选项卡，返回所选文本 |
+| `input(title, placeholder, opts)` | 转为单行 `TextInput` 表单卡，提交后返回 `state.value` |
+| `editor(title, prefill)` | 转为多行 `TextInput` 表单卡（6 行） |
+| `custom(spec)` | 接受 `BotdUiSpec` 对象（或 `{ title, prompt, ui }` 包装），渲染完整交互卡，返回 `{ decision, state }` |
+| `notify(message, type)` | Web 端弹 Toast |
+| `setStatus(key, text)` | 输入框上方状态徽标 |
+| `setWorkingMessage(message)` | 会话级工作消息提示 |
+| `setEditorText(text)` / `pasteToEditor(text)` | 预填 / 追加输入框内容 |
+| `setWidget(key, content, opts)` | 在输入框上下挂载实时面板（见下文 composer.widget 插槽） |
+
+阻塞式对话（`confirm`/`select`/`input`/`editor`/`custom`）经 `requestHumanInput` 闭环：参与者在网页卡片上作答，`await` 处拿到结果。纯 TUI 专属能力（`setFooter`、`setHeader`、`setEditorComponent`、组件工厂参数、主题 API）会抛出「此命令需要终端界面，当前网页不支持: ui.<方法名>」，不会假成功。`mode` 为 `print`、`hasUI` 为真，扩展可据此分支。
+
+### 插槽一：tool.view —— 工具返回自定义视图
+
+扩展用 `pi.registerTool` 注册的工具，在 `execute` 返回值的 `details.ui` 中放上 `BotdUiSpec`，网页就会把它渲染成工具卡片的可视化视图（`ToolDetailPanel`），替代纯文本输出预览：
+
+```ts
+import { defineExtension } from '@earendil-works/pi-coding-agent';
+import { Type } from '@sinclair/typebox';
+
+export default defineExtension((pi) => {
+  pi.registerTool({
+    name: 'deploy_status',
+    label: '部署状态',
+    description: '查询当前部署状态并渲染指标卡',
+    parameters: Type.Object({ env: Type.String() }),
+    async execute(_id, params) {
+      const status = await fetchStatus(params.env);
+      return {
+        content: [{ type: 'text', text: `环境 ${params.env} 部署正常` }],
+        details: {
+          ui: {
+            root: 'card',
+            elements: {
+              card: { type: 'Card', props: { title: `${params.env} 部署状态`, icon: 'shield', badge: 'LIVE' }, children: ['metrics'] },
+              metrics: { type: 'MetricGrid', props: { columns: 3 }, children: ['m1', 'm2', 'm3'] },
+              m1: { type: 'MetricCard', props: { label: '可用率', value: status.sla, status: 'ok' } },
+              m2: { type: 'MetricCard', props: { label: 'P99 延迟', value: status.p99, status: 'warn', trend: 'down' } },
+              m3: { type: 'MetricCard', props: { label: '活跃实例', value: status.instances, trend: 'flat' } },
+            },
+          },
+        },
+      };
+    },
+  });
+});
+```
+
+`details.ui` 在节点上轻 `validateUiSpec` 校验（失败降级为普通文本预览），合法 spec 经 `tool_status` SSE 事件透传到前端。工具卡默认展开渲染。
+
+### 插槽二：composer.widget —— 输入框上下挂实时面板
+
+命令或工具执行中，`ctx.ui.setWidget(key, uiSpec, { placement })` 在网页输入框上方（`aboveEditor`，默认）或下方（`belowEditor`）挂载实时面板；传 `undefined` 清除：
+
+```ts
+// 扩展命令内：挂载构建进度面板
+ctx.ui.setWidget('build-progress', {
+  root: 'panel',
+  elements: {
+    panel: {
+      type: 'Card',
+      props: { title: '构建进度', badge: 'RUNNING', icon: 'zap' },
+      children: ['steps', 'kv'],
+    },
+    steps: {
+      type: 'Steps',
+      props: {
+        items: [
+          { title: '安装依赖', status: 'done' },
+          { title: '编译', status: 'current' },
+          { title: '部署', status: 'pending' },
+        ],
+      },
+    },
+    kv: {
+      type: 'KeyValueList',
+      props: { items: [{ key: '耗时', value: '42s', mono: true }] },
+    },
+  },
+}, { placement: 'aboveEditor' });
+
+// 结束后清除
+ctx.ui.setWidget('build-progress', undefined);
+```
+
+`content` 也可以传 `string[]`，渲染为等宽文本行（适合日志尾巴）。组件工厂函数（终端画布）在 Web 端显式拒绝。面板可手动收起，切换会话时重置。
+
+### 插槽三：dialog.custom —— 弹出自定义表单并等待结果
+
+`await ctx.ui.custom({ title, prompt, ui })` 发起一次阻塞式交互：网页弹出完整交互卡，参与者填写并提交后，`await` 返回提交的 JSON：
+
+```ts
+const result = await ctx.ui.custom({
+  title: '创建发布单',
+  prompt: '请填写发布参数',
+  ui: {
+    root: 'form',
+    elements: {
+      form: {
+        type: 'Card',
+        props: { title: '创建发布单', icon: 'workflow', badge: 'RELEASE' },
+        children: ['env', 'note', 'hint', 'actions'],
+      },
+      env: {
+        type: 'Select',
+        props: {
+          label: '目标环境',
+          value: { $state: '/release/env' },
+          options: [
+            { value: 'staging', label: 'Staging' },
+            { value: 'production', label: 'Production' },
+          ],
+        },
+      },
+      note: {
+        type: 'TextInput',
+        props: { label: '发布说明', multiline: true, rows: 4, value: { $state: '/release/note' } },
+      },
+      hint: {
+        type: 'Callout',
+        props: { title: '影响面', content: 'Production 发布影响线上用户。', variant: 'warn' },
+      },
+      actions: { type: 'ActionBar', props: { align: 'right' }, children: ['cancel', 'apply'] },
+      cancel: {
+        type: 'Button',
+        props: { label: '取消', variant: 'secondary' },
+        on: { press: { action: 'submit', params: { decision: 'cancel' } } },
+      },
+      apply: {
+        type: 'Button',
+        props: { label: '开始发布', variant: 'primary' },
+        on: { press: { action: 'submit', params: { decision: 'apply' } } },
+      },
+    },
+    state: { release: { env: 'staging', note: '' } },
+  },
+});
+// 提交后 result 形如 { decision: 'apply', params: {...}, state: { release: { env: 'production', note: '...' } } }
+if (result.decision === 'apply') {
+  await deploy(result.state.release.env, result.state.release.note);
+}
+```
+
+Spec 传入前先轻 `validateUiSpec` 校验，非法直接报错。没有 `Button` 元素时卡片自动附带「提交表单」按钮。跨端降级见[外部渠道](channels.md)：飞书/Slack/Telegram 收到的是摘要行加网页填写链接，纯按钮审批卡则直接生成免登录一键确认链接。
+
 ## 网页端扩展命令的终端 UI 限制
 
-`apps/node/src/web-command-ui.ts` 给网页触发的扩展命令加了一层守卫。网页会话中执行扩展命令时：
+`apps/node/src/web-command-ui.ts` 把 Pi SDK 的 `ctx.ui` 桥接到 Web 前端（见上文「在 Pi 扩展中使用全栈 UI」）。网页会话中执行扩展命令时：
 
-- 访问 `ctx.ui` 的任何属性或方法都会抛出错误，错误文案为 `此命令需要终端界面，当前网页不支持: ui.<方法名>`。
-- 该错误使命令执行失败，不会被吞掉成假成功。
+- 对话式与流式方法（`confirm`/`select`/`input`/`editor`/`custom(BotdUiSpec)`/`notify`/`setStatus`/`setWidget`/`setEditorText` 等）在网页上原生工作。
+- 纯 TUI 专属能力（`setFooter`、`setHeader`、`setEditorComponent`、主题 API、`setWidget(fn)`/`custom(fn)` 组件工厂）会抛出错误，错误文案为 `此命令需要终端界面，当前网页不支持: ui.<方法名>`。该错误使命令执行失败，不会被吞掉成假成功。
 
-网页触发的命令回合里 `ctx.hasUI` 为假值、`ctx.mode` 为 `print`。扩展命令应先判断这两个字段，再决定走终端 UI 还是无界面回退。生成式 UI 卡片是网页端的交互替代方案。
+网页触发的命令回合里 `ctx.mode` 为 `print`、`ctx.hasUI` 为真（Web 桥接已挂载）。扩展仍应先判断 `mode` 与 `hasUI`，再决定走终端组件工厂还是声明式 `BotdUiSpec`。
 
 ## 语义图标
 

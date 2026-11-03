@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createHub } from '../apps/hub/src/index.js';
+import { buildEventPayload, extractAskUiSummary } from '../apps/hub/src/channel-payloads.js';
+import { buildApprovalCardSpec } from '../apps/node/src/cli/commands/node/approval-card.js';
 
 interface ReceivedRequest {
   method: string;
@@ -583,4 +585,135 @@ test('外部消息通道桥接：通道 CRUD、测试推送、事件自动推送
 
   // 等待微任务与非阻塞后台推送完成
   await new Promise((r) => setTimeout(r, 100));
+});
+
+// ===========================================================================
+// 声明式 UI ask（previewType='ui'）的跨端降级：飞书/Slack/Telegram/Webhook
+// ===========================================================================
+
+/** 构造 interaction_request 事件（模拟 ask-coordinator 广播的 SSE 事件形态） */
+function uiInteractionRequest(ask: Record<string, unknown>) {
+  return {
+    type: 'interaction_request',
+    sessionId: 'sess_ui_test',
+    ask: { id: 'ask_ui_1', sessionId: 'sess_ui_test', botId: 'bot-lead', options: [], status: 'pending', createdAt: new Date().toISOString(), ...ask },
+  } as any;
+}
+
+test('跨端 UI 降级：纯按钮风险审批卡（previewType=ui）生成摘要与免登录一键确认链接', () => {
+  const approvalSpec = buildApprovalCardSpec({
+    prompt: '是否将本次变更发布到生产环境？',
+    risk: 'high',
+    reason: '生产数据库 schema 迁移，失败需回滚',
+    resource: 'prod-db/orders',
+    optionList: ['批准', '拒绝'],
+  });
+  const previewContent = JSON.stringify(approvalSpec);
+  const event = uiInteractionRequest({
+    prompt: '是否将本次变更发布到生产环境？',
+    previewType: 'ui',
+    previewContent,
+  });
+
+  // extractAskUiSummary：Callout / KeyValueList 摘要 + 按钮去重，无表单项
+  const summary = extractAskUiSummary('ui', previewContent)!;
+  assert.ok(summary, 'ui summary must be extracted');
+  assert.equal(summary.hasFormInputs, false, 'approval card has no form inputs');
+  assert.deepEqual(summary.buttons, ['批准', '拒绝']);
+  assert.ok(summary.summaryLines.some((l) => l.includes('高风险操作确认') && l.includes('schema 迁移')));
+  assert.ok(summary.summaryLines.some((l) => l.includes('目标资源') && l.includes('prod-db/orders')));
+
+  const ctx = {
+    eventKind: 'ask_request' as const,
+    sessionId: 'sess_ui_test',
+    sessionTitle: 'UI 降级测试',
+    baseUrl: 'http://hub.example.com',
+    askSecret: 'test-secret',
+  };
+
+  // 飞书：摘要拼在 prompt 下方，UI 按钮补齐免登录一键确认链接
+  const feishu = buildEventPayload('feishu', ctx.eventKind, event, ctx.sessionId, ctx.sessionTitle, ctx.baseUrl, ctx.askSecret) as any;
+  const feishuText: string = feishu.content.text;
+  assert.ok(feishuText.includes('[高风险操作确认] 生产数据库 schema 迁移，失败需回滚'), 'feishu must contain callout summary');
+  assert.ok(feishuText.includes('目标资源: prod-db/orders'), 'feishu must contain KeyValueList summary');
+  assert.ok(feishuText.includes('👉 批准：'), 'feishu must render approval button link');
+  assert.ok(feishuText.includes('👉 拒绝：'), 'feishu must render reject button link');
+  assert.ok(feishuText.includes('/api/public/asks/ask_ui_1/respond'), 'feishu link must target public respond endpoint');
+  assert.ok(!feishuText.includes('交互表单'), 'no form-entry hint for pure-button cards');
+
+  // Slack：摘要 + <link|选项> 格式
+  const slack = buildEventPayload('slack', ctx.eventKind, event, ctx.sessionId, ctx.sessionTitle, ctx.baseUrl, ctx.askSecret) as any;
+  assert.ok(slack.text.includes('[高风险操作确认]'));
+  assert.ok(slack.text.includes('• <http://hub.example.com/api/public/asks/ask_ui_1/respond'), 'slack link syntax');
+  assert.ok(slack.text.includes('|批准>'));
+
+  // Telegram：摘要 + [选项](链接) Markdown
+  const telegram = buildEventPayload('telegram', ctx.eventKind, event, ctx.sessionId, ctx.sessionTitle, ctx.baseUrl, ctx.askSecret) as any;
+  assert.ok(telegram.text.includes('目标资源: prod-db/orders'));
+  assert.ok(telegram.text.includes('[批准]('));
+  assert.ok(telegram.text.includes('[拒绝]('));
+
+  // Webhook：options 回填 UI 按钮，respondUrls 可直接回调
+  const webhook = buildEventPayload('webhook', ctx.eventKind, event, ctx.sessionId, ctx.sessionTitle, ctx.baseUrl, ctx.askSecret) as any;
+  assert.deepEqual(webhook.ask.options, ['批准', '拒绝'], 'webhook options must fall back to ui buttons');
+  const approveUrl = new URL(webhook.respondUrls['批准']);
+  assert.equal(approveUrl.pathname, '/api/public/asks/ask_ui_1/respond');
+  assert.equal(approveUrl.searchParams.get('answer'), '批准');
+  assert.ok(approveUrl.searchParams.get('token'));
+});
+
+test('跨端 UI 降级：含 TextInput 表单的扩展 ctx.ui.input 卡片附网页填写入口，不生成链接选项', () => {
+  // 与 web-command-ui.ts buildInputSpec 同构：TextInput + 提交/取消按钮
+  const inputSpec = {
+    root: 'root',
+    elements: {
+      root: { type: 'Stack', props: { direction: 'vertical' }, children: ['field', 'actions'] },
+      field: { type: 'TextInput', props: { label: '请输入发布版本号', placeholder: '请输入...', value: { $state: 'value' } } },
+      actions: { type: 'ActionBar', props: { align: 'right' }, children: ['submit', 'cancel'] },
+      submit: { type: 'Button', props: { label: '提交', variant: 'primary' }, on: { press: { action: 'submit', params: { decision: '提交' } } } },
+      cancel: { type: 'Button', props: { label: '取消', variant: 'secondary' }, on: { press: { action: 'submit', params: { decision: '取消' } } } },
+    },
+    state: { value: '' },
+  };
+  const previewContent = JSON.stringify(inputSpec);
+  const event = uiInteractionRequest({
+    prompt: '请输入发布版本号',
+    previewType: 'ui',
+    previewContent,
+  });
+
+  const summary = extractAskUiSummary('ui', previewContent)!;
+  assert.ok(summary.hasFormInputs, 'TextInput marks hasFormInputs');
+  assert.ok(summary.summaryLines.includes('[表单项] 请输入发布版本号'));
+
+  const ctx = {
+    sessionId: 'sess_ui_test',
+    sessionTitle: 'UI 降级测试',
+    baseUrl: 'http://hub.example.com',
+    askSecret: 'test-secret',
+  };
+
+  // 飞书：无一键确认链接（表单无法用链接作答），附网页填写入口
+  const feishu = buildEventPayload('feishu', 'ask_request', event, ctx.sessionId, ctx.sessionTitle, ctx.baseUrl, ctx.askSecret) as any;
+  const feishuText: string = feishu.content.text;
+  assert.ok(feishuText.includes('[表单项] 请输入发布版本号'), 'feishu must contain form field summary');
+  assert.ok(!feishuText.includes('👉'), 'form cards must not render option links');
+  assert.ok(
+    feishuText.includes('该请求包含交互表单，请点击打开网页完成填写：http://hub.example.com/#?s=sess_ui_test'),
+    'feishu must include web form entry link'
+  );
+
+  // Slack / Telegram 同样附网页填写入口，无选项链接
+  const slack = buildEventPayload('slack', 'ask_request', event, ctx.sessionId, ctx.sessionTitle, ctx.baseUrl, ctx.askSecret) as any;
+  assert.ok(slack.text.includes('该请求包含交互表单，请点击打开网页完成填写：http://hub.example.com/#?s=sess_ui_test'));
+  assert.ok(!slack.text.includes('• <'));
+
+  const telegram = buildEventPayload('telegram', 'ask_request', event, ctx.sessionId, ctx.sessionTitle, ctx.baseUrl, ctx.askSecret) as any;
+  assert.ok(telegram.text.includes('该请求包含交互表单，请点击打开网页完成填写：http://hub.example.com/#?s=sess_ui_test'));
+  assert.ok(!telegram.text.includes('[提交]('));
+
+  // Webhook：options 仍为空（表单卡不能回填按钮为选项），respondUrls 为空映射
+  const webhook = buildEventPayload('webhook', 'ask_request', event, ctx.sessionId, ctx.sessionTitle, ctx.baseUrl, ctx.askSecret) as any;
+  assert.deepEqual(webhook.ask.options, [], 'form card options stay empty');
+  assert.deepEqual(webhook.respondUrls, {});
 });
