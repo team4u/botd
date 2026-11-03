@@ -125,6 +125,30 @@ export function parseGitSource(source: string): {
     };
   }
 
+  // Pi-package style `git:` sources: `git:github.com/owner/repo@v1.0.0`,
+  // `git:https://github.com/owner/repo@main`. Strip the prefix, normalize bare
+  // hostnames to https URLs, and peel a trailing `@ref` into `branch`.
+  const gitPrefixed = source.startsWith('git:');
+  let normalized = source;
+  if (gitPrefixed) {
+    normalized = source.slice(4);
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(normalized)) {
+      normalized = `https://${normalized}`;
+    }
+  }
+
+  // Full git URLs (original or normalized) with a trailing `@ref` (branch/tag):
+  // `https://github.com/owner/repo@v1.0.0`, `git:github.com/owner/repo@v1`.
+  // The `@` separator must sit in the last path segment (after host and repo)
+  // so usernames (`https://user@host/...`) never match.
+  const urlRefMatch = normalized.match(/^(https?:\/\/[^\/@\s]+\/[^\/@\s]+?\/[^\/@\s]+?)@([\w.\/-]+)$/);
+  if (urlRefMatch) {
+    const [, baseUrl, ref] = urlRefMatch;
+    const repoUrl = /\.git$/.test(baseUrl) ? baseUrl : `${baseUrl}.git`;
+    const nameMatch = baseUrl.match(/([^/]+?)(?:\.git)?$/);
+    return { repoUrl, branch: ref, inferredName: nameMatch ? nameMatch[1] : ref };
+  }
+
   // `npx skills add` style GitHub shorthand: owner/repo or owner/repo@skillName.
   // Only reached for sources that are not existing local paths (the local-path
   // case above already tried stat and fell through otherwise).
@@ -138,12 +162,19 @@ export function parseGitSource(source: string): {
     };
   }
 
-  const cleanSource = source.replace(/\/+$/, '');
+  // Plain `git:` source without a ref: use the normalized URL for cloning.
+  const cleanSource = (gitPrefixed ? normalized : source).replace(/\/+$/, '');
   const urlMatch = cleanSource.match(/(?:[:/])([^/:]+?)(?:\.git)?$/);
   const inferredName = urlMatch ? urlMatch[1] : path.basename(cleanSource);
 
+  // Normalized github.com URLs clone fine either way; append `.git` for
+  // consistency with the other GitHub-derived repoUrls.
+  const repoUrl = gitPrefixed && /^https:\/\/[^\/]+\/[^\/]+\/[^\/]+$/.test(cleanSource)
+    ? `${cleanSource}.git`
+    : cleanSource;
+
   return {
-    repoUrl: source,
+    repoUrl,
     inferredName,
   };
 }
@@ -179,11 +210,39 @@ export async function installResourceToNode(
 
     await runCommand('npm', ['install', pkgSpec, '--omit=dev'], { cwd: targetDir });
 
-    await fs.writeFile(
-      path.join(targetDir, 'index.ts'),
-      `import ext from '${pkgName}';\nexport default ext;\n`,
-      'utf8'
-    );
+    // Pi Package compatibility: a package manifest with a `pi` field (e.g.
+    // { "pi": { "extensions": ["./dist/index.js"] } }) is passed through by
+    // rewriting its relative extension paths against the install dir — the
+    // loader natively recognizes a `pi` field in this package.json, so no
+    // index.ts shim is generated in that case.
+    const installedPkgJson = path.join(targetDir, 'node_modules', pkgName, 'package.json');
+    let piExtensions: string[] | undefined;
+    try {
+      const pkg = JSON.parse(await fs.readFile(installedPkgJson, 'utf8')) as Record<string, unknown>;
+      const pi = pkg?.pi;
+      if (pi && typeof pi === 'object' && Array.isArray((pi as { extensions?: unknown }).extensions)) {
+        piExtensions = (pi as { extensions: unknown[] }).extensions.filter(
+          (rel): rel is string => typeof rel === 'string'
+        );
+      }
+    } catch {
+      // No readable package.json — fall back to the index.ts shim below.
+    }
+
+    if (piExtensions && piExtensions.length > 0) {
+      const manifestPath = path.join(targetDir, 'package.json');
+      const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+      manifest.pi = {
+        extensions: piExtensions.map((rel) => `./node_modules/${pkgName}/${rel.replace(/^\.\//, '')}`),
+      };
+      await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+    } else {
+      await fs.writeFile(
+        path.join(targetDir, 'index.ts'),
+        `import ext from '${pkgName}';\nexport default ext;\n`,
+        'utf8'
+      );
+    }
 
     return { kind: 'extension', id };
   }
@@ -240,14 +299,17 @@ export async function installResourceToNode(
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'botd-install-'));
   try {
     const { repoUrl, branch, subPath, skillName, inferredName } = parseGitSource(source);
-    const cloneArgs = ['clone', '--depth', '1'];
-    if (branch) {
-      cloneArgs.push('--branch', branch);
-    }
-    cloneArgs.push(repoUrl, tempDir);
-    // Route git through the managed MinGit on Windows when nothing else exists.
-    const prependPath = isWindows ? windowsShellPathPrefix(dataDir) : [];
-    await runCommand('git', cloneArgs, { cwd: os.tmpdir(), prependPath });
+
+    const cloneInto = async (dir: string, ref?: string): Promise<void> => {
+      const cloneArgs = ['clone', '--depth', '1'];
+      if (ref) cloneArgs.push('--branch', ref);
+      cloneArgs.push(repoUrl, dir);
+      // Route git through the managed MinGit on Windows when nothing else exists.
+      const prependPath = isWindows ? windowsShellPathPrefix(dataDir) : [];
+      await runCommand('git', cloneArgs, { cwd: os.tmpdir(), prependPath });
+    };
+
+    await cloneInto(tempDir, branch);
 
     const extractedRoot = subPath ? path.join(tempDir, subPath) : tempDir;
     if (!(await fileExists(extractedRoot))) {
@@ -259,14 +321,53 @@ export async function installResourceToNode(
     // repositories use; `owner/repo@skillName` or customId picks the name.
     let sourceRoot = extractedRoot;
     let nameHint = inferredName;
+    let nestedMissing = false;
     if (!(await fileExists(path.join(extractedRoot, 'SKILL.md')))) {
       const nested = await findNestedSkillDir(extractedRoot, skillName || input.customId);
       if (nested) {
         sourceRoot = nested.dir;
         nameHint = nested.name;
+      } else {
+        nestedMissing = true;
       }
     }
 
+    // `owner/repo@target` with no nested skill of that name: treat the suffix
+    // as a git tag/branch and re-clone at that ref (Pi `@ref` semantics).
+    if (nestedMissing && skillName && !subPath && input.kind !== 'skill') {
+      const retryDir = await fs.mkdtemp(path.join(os.tmpdir(), 'botd-install-'));
+      try {
+        await cloneInto(retryDir, skillName);
+        const retryRoot = (await fileExists(path.join(retryDir, 'SKILL.md')))
+          ? retryDir
+          : (await findNestedSkillDir(retryDir, input.customId))?.dir;
+        if (!retryRoot) {
+          throw new Error(`Ref "${skillName}" not found in ${repoUrl} (no nested skill and no such tag/branch)`);
+        }
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+        return await finalizeClonedResource(dataDir, retryDir, retryRoot, input, skillName);
+      } finally {
+        await fs.rm(retryDir, { recursive: true, force: true }).catch(() => {});
+      }
+    }
+
+    return await finalizeClonedResource(dataDir, tempDir, sourceRoot, input, nameHint);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/** Copy the chosen source root into dataDir as a skill or extension and install
+ *  npm deps for extension dirs that carry a package.json. `cloneDir` is removed
+ *  once the copy completes (callers must NOT clean it before awaiting this). */
+async function finalizeClonedResource(
+  dataDir: string,
+  cloneDir: string,
+  sourceRoot: string,
+  input: InstallInput,
+  nameHint: string
+): Promise<{ kind: 'skill' | 'extension'; id: string }> {
+  try {
     const hasSkillMd = await fileExists(path.join(sourceRoot, 'SKILL.md'));
     const resolvedKind: 'skill' | 'extension' =
       input.kind && input.kind !== 'auto' ? input.kind : hasSkillMd ? 'skill' : 'extension';
@@ -278,11 +379,12 @@ export async function installResourceToNode(
     await copyTreeExcludingGit(sourceRoot, destDir);
 
     if (resolvedKind === 'extension' && (await fileExists(path.join(destDir, 'package.json')))) {
+      const prependPath = isWindows ? windowsShellPathPrefix(dataDir) : [];
       await runCommand('npm', ['install', '--omit=dev'], { cwd: destDir, prependPath });
     }
 
     return { kind: resolvedKind, id };
   } finally {
-    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(cloneDir, { recursive: true, force: true }).catch(() => {});
   }
 }
