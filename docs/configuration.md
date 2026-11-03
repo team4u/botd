@@ -56,9 +56,11 @@ Docker Compose 的 `--env-file .env` 只提供变量替换值。只有 Compose `
 | `BOTD_BASH_PATH` | 自动查找（见下文） | Windows 上 Bash 的显式路径 |
 | `BOTD_MINGIT_URL` | Git for Windows v2.47.1 的 release 地址 | Windows 托管 MinGit 的下载地址 |
 | `BOTD_WS_MIN_RECONNECT_DELAY_MS` | `200` | 连接 Hub 的 WebSocket 最小重连间隔，单位毫秒 |
-| `BOTD_NPM_PACKAGE` | `botd` | 节点升级查询的 npm 包名 |
+| `BOTD_NPM_PACKAGE` | `@botd/node` | 节点升级查询的 npm 包名 |
 | `BOTD_NPM_REGISTRY` | `https://registry.npmjs.org` | 节点升级查询与下载使用的 registry |
 | `BOTD_UPGRADE_BLOCK_COOLDOWN_MS` | `1800000`（30 分钟） | 金丝雀失败版本的封禁时长，单位毫秒 |
+| `BOTD_AUTO_UPGRADE` | 无（关闭） | 设为非空值（如 `1`）开启节点自动升级 |
+| `BOTD_AUTO_UPGRADE_INTERVAL_MS` | `21600000`（6 小时） | 自动升级的检查间隔，单位毫秒，下限 `60000` |
 
 要点：
 
@@ -68,6 +70,7 @@ Docker Compose 的 `--env-file .env` 只提供变量替换值。只有 Compose `
 - Windows 的 Bash 查找顺序：`BOTD_BASH_PATH`（路径必须存在）→ 托管 MinGit → Git for Windows 常见安装位置 → `PATH` 中的 `bash.exe`（跳过旧版 WSL 空壳）。全部失败时节点自动下载托管 MinGit 到 `<数据目录>/runtime/mingit`。
 - registry 白名单：Hub 经 RPC 下发的 registry 必须等于官方默认值或 `BOTD_NPM_REGISTRY`，否则被丢弃。本机 CLI 请求可显式传 `--registry`。
 - `BOTD_SHELL_PATH` 只影响非 Windows 的 `botd bg run` 后台任务。未设置时交给 Node 使用系统默认 shell。回合内的 Bash 工具在 Windows 上固定使用上表的 Bash 解析结果。
+- 自动升级：`BOTD_AUTO_UPGRADE` 开启后，守护进程按间隔检查 registry 并在有意版本时自动执行升级，复用手动升级的排空、金丝雀验证、失败回滚与封禁链路；升级成功后自动替换进程。检查不依赖 Hub 连接；金丝雀失败时回滚旧版本并在封禁冷却期内不再尝试。
 
 框架内部变量（自动设置，通常无需配置）：
 

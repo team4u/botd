@@ -468,7 +468,7 @@ botd nodes upgrade node_xxx --version 0.3.0
 
 `nodes upgrade` 复用与网页相同的 Hub 接口，同样要求节点在线。
 
-升级依赖 npm registry 中的包。包名由 `BOTD_NPM_PACKAGE` 指定，默认 `botd`。registry 由 `BOTD_NPM_REGISTRY` 指定，默认 `https://registry.npmjs.org`。不要假设源码仓库已有公开安装包。源码部署的节点优先采用重新构建的方式。
+升级依赖 npm registry 中的包。包名由 `BOTD_NPM_PACKAGE` 指定，默认 `@botd/node`。registry 由 `BOTD_NPM_REGISTRY` 指定，默认 `https://registry.npmjs.org`。包尚未发布时检查返回 404，升级功能不可用；源码部署的节点优先采用重新构建的方式。
 
 安全约束：
 

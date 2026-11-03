@@ -51,7 +51,7 @@ import { getWorkspaceDiff } from './workspace-diff.js';
 import { ensureBuiltinSkill } from './builtin-skill.js';
 import { ensureWindowsShell, isWindows } from './windows-shell.js';
 import { notifyDaemonReady, spawnReplacementDaemon } from './daemon-launch.js';
-import { getNodeVersion, checkNodeUpgrade, performNodeUpgrade, filterRpcRegistryUrl } from './upgrader.js';
+import { getNodeVersion, checkNodeUpgrade, performNodeUpgrade, filterRpcRegistryUrl, startAutoUpgradeLoop as startAutoUpgradeLoopFactory, type AutoUpgradeLoopHandle } from './upgrader.js';
 
 export interface DaemonHandle {
   nodeId: string;
@@ -181,6 +181,21 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
     },
   });
   let heartbeatTimer: NodeJS.Timeout | null = null;
+  // 自动升级：默认关闭。开启后周期检查 registry，复用手动升级的排空/金丝雀/
+  // 回滚/封禁链路；升级成功即由 onScheduleShutdown 平滑替换本进程。
+  let autoUpgradeLoop: AutoUpgradeLoopHandle | null = null;
+  const startAutoUpgradeLoop = () => {
+    if (autoUpgradeLoop) return;
+    autoUpgradeLoop = startAutoUpgradeLoopFactory(dataDir, {
+      enabled: Boolean(process.env.BOTD_AUTO_UPGRADE),
+      shouldSkip: () => isStopping || restartRequested,
+      onScheduleShutdown: () => {
+        setTimeout(() => {
+          void handleShutdown();
+        }, 100).unref();
+      },
+    });
+  };
   let rpcInstance: BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null = null;
   let rws: ReconnectingWebSocket;
   const syncRegistrationWithHub = async (targetRpc = hubRpc): Promise<void> => {
@@ -437,6 +452,10 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
           }
         }
       }, 20_000);
+
+      // 自动升级定时器随守护进程启动一次即可，与 Hub 连接无关（registry 检查
+      // 不依赖 Hub），升级排空等待在本进程内完成。
+      startAutoUpgradeLoop();
     } catch (err) {
       console.error('Node registration failed:', err);
     }
@@ -471,6 +490,10 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
     if (heartbeatTimer) {
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
+    }
+    if (autoUpgradeLoop) {
+      autoUpgradeLoop.stop();
+      autoUpgradeLoop = null;
     }
     hubRpc = null;
 

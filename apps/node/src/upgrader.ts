@@ -197,7 +197,7 @@ export async function checkNodeUpgrade(
     process.env.BOTD_NPM_REGISTRY ||
     DEFAULT_REGISTRY;
   const registryUrl = rawRegistry.trim().replace(/\/+$/, '');
-  const pkgName = process.env.BOTD_NPM_PACKAGE || 'botd';
+  const pkgName = process.env.BOTD_NPM_PACKAGE || '@botd/node';
 
   const fetchImpl = options?.fetchFn ?? fetch;
   const url = `${registryUrl}/${encodeURIComponent(pkgName)}/latest`;
@@ -392,7 +392,7 @@ export async function stageReleaseFromNpm(
       }
       entryRelative = 'cli.js';
     } else {
-      const pkgName = process.env.BOTD_NPM_PACKAGE || 'botd';
+      const pkgName = process.env.BOTD_NPM_PACKAGE || '@botd/node';
       const rawRegistry =
         options?.registryUrl ||
         process.env.BOTD_NPM_REGISTRY ||
@@ -603,5 +603,74 @@ export async function performNodeUpgrade(
     targetVersion,
     upgraded: true,
     pid,
+  };
+}
+
+export interface AutoUpgradeLoopOptions {
+  /** Set to false (default) to never fire; the daemon gates this on
+   *  BOTD_AUTO_UPGRADE. */
+  enabled?: boolean;
+  /** Check interval; defaults to BOTD_AUTO_UPGRADE_INTERVAL_MS or 6h,
+   *  clamped to a 60s floor. */
+  intervalMs?: number;
+  /** Injectable for tests; defaults to performNodeUpgrade. */
+  performUpgrade?: typeof performNodeUpgrade;
+  /** Daemon asks the loop to skip a tick while stopping/restarting. */
+  shouldSkip?: () => boolean;
+  /** Invoked on successful upgrade, mirrors PerformNodeUpgradeOptions. */
+  onScheduleShutdown: () => void;
+  log?: (message: string) => void;
+}
+
+export interface AutoUpgradeLoopHandle {
+  stop: () => void;
+}
+
+/** Periodic auto-upgrade: checks the registry every intervalMs and runs the
+ *  full manual-upgrade pipeline (drain, canary, rollback, blocklist). A tick
+ *  that finds no newer version is a no-op; failures are logged and retried
+ *  next tick (a canary-failed version stays blocked for its cooldown). */
+export function startAutoUpgradeLoop(
+  dataDir: string,
+  options: AutoUpgradeLoopOptions,
+): AutoUpgradeLoopHandle {
+  if (!options.enabled) return { stop: () => {} };
+
+  const intervalMs = (() => {
+    if (options.intervalMs !== undefined) return Math.max(60_000, options.intervalMs);
+    const raw = Number(process.env.BOTD_AUTO_UPGRADE_INTERVAL_MS);
+    return Number.isFinite(raw) && raw >= 60_000 ? raw : 6 * 60 * 60 * 1000;
+  })();
+
+  const perform = options.performUpgrade ?? performNodeUpgrade;
+  const log = options.log ?? ((message: string) => console.log(`[auto-upgrade] ${message}`));
+  let running = false;
+
+  const tick = async () => {
+    if (running || options.shouldSkip?.()) return;
+    running = true;
+    try {
+      const result = await perform(dataDir, { onScheduleShutdown: options.onScheduleShutdown });
+      if (result.upgraded) {
+        log(`${result.previousVersion} -> ${result.targetVersion} succeeded, restarting daemon`);
+      }
+    } catch (err: any) {
+      // Network hiccups and canary failures (already rolled back, target
+      // version blocked for the cooldown) wait for the next tick.
+      log(`failed: ${err?.message || String(err)}`);
+    } finally {
+      running = false;
+    }
+  };
+
+  const timer = setInterval(() => {
+    void tick();
+  }, intervalMs);
+  timer.unref();
+
+  return {
+    stop: () => {
+      clearInterval(timer);
+    },
   };
 }

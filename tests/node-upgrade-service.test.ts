@@ -16,6 +16,7 @@ import {
   readBlockedRelease,
   writeBlockedRelease,
   clearBlockedRelease,
+  startAutoUpgradeLoop,
 } from '../apps/node/src/upgrader.js';
 import {
   generateServiceDescriptor,
@@ -88,7 +89,7 @@ describe('checkNodeUpgrade', () => {
 
   test('detects update available when registry has newer version', async () => {
     const mockFetch: typeof fetch = async (input) => {
-      assert.match(String(input), /\/botd\/latest$/);
+      assert.match(String(input), /(%40botd%2Fnode|@botd\/node)\/latest$/);
       return new Response(JSON.stringify({ version: '0.5.0' }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
