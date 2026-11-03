@@ -9,6 +9,7 @@ import { buildProgram } from '../apps/node/src/cli/program.js';
 import { HubClient } from '../apps/node/src/cli/hub-client.js';
 import { delegateSessionAndWait } from '../apps/node/src/cli/commands/sessions.js';
 import { loadBotResources } from '../apps/node/src/commands.js';
+import { resolveSpawnType } from '../apps/node/node_modules/@tintinweb/pi-subagents/dist/agent-types.js';
 import { loadTurnDeps } from '../apps/node/src/runtime/turn-deps.js';
 
 const PASSWORD = '{{SECRET_cgxq2tsc}}';
@@ -249,6 +250,16 @@ test('loadBotResources: 主 BOT 注册 Agent（含 stop_subagent 且统一支持
   assert.ok((agentTool.parameters as any).properties.title, 'Agent parameters must include title');
   assert.ok((agentTool.parameters as any).properties.artifact_ids, 'Agent parameters must include artifact_ids');
   assert.ok((agentTool.parameters as any).properties.timeout_seconds, 'Agent parameters must include timeout_seconds');
+
+  // 内置默认代理（Explore / Plan / general-purpose）可解析为本地子代理；
+  // 未在本地定义的跨 Bot 名称（如 bot_worker）在 fallbackSubagent: 'none' 下解析失败，
+  // 继续精准走 Hub 跨 Bot 子会话委派。
+  for (const builtin of ['Explore', 'Plan', 'general-purpose']) {
+    const resolved = resolveSpawnType(builtin);
+    assert.equal(resolved.ok, true, `built-in default agent "${builtin}" must resolve locally: ${JSON.stringify(resolved)}`);
+  }
+  const crossBot = resolveSpawnType('bot_worker');
+  assert.equal(crossBot.ok, false, 'unknown cross-bot name must NOT resolve locally under fallbackSubagent: none');
 
   const { runner: subRunner } = await buildRunner(
     { ...leadBot, id: 'bot_sub', parentBotId: 'bot_lead' },

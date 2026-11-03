@@ -124,7 +124,7 @@ export function triggerActiveSubagentHandoff(): boolean {
  */
 export function rebindSubagentGlobalsForBot(botDir: string): void {
   process.env.PI_CODING_AGENT_DIR = botDir;
-  setDefaultsDisabled(true);
+  setDefaultsDisabled(false);
   setFallbackSubagent(NO_FALLBACK);
   registerAgents(loadCustomAgents(botDir));
 }

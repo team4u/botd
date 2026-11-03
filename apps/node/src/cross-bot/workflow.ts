@@ -820,6 +820,17 @@ export function wrapWorkflowToolForCrossBot(
   if (typeof originalExecute !== 'function') return tool;
   const { dataDir, botDir, workspaceDir, pi, handoffScope } = deps;
 
+  // 工具参数定义：追加可选 timeout_seconds（每次跨 Bot 步骤的等待超时）
+  const parameters = tool.parameters ? { ...tool.parameters } : { type: 'object', properties: {} };
+  const properties = { ...(parameters.properties || {}) };
+  if (!properties.timeout_seconds) {
+    properties.timeout_seconds = {
+      type: 'number',
+      description: 'Maximum seconds to wait for each cross-bot step (default: 600 or BOTD_CROSS_BOT_TIMEOUT_SECONDS).',
+    };
+  }
+  parameters.properties = properties;
+
   const textResult = (text: string, isError = false, details?: Record<string, unknown>) =>
     ({
       content: [{ type: 'text', text }],
@@ -841,6 +852,13 @@ export function wrapWorkflowToolForCrossBot(
     const run = await prepareWorkflowRun(workspaceDir, params);
     if ('error' in run) return textResult(run.error, true);
     const { runId, scriptSource, scriptPath, journalPath, meta, replayEntries, resumeFromRunId } = run;
+
+    // 未完成断点标记：启动即写入，正常跑完删除；失败 / 中断保留供下回合提示续跑
+    await markWorkflowRunStarted(workspaceDir, {
+      runId,
+      workflowName: meta.name,
+      scriptPath,
+    });
 
     // 5) 组合 abort 信号：父级取消（会话停止）中止整个工作流；接管（新消息）仅解除等待
     const effectiveSessionId = deps.sessionId || process.env.BOTD_SESSION_ID || '';
@@ -889,6 +907,10 @@ export function wrapWorkflowToolForCrossBot(
         },
       });
       completeWorkflowTask(task, result);
+      // 正常跑完（completed）才清除断点标记；failed / killed 保留供下回合提示续跑
+      if (result.status === 'completed') {
+        await markWorkflowRunFinished(workspaceDir);
+      }
       return formatWorkflowResult(task, result, { name: meta.name, runId, scriptPath, resumeFromRunId });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -904,5 +926,5 @@ export function wrapWorkflowToolForCrossBot(
     }
   };
 
-  return { ...tool, execute: wrappedExecute };
+  return { ...tool, parameters, execute: wrappedExecute };
 }

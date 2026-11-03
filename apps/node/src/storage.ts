@@ -316,11 +316,12 @@ export async function saveBot(dataDir: string, bot: BotConfig, systemMd?: string
 
   const subagentsJsonContent = JSON.stringify(
     {
-      disableDefaultAgents: true,
-      disableDefaults: true,
+      disableDefaultAgents: false,
+      disableDefaults: false,
       fallbackSubagent: 'none',
       backgroundByDefault: false,
       packageAgents: false,
+      defaultJoinMode: 'smart',
     },
     null,
     2

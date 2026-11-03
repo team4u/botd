@@ -407,8 +407,8 @@ export async function executeBotTurn(
       await new Promise((r) => setTimeout(r, 100));
     }
     if (drainedBackground && !runRegistry.isCancelled(runKey)) {
-      // Wait briefly for CompletionOutbox (500ms hold) to deliver follow-up turn into session
-      await new Promise((r) => setTimeout(r, 600));
+      // Wait briefly for CompletionOutbox (200ms hold) to deliver follow-up turn into session
+      await new Promise((r) => setTimeout(r, 300));
       await session.waitForIdle();
     }
 
