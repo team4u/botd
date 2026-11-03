@@ -385,11 +385,46 @@ interface CrossBotSessionOptions {
   phaseTitle?: string;
   skipCompletionEvent?: boolean;
   onChildCreated?: (created: DelegateSessionResult) => void;
+  /** 传入时复用/重连该已有子会话（断点续跑幂等复用），绝不重新 POST /delegate */
+  existingChild?: DelegateSessionResult;
+  /** 配合 existingChild：父会话产物基线（用于识别重连后新回传的产物） */
+  baselineParentArtifactIds?: string[];
+}
+
+/** 默认跨 Bot 子会话等待超时（秒）：BOTD_CROSS_BOT_TIMEOUT_SECONDS 可覆盖，缺省 600 */
+export function getDefaultCrossBotTimeoutSeconds(): number {
+  const raw = Number(process.env.BOTD_CROSS_BOT_TIMEOUT_SECONDS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 600;
+}
+
+/**
+ * 探测一个历史子会话能否被断点续跑重连复用。
+ *
+ * Hub 未提供 GET /api/sessions/:id 单端点；这里用消息列表做探针：
+ * - 404（会话不存在）→ 不可复用（丢弃记录，派生新子会话重试）
+ * - 末条消息为 system（回合失败落下的错误消息）→ 已失败，不可复用
+ * - 其余（idle 且有 assistant 回复 / running / queued）→ 可复用，具体收敛
+ *   状态由重连等待逻辑（waitForExistingChildSession 的 SSE 首帧快照 + 后续帧）判定
+ */
+async function probeChildSessionReusable(
+  client: import('./cli/hub-client.js').HubClient,
+  childSessionId: string,
+): Promise<boolean> {
+  try {
+    const messages = await client.get<Array<{ role?: string }>>(
+      `/api/sessions/${encodeURIComponent(childSessionId)}/messages`,
+    );
+    const last = messages[messages.length - 1];
+    if (last?.role === 'system') return false;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 interface CrossBotExecutionResult {
   ok: boolean;
-  status: 'done' | 'failed' | 'aborted' | 'background';
+  status: 'done' | 'failed' | 'timed_out' | 'aborted' | 'background';
   reply: string;
   formattedText: string;
   childSessionId?: string;
@@ -422,6 +457,8 @@ async function executeCrossBotSession(options: CrossBotSessionOptions): Promise<
     phaseTitle,
     skipCompletionEvent,
     onChildCreated,
+    existingChild,
+    baselineParentArtifactIds,
   } = options;
 
   const startMs = Date.now();
@@ -498,8 +535,10 @@ async function executeCrossBotSession(options: CrossBotSessionOptions): Promise<
         autoWakeParent: false,
       },
       {
-        waitSeconds: timeoutSeconds ?? 600,
+        waitSeconds: timeoutSeconds ?? getDefaultCrossBotTimeoutSeconds(),
         signal: watch.signal,
+        existingChild,
+        ...(baselineParentArtifactIds ? { baselineParentArtifacts: baselineParentArtifactIds } : {}),
         onChildCreated: (r) => {
           childSessionId = r.childSession.id;
           const rec: CrossBotSessionRecord = {
@@ -526,6 +565,24 @@ async function executeCrossBotSession(options: CrossBotSessionOptions): Promise<
   } catch (err) {
     if (watch.isHandedOff() || signal?.aborted || watch.signal.aborted) {
       waitRes = undefined;
+    } else if (
+      err instanceof Error &&
+      err.message.includes('Timed out after') &&
+      childSessionId
+    ) {
+      // 等待超时：子会话仍在后台运行且未被取消。返回结构化 timed_out 结果，
+      // 保留 childSessionId 供断点续跑幂等重连，绝不向外 throw 丢失子会话句柄。
+      const formattedText = `Sub-session "${childSessionId}" (@${botId}) timed out after ${timeoutSeconds ?? getDefaultCrossBotTimeoutSeconds()}s while still running. It was NOT cancelled and continues running in the background.`;
+      return {
+        ok: false,
+        status: 'timed_out',
+        reply: formattedText,
+        formattedText,
+        childSessionId,
+        returnedArtifacts: [],
+        details: { agentId: stepRunId, childSessionId, status: 'timed_out' },
+        durationMs: Date.now() - startMs,
+      };
     } else {
       watch.cleanup();
       throw err;
@@ -660,7 +717,7 @@ function wrapAgentToolForHandoff(tool: any, deps: WrapAgentToolDeps): any {
   if (!properties.timeout_seconds) {
     properties.timeout_seconds = {
       type: 'number',
-      description: 'Maximum seconds to wait when run_in_background is false (default: 600).',
+      description: 'Maximum seconds to wait when run_in_background is false (default: 600 or BOTD_CROSS_BOT_TIMEOUT_SECONDS).',
     };
   }
   parameters.properties = properties;
@@ -699,7 +756,7 @@ function wrapAgentToolForHandoff(tool: any, deps: WrapAgentToolDeps): any {
         });
         const client = await connectHubAsNode(dataDir);
         const res = await sendSessionMessageAndWait(client, remote.childSessionId, String(params.prompt || ''), {
-          waitSeconds: params.timeout_seconds ?? 600,
+          waitSeconds: typeof params?.timeout_seconds === 'number' && params.timeout_seconds > 0 ? params.timeout_seconds : getDefaultCrossBotTimeoutSeconds(),
           signal,
         });
         pi.events.emit(res.ok ? 'subagents:completed' : 'subagents:failed', {
@@ -811,7 +868,10 @@ function wrapAgentToolForHandoff(tool: any, deps: WrapAgentToolDeps): any {
       title: params?.title || params?.description,
       artifactIds: params?.artifact_ids,
       runInBackground: params?.run_in_background === true,
-      timeoutSeconds: params?.timeout_seconds ?? 600,
+      timeoutSeconds:
+        typeof params?.timeout_seconds === 'number' && params.timeout_seconds > 0
+          ? params.timeout_seconds
+          : getDefaultCrossBotTimeoutSeconds(),
       handoffScope,
       signal,
       stepRunId: runId,
@@ -941,6 +1001,17 @@ function wrapWorkflowToolForCrossBot(
   if (typeof originalExecute !== 'function') return tool;
   const { dataDir, botDir, workspaceDir, pi, handoffScope } = deps;
 
+  // 工具参数定义：追加可选 timeout_seconds（每次跨 Bot 步骤的等待超时）
+  const parameters = tool.parameters ? { ...tool.parameters } : { type: 'object', properties: {} };
+  const properties = { ...(parameters.properties || {}) };
+  if (!properties.timeout_seconds) {
+    properties.timeout_seconds = {
+      type: 'number',
+      description: 'Maximum seconds to wait for each cross-bot step (default: 600 or BOTD_CROSS_BOT_TIMEOUT_SECONDS).',
+    };
+  }
+  parameters.properties = properties;
+
   const textResult = (text: string, isError = false, details?: Record<string, unknown>) =>
     ({
       content: [{ type: 'text', text }],
@@ -958,6 +1029,12 @@ function wrapWorkflowToolForCrossBot(
     // 与 Agent 工具包装器同理：进入原 execute 前同步重置为本 BOT 的全局注册表，
     // 防止并发回合的环境覆盖导致本地步骤类型解析成别的 BOT 的（空）目录。
     rebindSubagentGlobalsForBot(botDir);
+
+    // 每个跨 Bot 步骤的等待超时（秒）：参数显式指定 > BOTD_CROSS_BOT_TIMEOUT_SECONDS > 600
+    const stepTimeoutSeconds =
+      typeof params?.timeout_seconds === 'number' && params.timeout_seconds > 0
+        ? params.timeout_seconds
+        : getDefaultCrossBotTimeoutSeconds();
 
     // 1) 准备 .workflows 目录与断点日志回放
     const workflowsDir = path.join(workspaceDir, '.workflows');
@@ -1025,6 +1102,57 @@ function wrapWorkflowToolForCrossBot(
       return textResult(`Could not persist workflow script: ${err instanceof Error ? err.message : String(err)}`, true);
     }
     const journalPath = path.join(workflowsDir, `${runId}.workflow.jsonl`);
+
+    // 4b) 跨 Bot 子会话映射持久化：<runId>.sessions.json。
+    // 等待超时（timed_out）的步骤不会写入 journal，但它的子会话仍在后台运行；
+    // 该映射让 resumeFromRunId 续跑时能幂等重连同一个子会话，而不是再创建一个。
+    const sessionsMapPath = path.join(workflowsDir, `${runId}.sessions.json`);
+    type PersistedSessionEntry = {
+      childSession: DelegateSessionResult['childSession'];
+      initialMessage: DelegateSessionResult['initialMessage'];
+      parentSessionId: string;
+      baselineArtifactIds: string[];
+      botId: string;
+    };
+    const persistedSessions = new Map<string, PersistedSessionEntry>();
+    let sessionsMapDirty = false;
+    const flushSessionsMap = () => {
+      if (!sessionsMapDirty) return;
+      sessionsMapDirty = false;
+      try {
+        writeAtomicFile(
+          sessionsMapPath,
+          JSON.stringify(Object.fromEntries(persistedSessions), null, 2),
+        ).catch(() => {});
+      } catch {
+        // 落盘失败不阻断工作流：仅失去下次续跑的幂等重连能力
+      }
+    };
+    const rememberSession = (signature: string, entry: PersistedSessionEntry) => {
+      persistedSessions.set(signature, entry);
+      sessionsMapDirty = true;
+      flushSessionsMap();
+    };
+    if (resumeFromRunId) {
+      const prevSessionsPath = path.join(workflowsDir, `${resumeFromRunId}.sessions.json`);
+      if (existsSync(prevSessionsPath)) {
+        try {
+          const parsed = JSON.parse(await fs.readFile(prevSessionsPath, 'utf8')) as Record<string, PersistedSessionEntry>;
+          for (const [sig, entry] of Object.entries(parsed)) {
+            if (entry && typeof entry.childSession?.id === 'string') {
+              persistedSessions.set(sig, entry);
+            }
+          }
+        } catch {
+          // 损坏的映射文件视为空：代价只是失去幂等重连
+        }
+      }
+      // 继承的映射同步写入新 runId 的映射文件，保证 resume-of-resume 也能传递
+      if (persistedSessions.size > 0) {
+        sessionsMapDirty = true;
+        flushSessionsMap();
+      }
+    }
 
     // 5) 组合 abort 信号：父级取消（会话停止）中止整个工作流；接管（新消息）仅解除等待
     const effectiveSessionId = deps.sessionId || process.env.BOTD_SESSION_ID || '';
@@ -1101,6 +1229,57 @@ function wrapWorkflowToolForCrossBot(
         }
 
         const startMs = Date.now();
+
+        // 断点续跑幂等复用：同一跨 Bot 步骤若已有持久化的子会话记录（例如上次
+        // 等待超时后仍在后台运行的子会话），先探测 Hub 上该子会话是否可用——
+        // 可用则直接重连复用，绝不重新 POST /delegate 创建重复子会话。
+        const stepSignature = `${cleanType}::${request.label || ''}::${request.prompt}`;
+        let existingChild: DelegateSessionResult | undefined;
+        let reuseBaselineArtifactIds: string[] | undefined;
+        const prev = persistedSessions.get(stepSignature);
+        if (prev) {
+          const probe = await probeChildSessionReusable(client, prev.childSession.id);
+          if (probe) {
+            existingChild = {
+              parentSessionId: prev.parentSessionId,
+              childSession: prev.childSession,
+              initialMessage: prev.initialMessage,
+            };
+            reuseBaselineArtifactIds = prev.baselineArtifactIds;
+            const rec = {
+              childSessionId: prev.childSession.id,
+              botId: cleanType,
+              label: request.label || cleanType,
+              ...(request.phaseTitle !== undefined ? { phaseTitle: request.phaseTitle } : {}),
+            };
+            remoteSessions.set(request.agentId, rec);
+            if (request.label) remoteSessions.set(request.label, rec);
+            request.onResolved?.({ recordId: prev.childSession.id, modelId: cleanType });
+            pi.events.emit('subagents:started', {
+              id: stepRunId,
+              type: cleanType,
+              description: request.label || cleanType,
+              ...(request.phaseTitle !== undefined ? { phase: request.phaseTitle } : {}),
+              childSessionId: prev.childSession.id,
+            });
+          } else {
+            // 子会话已 failed / 不存在（404）：丢弃旧记录，派生新子会话重试
+            persistedSessions.delete(stepSignature);
+            sessionsMapDirty = true;
+            flushSessionsMap();
+          }
+        }
+
+        // 父会话产物基线：新建路径下在派生前拉取并随子会话记录持久化，
+        // 供等待超时后的断点续跑重连时对比识别新回传产物
+        let newChildBaselineArtifactIds: string[] | undefined;
+        if (!existingChild) {
+          newChildBaselineArtifactIds = await client
+            .get<Array<{ id: string }>>(`/api/sessions/${encodeURIComponent(effectiveSessionId)}/artifacts`)
+            .then((arts) => arts.map((a) => a.id))
+            .catch(() => []);
+        }
+
         const execRes = await executeCrossBotSession({
           client,
           pi,
@@ -1109,13 +1288,14 @@ function wrapWorkflowToolForCrossBot(
           prompt: effectivePrompt,
           title: `[${request.phaseTitle || validated.meta.name}] ${request.label || cleanType}`,
           runInBackground: false,
-          timeoutSeconds: 600,
+          timeoutSeconds: stepTimeoutSeconds,
           handoffScope,
           signal: workflowAbortController.signal,
           stepRunId,
           label: request.label || cleanType,
           phaseTitle: request.phaseTitle,
           skipCompletionEvent: true,
+          ...(existingChild ? { existingChild, ...(reuseBaselineArtifactIds ? { baselineParentArtifactIds: reuseBaselineArtifactIds } : {}) } : {}),
           onChildCreated: (created) => {
             const rec = {
               childSessionId: created.childSession.id,
@@ -1126,6 +1306,16 @@ function wrapWorkflowToolForCrossBot(
             remoteSessions.set(request.agentId, rec);
             if (request.label) remoteSessions.set(request.label, rec);
             request.onResolved?.({ recordId: created.childSession.id, modelId: cleanType });
+            // 子会话创建即落盘：即使随后等待超时（timed_out），断点续跑也能幂等重连
+            if (!existingChild) {
+              rememberSession(stepSignature, {
+                childSession: created.childSession,
+                initialMessage: created.initialMessage,
+                parentSessionId: effectiveSessionId,
+                baselineArtifactIds: newChildBaselineArtifactIds ?? [],
+                botId: cleanType,
+              });
+            }
           },
         });
 
@@ -1230,7 +1420,7 @@ function wrapWorkflowToolForCrossBot(
           });
           const client = await connectHubAsNode(dataDir);
           const res = await sendSessionMessageAndWait(client, remote.childSessionId, prompt, {
-            waitSeconds: 600,
+            waitSeconds: stepTimeoutSeconds,
             signal: workflowAbortController.signal,
           });
           pi.events.emit(res.ok ? 'subagents:completed' : 'subagents:failed', {
