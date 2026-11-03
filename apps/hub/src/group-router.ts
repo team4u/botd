@@ -369,61 +369,6 @@ export class GroupRouter {
     return stages;
   }
 
-  skipQueueStage(sessionId: string, target: { stageId?: string; botId?: string }): QueueStageSummary[] {
-    const state = this.getOrCreateState(sessionId);
-    if (target.stageId) {
-      state.queue = state.queue.filter(
-        (item) => item.stageId !== target.stageId && item.parallelGroupId !== target.stageId
-      );
-    } else if (target.botId) {
-      const idx = state.queue.findIndex((item) => item.botId === target.botId);
-      if (idx !== -1) {
-        state.queue.splice(idx, 1);
-      }
-    }
-    const queuePlan = this.getQueuePlan(sessionId);
-    this.sseHub.broadcast(sessionId, {
-      type: 'session_status',
-      sessionId,
-      status: state.isRunning ? 'running' : 'idle',
-      activeBotId: state.activeBotId,
-      activeBotIds: Array.from(state.activeBotIds),
-      queuePlan,
-    });
-    return queuePlan;
-  }
-
-  appendQueueStage(sessionId: string, orchestration: string): QueueStageSummary[] {
-    const session = this.db.getSession(sessionId);
-    if (!session) return [];
-    const state = this.getOrCreateState(sessionId);
-    const validBotIds = this.getValidBotIds(session);
-    const mentions = extractMentions(orchestration, validBotIds);
-    const botIds = mentions.length > 0 ? mentions : validBotIds.has(orchestration.trim()) ? [orchestration.trim()] : [];
-    const chainBudget = new ChainBudget(MAX_RELAY_TURNS);
-    for (const botId of botIds) {
-      state.queue.push({
-        botId,
-        chainBudget,
-        generation: state.generation,
-        stageId: `stage_${randomUUID()}`,
-      });
-    }
-    const queuePlan = this.getQueuePlan(sessionId);
-    this.sseHub.broadcast(sessionId, {
-      type: 'session_status',
-      sessionId,
-      status: state.isRunning ? 'running' : 'idle',
-      activeBotId: state.activeBotId,
-      activeBotIds: Array.from(state.activeBotIds),
-      queuePlan,
-    });
-    if (!state.isRunning) {
-      this.processQueue(sessionId).catch(() => {});
-    }
-    return queuePlan;
-  }
-
   private getOrCreateState(sessionId: string): SessionRuntimeState {
     let state = this.states.get(sessionId);
     if (!state) {

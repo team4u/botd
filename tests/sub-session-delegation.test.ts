@@ -182,14 +182,12 @@ test('Sub-Session Delegation: 创建子会话、父会话通知、subsessions �
   assert.equal(subsessions[0].id, delegateResult.childSession.id);
   assert.equal(subsessions[0].parentSessionId, parentSession.id);
 
-  // 4. 验证父会话收到了派生通知公屏消息（role: 'callback', senderBotId: botWorker）
+  // 4. 验证父会话中不插入 📋 已派生子会话 过程通知消息
   const parentMessagesBefore = hub.db.getMessages(parentSession.id);
-  const noticeMsg = parentMessagesBefore.find((m) => m.role === 'callback');
-  assert.ok(noticeMsg, 'Parent session should contain a notice callback message');
-  assert.equal(noticeMsg.senderBotId, botWorker);
-  assert.ok(
-    noticeMsg.content.includes(`已派生子会话「[${delegateResult.childSession.title}](#?s=${delegateResult.childSession.id})」交由 @${botWorker} 执行任务。`),
-    `Notice content mismatch: ${noticeMsg.content}`
+  assert.equal(
+    parentMessagesBefore.some((m) => m.role === 'callback' && m.content.includes('已派生子会话')),
+    false,
+    'Parent session should not contain an initial derivation notice message',
   );
 
   // 5. 等待子会话执行完成，自动向父会话回传完成摘要
@@ -841,7 +839,7 @@ test('Sub-Session Delegation: 并发多子会话 All-Settled Barrier —— 全�
   assert.ok(leadTurns[0].incrementalMessages.includes('任务二'));
 });
 
-test('Sub-Session Delegation: autoWakeParent: false 仅落库完成回调，不唤醒父会话主控 Bot', async (t) => {
+test('Sub-Session Delegation: autoWakeParent: false 不落库完成回调，亦不唤醒父会话主控 Bot', async (t) => {
   const ctx = await createTestContext(t);
   const { hub, adminUser, adminCookie, mockRpcs, registerNodeWithBots, jsonRequest } = ctx;
 
@@ -880,24 +878,17 @@ test('Sub-Session Delegation: autoWakeParent: false 仅落库完成回调，不�
   assert.equal(delegateRes.status, 201, JSON.stringify(delegateRes.json));
   const delegateResult: DelegateSessionResult = delegateRes.json;
 
-  // 等待完成回调落库
-  await waitFor(() =>
-    hub.db
-      .getMessages(parentSession.id)
-      .some((m) => m.role === 'callback' && m.content.includes('静默任务') && m.content.includes('已完成'))
-  );
+  // 等待子会话执行完成（回到 idle）
+  await waitFor(() => hub.db.getSession(delegateResult.childSession.id)?.status === 'idle');
 
-  // 回调消息必须存在且带摘要
-  const parentMessages = hub.db.getMessages(parentSession.id);
-  const completionMsg = parentMessages.find(
-    (m) => m.role === 'callback' && m.content.includes('静默任务') && m.content.includes('已完成')
-  );
-  assert.ok(completionMsg, 'autoWakeParent=false 时完成回调消息仍应落库');
-  assert.equal(completionMsg.senderBotId, botWorker);
-  assert.ok(completionMsg.content.includes('静默子任务完成'));
-
-  // 等待潜在（不应发生的）异步唤醒落地
+  // 等待潜在（不应发生的）异步回调或唤醒落地
   await new Promise((r) => setTimeout(r, 300));
+
+  // autoWakeParent=false 时，父会话公屏不得产生 callback 消息
+  const parentMessages = hub.db.getMessages(parentSession.id);
+  const completionMsg = parentMessages.find((m) => m.role === 'callback');
+  assert.equal(completionMsg, undefined, 'autoWakeParent=false 时父会话不得产生 callback 消息');
+
   assert.equal(
     turnsCalled.includes(botLead),
     false,

@@ -847,10 +847,6 @@ export function createHub(options?: HubOptions): HubInstance {
     return c.json(hits);
   });
 
-  app.get('/api/approvals/pending', (c) => {
-    return c.json(db.listPendingAsksForUser(c.get('user').id));
-  });
-
   app.get('/api/sessions', (c) => {
     const sessions = db.getAccessibleSessions(c.get('user').id);
     return c.json(
@@ -1193,27 +1189,6 @@ export function createHub(options?: HubOptions): HubInstance {
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to interact with subagent' }, 500);
     }
-  });
-
-  app.post('/api/sessions/:id/queue/skip', async (c) => {
-    const id = c.req.param('id');
-    const sRes = resolveOwnedSession(c, db, id);
-    if (!sRes.ok) return sRes.response;
-    const body = await c.req.json<{ stageId?: string; botId?: string }>().catch(() => ({}));
-    const queuePlan = router.skipQueueStage(id, body);
-    return c.json({ ok: true, queuePlan });
-  });
-
-  app.post('/api/sessions/:id/queue/append', async (c) => {
-    const id = c.req.param('id');
-    const sRes = resolveOwnedSession(c, db, id);
-    if (!sRes.ok) return sRes.response;
-    const body = await c.req.json<{ orchestration: string }>().catch(() => null);
-    if (!body || typeof body.orchestration !== 'string' || !body.orchestration.trim()) {
-      return c.json({ error: 'orchestration expression is required' }, 400);
-    }
-    const queuePlan = router.appendQueueStage(id, body.orchestration);
-    return c.json({ ok: true, queuePlan });
   });
 
   // 会话分叉：以某条消息为锚点克隆出新会话（含锚点及其之前的消息），源会话完全不动。

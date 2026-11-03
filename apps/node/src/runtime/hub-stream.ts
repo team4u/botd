@@ -91,7 +91,7 @@ export function toSubagentPayload(run: SubagentRunRecord, extra?: { error?: stri
     id: run.id,
     subagentId: run.subagentId,
     task: run.task,
-    status: run.status === 'skipped' ? 'done' : run.status,
+    status: run.status,
     ...(run.replyFull !== undefined ? { result: run.replyFull } : {}),
     ...(extra?.error ? { error: extra.error } : {}),
     ...(run.durationMs !== undefined ? { durationMs: run.durationMs } : {}),

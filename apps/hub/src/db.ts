@@ -89,8 +89,6 @@ type MessageRow = {
   model_badge: string | null;
   content: string;
   mentions_json: string;
-  whisper_target_bot_ids_json?: string | null;
-  orchestration_plan?: string | null;
   subagent_runs_json?: string | null;
   tool_calls_json: string | null;
   blocks_json?: string | null;
@@ -127,7 +125,7 @@ const mapMessageRow = (row: MessageRow): MessageRecord => {
 };
 
 const MESSAGE_SELECT_COLUMNS =
-  'id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, aborted, created_at';
+  'id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, aborted, created_at';
 
 const ARTIFACT_COLUMNS = 'id, session_id, filename, mime_type, size_bytes, sender_bot_id, created_at';
 
@@ -788,54 +786,7 @@ export class HubDatabase {
     }));
   }
 
-  listPendingAsksForUser(userId: string): PendingAskRecord[] {
-    const now = new Date().toISOString();
-    this.db.prepare(`
-      UPDATE pending_asks
-      SET status = 'expired'
-      WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?
-    `).run(now);
 
-    const stmt = this.db.prepare(`
-      SELECT pa.id, pa.session_id, pa.bot_id, pa.prompt, pa.options_json, pa.status, pa.answer,
-             pa.preview_type, pa.preview_content, pa.created_at, pa.expires_at, s.title AS session_title
-      FROM pending_asks pa
-      JOIN sessions s ON s.id = pa.session_id
-      LEFT JOIN session_participants sp ON sp.session_id = pa.session_id AND sp.user_id = ?
-      WHERE pa.status = 'pending'
-        AND (s.owner_id = ? OR sp.user_id = ?)
-      ORDER BY pa.created_at DESC
-    `);
-    const rows = stmt.all(userId, userId, userId) as {
-      id: string;
-      session_id: string;
-      bot_id: string;
-      prompt: string;
-      options_json: string;
-      status: string;
-      answer: string | null;
-      preview_type: string | null;
-      preview_content: string | null;
-      created_at: string;
-      expires_at: string | null;
-      session_title: string;
-    }[];
-
-    return rows.map((row) => ({
-      id: row.id,
-      sessionId: row.session_id,
-      botId: row.bot_id,
-      prompt: row.prompt,
-      options: parseOptionalJson<string[]>(row.options_json) ?? [],
-      status: row.status as 'pending' | 'answered' | 'expired',
-      ...(row.answer !== null && row.answer !== undefined ? { answer: row.answer } : {}),
-      ...(row.preview_type ? { previewType: row.preview_type as AskPreviewType } : {}),
-      ...(row.preview_content ? { previewContent: row.preview_content } : {}),
-      sessionTitle: row.session_title,
-      createdAt: row.created_at,
-      ...(row.expires_at !== null && row.expires_at !== undefined ? { expiresAt: row.expires_at } : {}),
-    }));
-  }
 
   // --- Users ---
   /** 若 users 表为空，插入自举管理员（固定 id: user_admin / username: admin / role: admin） */
@@ -1282,8 +1233,8 @@ export class HubDatabase {
   }): SessionRecord {
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
-      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id, member_roles_json, blackboard)
-      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id)
+      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?)
     `);
     const leadBotId = input.leadBotId;
     stmt.run(
@@ -1295,9 +1246,7 @@ export class HubDatabase {
       now,
       now,
       input.ownerId,
-      input.parentSessionId ?? null,
-      '{}',
-      ''
+      input.parentSessionId ?? null
     );
     return {
       id: input.id,
@@ -1729,12 +1678,12 @@ export class HubDatabase {
     const now = new Date().toISOString();
     const newSessionId = `sess_${randomUUID()}`;
     const insertSession = this.db.prepare(`
-      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id, member_roles_json, blackboard)
-      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id)
+      VALUES (?, ?, ?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?)
     `);
 
     const rows = this.db.prepare(`
-      SELECT role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, created_at
+      SELECT role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, created_at
       FROM messages
       WHERE session_id = ? AND rowid <= ?
       ORDER BY rowid ASC
@@ -1746,8 +1695,6 @@ export class HubDatabase {
       model_badge: string | null;
       content: string;
       mentions_json: string;
-      whisper_target_bot_ids_json?: string | null;
-      orchestration_plan?: string | null;
       subagent_runs_json?: string | null;
       tool_calls_json: string | null;
       blocks_json?: string | null;
@@ -1757,8 +1704,8 @@ export class HubDatabase {
     }[];
     // 逐行 INSERT（新 msg id、新 session_id），created_at 保留原值以保真时间线
     const insertMessage = this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertArtifact = this.db.prepare(`
       INSERT INTO artifacts (id, session_id, filename, mime_type, size_bytes, sender_bot_id, storage_path, created_at)
@@ -1777,9 +1724,7 @@ export class HubDatabase {
         now,
         now,
         ownerId,
-        source.parentSessionId ?? null,
-        '{}',
-        ''
+        source.parentSessionId ?? null
       );
 
       for (const row of rows) {
@@ -1833,8 +1778,6 @@ export class HubDatabase {
           row.model_badge,
           row.content,
           row.mentions_json,
-          null,
-          null,
           row.subagent_runs_json ?? null,
           row.tool_calls_json,
           row.blocks_json ?? null,
@@ -1877,7 +1820,7 @@ export class HubDatabase {
 
     const stmt = this.db.prepare(`
       UPDATE sessions
-      SET title = ?, mode = ?, lead_bot_id = ?, member_bot_ids_json = ?, status = ?, active_bot_id = ?, archived = ?, pinned = ?, parent_session_id = ?, member_roles_json = '{}', blackboard = '', updated_at = ?
+      SET title = ?, mode = ?, lead_bot_id = ?, member_bot_ids_json = ?, status = ?, active_bot_id = ?, archived = ?, pinned = ?, parent_session_id = ?, updated_at = ?
       WHERE id = ?
     `);
     stmt.run(
@@ -1967,8 +1910,8 @@ export class HubDatabase {
     const attachmentsJson = msg.attachments ? JSON.stringify(msg.attachments) : null;
     const subagentRunsJson = msg.subagentRuns && msg.subagentRuns.length > 0 ? JSON.stringify(msg.subagentRuns) : null;
     const stmt = this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, whisper_target_bot_ids_json, orchestration_plan, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, aborted, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, aborted, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       msg.id,

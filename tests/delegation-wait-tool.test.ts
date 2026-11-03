@@ -157,13 +157,10 @@ test('CLI --wait: delegate 完成等待返回 status/reply/returnedArtifacts，a
   assert.equal(env.leadTurns.length, 0, 'parent lead bot must NOT be triggered for a summary turn');
   assert.equal(env.workerTurns.length, 1, 'worker executes exactly one turn');
 
-  // 父会话应有一条完成 callback 消息（带 attachments），子会话消息含 assistant 回复
+  // autoWakeParent=false：前台委派不向父会话插入 callback 消息，子会话消息含 assistant 回复
   const parentMessages = env.hub.db.getMessages(parent.id);
-  const completion = parentMessages.find(
-    (m) => m.role === 'callback' && m.content.startsWith('✅') && m.content.includes(`(#?s=${out.childSession.id})`),
-  );
-  assert.ok(completion, 'parent session must contain the completion callback');
-  assert.equal(completion.attachments?.length, 1);
+  const completion = parentMessages.find((m) => m.role === 'callback');
+  assert.equal(completion, undefined, 'parent session must not contain completion callback when autoWakeParent=false');
   const childMessages = env.hub.db.getMessages(out.childSession.id);
   assert.ok(childMessages.some((m) => m.role === 'assistant' && m.content === '子任务完成：报告已生成。'));
 });
@@ -189,9 +186,10 @@ test('delegateSessionAndWait: 子会话失败时返回 status=failed 与错误�
   assert.deepEqual(result.returnedArtifacts, []);
   assert.equal(result.childSession.leadBotId, 'bot_worker');
 
-  // 失败 callback（❌ 前缀）必须已落到父会话公屏
+  // autoWakeParent=false：失败时不向父会话公屏插入 callback 消息
   const parentMessages = env.hub.db.getMessages(parent.id);
-  assert.ok(parentMessages.some((m) => m.role === 'callback' && m.content.startsWith('❌') && m.content.includes('模拟子任务执行崩溃')));
+  const failCallback = parentMessages.find((m) => m.role === 'callback');
+  assert.equal(failCallback, undefined, 'parent session must not contain failure callback when autoWakeParent=false');
 });
 
 test('delegateSessionAndWait: 快速完成的子会话不因 SSE 开流竞态漏采结果', { timeout: 30_000 }, async (t) => {

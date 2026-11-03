@@ -1,4 +1,5 @@
 import type {
+  ArtifactRecord,
   DelegateSessionInput,
   DelegateSessionResult,
   MessageAttachment,
@@ -39,10 +40,9 @@ function createDeferred<T = void>(): Deferred<T> {
 /**
  * 委派子会话并同步等待其完成（用于 `botd sessions delegate --wait` 与 delegate_bot 工具）。
  *
- * 时序：先订阅父会话 SSE（等初始 session_status 快照帧确认流已激活），再 POST delegate。
- * 这样即使子会话极快完成，完成/失败 callback 消息也不会漏采。
- * 终止信号：父会话出现匹配 childSessionId 的 ✅/❌ callback 消息、waitSeconds 超时、
- * 或外部 signal 中止（用户接管/取消）。结束后拉取子会话消息提取 reply / 错误详情。
+ * 时序：先获取父会话已有产物基线并 POST delegate 创建子会话，
+ * 随后直接订阅子会话自身的 SSE 流（/api/sessions/:childSessionId/events）监听状态收敛（idle / failed）。
+ * 结束后拉取子会话消息提取 reply / 错误详情，并对比父会话产物拉取新产出交付物。
  */
 export async function delegateSessionAndWait(
   client: HubClient,
@@ -62,57 +62,94 @@ export async function delegateSessionAndWait(
   const streamReady = createDeferred<void>();
   let streamReadySettled = false;
   let sawInitialSnapshot = false;
-  const callbackBuffer: MessageRecord[] = [];
-  const completion = createDeferred<MessageRecord>();
+  const completion = createDeferred<{ status: 'done' | 'failed' }>();
   let completionSettled = false;
-  let childSessionId = '';
+  let wasAborted = false;
 
-  /** 判定一条 callback 消息是否为 childSessionId 的完成/失败通知 */
-  const isCompletionFor = (msg: MessageRecord, childSessionId: string): boolean =>
-    msg.role === 'callback' &&
-    msg.content.includes(`(#?s=${childSessionId})`) &&
-    (msg.content.startsWith('✅') || msg.content.startsWith('❌'));
+  const resolveCompletion = (result: { status: 'done' | 'failed' }) => {
+    if (!completionSettled) {
+      completionSettled = true;
+      completion.resolve(result);
+    }
+  };
 
-  const eventsPromise = client
-    .events(parentSessionId, {
-      signal: abortController.signal,
-      onEvent: (event: SessionSseEvent) => {
-        if (!streamReadySettled) {
-          streamReadySettled = true;
-          streamReady.resolve();
-        }
-        // 服务器建流时总是先推一帧当前状态快照，不能作为任何业务事件的依据
-        if (event.type === 'session_status' && !sawInitialSnapshot) {
-          sawInitialSnapshot = true;
-          return;
-        }
-        if (event.type === 'message_created' && event.message.role === 'callback') {
-          callbackBuffer.push(event.message);
-          if (
-            childSessionId &&
-            isCompletionFor(event.message, childSessionId) &&
-            !completionSettled
-          ) {
-            completionSettled = true;
-            completion.resolve(event.message);
-          }
-        }
-      },
-    })
-    .catch((err: unknown) => {
-      if (!streamReadySettled) {
-        streamReadySettled = true;
-        streamReady.reject(err);
-      }
-      // 主动断流（abortController.abort()）导致的抛错是正常路径，吞掉
-    });
+  let eventsPromise: Promise<void> | undefined;
 
   try {
-    // 1. 等事件流激活（收到首个事件），10 秒无事件则超时
+    // 1. 获取父会话已有的产物列表基线，后续用于识别子会话回传的新产物
+    const baselineParentArtifacts = new Set(
+      (
+        await client
+          .get<Array<{ id: string }>>(`/api/sessions/${encodeURIComponent(parentSessionId)}/artifacts`)
+          .catch(() => [])
+      ).map((a) => a.id),
+    );
+
+    // 2. 创建子会话
+    const delegateResult = await client.post<DelegateSessionResult>(
+      `/api/sessions/${encodeURIComponent(parentSessionId)}/delegate`,
+      { ...input, autoWakeParent: input.autoWakeParent ?? false },
+    );
+    const childSessionId = delegateResult.childSession.id;
+    options.onChildCreated?.(delegateResult);
+
+    // 3. 打开子会话自身事件流并监听状态收敛
+    const handleEvent = async (event: SessionSseEvent) => {
+      if (!streamReadySettled) {
+        streamReadySettled = true;
+        streamReady.resolve();
+      }
+      if (event.type === 'session_status') {
+        if (event.status === 'failed') {
+          resolveCompletion({ status: 'failed' });
+          return;
+        }
+        if (event.status === 'idle') {
+          if (!sawInitialSnapshot) {
+            sawInitialSnapshot = true;
+            // 首帧快照：检查子会话是否在建立 SSE 前已极速跑完
+            try {
+              const msgs = await client.get<MessageRecord[]>(
+                `/api/sessions/${encodeURIComponent(childSessionId)}/messages`,
+              );
+              const lastMsg = msgs[msgs.length - 1];
+              if (lastMsg && (lastMsg.role === 'assistant' || lastMsg.role === 'system')) {
+                resolveCompletion({ status: lastMsg.role === 'system' ? 'failed' : 'done' });
+              }
+            } catch {
+              // 忽略快照拉取异常，后续帧继续等待
+            }
+            return;
+          }
+          // 后续帧收到 idle，代表已完成
+          resolveCompletion({ status: 'done' });
+          return;
+        }
+        if (!sawInitialSnapshot) {
+          sawInitialSnapshot = true;
+        }
+      }
+    };
+
+    eventsPromise = client
+      .events(childSessionId, {
+        signal: abortController.signal,
+        onEvent: (event: SessionSseEvent) => {
+          void handleEvent(event);
+        },
+      })
+      .catch((err: unknown) => {
+        if (!streamReadySettled) {
+          streamReadySettled = true;
+          streamReady.reject(err);
+        }
+      });
+
+    // 4. 等待子会话流激活（10 秒超时）
     let streamTimer: ReturnType<typeof setTimeout> | undefined;
     const streamTimeout = new Promise<never>((_, reject) => {
       streamTimer = setTimeout(() => {
-        reject(new CliError('Timed out opening the session event stream'));
+        reject(new CliError('Timed out opening the child session event stream'));
       }, 10_000);
     });
     try {
@@ -121,22 +158,7 @@ export async function delegateSessionAndWait(
       if (streamTimer) clearTimeout(streamTimer);
     }
 
-    // 2. 流激活后再创建子会话，避免竞态漏掉快速完成的 callback
-    const delegateResult = await client.post<DelegateSessionResult>(
-      `/api/sessions/${encodeURIComponent(parentSessionId)}/delegate`,
-      { ...input, autoWakeParent: input.autoWakeParent ?? false },
-    );
-    childSessionId = delegateResult.childSession.id;
-    options.onChildCreated?.(delegateResult);
-
-    // 3. 缓冲区可能已含完成回调（子会话在 POST 返回前就结束）
-    const alreadyDone = callbackBuffer.find((m) => isCompletionFor(m, childSessionId));
-    if (alreadyDone && !completionSettled) {
-      completionSettled = true;
-      completion.resolve(alreadyDone);
-    }
-
-    // 4. 等待完成 callback、超时或外部中止
+    // 5. 等待状态收敛、超时或外部中止
     if (!completionSettled) {
       let waitTimer: ReturnType<typeof setTimeout> | undefined;
       const waitTimeout = new Promise<never>((_, reject) => {
@@ -144,55 +166,61 @@ export async function delegateSessionAndWait(
           reject(new CliError(`Timed out after ${options.waitSeconds}s waiting for the sub-session to finish`));
         }, options.waitSeconds * 1000);
       });
-      const onAbortReject = () => {
-        if (!completionSettled) {
-          completionSettled = true;
-          completion.resolve(undefined as unknown as MessageRecord);
-        }
+      const onAbort = () => {
+        wasAborted = true;
+        resolveCompletion({ status: 'failed' });
       };
-      abortController.signal.addEventListener('abort', onAbortReject, { once: true });
+      abortController.signal.addEventListener('abort', onAbort, { once: true });
       try {
         await Promise.race([completion.promise, waitTimeout]);
       } finally {
         if (waitTimer) clearTimeout(waitTimer);
-        abortController.signal.removeEventListener('abort', onAbortReject);
+        abortController.signal.removeEventListener('abort', onAbort);
       }
     }
 
-    const completionCallbackMsg =
-      callbackBuffer.find((m) => isCompletionFor(m, childSessionId)) ?? undefined;
+    const outcome = await completion.promise.catch(() => ({ status: 'failed' as const }));
 
-    // 5. 拉取子会话消息，提取 reply 或错误详情
-    const childMessages = completionCallbackMsg
-      ? await client.get<MessageRecord[]>(
-          `/api/sessions/${encodeURIComponent(childSessionId)}/messages`,
-        )
-      : [];
+    // 6. 拉取子会话消息与回传产物
+    const childMessages = await client
+      .get<MessageRecord[]>(`/api/sessions/${encodeURIComponent(childSessionId)}/messages`)
+      .catch(() => []);
 
-    const failed = completionCallbackMsg?.content.startsWith('❌') === true;
-    let status: 'done' | 'failed' = 'done';
+    let status: 'done' | 'failed' = outcome.status;
     let reply = '';
-    if (!completionCallbackMsg) {
+    if (wasAborted) {
       status = 'failed';
       reply = `Timed out or aborted while waiting for sub-session "${childSessionId}" to finish. It may still be running; inspect it with \`botd sessions messages ${childSessionId} --json\`.`;
-    } else if (failed) {
-      status = 'failed';
+    } else if (status === 'failed') {
       const lastSystem = [...childMessages].reverse().find((m) => m.role === 'system');
-      reply = lastSystem?.content?.trim() || completionCallbackMsg.content.trim();
+      reply = lastSystem?.content?.trim() || 'Sub-session execution failed';
     } else {
       const lastAssistant = [...childMessages].reverse().find((m) => m.role === 'assistant');
       reply = lastAssistant?.content?.trim() ?? '';
     }
 
+    const afterArtifacts = await client
+      .get<ArtifactRecord[]>(`/api/sessions/${encodeURIComponent(parentSessionId)}/artifacts`)
+      .catch(() => []);
+    const returnedArtifacts: MessageAttachment[] = afterArtifacts
+      .filter((a) => !baselineParentArtifacts.has(a.id))
+      .map((a) => ({
+        id: a.id,
+        filename: a.filename,
+        mimeType: a.mimeType,
+        sizeBytes: a.sizeBytes,
+        url: `/api/artifacts/${a.id}`,
+      }));
+
     return {
       ...delegateResult,
       status,
       reply,
-      returnedArtifacts: completionCallbackMsg?.attachments ?? [],
+      returnedArtifacts,
     };
   } finally {
     abortController.abort();
-    void eventsPromise.catch(() => {});
+    if (eventsPromise) void eventsPromise.catch(() => {});
     options.signal?.removeEventListener('abort', externalAbort);
   }
 }

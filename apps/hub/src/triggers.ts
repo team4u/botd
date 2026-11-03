@@ -1,5 +1,4 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import type { MessageAttachment } from '@botd/protocol';
 import type { Hono } from 'hono';
 import { cronMatches, isValidCronExpr, parseDelayDuration } from '@botd/protocol';
 import type { AutomationEventRecord, TriggerEventFilter, TriggerKind, TriggerRecord, UserRecord } from '@botd/protocol';
@@ -8,6 +7,7 @@ import type { GroupRouter } from './group-router.js';
 import type { SseHub } from './sse.js';
 import type { ArtifactService } from './artifact-service.js';
 import { resolveOwnedSession } from './http-helpers.js';
+import { watchSubSessionCompletion } from './delegation.js';
 
 const VALID_KINDS = new Set<TriggerKind>(['webhook', 'cron', 'once']);
 const VALID_DISPATCH_MODES = new Set<string>(['append', 'subsession']);
@@ -183,108 +183,21 @@ export function registerTriggerRoutes(
       parentSessionId: trigger.sessionId,
     });
 
-    const parentNoticeContent = `📋 触发器「${trigger.name}」已派生子会话「[${childSession.title}](#?s=${childSession.id})」交由 @${trigger.botId} 执行任务。`;
-    const parentNoticeMsg = db.createMessage({
-      id: `msg_${randomUUID()}`,
-      sessionId: trigger.sessionId,
-      role: 'callback',
-      senderBotId: trigger.botId,
-      content: parentNoticeContent,
-      mentions: [],
-    });
-    sseHub?.broadcast(trigger.sessionId, {
-      type: 'message_created',
-      message: parentNoticeMsg.message,
-    });
-
     // 载荷挂载须在子会话启动前完成（首轮 turn 的 incomingArtifacts 快照才能包含事件文件）
     const payloadArtifactId = attachPayload?.(childSession.id);
 
     // 记录子会话启动前已存在的产物 id（含挂载的事件载荷 event_<id>.json）：完成时据此区分「新产出」
     const baselineArtifactIds = new Set(db.listSessionArtifacts(childSession.id).map((a) => a.id));
 
-    // 订阅子会话状态：完成/失败时向父会话回传 callback 消息
-    if (sseHub) {
-      let unsubscribed = false;
-      let unsubscribe: (() => void) | undefined;
-      const cleanup = () => {
-        if (unsubscribed) return;
-        unsubscribed = true;
-        unsubscribe?.();
-      };
-      unsubscribe = sseHub.subscribe(childSession.id, (event) => {
-        if (event.type !== 'session_status') return;
-        if (event.status === 'idle') {
-          cleanup();
-          // 幂等防重：仅首个完成/失败回调可插入父会话消息，跨 Hub 重启依然生效
-          if (!db.markSessionParentNotified(childSession.id)) return;
-          const messages = db.getMessages(childSession.id);
-          const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
-          const summary = lastAssistant?.content?.trim() || '(无回复内容)';
-          let callbackContent = `✅ 子会话「[${childSession.title}](#?s=${childSession.id})」已完成：\n\n${summary}`;
-
-          // 子 -> 父回传：把子会话执行期间新产出的交付物以零拷贝 storagePath 引用复制回父会话。
-          // 删除安全性依赖 artifact-service 的按引用计数回收（见 reclaimUnreferencedFiles），
-          // 此处只新增引用行、不复制文件，也不得改成删行即删文件。
-          const returnedAttachments: MessageAttachment[] = [];
-          for (const childArt of db.listSessionArtifacts(childSession.id)) {
-            if (baselineArtifactIds.has(childArt.id)) continue; // 启动前挂载的事件载荷不回传
-            const withPath = db.getArtifactWithStoragePath(childArt.id);
-            if (!withPath) continue;
-            const parentArt = db.createArtifact({
-              id: `art_${randomUUID()}`,
-              sessionId: trigger.sessionId,
-              filename: withPath.filename,
-              mimeType: withPath.mimeType,
-              sizeBytes: withPath.sizeBytes,
-              senderBotId: withPath.senderBotId,
-              storagePath: withPath.storagePath,
-            });
-            sseHub.broadcast(trigger.sessionId, {
-              type: 'artifact_created',
-              sessionId: trigger.sessionId,
-              artifact: parentArt,
-            });
-            returnedAttachments.push({
-              id: parentArt.id,
-              filename: parentArt.filename,
-              mimeType: parentArt.mimeType,
-              sizeBytes: parentArt.sizeBytes,
-              url: `/api/artifacts/${parentArt.id}`,
-            });
-          }
-          if (returnedAttachments.length > 0) {
-            const artifactLines = returnedAttachments
-              .map((a) => `- ${a.filename} (${a.url})`)
-              .join('\n');
-            callbackContent += `\n\n📦 产出交付物：\n${artifactLines}`;
-          }
-
-          const resultMsg = db.createMessage({
-            id: `msg_${randomUUID()}`,
-            sessionId: trigger.sessionId,
-            role: 'callback',
-            senderBotId: trigger.botId,
-            content: callbackContent,
-            mentions: [],
-            ...(returnedAttachments.length > 0 ? { attachments: returnedAttachments } : {}),
-          });
-          sseHub.broadcast(trigger.sessionId, { type: 'message_created', message: resultMsg.message });
-        } else if (event.status === 'failed') {
-          cleanup();
-          if (!db.markSessionParentNotified(childSession.id)) return;
-          const failMsg = db.createMessage({
-            id: `msg_${randomUUID()}`,
-            sessionId: trigger.sessionId,
-            role: 'callback',
-            senderBotId: trigger.botId,
-            content: `❌ 子会话「[${childSession.title}](#?s=${childSession.id})」执行失败`,
-            mentions: [],
-          });
-          sseHub.broadcast(trigger.sessionId, { type: 'message_created', message: failMsg.message });
-        }
-      });
-    }
+    // 订阅子会话状态：完成/失败时向父会话回传 callback 消息与交付物
+    watchSubSessionCompletion({
+      db,
+      sseHub,
+      parentSessionId: trigger.sessionId,
+      childSession,
+      botId: trigger.botId,
+      baselineArtifactIds,
+    });
 
     // 初始 user 消息：若配置 skillId 且 prompt 未以 / 开头，加 /skill: 前缀
     let initialPrompt = prompt;

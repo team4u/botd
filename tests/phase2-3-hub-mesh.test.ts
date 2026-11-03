@@ -187,7 +187,7 @@ async function createMeshFixture(t: TestContext) {
   return { hub, base, request, json, createUser, addNode, connectNode, adminCookie };
 }
 
-test('Task 2.1 & 2.2: pending_asks with previewType, previewContent, timeoutSeconds: 0 and GET /api/approvals/pending', async (t) => {
+test('Task 2.1 & 2.2: pending_asks with previewType, previewContent, timeoutSeconds: 0 and session asks API', async (t) => {
   const f = await createMeshFixture(t);
   const node = await f.addNode(['ask-bot']);
 
@@ -213,8 +213,8 @@ test('Task 2.1 & 2.2: pending_asks with previewType, previewContent, timeoutSeco
   // Give a moment for Hub to save pending ask
   await new Promise((r) => setTimeout(r, 60));
 
-  // Call GET /api/approvals/pending
-  const pendingList = await f.json<PendingAskRecord[]>('/api/approvals/pending');
+  // Call GET /api/sessions/:id/asks
+  const pendingList = await f.json<PendingAskRecord[]>(`/api/sessions/${session.id}/asks`);
   assert.equal(pendingList.length, 1);
   const pendingAsk = pendingList[0];
   assert.equal(pendingAsk.sessionId, session.id);
@@ -223,7 +223,6 @@ test('Task 2.1 & 2.2: pending_asks with previewType, previewContent, timeoutSeco
   assert.equal(pendingAsk.previewType, 'diff');
   assert.equal(pendingAsk.previewContent, '--- a/main.ts\n+++ b/main.ts\n+console.log("hello");');
   assert.equal(pendingAsk.expiresAt, undefined);
-  assert.equal(pendingAsk.sessionTitle, 'Code Review Session');
 
   // Respond to the ask
   const respondRes = await f.json<{ ok: boolean; ask: PendingAskRecord }>(
@@ -238,8 +237,8 @@ test('Task 2.1 & 2.2: pending_asks with previewType, previewContent, timeoutSeco
   const result = await askPromise;
   assert.equal(result.answer, 'Approve');
 
-  // GET /api/approvals/pending should now be empty
-  const pendingAfter = await f.json<PendingAskRecord[]>('/api/approvals/pending');
+  // GET /api/sessions/:id/asks should now be empty
+  const pendingAfter = await f.json<PendingAskRecord[]>(`/api/sessions/${session.id}/asks`);
   assert.equal(pendingAfter.length, 0);
 });
 

@@ -431,13 +431,6 @@ test('dispatchMode=subsession：Webhook 触发自动派生子会话、父会话�
   assert.equal(childSession.mode, 'direct');
   assert.equal(childSession.title, '[自动任务] nightly report');
 
-  // 父会话通知消息
-  const parentMsgs = hub.db.getMessages('sess_sub');
-  const notice = parentMsgs.find(
-    (m) => m.role === 'callback' && m.content.includes(`触发器「nightly report」已派生子会话「[${childSession.title}](#?s=${childSessionId})」交由 @bot_sub 执行任务。`)
-  );
-  assert.ok(notice, `父会话应包含派生通知，实际消息: ${JSON.stringify(parentMsgs.map((m) => m.content))}`);
-
   // 子会话被真实启动（runTurn 被调用）
   await waitFor(() => turns.some((x) => x.sessionId === childSessionId));
   assert.ok(turns.some((x) => x.botId === 'bot_sub'));
@@ -538,10 +531,9 @@ test('dispatchMode=subsession：cron/once/手动 run 亦派生子会话', async 
   assert.equal(childSession.parentSessionId, 'sess_manual');
   assert.equal(childSession.title, '[自动任务] manual sub');
 
-  // 父会话通知 + 子会话执行
+  // 子会话执行
   await waitFor(() => turns.length > 0);
-  const parentMsgs = hub.db.getMessages('sess_manual');
-  assert.ok(parentMsgs.some((m) => m.role === 'callback' && m.content.includes('已派生子会话')));
+  assert.equal(turns[0].sessionId, runJson.childSessionId);
 });
 
 test('dispatchMode=subsession：子会话失败时父会话收到失败回传', async (t) => {

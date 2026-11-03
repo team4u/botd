@@ -202,6 +202,54 @@ interface CrossBotSessionRecord {
 /** 跨 Bot 子会话全局映射表：支持按 agentId、runId、label 或 childSessionId 查找 */
 const crossBotSessionMap = new Map<string, CrossBotSessionRecord>();
 
+interface HandoffWatch {
+  combo: AbortController;
+  signal: AbortSignal;
+  isHandedOff: () => boolean;
+  cleanup: () => void;
+}
+
+/** 组合信号监听：父级取消（整会话停止）与用户接管轮询（80ms），集中管理 cleanup 避免样板代码重复 */
+function createHandoffWatch(options: {
+  parentSignal?: AbortSignal;
+  handoffScope?: { wasTriggered: () => boolean };
+  onParentAbort?: () => void;
+}): HandoffWatch {
+  const combo = new AbortController();
+  let handedOff = false;
+
+  const onParentAbort = () => {
+    options.onParentAbort?.();
+    combo.abort();
+  };
+  const onHandoff = () => {
+    handedOff = true;
+    combo.abort();
+  };
+
+  if (options.parentSignal?.aborted) {
+    onParentAbort();
+  } else {
+    options.parentSignal?.addEventListener('abort', onParentAbort, { once: true });
+  }
+
+  const handoffPoll = setInterval(() => {
+    if (options.handoffScope?.wasTriggered()) onHandoff();
+  }, 80);
+
+  const cleanup = () => {
+    clearInterval(handoffPoll);
+    options.parentSignal?.removeEventListener?.('abort', onParentAbort);
+  };
+
+  return {
+    combo,
+    signal: combo.signal,
+    isHandedOff: () => handedOff,
+    cleanup,
+  };
+}
+
 /**
  * 向跨 Bot 子会话发送跟进消息并等待该会话回到 idle / failed。
  * 时序与 delegateSessionAndWait 对齐：先订阅子会话 SSE 确认流已激活，再 POST 消息。
@@ -425,32 +473,17 @@ async function executeCrossBotSession(options: CrossBotSessionOptions): Promise<
   // 前台模式：等待子会话执行完成，支持接管转后台与父级取消
   const { delegateSessionAndWait } = await import('./cli/commands/sessions.js');
   let childSessionId = '';
-  let handedOff = false;
-  const combo = new AbortController();
-
-  const onParentAbort = () => {
-    if (childSessionId) {
-      void client
-        .post(`/api/sessions/${encodeURIComponent(childSessionId)}/cancel`)
-        .catch(() => {});
-    }
-    combo.abort();
-  };
-  const onHandoff = () => {
-    handedOff = true;
-    combo.abort();
-  };
-
-  if (signal?.aborted) onParentAbort();
-  else signal?.addEventListener('abort', onParentAbort, { once: true });
-
-  const handoffPoll = setInterval(() => {
-    if (handoffScope?.wasTriggered()) onHandoff();
-  }, 80);
-  const cleanupListeners = () => {
-    clearInterval(handoffPoll);
-    signal?.removeEventListener?.('abort', onParentAbort);
-  };
+  const watch = createHandoffWatch({
+    parentSignal: signal,
+    handoffScope,
+    onParentAbort: () => {
+      if (childSessionId) {
+        void client
+          .post(`/api/sessions/${encodeURIComponent(childSessionId)}/cancel`)
+          .catch(() => {});
+      }
+    },
+  });
 
   let waitRes: Awaited<ReturnType<typeof delegateSessionAndWait>> | undefined;
   try {
@@ -466,7 +499,7 @@ async function executeCrossBotSession(options: CrossBotSessionOptions): Promise<
       },
       {
         waitSeconds: timeoutSeconds ?? 600,
-        signal: combo.signal,
+        signal: watch.signal,
         onChildCreated: (r) => {
           childSessionId = r.childSession.id;
           const rec: CrossBotSessionRecord = {
@@ -491,17 +524,18 @@ async function executeCrossBotSession(options: CrossBotSessionOptions): Promise<
       },
     );
   } catch (err) {
-    if (handedOff || signal?.aborted || combo.signal.aborted) {
+    if (watch.isHandedOff() || signal?.aborted || watch.signal.aborted) {
       waitRes = undefined;
     } else {
-      cleanupListeners();
+      watch.cleanup();
       throw err;
     }
   } finally {
-    cleanupListeners();
+    watch.cleanup();
   }
 
   const durationMs = Date.now() - startMs;
+  const handedOff = watch.isHandedOff();
 
   if (!waitRes) {
     const formattedText = handedOff
@@ -726,47 +760,31 @@ function wrapAgentToolForHandoff(tool: any, deps: WrapAgentToolDeps): any {
       }
 
       // 组合信号：父级取消（整会话停止）或用户接管（主会话新消息）
-      const combo = new AbortController();
-      let handedOff = false;
-      const onParentAbort = () => {
-        const manager = getGlobalSubagentManager();
-        manager?.abort?.(agentId);
-        combo.abort();
-      };
-      const onHandoff = () => {
-        handedOff = true;
-        combo.abort();
-      };
-      if (signal?.aborted) {
-        onParentAbort();
-      } else {
-        signal?.addEventListener('abort', onParentAbort, { once: true });
-      }
-
-      const handoffPoll = setInterval(() => {
-        if (handoffScope?.wasTriggered()) onHandoff();
-      }, 80);
-      const cleanupListeners = () => {
-        clearInterval(handoffPoll);
-        signal?.removeEventListener?.('abort', onParentAbort);
-      };
+      const watch = createHandoffWatch({
+        parentSignal: signal,
+        handoffScope,
+        onParentAbort: () => {
+          const manager = getGlobalSubagentManager();
+          manager?.abort?.(agentId);
+        },
+      });
 
       try {
         const waitResult = await getResultTool.execute(
           `wait_${toolCallId}`,
           { agent_id: agentId, wait: true },
-          combo.signal,
+          watch.signal,
           undefined,
           ctx,
         );
-        if (handedOff) {
+        if (watch.isHandedOff()) {
           return makeTextResult(
             `Agent "${agentId}" (${params.subagent_type}) has been moved to the background because the user sent a new message in the session. It is STILL RUNNING. Read the user's new message and use stop_subagent, steer_subagent, or get_subagent_result with agent_id "${agentId}" as needed.`
           );
         }
         return waitResult;
       } finally {
-        cleanupListeners();
+        watch.cleanup();
       }
     }
 
@@ -1010,22 +1028,11 @@ function wrapWorkflowToolForCrossBot(
 
     // 5) 组合 abort 信号：父级取消（会话停止）中止整个工作流；接管（新消息）仅解除等待
     const effectiveSessionId = deps.sessionId || process.env.BOTD_SESSION_ID || '';
-    const workflowAbortController = new AbortController();
-    let handedOff = false;
-    const onParentAbort = () => workflowAbortController.abort();
-    const onHandoff = () => {
-      handedOff = true;
-      workflowAbortController.abort();
-    };
-    if (signal?.aborted) onParentAbort();
-    else signal?.addEventListener('abort', onParentAbort, { once: true });
-    const handoffPoll = setInterval(() => {
-      if (handoffScope?.wasTriggered()) onHandoff();
-    }, 80);
-    const cleanupListeners = () => {
-      clearInterval(handoffPoll);
-      signal?.removeEventListener?.('abort', onParentAbort);
-    };
+    const watch = createHandoffWatch({
+      parentSignal: signal,
+      handoffScope,
+    });
+    const workflowAbortController = watch.combo;
 
     // 6) CompositeWorkflowHost：本地子代理走 pi-subagents manager，
     //    未注册类型（或 @/bot: 前缀）走 Hub 子会话跨 BOT 委派。
@@ -1124,7 +1131,7 @@ function wrapWorkflowToolForCrossBot(
 
         if (!execRes.ok) {
           const message = execRes.reply || 'Cross-bot sub-session failed';
-          const error = handedOff || workflowAbortController.signal.aborted ? 'Workflow aborted.' : message;
+          const error = watch.isHandedOff() || workflowAbortController.signal.aborted ? 'Workflow aborted.' : message;
           pi.events.emit('subagents:failed', {
             id: stepRunId,
             type: cleanType,
@@ -1350,7 +1357,7 @@ function wrapWorkflowToolForCrossBot(
         status: 'failed',
       });
     } finally {
-      cleanupListeners();
+      watch.cleanup();
     }
   };
 

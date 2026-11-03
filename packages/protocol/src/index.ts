@@ -282,7 +282,7 @@ export interface SubagentRunRecord {
   childSessionId?: string;
   /** 本次运行的启动时间（ISO），供检视抽屉合成消息时间戳与日期分隔线 */
   startedAt?: string;
-  status: 'running' | 'done' | 'error' | 'stopped' | 'skipped';
+  status: 'running' | 'done' | 'error' | 'stopped';
   toolCount?: number;
   currentTool?: string;
   durationMs?: number;
@@ -405,7 +405,6 @@ export interface DelegateSessionInput {
   botId: string;
   title?: string;
   prompt: string;
-  memberBotIds?: string[];
   mode?: SessionMode;
   artifactIds?: string[];
   /** 是否在子会话完成后自动唤醒父会话的主控 Bot（默认 true；同步等待或静默委派时传 false） */
