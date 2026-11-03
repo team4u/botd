@@ -56,10 +56,52 @@ async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
+async function copyTreeExcludingGit(src: string, dest: string): Promise<void> {
+  await fs.cp(src, dest, {
+    recursive: true,
+    filter: (candidate) => path.basename(candidate) !== '.git',
+  });
+}
+
+/** Standard skill roots a repository may carry (Agent Skills spec layouts). */
+const NESTED_SKILL_ROOTS = ['skills', path.join('.agents', 'skills'), path.join('.agent', 'skills')];
+
+/** Locate a skill below a cloned repo root: `skills/<name>`, `.agents/skills/<name>`
+ *  or `.agent/skills/<name>`. With a target name only that name matches; without
+ *  one the layout must be unambiguous (exactly one skill dir found). */
+async function findNestedSkillDir(
+  repoRoot: string,
+  target?: string
+): Promise<{ dir: string; name: string } | null> {
+  if (target) {
+    if (path.basename(target) !== target) return null; // refuse traversal-ish names
+    for (const root of NESTED_SKILL_ROOTS) {
+      const dir = path.join(repoRoot, root, target);
+      if (await fileExists(path.join(dir, 'SKILL.md'))) return { dir, name: target };
+    }
+    return null;
+  }
+  const found: { dir: string; name: string }[] = [];
+  for (const root of NESTED_SKILL_ROOTS) {
+    const rootDir = path.join(repoRoot, root);
+    if (!(await fileExists(rootDir))) continue;
+    const entries = await fs.readdir(rootDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      if (await fileExists(path.join(rootDir, entry.name, 'SKILL.md'))) {
+        found.push({ dir: path.join(rootDir, entry.name), name: entry.name });
+      }
+    }
+  }
+  return found.length === 1 ? found[0] : null;
+}
+
 export function parseGitSource(source: string): {
   repoUrl: string;
   branch?: string;
   subPath?: string;
+  /** Skill picked via the `owner/repo@skillName` shorthand, if any. */
+  skillName?: string;
   inferredName: string;
 } {
   const treeMatch = source.match(
@@ -80,6 +122,19 @@ export function parseGitSource(source: string): {
       branch,
       subPath,
       inferredName,
+    };
+  }
+
+  // `npx skills add` style GitHub shorthand: owner/repo or owner/repo@skillName.
+  // Only reached for sources that are not existing local paths (the local-path
+  // case above already tried stat and fell through otherwise).
+  const shorthandMatch = source.match(/^([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:@([\w.-]+))?$/);
+  if (shorthandMatch && shorthandMatch[1] !== '.' && shorthandMatch[1] !== '..') {
+    const [, owner, repo, skillName] = shorthandMatch;
+    return {
+      repoUrl: `https://github.com/${owner}/${repo}.git`,
+      skillName,
+      inferredName: skillName || repo,
     };
   }
 
@@ -165,12 +220,26 @@ export async function installResourceToNode(
         return { kind: 'extension', id: baseId };
       }
     }
+
+    // Local directory: a skill ships SKILL.md at its root, anything else is
+    // treated as an extension directory.
+    if (stat && stat.isDirectory()) {
+      const hasSkillMd = await fileExists(path.join(source, 'SKILL.md'));
+      const resolvedKind: 'skill' | 'extension' =
+        input.kind && input.kind !== 'auto' ? input.kind : hasSkillMd ? 'skill' : 'extension';
+      const id = sanitizeId(input.customId || path.basename(source));
+      const destDir = path.join(dataDir, resolvedKind === 'skill' ? 'skills' : 'extensions', id);
+      await fs.rm(destDir, { recursive: true, force: true });
+      await ensureDir(path.dirname(destDir));
+      await copyTreeExcludingGit(source, destDir);
+      return { kind: resolvedKind, id };
+    }
   }
 
   // Case 3: Git URL or repository
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'botd-install-'));
   try {
-    const { repoUrl, branch, subPath, inferredName } = parseGitSource(source);
+    const { repoUrl, branch, subPath, skillName, inferredName } = parseGitSource(source);
     const cloneArgs = ['clone', '--depth', '1'];
     if (branch) {
       cloneArgs.push('--branch', branch);
@@ -185,19 +254,28 @@ export async function installResourceToNode(
       throw new Error(`Subpath "${subPath}" not found in repository`);
     }
 
-    const hasSkillMd = await fileExists(path.join(extractedRoot, 'SKILL.md'));
+    // No SKILL.md at the root: look for the standard nested skill layouts
+    // (skills/<name>, .agents/skills/<name>, .agent/skills/<name>) that skill
+    // repositories use; `owner/repo@skillName` or customId picks the name.
+    let sourceRoot = extractedRoot;
+    let nameHint = inferredName;
+    if (!(await fileExists(path.join(extractedRoot, 'SKILL.md')))) {
+      const nested = await findNestedSkillDir(extractedRoot, skillName || input.customId);
+      if (nested) {
+        sourceRoot = nested.dir;
+        nameHint = nested.name;
+      }
+    }
+
+    const hasSkillMd = await fileExists(path.join(sourceRoot, 'SKILL.md'));
     const resolvedKind: 'skill' | 'extension' =
       input.kind && input.kind !== 'auto' ? input.kind : hasSkillMd ? 'skill' : 'extension';
-    const id = sanitizeId(input.customId || inferredName);
+    const id = sanitizeId(input.customId || nameHint);
     const destDir = path.join(dataDir, resolvedKind === 'skill' ? 'skills' : 'extensions', id);
 
     await fs.rm(destDir, { recursive: true, force: true });
     await ensureDir(path.dirname(destDir));
-    await fs.cp(extractedRoot, destDir, {
-      recursive: true,
-      filter: (src) =>
-        path.basename(src) !== '.git' && !src.endsWith('/.git') && !src.endsWith('\\.git'),
-    });
+    await copyTreeExcludingGit(sourceRoot, destDir);
 
     if (resolvedKind === 'extension' && (await fileExists(path.join(destDir, 'package.json')))) {
       await runCommand('npm', ['install', '--omit=dev'], { cwd: destDir, prependPath });

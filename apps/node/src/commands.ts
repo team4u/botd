@@ -11,7 +11,7 @@ import {
   type ResourceLoader,
 } from '@earendil-works/pi-coding-agent';
 import type { BotConfig, ChatCommand, DelegateSessionResult } from '@botd/protocol';
-import { assertSafeId, ensureDir, getBotDir, readNodeIdentity, writeAtomicFile } from './storage.js';
+import { assertSafeId, ensureDir, getBotDir, readNodeIdentity, resolveSkillDir, writeAtomicFile } from './storage.js';
 import subagentsExtension from '@tintinweb/pi-subagents/dist/index.js';
 import {
   setDefaultsDisabled,
@@ -1396,10 +1396,9 @@ export async function loadBotResources(
   const botDir = getBotDir(dataDir, bot.id);
   const workspaceDir = path.join(botDir, 'workspace');
   const promptsDir = path.join(botDir, 'prompts');
-  const skillPaths = (bot.enabledSkills ?? []).map(id => {
-    assertSafeId(id, 'Skill ID');
-    return path.join(dataDir, 'skills', id);
-  });
+  const skillPaths = (bot.enabledSkills ?? []).map(id =>
+    resolveSkillDir(dataDir, id, workspaceDir)
+  );
   // 主 BOT 挂载 pi-subagents 底座（Agent / SubagentWorkflow 编排工具 + 子代理调度）；
   // 子代理不挂载（防套娃：子代理不能再派子代理），扩展内部另有 inChildSessionContext 防重入双保险。
   let extensionFactories: ExtensionFactory[] = [];

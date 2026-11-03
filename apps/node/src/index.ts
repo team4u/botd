@@ -16,6 +16,8 @@ export {
   writeNodeIdentity,
   getBotDir,
   getSkillDir,
+  getSkillSearchDirs,
+  resolveSkillDir,
   getExtensionDir,
   listBots,
   readBot,
