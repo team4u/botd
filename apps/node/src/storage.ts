@@ -189,6 +189,49 @@ export function getSkillDir(dataDir: string, skillId: string): string {
   return path.join(dataDir, 'skills', skillId);
 }
 
+/**
+ * Skill discovery roots in priority order: the writable botd-managed
+ * <dataDir>/skills first, then the Agent Skills standard dirs
+ * (.agents/skills / .agent/skills) inside dataDir and workspace, plus the
+ * user-home level when dataDir is ~/.botd (so `npx skills add` installs work
+ * without copying; temp/test data dirs stay isolated because their basename
+ * is not ".botd"). BOTD_SKILLS_DIRS (path.delimiter-separated) appends extras.
+ */
+export function getSkillSearchDirs(dataDir: string, workspaceDir?: string): string[] {
+  const dirs = [
+    path.join(dataDir, 'skills'),
+    path.join(dataDir, '.agents', 'skills'),
+    path.join(dataDir, '.agent', 'skills'),
+  ];
+  const resolvedDataDir = path.resolve(dataDir);
+  if (path.basename(resolvedDataDir) === '.botd') {
+    const home = path.dirname(resolvedDataDir);
+    dirs.push(path.join(home, '.agents', 'skills'), path.join(home, '.agent', 'skills'));
+  }
+  if (workspaceDir) {
+    dirs.push(path.join(workspaceDir, '.agents', 'skills'), path.join(workspaceDir, '.agent', 'skills'));
+  }
+  const extra = (process.env.BOTD_SKILLS_DIRS || '')
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => path.resolve(entry));
+  return [...new Set([...dirs, ...extra].map((dir) => path.resolve(dir)))];
+}
+
+/** Resolve a skill's actual directory: the first search root containing
+ *  <id>/SKILL.md wins (primary dir first); fall back to the writable primary
+ *  dir so a missing skill fails at read time with the canonical path. */
+export function resolveSkillDir(dataDir: string, skillId: string, workspaceDir?: string): string {
+  assertSafeId(skillId, 'Skill ID');
+  for (const rootDir of getSkillSearchDirs(dataDir, workspaceDir)) {
+    if (existsSync(path.join(rootDir, skillId, 'SKILL.md'))) {
+      return path.join(rootDir, skillId);
+    }
+  }
+  return getSkillDir(dataDir, skillId);
+}
+
 export function getExtensionDir(dataDir: string, extId: string): string {
   assertSafeId(extId, 'Extension ID');
   return path.join(dataDir, 'extensions', extId);
@@ -329,24 +372,32 @@ export async function deleteBot(dataDir: string, botId: string): Promise<void> {
   await fs.rm(botDir, { recursive: true, force: true });
 }
 
-export async function listSkills(dataDir: string): Promise<string[]> {
-  const skillsDir = path.join(dataDir, 'skills');
+/** Scan one skills root; symlinks count because `npx skills add` creates them. */
+async function listSkillEntriesInDir(skillsDir: string): Promise<string[]> {
   if (!existsSync(skillsDir)) return [];
   const entries = await fs.readdir(skillsDir, { withFileTypes: true });
-  const skills: string[] = [];
+  const names: string[] = [];
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const skillMd = path.join(skillsDir, entry.name, 'SKILL.md');
-    if (existsSync(skillMd)) {
-      skills.push(entry.name);
+    if ((!entry.isDirectory() && !entry.isSymbolicLink()) || !isSafeId(entry.name)) continue;
+    if (existsSync(path.join(skillsDir, entry.name, 'SKILL.md'))) {
+      names.push(entry.name);
     }
   }
-  return skills;
+  return names;
+}
+
+export async function listSkills(dataDir: string, workspaceDir?: string): Promise<string[]> {
+  const seen = new Set<string>();
+  for (const skillsDir of getSkillSearchDirs(dataDir, workspaceDir)) {
+    for (const name of await listSkillEntriesInDir(skillsDir)) {
+      seen.add(name);
+    }
+  }
+  return [...seen];
 }
 
 export async function readSkill(dataDir: string, skillId: string): Promise<string> {
-  assertSafeId(skillId, 'Skill ID');
-  const skillMd = path.join(getSkillDir(dataDir, skillId), 'SKILL.md');
+  const skillMd = path.join(resolveSkillDir(dataDir, skillId), 'SKILL.md');
   return fs.readFile(skillMd, 'utf8');
 }
 
@@ -401,8 +452,10 @@ export async function deleteResource(
 ): Promise<void> {
   assertSafeId(target.id, `${target.kind === 'skill' ? 'Skill' : 'Extension'} ID`);
   if (target.kind === 'skill') {
-    const skillDir = getSkillDir(dataDir, target.id);
-    await fs.rm(skillDir, { recursive: true, force: true });
+    await fs.rm(getSkillDir(dataDir, target.id), { recursive: true, force: true });
+    // Discovery also surfaces copies under the Agent Skills standard dirs.
+    await fs.rm(path.join(dataDir, '.agents', 'skills', target.id), { recursive: true, force: true });
+    await fs.rm(path.join(dataDir, '.agent', 'skills', target.id), { recursive: true, force: true });
     return;
   }
   if (target.kind === 'extension') {
@@ -498,9 +551,10 @@ export async function seedStorageIfEmpty(dataDir: string, nodeId: string): Promi
   await ensureDir(path.join(dataDir, 'extensions'));
   await ensureDir(path.join(dataDir, 'bots'));
 
-  // 1. Seed example skill if none exists
-  const skills = await listSkills(dataDir);
-  if (skills.length === 0) {
+  // 1. Seed example skill if the primary skills dir has none. Discovery also
+  // surfaces ~/.agents/skills etc., so check <dataDir>/skills directly: the
+  // default bot enables cli-helper and seeding always targets the primary dir.
+  if ((await listSkillEntriesInDir(path.join(dataDir, 'skills'))).length === 0) {
     const exampleSkill = `# CLI Helper Skill
 
 This node executes tasks using local CLI tools.

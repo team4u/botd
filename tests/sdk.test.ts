@@ -1,11 +1,23 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { executeBotTurn, getActiveSessionCount, getBotCommands } from '../apps/node/src/runtime.js';
-import { saveBot, writeExtension, writeSkill } from '../apps/node/src/storage.js';
+import {
+  deleteResource,
+  getSkillSearchDirs,
+  listSkills,
+  readSkill,
+  resolveSkillDir,
+  saveBot,
+  seedStorageIfEmpty,
+  writeExtension,
+  writeSkill,
+} from '../apps/node/src/storage.js';
+import { installResourceToNode, parseGitSource } from '../apps/node/src/installer.js';
 
 /**
  * Inject a provider API key through the BOTD_API_KEY_<PROVIDER> environment override
@@ -724,5 +736,174 @@ test('executeBotTurn waits for model response when extension command triggers tu
     : JSON.stringify(userMessages[0].content);
   assert(userText.includes('Triggered query: sample_query'));
   assert.equal(getActiveSessionCount(), 0);
+});
+
+test('skill discovery reads .agents/skills and .agent/skills with precedence and symlinks', async t => {
+  const home = await mkdtemp(path.join(tmpdir(), 'botd-skill-home-'));
+  const dataDir = path.join(home, '.botd');
+  t.after(() => rm(home, { recursive: true, force: true }));
+
+  // Skills in the standard Agent Skills dirs inside dataDir (one symlinked).
+  await mkdir(path.join(dataDir, '.agents', 'skills', 'shared-skill'), { recursive: true });
+  await writeFile(path.join(dataDir, '.agents', 'skills', 'shared-skill', 'SKILL.md'), 'AGENTS_DIR_SKILL_BODY');
+  const realSkill = path.join(home, 'real-skill');
+  await mkdir(realSkill, { recursive: true });
+  await writeFile(path.join(realSkill, 'SKILL.md'), 'SYMLINKED_SKILL_BODY');
+  await mkdir(path.join(dataDir, '.agent', 'skills'), { recursive: true });
+  await symlink(realSkill, path.join(dataDir, '.agent', 'skills', 'linked-skill'));
+
+  // Home-level .agents/skills is discovered because basename(dataDir) === '.botd'.
+  await mkdir(path.join(home, '.agents', 'skills', 'home-skill'), { recursive: true });
+  await writeFile(path.join(home, '.agents', 'skills', 'home-skill', 'SKILL.md'), 'HOME_AGENTS_SKILL_BODY');
+  await mkdir(path.join(home, '.agent', 'skills', 'legacy-skill'), { recursive: true });
+  await writeFile(path.join(home, '.agent', 'skills', 'legacy-skill', 'SKILL.md'), 'HOME_AGENT_SKILL_BODY');
+
+  const skills = await listSkills(dataDir);
+  for (const expected of ['shared-skill', 'linked-skill', 'home-skill', 'legacy-skill']) {
+    assert(skills.includes(expected), `listSkills must discover ${expected}, got: ${skills.join(', ')}`);
+  }
+  assert.equal(await readSkill(dataDir, 'shared-skill'), 'AGENTS_DIR_SKILL_BODY');
+  assert.equal(await readSkill(dataDir, 'linked-skill'), 'SYMLINKED_SKILL_BODY');
+  assert.equal(await readSkill(dataDir, 'home-skill'), 'HOME_AGENTS_SKILL_BODY');
+  assert.equal(await readSkill(dataDir, 'legacy-skill'), 'HOME_AGENT_SKILL_BODY');
+  assert.equal(
+    resolveSkillDir(dataDir, 'home-skill'),
+    path.join(home, '.agents', 'skills', 'home-skill')
+  );
+
+  // The writable primary dir overrides the standard dirs for the same id.
+  await writeSkill(dataDir, 'shared-skill', 'PRIMARY_DIR_WINS');
+  assert.equal(await readSkill(dataDir, 'shared-skill'), 'PRIMARY_DIR_WINS');
+  assert.equal(resolveSkillDir(dataDir, 'shared-skill'), path.join(dataDir, 'skills', 'shared-skill'));
+
+  // Temp test dirs (basename !== .botd) stay isolated from the home-level dirs.
+  const isolated = await mkdtemp(path.join(tmpdir(), 'botd-skill-isolated-'));
+  t.after(() => rm(isolated, { recursive: true, force: true }));
+  assert.equal((await listSkills(isolated)).length, 0);
+  assert(!getSkillSearchDirs(isolated).some(dir => dir.startsWith(home)));
+
+  // BOTD_SKILLS_DIRS appends extra roots.
+  const extra = path.join(home, 'extra-skills');
+  await mkdir(path.join(extra, 'env-skill'), { recursive: true });
+  await writeFile(path.join(extra, 'env-skill', 'SKILL.md'), 'ENV_DIR_SKILL_BODY');
+  const previousEnv = process.env.BOTD_SKILLS_DIRS;
+  process.env.BOTD_SKILLS_DIRS = [extra, ''].join(path.delimiter);
+  t.after(() => {
+    if (previousEnv === undefined) delete process.env.BOTD_SKILLS_DIRS;
+    else process.env.BOTD_SKILLS_DIRS = previousEnv;
+  });
+  assert((await listSkills(isolated)).includes('env-skill'));
+  assert.equal(await readSkill(isolated, 'env-skill'), 'ENV_DIR_SKILL_BODY');
+
+  // Deleting removes the discovered copy under the standard dirs too.
+  await deleteResource(dataDir, { kind: 'skill', id: 'shared-skill' });
+  const afterDelete = await listSkills(dataDir);
+  assert(!afterDelete.includes('shared-skill'), `primary + standard copies must both be gone, got: ${afterDelete.join(', ')}`);
+});
+
+test('seedStorageIfEmpty seeds cli-helper into the primary dir even when .agents/skills already has skills', async t => {
+  const home = await mkdtemp(path.join(tmpdir(), 'botd-skill-seed-'));
+  const dataDir = path.join(home, '.botd');
+  t.after(() => rm(home, { recursive: true, force: true }));
+
+  await mkdir(path.join(home, '.agents', 'skills', 'preexisting'), { recursive: true });
+  await writeFile(path.join(home, '.agents', 'skills', 'preexisting', 'SKILL.md'), 'PREEXISTING_SKILL');
+
+  await seedStorageIfEmpty(dataDir, 'node_seed');
+
+  assert.equal(await readFile(path.join(dataDir, 'skills', 'cli-helper', 'SKILL.md'), 'utf-8').then(s => s.includes('CLI Helper'), () => false), true,
+    'cli-helper must be seeded into <dataDir>/skills');
+  const skills = await listSkills(dataDir);
+  assert(skills.includes('cli-helper'));
+  assert(skills.includes('preexisting'));
+});
+
+test('loadBotResources / getBotCommands resolve enabled skills from .agents/skills and .agent/skills', async t => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'botd-skill-cmds-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+
+  await mkdir(path.join(dataDir, '.agents', 'skills', 'agents-skill'), { recursive: true });
+  await writeFile(
+    path.join(dataDir, '.agents', 'skills', 'agents-skill', 'SKILL.md'),
+    '---\nname: agents-skill\ndescription: AGENTS_DIR_SKILL_DESC\n---\nAGENTS_DIR_SKILL_BODY'
+  );
+  await mkdir(path.join(dataDir, '.agent', 'skills', 'agent-skill'), { recursive: true });
+  await writeFile(
+    path.join(dataDir, '.agent', 'skills', 'agent-skill', 'SKILL.md'),
+    '---\nname: agent-skill\ndescription: AGENT_DIR_SKILL_DESC\n---\nAGENT_DIR_SKILL_BODY'
+  );
+
+  const bot: BotConfig = {
+    id: 'std-dir-bot',
+    nodeId: 'node_test',
+    name: 'std-dir-bot',
+    description: '',
+    modelProvider: 'unconfigured-provider',
+    modelId: 'unconfigured-model',
+    enabledSkills: ['agents-skill', 'agent-skill'],
+    enabledExtensions: [],
+    updatedAt: new Date().toISOString(),
+  };
+  await saveBot(dataDir, bot, 'Standard dirs bot');
+
+  const commands = await getBotCommands(dataDir, bot);
+  const agentsCmd = commands.find(c => c.name === 'skill:agents-skill');
+  assert(agentsCmd, 'skill from .agents/skills must be resolvable');
+  assert.equal(agentsCmd.source, 'skill');
+  assert.equal(agentsCmd.description, 'AGENTS_DIR_SKILL_DESC');
+  const agentCmd = commands.find(c => c.name === 'skill:agent-skill');
+  assert(agentCmd, 'skill from .agent/skills must be resolvable');
+  assert.equal(agentCmd.description, 'AGENT_DIR_SKILL_DESC');
+});
+
+test('installResourceToNode installs local skill dirs and nested git skill layouts', async t => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'botd-skill-install-'));
+  const source = await mkdtemp(path.join(tmpdir(), 'botd-skill-src-'));
+  t.after(async () => {
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(source, { recursive: true, force: true });
+  });
+
+  // Local directory with SKILL.md at its root -> skill.
+  const localSkill = path.join(source, 'local-skill');
+  await mkdir(path.join(localSkill, 'reference'), { recursive: true });
+  await writeFile(path.join(localSkill, 'SKILL.md'), '# Local Skill\nInstalled from a directory.');
+  await writeFile(path.join(localSkill, 'reference', 'notes.md'), 'reference content');
+  await mkdir(path.join(localSkill, '.git'), { recursive: true });
+  await writeFile(path.join(localSkill, '.git', 'HEAD'), 'ref: refs/heads/main');
+
+  const local = await installResourceToNode(dataDir, { source: localSkill, kind: 'auto' });
+  assert.deepEqual(local, { kind: 'skill', id: 'local-skill' });
+  assert.equal(await readFile(path.join(dataDir, 'skills', 'local-skill', 'SKILL.md'), 'utf-8'), '# Local Skill\nInstalled from a directory.');
+  assert.equal(await readFile(path.join(dataDir, 'skills', 'local-skill', 'reference', 'notes.md'), 'utf-8'), 'reference content');
+  assert(!(await readFile(path.join(dataDir, 'skills', 'local-skill', '.git', 'HEAD'), 'utf-8').then(() => true, () => false)), '.git must be excluded');
+
+  // GitHub shorthand parsing: owner/repo and owner/repo@skillName.
+  assert.deepEqual(parseGitSource('owner/repo'), {
+    repoUrl: 'https://github.com/owner/repo.git',
+    skillName: undefined,
+    inferredName: 'repo',
+  });
+  assert.deepEqual(parseGitSource('owner/repo@my-skill'), {
+    repoUrl: 'https://github.com/owner/repo.git',
+    skillName: 'my-skill',
+    inferredName: 'my-skill',
+  });
+
+  // Nested skills/<name>/SKILL.md layout in a local git repository: the
+  // single-skill auto-selection must pick skills/packaged-skill.
+  const repo = path.join(source, 'nested-repo');
+  await mkdir(path.join(repo, 'skills', 'packaged-skill'), { recursive: true });
+  await writeFile(path.join(repo, 'skills', 'packaged-skill', 'SKILL.md'), '# Nested Skill\nFrom skills/ layout.');
+  await writeFile(path.join(repo, 'README.md'), '# repo');
+  execFileSync('git', ['init'], { cwd: repo });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo });
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo });
+  execFileSync('git', ['add', '.'], { cwd: repo });
+  execFileSync('git', ['commit', '-m', 'init'], { cwd: repo });
+
+  const nested = await installResourceToNode(dataDir, { source: `file://${repo}`, kind: 'auto' });
+  assert.deepEqual(nested, { kind: 'skill', id: 'packaged-skill' });
+  assert.match(await readFile(path.join(dataDir, 'skills', 'packaged-skill', 'SKILL.md'), 'utf-8'), /Nested Skill/);
 });
 
