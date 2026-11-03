@@ -448,9 +448,6 @@ export const api = {
     });
   },
 
-  async listSubSessions(sessionId: string): Promise<SessionRecord[]> {
-    return request<SessionRecord[]>(`/api/sessions/${encodeURIComponent(sessionId)}/subsessions`);
-  },
 
   async updateSession(
     sessionId: string,
@@ -462,25 +459,6 @@ export const api = {
     });
   },
 
-  async skipQueueStage(
-    sessionId: string,
-    payload: { stageId?: string; botId?: string }
-  ): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/queue/skip`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-  },
-
-  async appendQueueStage(
-    sessionId: string,
-    orchestration: string
-  ): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/queue/append`, {
-      method: 'POST',
-      body: JSON.stringify({ orchestration }),
-    });
-  },
 
   async setSessionArchived(sessionId: string, archived: boolean): Promise<SessionRecord> {
     return request<SessionRecord>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
@@ -638,9 +616,6 @@ export const api = {
     );
   },
 
-  async listPendingApprovals(): Promise<PendingAskRecord[]> {
-    return request<PendingAskRecord[]>('/api/approvals/pending');
-  },
 
   async respondToAsk(
     sessionId: string,

@@ -12,9 +12,6 @@ import {
 } from '../apps/web/src/components/CreateSessionModal.js';
 import {
   orderBotsAsTree,
-  toggleGroupMember,
-  selectGroupLead,
-  batchSelectGroupMembers,
 } from '../apps/web/src/components/GroupMemberPicker.js';
 
 // Dynamically import BotEditorModal so tsc in tsconfig.tests.json does not traverse into
@@ -349,7 +346,7 @@ test('shouldSaveBotMemory: 编辑 Bot 记忆被修改后触发保存', () => {
 
 
 // ==========================================
-// 4. GroupMemberPicker 三合一树状选择器纯函数测试
+// 4. GroupMemberPicker 纯函数测试
 // ==========================================
 
 test('GroupMemberPicker: orderBotsAsTree 将子代理紧跟在所属主 BOT 后，且默认草稿选主 BOT 为主持', () => {
@@ -363,29 +360,5 @@ test('GroupMemberPicker: orderBotsAsTree 将子代理紧跟在所属主 BOT 后�
 
   const draft = createDefaultSessionDraft(unorderedBots);
   assert.equal(draft.leadBotId, 'main-1', '默认主持人应为树序首位主 BOT');
-});
-
-test('GroupMemberPicker: 取消勾选当前主持人时自动顺延，设为主持时未勾选成员自动入群', () => {
-  const tree = [{ id: 'bot-1' }, { id: 'bot-2' }, { id: 'bot-3' }];
-
-  // 取消勾选当前主持人 bot-1 -> 顺延给树序中下一个已选成员 bot-2
-  const afterUncheckLead = toggleGroupMember(tree, ['bot-1', 'bot-2'], 'bot-1', 'bot-1');
-  assert.deepEqual(afterUncheckLead, { selectedIds: ['bot-2'], leadBotId: 'bot-2' });
-
-  // 再取消仅剩的 bot-2 -> 列表清空，leadBotId 置空
-  const afterUncheckAll = toggleGroupMember(tree, afterUncheckLead.selectedIds, afterUncheckLead.leadBotId, 'bot-2');
-  assert.deepEqual(afterUncheckAll, { selectedIds: [], leadBotId: '' });
-
-  // 从空状态勾选 bot-3 -> 自动成为主持人
-  const afterCheckFirst = toggleGroupMember(tree, [], '', 'bot-3');
-  assert.deepEqual(afterCheckFirst, { selectedIds: ['bot-3'], leadBotId: 'bot-3' });
-
-  // 直接将未勾选的 bot-1 设为主持人 -> 自动加入已选并切换主持
-  const afterSelectLead = selectGroupLead(['bot-3'], 'bot-1');
-  assert.deepEqual(afterSelectLead, { selectedIds: ['bot-3', 'bot-1'], leadBotId: 'bot-1' });
-
-  // 反选：bot-1 和 bot-3 取消，bot-2 被选中并自动接任主持人，同时保留隐藏 ID
-  const afterInvert = batchSelectGroupMembers(tree, ['bot-3', 'bot-1', 'hidden-bot'], 'bot-1', 'invert');
-  assert.deepEqual(afterInvert, { selectedIds: ['bot-2', 'hidden-bot'], leadBotId: 'bot-2' });
 });
 
