@@ -57,9 +57,13 @@ export interface HubStreamSink {
 export function createHubStreamSink(hubRpc: HubStream): HubStreamSink {
   const send = (event: Parameters<HubStream['onSessionStream']>[0]) => {
     try {
-      hubRpc.onSessionStream.asEvent(event);
+      // birpc 的 _call 是 async 函数：rpc 已关闭时 reject 而非同步 throw，
+      // 同步 try/catch 兜不住，必须显式 .catch，否则未处理拒绝会击穿整个 daemon。
+      void hubRpc.onSessionStream.asEvent(event).catch(() => {
+        // 推流失败不影响回合本身
+      });
     } catch {
-      // 推流失败不影响回合本身
+      // 同步抛出路径（防御未来 birpc 行为变化）同样静默
     }
   };
   return {
