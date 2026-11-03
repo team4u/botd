@@ -149,6 +149,11 @@ export function buildGroupContextPrompt(
     const desc = bot?.description ? ` - ${bot.description}` : '';
     const skills = bot?.enabledSkills?.length ? ` (技能: ${bot.enabledSkills.join(', ')})` : '';
     prompt += `- @${session.leadBotId} (${bot?.name || session.leadBotId})${desc}${skills}\n`;
+    // Space 绑定：让 Bot 明确知晓当前回合运行的真实项目目录
+    const spaceDir = session.workspaceDir || bot?.workspaceDir;
+    if (spaceDir) {
+      prompt += `- 工作区目录 (Space): ${spaceDir}\n`;
+    }
   }
 
   // 子代理感知：主 BOT 始终注入子代理引导与规范，让主 BOT 知道如何调度与创建子代理
@@ -795,6 +800,9 @@ export class GroupRouter {
         botId: item.botId,
         groupContextPrompt: effectiveGroupContextPrompt,
         incrementalMessages: prep.incrementalText,
+        ...(session.workspaceDir || prep.bot.workspaceDir
+          ? { workspaceDir: session.workspaceDir || prep.bot.workspaceDir }
+          : {}),
         ...(item.commandText ? { commandText: item.commandText } : {}),
         ...(prep.attachments.length > 0 ? { attachments: prep.attachments } : {}),
         ...(prep.incomingArtifacts.length > 0 ? { incomingArtifacts: prep.incomingArtifacts } : {}),

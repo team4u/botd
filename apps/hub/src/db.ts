@@ -213,6 +213,7 @@ type BotRow = {
   tool_scope?: string | null;
   custom_tools_json?: string | null;
   isolation?: string | null;
+  workspace_dir?: string | null;
 };
 
 const mapBotRow = (row: BotRow): BotConfig => ({
@@ -234,12 +235,13 @@ const mapBotRow = (row: BotRow): BotConfig => ({
   ...(row.tool_scope ? { toolScope: row.tool_scope as SubagentToolScope } : {}),
   ...(row.custom_tools_json ? { customTools: parseOptionalJson<string[]>(row.custom_tools_json) } : {}),
   ...(row.isolation ? { isolation: row.isolation as SubagentIsolation } : {}),
+  ...(row.workspace_dir ? { workspaceDir: row.workspace_dir } : {}),
 });
 
 type BotRowWithOwner = BotRow & { owner_id: string | null; owner_name: string | null };
 
 const BOT_WITH_OWNER_COLUMNS =
-  'b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id, b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json, b.visibility, b.updated_at, b.parent_bot_id, b.inherit_model, b.inherit_skills, b.color, b.tool_scope, b.custom_tools_json, b.isolation, n.owner_id, u.username AS owner_name';
+  'b.id, b.node_id, b.name, b.description, b.model_provider, b.model_id, b.thinking_level, b.enabled_skills_json, b.enabled_extensions_json, b.visibility, b.updated_at, b.parent_bot_id, b.inherit_model, b.inherit_skills, b.color, b.tool_scope, b.custom_tools_json, b.isolation, b.workspace_dir, n.owner_id, u.username AS owner_name';
 
 function mapBotRowWithOwner(row: BotRowWithOwner, currentUserId?: string): BotConfig {
   return {
@@ -639,6 +641,8 @@ export class HubDatabase {
       `ALTER TABLE triggers ADD COLUMN event_filter_json TEXT`,
       `ALTER TABLE triggers ADD COLUMN secret TEXT`,
       `ALTER TABLE sessions ADD COLUMN parent_notified INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE bots ADD COLUMN workspace_dir TEXT`,
+      `ALTER TABLE sessions ADD COLUMN workspace_dir TEXT`,
     ];
 
     for (const sql of migrations) {
@@ -1176,8 +1180,8 @@ export class HubDatabase {
 
   saveBot(bot: BotConfig): void {
     const stmt = this.db.prepare(`
-      INSERT INTO bots (id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, visibility, updated_at, parent_bot_id, inherit_model, inherit_skills, color, tool_scope, custom_tools_json, isolation)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO bots (id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, enabled_extensions_json, visibility, updated_at, parent_bot_id, inherit_model, inherit_skills, color, tool_scope, custom_tools_json, isolation, workspace_dir)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         node_id = excluded.node_id,
         name = excluded.name,
@@ -1195,7 +1199,8 @@ export class HubDatabase {
         color = excluded.color,
         tool_scope = excluded.tool_scope,
         custom_tools_json = excluded.custom_tools_json,
-        isolation = excluded.isolation
+        isolation = excluded.isolation,
+        workspace_dir = excluded.workspace_dir
     `);
     stmt.run(
       bot.id,
@@ -1215,7 +1220,8 @@ export class HubDatabase {
       bot.color ?? null,
       bot.toolScope ?? null,
       bot.customTools ? JSON.stringify(bot.customTools) : null,
-      bot.isolation ?? null
+      bot.isolation ?? null,
+      bot.workspaceDir?.trim() ? bot.workspaceDir.trim() : null
     );
   }
 
@@ -1231,13 +1237,15 @@ export class HubDatabase {
     leadBotId: string;
     ownerId: string;
     parentSessionId?: string;
+    workspaceDir?: string;
   }): SessionRecord {
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
-      INSERT INTO sessions (id, title, lead_bot_id, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id)
-      VALUES (?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?)
+      INSERT INTO sessions (id, title, lead_bot_id, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id, workspace_dir)
+      VALUES (?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?, ?)
     `);
     const leadBotId = input.leadBotId;
+    const workspaceDir = input.workspaceDir?.trim() ? input.workspaceDir.trim() : null;
     stmt.run(
       input.id,
       input.title,
@@ -1245,7 +1253,8 @@ export class HubDatabase {
       now,
       now,
       input.ownerId,
-      input.parentSessionId ?? null
+      input.parentSessionId ?? null,
+      workspaceDir
     );
     return {
       id: input.id,
@@ -1256,11 +1265,12 @@ export class HubDatabase {
       createdAt: now,
       updatedAt: now,
       ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
+      ...(workspaceDir ? { workspaceDir } : {}),
     };
   }
 
   getSession(id: string): (SessionRecord & { cursorMap: Record<string, number> }) | undefined {
-    const stmt = this.db.prepare('SELECT id, title, lead_bot_id, cursor_map_json, status, active_bot_id, archived, parent_session_id, owner_id, created_at, updated_at FROM sessions WHERE id = ?');
+    const stmt = this.db.prepare('SELECT id, title, lead_bot_id, cursor_map_json, status, active_bot_id, archived, parent_session_id, owner_id, workspace_dir, created_at, updated_at FROM sessions WHERE id = ?');
     const row = stmt.get(id) as {
       id: string;
       title: string;
@@ -1271,6 +1281,7 @@ export class HubDatabase {
       archived: number;
       parent_session_id: string | null;
       owner_id: string | null;
+      workspace_dir: string | null;
       created_at: string;
       updated_at: string;
     } | undefined;
@@ -1285,6 +1296,7 @@ export class HubDatabase {
       archived: Boolean(row.archived),
       parentSessionId: row.parent_session_id ?? undefined,
       ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+      ...(row.workspace_dir ? { workspaceDir: row.workspace_dir } : {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -1292,7 +1304,7 @@ export class HubDatabase {
 
   getAllSessions(ownerId: string): SessionRecord[] {
     const stmt = this.db.prepare(`
-      SELECT s.id, s.title, s.lead_bot_id, s.status, s.active_bot_id, s.archived, s.parent_session_id, s.owner_id, s.created_at, s.updated_at,
+      SELECT s.id, s.title, s.lead_bot_id, s.status, s.active_bot_id, s.archived, s.parent_session_id, s.owner_id, s.workspace_dir, s.created_at, s.updated_at,
         (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
         (SELECT m.content FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_content,
         (SELECT m.created_at FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_at
@@ -1309,6 +1321,7 @@ export class HubDatabase {
       archived: number;
       parent_session_id: string | null;
       owner_id: string | null;
+      workspace_dir: string | null;
       created_at: string;
       updated_at: string;
       message_count: number | bigint;
@@ -1325,6 +1338,7 @@ export class HubDatabase {
         archived: Boolean(row.archived),
         parentSessionId: row.parent_session_id ?? undefined,
         ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+        ...(row.workspace_dir ? { workspaceDir: row.workspace_dir } : {}),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         messageCount: Number(row.message_count),
@@ -1336,7 +1350,7 @@ export class HubDatabase {
 
   listSubSessions(parentSessionId: string): SessionRecord[] {
     const stmt = this.db.prepare(`
-      SELECT s.id, s.title, s.lead_bot_id, s.status, s.active_bot_id, s.archived, s.parent_session_id, s.created_at, s.updated_at,
+      SELECT s.id, s.title, s.lead_bot_id, s.status, s.active_bot_id, s.archived, s.parent_session_id, s.workspace_dir, s.created_at, s.updated_at,
         (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
         (SELECT m.content FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_content,
         (SELECT m.created_at FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_at
@@ -1352,6 +1366,7 @@ export class HubDatabase {
       active_bot_id: string | null;
       archived: number;
       parent_session_id: string | null;
+      workspace_dir: string | null;
       created_at: string;
       updated_at: string;
       message_count: number | bigint;
@@ -1367,6 +1382,7 @@ export class HubDatabase {
         activeBotId: row.active_bot_id ?? undefined,
         archived: Boolean(row.archived),
         parentSessionId: row.parent_session_id ?? undefined,
+        ...(row.workspace_dir ? { workspaceDir: row.workspace_dir } : {}),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         messageCount: Number(row.message_count),
@@ -1636,8 +1652,8 @@ export class HubDatabase {
     const now = new Date().toISOString();
     const newSessionId = `sess_${randomUUID()}`;
     const insertSession = this.db.prepare(`
-      INSERT INTO sessions (id, title, lead_bot_id, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id)
-      VALUES (?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?)
+      INSERT INTO sessions (id, title, lead_bot_id, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id, workspace_dir)
+      VALUES (?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?, ?)
     `);
 
     const rows = this.db.prepare(`
@@ -1680,7 +1696,8 @@ export class HubDatabase {
         now,
         now,
         ownerId,
-        source.parentSessionId ?? null
+        source.parentSessionId ?? null,
+        source.workspaceDir ?? null
       );
 
       for (const row of rows) {
@@ -1756,6 +1773,7 @@ export class HubDatabase {
       activeBotId?: string;
       archived?: boolean;
       parentSessionId?: string;
+      workspaceDir?: string | null;
     }
   ): SessionRecord | undefined {
     const session = this.getSession(id);
@@ -1767,10 +1785,13 @@ export class HubDatabase {
     const activeBotId = patch.activeBotId !== undefined ? patch.activeBotId : session.activeBotId;
     const archived = patch.archived ?? session.archived ?? false;
     const parentSessionId = patch.parentSessionId !== undefined ? patch.parentSessionId : session.parentSessionId;
+    const workspaceDir = patch.workspaceDir !== undefined
+      ? (patch.workspaceDir && patch.workspaceDir.trim() ? patch.workspaceDir.trim() : null)
+      : (session.workspaceDir ?? null);
 
     const stmt = this.db.prepare(`
       UPDATE sessions
-      SET title = ?, lead_bot_id = ?, status = ?, active_bot_id = ?, archived = ?, parent_session_id = ?, updated_at = ?
+      SET title = ?, lead_bot_id = ?, status = ?, active_bot_id = ?, archived = ?, parent_session_id = ?, workspace_dir = ?, updated_at = ?
       WHERE id = ?
     `);
     stmt.run(
@@ -1780,6 +1801,7 @@ export class HubDatabase {
       activeBotId ?? null,
       archived ? 1 : 0,
       parentSessionId ?? null,
+      workspaceDir,
       now,
       id
     );
@@ -1792,6 +1814,7 @@ export class HubDatabase {
       activeBotId: activeBotId ?? undefined,
       archived,
       parentSessionId: parentSessionId ?? undefined,
+      ...(workspaceDir ? { workspaceDir } : {}),
       createdAt: session.createdAt,
       updatedAt: now,
     };

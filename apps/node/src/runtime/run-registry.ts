@@ -6,8 +6,9 @@ import type { SubagentBridge } from './subagent-bridge.js';
 /**
  * 回合运行注册表：收敛 runtime 的全部模块级可变状态为单个对象。
  * runKey = `${sessionId}:${botId}`；pending 与 active 的区分保证「占位在任何 await 之前」。
- * 另维护工作目录级互斥：同一 (dataDir, 主Bot) 的 workspace 同一时刻只允许一个回合进入，
- * 不同会话触发同一主 Bot 时 FIFO 排队（子代理与其父主 Bot 共享同一 workspace，同样互斥）。
+ * 另维护工作目录级互斥：同一实际工作目录（dataDir + 解析后的 workspace 路径）同一时刻只允许一个回合进入，
+ * 不同会话触发同一工作区时 FIFO 排队（子代理与其父主 Bot 共享同一 workspace，同样互斥；
+ * 绑定不同项目 Space 的回合互不阻塞）。
  */
 
 export interface ActiveTurnContext {
@@ -118,37 +119,38 @@ export class RunRegistry {
   }
 
   /**
-   * 获取 Bot 实际工作目录（workspace）的互斥锁：同一 (dataDir, 主Bot) 同一时刻只有一个回合在跑。
-   * 不同会话触发同一主 Bot 时按 FIFO 排队，等待期间被 cancel 立即拒绝。
+   * 获取 Bot 实际工作目录（workspace）的互斥锁：同一工作目录同一时刻只有一个回合在跑。
+   * 不同会话触发同一工作区时按 FIFO 排队，等待期间被 cancel 立即拒绝。
+   * workspaceKey 通常是解析后的工作目录绝对路径（不同项目 Space 互不阻塞）。
    * 必须与 release(runKey) 严格配对调用。
    */
-  acquireWorkspace(runKey: string, dataDir: string, workspaceBotId: string): Promise<void> {
-    const workspaceKey = `${dataDir}::${workspaceBotId}`;
-    this.runKeyToWorkspaceKey.set(runKey, workspaceKey);
+  acquireWorkspace(runKey: string, dataDir: string, workspaceKey: string): Promise<void> {
+    const lockKey = `${dataDir}::${workspaceKey}`;
+    this.runKeyToWorkspaceKey.set(runKey, lockKey);
     if (this.isCancelled(runKey)) {
       return Promise.reject(new Error('Turn was cancelled'));
     }
-    const owner = this.workspaceOwner.get(workspaceKey);
+    const owner = this.workspaceOwner.get(lockKey);
     if (owner === undefined || owner === runKey) {
-      this.workspaceOwner.set(workspaceKey, runKey);
+      this.workspaceOwner.set(lockKey, runKey);
       return Promise.resolve();
     }
     // 已被其他回合持有：进入 FIFO 等待队列（resolve = 拿到锁；reject = 排队期间被取消）
     return new Promise<void>((resolve, reject) => {
-      const waiters = this.workspaceWaiters.get(workspaceKey) ?? [];
+      const waiters = this.workspaceWaiters.get(lockKey) ?? [];
       waiters.push({ runKey, resolve, reject });
-      this.workspaceWaiters.set(workspaceKey, waiters);
+      this.workspaceWaiters.set(lockKey, waiters);
     });
   }
 
-  /** 工作区是否被占用（不含排队中的等待者） */
-  isWorkspaceBusy(dataDir: string, workspaceBotId: string): boolean {
-    return this.workspaceOwner.has(`${dataDir}::${workspaceBotId}`);
+  /** 工作区是否被占用（不含排队中的等待者）；workspaceKey 为解析后的工作目录 */
+  isWorkspaceBusy(dataDir: string, workspaceKey: string): boolean {
+    return this.workspaceOwner.has(`${dataDir}::${workspaceKey}`);
   }
 
   /** 工作区当前排队长度（不含持锁者） */
-  getWorkspaceQueueLength(dataDir: string, workspaceBotId: string): number {
-    return this.workspaceWaiters.get(`${dataDir}::${workspaceBotId}`)?.length ?? 0;
+  getWorkspaceQueueLength(dataDir: string, workspaceKey: string): number {
+    return this.workspaceWaiters.get(`${dataDir}::${workspaceKey}`)?.length ?? 0;
   }
 
   /** 回合收尾：清空该 runKey 的全部痕迹（finally 路径统一调用），并把工作区锁移交给队首等待者 */

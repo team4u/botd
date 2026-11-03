@@ -82,15 +82,27 @@ export async function executeBotTurn(
   let session: AgentSession | null = null;
   let unsubscribeMain: (() => void) | null = null;
   let bridge: ReturnType<typeof createSubagentBridge> = undefined;
+  // 提前读取 Bot 与父 Bot 数据：解析 Space 绑定（workspaceDir）需在排队前完成
+  const botData = await readBot(dataDir, bot.id);
+  const parentBotDataEarly = bot.parentBotId ? await readBot(dataDir, bot.parentBotId) : null;
+  const effectiveWorkspaceDir =
+    input.workspaceDir?.trim() ||
+    botData?.bot.workspaceDir?.trim() ||
+    parentBotDataEarly?.bot.workspaceDir?.trim() ||
+    '';
   // 临时子代理（agents/tmp-*.md）在主 BOT 回合结束时统一清理；主目录不随子代理回合变化，提前解析
   const mainAgentDir = resolveBotPaths(dataDir, bot).mainAgentDir;
 
   try {
     // 工作区互斥：子代理与其父主 Bot 共享同一 workspace 目录，同一主 Bot 的回合跨会话串行。
+    // 互斥粒度是实际工作目录：不同项目 Space 之间互不阻塞。
     // 必须在 purgeStaleSubagentManager / beginSubagentHandoffScope 之前排队等待，
     // 否则排队中的回合会提前清掉或覆盖正在运行回合的全局状态（subagent manager / handoff scope）。
-    const workspaceBotId = bot.parentBotId || bot.id;
-    await runRegistry.acquireWorkspace(runKey, dataDir, workspaceBotId);
+    const defaultWorkspaceDir = path.join(dataDir, 'bots', bot.parentBotId || bot.id, 'workspace');
+    const workspaceKey = effectiveWorkspaceDir
+      ? path.resolve(effectiveWorkspaceDir)
+      : path.resolve(defaultWorkspaceDir);
+    await runRegistry.acquireWorkspace(runKey, dataDir, workspaceKey);
 
     // 生命周期修复：上一轮异常退出可能残留全局 manager 注册表
     // （与原始语义一致：activeTurns 为空时清理；pending 中的回合不算已注册）
@@ -104,13 +116,9 @@ export async function executeBotTurn(
     const { createWebExtensionUIContext, guardExtensionCommands } = webCommandUiMod;
 
     // --- 1. 生效配置与目录 ---
-    let parentBotData: Awaited<ReturnType<typeof readBot>> = null;
-    if (bot.parentBotId) {
-      parentBotData = await readBot(dataDir, bot.parentBotId);
-    }
-    const parentBotConfig = (parentBotData as any)?.config ?? parentBotData?.bot;
+    const parentBotConfig = (parentBotDataEarly as any)?.config ?? parentBotDataEarly?.bot;
     const effectiveBot = resolveEffectiveBot(bot, parentBotConfig ?? null);
-    const { botDir, workspaceDir, sessionDir } = resolveBotPaths(dataDir, bot);
+    const { botDir, workspaceDir, sessionDir } = resolveBotPaths(dataDir, bot, input.workspaceDir);
     const sessionFile = path.join(sessionDir, `${input.sessionId}.jsonl`);
     await ensureDir(workspaceDir);
     await ensureDir(sessionDir);
@@ -152,7 +160,6 @@ export async function executeBotTurn(
     }
 
     // --- 4. BOT 文件 / 环境变量 / 内置技能 ---
-    const botData = await readBot(dataDir, bot.id);
     const systemMd = botData?.systemMd || '';
     const memoryMd = botData?.memoryMd || '';
     const nodeMemoryMd = await readNodeMemory(dataDir);
@@ -211,7 +218,7 @@ export async function executeBotTurn(
           systemMd ? `[角色设定]\n${systemMd}` : '',
           buildMemoryPromptSection({
             memoryMd,
-            parentMemoryMd: parentBotData?.memoryMd,
+            parentMemoryMd: parentBotDataEarly?.memoryMd,
             nodeMemoryMd,
             memoryTopics,
             canWrite: canBotWriteMemory(bot),

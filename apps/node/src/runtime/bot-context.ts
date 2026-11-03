@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import type { BotConfig } from '@botd/protocol';
 
@@ -20,8 +21,18 @@ export function resolveEffectiveBot(bot: BotConfig, parentBotConfig: Partial<Bot
   };
 }
 
-/** 子代理的工作区/agentDir 始终挂在主 BOT 目录下（防套娃：子代理目录只存会话与环境） */
-export function resolveBotPaths(dataDir: string, bot: BotConfig): {
+/** 子代理的工作区/agentDir 始终挂在主 BOT 目录下（防套娃：子代理目录只存会话与环境）；
+ * 绑定真实项目目录（Space）时 workspaceDir 改用该目录 */
+/** 展开 `~/` 前缀为用户主目录，其余原样返回 */
+function expandHome(dir: string): string {
+  if (dir === '~') return os.homedir();
+  if (dir.startsWith('~/') || dir.startsWith('~\\')) {
+    return path.join(os.homedir(), dir.slice(2));
+  }
+  return dir;
+}
+
+export function resolveBotPaths(dataDir: string, bot: BotConfig, sessionWorkspaceDir?: string): {
   botDir: string;
   workspaceDir: string;
   sessionDir: string;
@@ -33,9 +44,11 @@ export function resolveBotPaths(dataDir: string, bot: BotConfig): {
   const botDir = path.join(dataDir, 'bots', bot.id);
   const mainBotId = bot.parentBotId || bot.id;
   const mainBotDir = path.join(dataDir, 'bots', mainBotId);
+  // Space 绑定：会话级优先于 Bot 级；未绑定时回落到主 BOT 目录下的 workspace
+  const boundWorkspace = sessionWorkspaceDir?.trim() || bot.workspaceDir?.trim() || '';
   return {
     botDir,
-    workspaceDir: path.join(mainBotDir, 'workspace'),
+    workspaceDir: boundWorkspace ? expandHome(boundWorkspace) : path.join(mainBotDir, 'workspace'),
     sessionDir: path.join(botDir, 'sessions'),
     agentDir: botDir,
     mainAgentDir: mainBotDir,
