@@ -19,6 +19,7 @@ import {
   Share2,
   Sparkles,
   History as HistoryIcon,
+  FolderGit2,
 } from 'lucide-react';
 import type {
   SessionRecord,
@@ -323,6 +324,39 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [diffDrawerOpen, setDiffDrawerOpen] = useState(false);
   const [insertTextRequest, setInsertTextRequest] = useState<{ text: string; seq: number; replace?: boolean } | null>(null);
 
+  // ===== 右侧抽屉「双栏常驻（Pin 模式）」=====
+  // 偏好持久化到 localStorage；开启后抽屉与主对话并排展示，不再遮挡输入
+  const [drawerPinned, setDrawerPinned] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('botd-drawer-pinned') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const toggleDrawerPin = useCallback(() => {
+    setDrawerPinned((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('botd-drawer-pinned', next ? '1' : '0');
+      } catch {
+        // 隐私模式等场景下静默降级为会话内记忆
+      }
+      return next;
+    });
+  }, []);
+
+  // 宽屏探测：Pin 布局只在 lg(1024px)+ 生效，窄屏自动回退为浮层抽屉
+  const [isWideScreen, setIsWideScreen] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches
+  );
+  useEffect(() => {
+    const mql = window.matchMedia('(min-width: 1024px)');
+    const onChange = (e: MediaQueryListEvent) => setIsWideScreen(e.matches);
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
+  const drawerPinnedActive = drawerPinned && isWideScreen;
+
   // ===== 扩展 UI（ctx.ui 桥接）=====
   // editor_text 事件预填输入框（mode=set 替换 / paste 追加）；挂件与状态徽标由 extensionUiState 渲染
   useEffect(() => {
@@ -534,6 +568,107 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
     return 0;
   }, [messages]);
+
+  // ===== 顶栏 Space（项目工作目录）徽标与快速绑定 =====
+  // 目录可能挂在 session 或 BOT 上；绑定通过 PATCH /api/sessions/:id 即时生效
+  const sessionWorkspaceDir =
+    (session as { workspaceDir?: string }).workspaceDir ||
+    (directBot as { workspaceDir?: string } | undefined)?.workspaceDir ||
+    '';
+  const [spaceMenuOpen, setSpaceMenuOpen] = useState(false);
+  const [spaceInput, setSpaceInput] = useState('');
+  const [spaceBusy, setSpaceBusy] = useState(false);
+  const spaceMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setSpaceMenuOpen(false);
+    setSpaceInput(sessionWorkspaceDir);
+  }, [session.id, sessionWorkspaceDir]);
+
+  // 点击外部关闭 Space 绑定浮层
+  useEffect(() => {
+    if (!spaceMenuOpen) return;
+    const handlePointerDown = (e: MouseEvent) => {
+      if (spaceMenuRef.current && !spaceMenuRef.current.contains(e.target as Node)) {
+        setSpaceMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSpaceMenuOpen(false);
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [spaceMenuOpen]);
+
+  const commitSpaceDir = async () => {
+    const dir = spaceInput.trim();
+    if (spaceBusy) return;
+    setSpaceBusy(true);
+    try {
+      await api.updateSession(session.id, { workspaceDir: dir } as never);
+      onAddToast?.('success', dir ? `已绑定项目目录 ${dir}` : '已解绑项目目录');
+      setSpaceMenuOpen(false);
+    } catch (err: unknown) {
+      onAddToast?.('error', err instanceof Error ? err.message : '绑定项目目录失败');
+    } finally {
+      setSpaceBusy(false);
+    }
+  };
+
+  // ===== 全局开发快捷键 =====
+  // Cmd/Ctrl+. 切换代码变更抽屉；Cmd/Ctrl+Shift+J 切换后台进程抽屉；Cmd/Ctrl+Shift+O 开启新话题
+  // 经 ref 调用最新回调，避免依赖变化导致监听反复拆建；输入框聚焦时同样生效（可随时切换右栏视野）
+  const toggleDiffDrawerRef = useRef(() => setDiffDrawerOpen((v) => !v));
+  toggleDiffDrawerRef.current = () => setDiffDrawerOpen((v) => !v);
+  const toggleBgJobsRef = useRef(() => {
+    setSelectedBgJobId(null);
+    setBgJobsOpen((v) => !v);
+    setHasRunningBgJobs(false);
+  });
+  toggleBgJobsRef.current = () => {
+    setSelectedBgJobId(null);
+    setBgJobsOpen((v) => !v);
+    setHasRunningBgJobs(false);
+  };
+  const newTopicRef = useRef(() => void onNewTopic(session.id));
+  newTopicRef.current = () => void onNewTopic(session.id);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      if (e.key === '.') {
+        e.preventDefault();
+        toggleDiffDrawerRef.current();
+      } else if (e.shiftKey && (e.key === 'J' || e.key === 'j')) {
+        e.preventDefault();
+        toggleBgJobsRef.current();
+      } else if (e.shiftKey && (e.key === 'O' || e.key === 'o')) {
+        e.preventDefault();
+        newTopicRef.current();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  // ===== 代码变更抽屉静默刷新信号 =====
+  // 会话消息数或流式工具状态变化时，打开中的右栏 diff 跟随左栏对话实时刷新
+  const streamingToolSignal = useMemo(
+    () =>
+      streamingStates
+        .map(
+          (s) =>
+            `${s.botId}:${s.tools.map((t) => `${t.toolName}@${t.status}`).join(',')}`
+        )
+        .join('|'),
+    [streamingStates]
+  );
+  const diffRefreshSignal = `${messages.length}:${streamingToolSignal}`;
 
   // 用 ref 避免订阅 effect 依赖抽屉开关导致反复重订阅
   const artifactsOpenRef = useRef(false);
@@ -751,10 +886,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
   );
 
   return (
-    <div
-      className="flex-1 flex flex-col h-full bg-white dark:bg-zinc-950 overflow-hidden"
-      onClick={handleRootClick}
-    >
+    <div className="flex-1 flex h-full bg-white dark:bg-zinc-950 overflow-hidden">
+      {/* 左侧主聊天列：抽屉固定分栏时右移让位，其余时刻独占全宽 */}
+      <div
+        className="flex-1 min-w-0 flex flex-col h-full overflow-hidden"
+        onClick={handleRootClick}
+      >
       {/* 极简顶栏（h-13 sm:h-14，删掉参会胶囊火车与停止按钮） */}
       <header className="h-13 sm:h-14 px-3 sm:px-4 bg-white dark:bg-zinc-950 border-b border-zinc-200/80 dark:border-zinc-800/80 flex items-center justify-between shrink-0 z-10">
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
@@ -837,21 +974,103 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 {session.title}
               </h2>
 
+              {/* Space（项目工作目录）徽标：点击弹出轻量绑定浮层 */}
+              <div className="relative shrink-0" ref={spaceMenuRef}>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSpaceMenuOpen((v) => !v);
+                  }}
+                  title={sessionWorkspaceDir || '绑定当前会话对应的本地项目目录'}
+                  className={`inline-flex items-center gap-1 h-6 px-2 rounded-full text-[11px] font-medium transition-colors cursor-pointer max-w-40 sm:max-w-56 ${
+                    sessionWorkspaceDir
+                      ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                      : 'border border-dashed border-zinc-300 dark:border-zinc-700 text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 hover:border-zinc-400 dark:hover:border-zinc-600'
+                  }`}
+                >
+                  <FolderGit2 className="w-3 h-3 shrink-0" />
+                  <span className="truncate font-mono">
+                    {sessionWorkspaceDir
+                      ? sessionWorkspaceDir.split('/').filter(Boolean).pop() || sessionWorkspaceDir
+                      : '绑定项目目录'}
+                  </span>
+                </button>
+                {spaceMenuOpen && (
+                  <div className="absolute left-0 top-full mt-1.5 w-72 max-w-[calc(100vw-1.5rem)] bg-white dark:bg-zinc-900 border border-zinc-200/90 dark:border-zinc-800 rounded-xl shadow-lg p-2.5 z-50 animate-in fade-in">
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mb-1.5 leading-relaxed">
+                      绑定当前会话对应的本地项目目录（如 /root/code/botd），留空即解绑。
+                    </p>
+                    <input
+                      autoFocus
+                      type="text"
+                      value={spaceInput}
+                      disabled={spaceBusy}
+                      onChange={(e) => setSpaceInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                          e.preventDefault();
+                          void commitSpaceDir();
+                        } else if (e.key === 'Escape') {
+                          e.preventDefault();
+                          setSpaceMenuOpen(false);
+                        }
+                      }}
+                      placeholder="/root/code/my-project"
+                      aria-label="项目工作目录"
+                      className="w-full px-2 py-1.5 text-xs font-mono bg-white dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-blue-500 dark:focus:border-blue-400"
+                    />
+                    <div className="flex items-center justify-end gap-1.5 mt-2">
+                      <button
+                        type="button"
+                        onClick={() => setSpaceMenuOpen(false)}
+                        disabled={spaceBusy}
+                        className="px-2.5 py-1 rounded-lg text-xs text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void commitSpaceDir()}
+                        disabled={spaceBusy}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-medium transition-colors cursor-pointer"
+                      >
+                        {spaceBusy && <Loader2 className="w-3 h-3 animate-spin-fast" />}
+                        保存
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
 
-        {/* 右侧操作：高水位一键压缩 + 开启新话题 + 产物/后台进程抽屉入口 + 更多操作下拉菜单 */}
+        {/* 右侧操作：常驻上下文水位胶囊 + 开启新话题 + 产物/后台进程抽屉入口 + 更多操作下拉菜单 */}
         <div className="flex items-center gap-1 shrink-0">
-          {latestCtxPct >= 75 && (
+          {/* 上下文水位常驻胶囊：>0 即展示；>=75% 琥珀色预警，点击发送 /compact */}
+          {latestCtxPct > 0 && (
             <button
               type="button"
               onClick={() => void onSendMessage('/compact')}
-              className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/60 text-xs font-medium transition-colors cursor-pointer shrink-0 shadow-2xs mr-0.5"
-              title="当前上下文水位较高，点击自动发送 /compact 进行上下文压缩"
+              className={`inline-flex items-center gap-1.5 h-8 rounded-lg text-xs font-medium transition-colors cursor-pointer shrink-0 border mr-0.5 ${
+                latestCtxPct >= 75
+                  ? 'px-2.5 bg-amber-50 dark:bg-amber-950/40 border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/60'
+                  : 'px-2 bg-zinc-50 dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400 border-zinc-200/80 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+              }`}
+              title={
+                latestCtxPct >= 75
+                  ? '当前上下文水位较高，点击自动发送 /compact 进行上下文压缩'
+                  : `当前上下文水位 ${latestCtxPct}%，点击发送 /compact 主动压缩`
+              }
             >
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
-              <span>上下文水位 {latestCtxPct}% · 一键压缩 (/compact)</span>
+              <span
+                className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                  latestCtxPct >= 75 ? 'bg-amber-500 animate-pulse' : 'bg-zinc-400 dark:bg-zinc-500'
+                }`}
+              />
+              <span className="font-mono tabular-nums">Ctx {latestCtxPct}%</span>
+              {latestCtxPct >= 75 && <span className="hidden md:inline">· 压缩</span>}
             </button>
           )}
 
@@ -859,7 +1078,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <button
             onClick={() => void onNewTopic(session.id)}
             className="p-2 rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-            title="开启新话题"
+            title="开启新话题 (Ctrl/Cmd+Shift+O)"
             aria-label="开启新话题"
           >
             <MessageSquarePlus className="w-4 h-4" />
@@ -928,7 +1147,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 setHasRunningBgJobs(false);
               }}
               className="h-8 w-8 rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-center transition-colors cursor-pointer"
-              title="后台进程"
+              title="后台进程 (Ctrl/Cmd+Shift+J)"
               aria-label="后台进程"
             >
               <SquareTerminal className="w-4 h-4" />
@@ -945,8 +1164,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <button
             type="button"
             onClick={() => setDiffDrawerOpen(true)}
-            className="h-8 w-8 rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-center transition-colors cursor-pointer"
-            title="代码变更"
+            className={`h-8 w-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+              diffDrawerOpen
+                ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400'
+                : 'text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+            }`}
+            title="代码变更 (Ctrl/Cmd+.)"
             aria-label="代码变更"
           >
             <FileDiff className="w-4 h-4" />
@@ -1237,6 +1460,43 @@ export const ChatView: React.FC<ChatViewProps> = ({
           aria-hidden="true"
         />
       )}
+      </div>{/* /左侧主聊天列 */}
+
+      {/* 右侧固定抽屉列（Pin 模式）：代码变更优先，其次子代理运行详情；窄屏自动隐藏 */}
+      {drawerPinnedActive && (diffDrawerOpen || Boolean(inspectingRun)) && (
+        <div className="hidden lg:flex w-[440px] xl:w-[540px] shrink-0 border-l border-zinc-200/90 dark:border-zinc-800/90 h-full">
+          {diffDrawerOpen ? (
+            <WorkspaceDiffDrawer
+              isOpen
+              pinned
+              onTogglePin={toggleDrawerPin}
+              sessionId={session.id}
+              bot={directBot || botMap.get(session.leadBotId)}
+              messages={messages}
+              onClose={() => setDiffDrawerOpen(false)}
+              onQuoteFile={(filePath) => {
+                setInsertTextRequest({ text: `\`${filePath}\` `, seq: Date.now() });
+              }}
+              onQuoteDiffLine={(quoteText) => {
+                setInsertTextRequest({ text: `${quoteText} `, seq: Date.now() });
+              }}
+              refreshSignal={diffRefreshSignal}
+            />
+          ) : (
+            <SubagentRunDrawer
+              isOpen
+              pinned
+              onTogglePin={toggleDrawerPin}
+              sessionId={session.id}
+              run={inspectingRun}
+              botMap={botMap}
+              nodeMap={nodeMap}
+              onClose={() => onInspectSubagentRun?.(null)}
+              onToast={(type, message) => onAddToast?.(type, message)}
+            />
+          )}
+        </div>
+      )}
 
       {/* 清空消息 / 删除会话二次确认 */}
       <ConfirmDialog
@@ -1278,17 +1538,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onClose={() => setArtifactsOpen(false)}
       />
 
-      {/* 代码变更抽屉：查看工作区 Git 净变更，引用文件路径插入输入框 */}
-      <WorkspaceDiffDrawer
-        isOpen={diffDrawerOpen}
-        sessionId={session.id}
-        bot={directBot || botMap.get(session.leadBotId)}
-        messages={messages}
-        onClose={() => setDiffDrawerOpen(false)}
-        onQuoteFile={(filePath) => {
-          setInsertTextRequest({ text: `\`${filePath}\` `, seq: Date.now() });
-        }}
-      />
+      {/* 代码变更抽屉（浮层模式）：查看工作区 Git 净变更，引用文件路径/行插入输入框；Pin 分栏时由右列渲染 */}
+      {!drawerPinnedActive && (
+        <WorkspaceDiffDrawer
+          isOpen={diffDrawerOpen}
+          sessionId={session.id}
+          bot={directBot || botMap.get(session.leadBotId)}
+          messages={messages}
+          onClose={() => setDiffDrawerOpen(false)}
+          onTogglePin={toggleDrawerPin}
+          onQuoteFile={(filePath) => {
+            setInsertTextRequest({ text: `\`${filePath}\` `, seq: Date.now() });
+          }}
+          onQuoteDiffLine={(quoteText) => {
+            setInsertTextRequest({ text: `${quoteText} `, seq: Date.now() });
+          }}
+          refreshSignal={diffRefreshSignal}
+        />
+      )}
 
       {/* 分享对话弹窗 */}
       {shareModalOpen && (
@@ -1347,16 +1614,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onToast={(type, message) => onAddToast?.(type, message)}
       />
 
-      {/* 子代理运行详情抽屉：与主对话同源的时间线 + Steer/Resume/停止控制 */}
-      <SubagentRunDrawer
-        isOpen={Boolean(inspectingRunId)}
-        sessionId={session.id}
-        run={inspectingRun}
-        botMap={botMap}
-        nodeMap={nodeMap}
-        onClose={() => onInspectSubagentRun?.(null)}
-        onToast={(type, message) => onAddToast?.(type, message)}
-      />
+      {/* 子代理运行详情抽屉（浮层模式）：与主对话同源的时间线 + Steer/Resume/停止控制；Pin 分栏时由右列渲染 */}
+      {!drawerPinnedActive && (
+        <SubagentRunDrawer
+          isOpen={Boolean(inspectingRunId)}
+          sessionId={session.id}
+          run={inspectingRun}
+          botMap={botMap}
+          nodeMap={nodeMap}
+          onClose={() => onInspectSubagentRun?.(null)}
+          onTogglePin={toggleDrawerPin}
+          onToast={(type, message) => onAddToast?.(type, message)}
+        />
+      )}
 
       {/* 跨 BOT 子会话内联检视抽屉：不离开父会话就地查看/插话子任务 */}
       <SubSessionDrawer
