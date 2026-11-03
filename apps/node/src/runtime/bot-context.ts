@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { BotConfig } from '@botd/protocol';
 
@@ -39,4 +40,22 @@ export function resolveBotPaths(dataDir: string, bot: BotConfig): {
     agentDir: botDir,
     mainAgentDir: mainBotDir,
   };
+}
+
+/**
+ * 清理回合内临时创建的子代理定义文件（<agentDir>/agents/tmp-*.md），
+ * 保留通过 saveBot 持久化的正式子代理定义文件。
+ */
+export async function cleanupEphemeralAgents(agentDir: string): Promise<void> {
+  const agentsDir = path.join(agentDir, 'agents');
+  try {
+    const entries = await fs.readdir(agentsDir, { withFileTypes: true });
+    await Promise.all(
+      entries
+        .filter((e) => (e.isFile() || e.isSymbolicLink()) && /^tmp-[a-zA-Z0-9_-]+\.md$/.test(e.name))
+        .map((e) => fs.rm(path.join(agentsDir, e.name), { force: true }).catch(() => {})),
+    );
+  } catch {
+    // Directory may not exist yet; ignore
+  }
 }
