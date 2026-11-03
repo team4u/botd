@@ -24,6 +24,7 @@ import {
   beginSubagentHandoffScope,
   endSubagentHandoffScope,
   getGlobalSubagentManager,
+  type SubagentHandoffScope,
 } from '../commands.js';
 import { loadTurnDeps } from './turn-deps.js';
 import { createHubStreamSink, type HubStream } from './hub-stream.js';
@@ -74,18 +75,25 @@ export async function executeBotTurn(
     throw new Error(`Turn already running for session ${input.sessionId} and bot ${bot.id}`);
   }
 
-  // 生命周期修复：上一轮异常退出可能残留全局 manager 注册表
-  // （与原始语义一致：activeTurns 为空时清理；pending 中的回合不算已注册）
-  purgeStaleSubagentManager(!runRegistry.hasRegisteredTurns());
-
-  const handoffScope = beginSubagentHandoffScope();
   const sink = createHubStreamSink(hubRpc);
 
+  let handoffScope: SubagentHandoffScope | undefined;
   let session: AgentSession | null = null;
   let unsubscribeMain: (() => void) | null = null;
   let bridge: ReturnType<typeof createSubagentBridge> = undefined;
 
   try {
+    // 工作区互斥：子代理与其父主 Bot 共享同一 workspace 目录，同一主 Bot 的回合跨会话串行。
+    // 必须在 purgeStaleSubagentManager / beginSubagentHandoffScope 之前排队等待，
+    // 否则排队中的回合会提前清掉或覆盖正在运行回合的全局状态（subagent manager / handoff scope）。
+    const workspaceBotId = bot.parentBotId || bot.id;
+    await runRegistry.acquireWorkspace(runKey, dataDir, workspaceBotId);
+
+    // 生命周期修复：上一轮异常退出可能残留全局 manager 注册表
+    // （与原始语义一致：activeTurns 为空时清理；pending 中的回合不算已注册）
+    purgeStaleSubagentManager(!runRegistry.hasRegisteredTurns());
+
+    handoffScope = beginSubagentHandoffScope();
     const { piAgent, piAiCompat, commandsMod, webCommandUiMod } = await loadTurnDeps();
     const { createAgentSession, SessionManager, SettingsManager } = piAgent;
     const { getModel } = piAiCompat;
