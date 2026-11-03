@@ -1,0 +1,194 @@
+import { randomUUID } from 'node:crypto';
+import type { MessageAttachment } from '@botd/protocol';
+import { extractMentions, parseSlashCommand } from '../group-router.js';
+import { resolveOwnedSession } from '../http-helpers.js';
+import type { HubApp, HubContext } from './context.js';
+
+export function registerMessageRoutes(app: HubApp, ctx: HubContext): void {
+  const { db, router, sseHub } = ctx;
+
+  app.get('/api/messages/search', (c) => {
+    const q = (c.req.query('q') ?? '').trim();
+    if (!q) {
+      return c.json({ error: 'Missing search query parameter "q"' }, 400);
+    }
+    const sessionId = c.req.query('sessionId')?.trim() || undefined;
+    if (sessionId) {
+      const sRes = resolveOwnedSession(c, db, sessionId);
+      if (!sRes.ok) return sRes.response;
+    }
+    const rawLimit = Number(c.req.query('limit') || '30');
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 100) : 30;
+    const hits = db.searchMessages(c.get('user').id, q, { sessionId, limit });
+    return c.json(hits);
+  });
+
+  app.get('/api/sessions/:id/messages', (c) => {
+    const id = c.req.param('id');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+
+    // 分页参数：before=<messageId>（向上翻页）、around=<messageId>（定位上下文）、limit；无参数时保持全量返回
+    const beforeId = c.req.query('before')?.trim() || undefined;
+    const aroundId = c.req.query('around')?.trim() || undefined;
+    const limitRaw = c.req.query('limit');
+    if (beforeId === undefined && aroundId === undefined && limitRaw === undefined) {
+      return c.json(db.getMessages(id));
+    }
+
+    let limit: number | undefined;
+    if (limitRaw !== undefined) {
+      const parsed = Number(limitRaw);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        return c.json({ error: 'Invalid limit' }, 400);
+      }
+      limit = parsed;
+    }
+
+    // around 优先于 before；锚点必须存在且属于该会话
+    const anchorId = aroundId ?? beforeId;
+    let anchor: { rowid: number } | undefined;
+    if (anchorId !== undefined) {
+      const found = db.getMessageById(anchorId);
+      if (!found || found.message.sessionId !== id) {
+        return c.json({ error: 'Message not found' }, 404);
+      }
+      anchor = found;
+    }
+
+    const page = db.getMessagesPage(id, {
+      ...(anchor && beforeId !== undefined && aroundId === undefined ? { beforeRowid: anchor.rowid } : {}),
+      ...(anchor && aroundId !== undefined ? { aroundRowid: anchor.rowid } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+    });
+    return c.json(page);
+  });
+
+  app.post('/api/sessions/:id/messages', async (c) => {
+    const id = c.req.param('id');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    const session = sRes.session;
+
+    if (router.isDraining()) {
+      return c.json({ error: 'Hub is draining for upgrade, please retry shortly' }, 503);
+    }
+
+    const body = (await c.req.json<{ content?: string; attachments?: MessageAttachment[] }>().catch(() => ({ content: '' }))) as {
+      content?: string;
+      attachments?: MessageAttachment[];
+    };
+    const attachments = Array.isArray(body.attachments) ? body.attachments : [];
+    if ((typeof body.content !== 'string' || !body.content.trim()) && attachments.length === 0) {
+      return c.json({ error: 'Missing content' }, 400);
+    }
+    const content = typeof body.content === 'string' ? body.content : '';
+
+    const validBots = router.getValidBotIds(session);
+    const cmdResult = parseSlashCommand(content, validBots);
+    if (cmdResult.error) {
+      return c.json({ error: cmdResult.error }, 400);
+    }
+
+    const user = c.get('user');
+    const participants = db.listSessionParticipants(id);
+    const isMultiUser = participants.length > 0 || (session.ownerId !== undefined && user.id !== session.ownerId);
+
+    const routerContent = isMultiUser && !content.startsWith(`[User: ${user.username}]`)
+      ? `[User: ${user.username}]: ${content}`
+      : content;
+
+    const mentions = cmdResult.targetBotId
+      ? [cmdResult.targetBotId]
+      : (cmdResult.isCommand ? [] : extractMentions(content, validBots));
+
+    const msgResult = db.createMessage({
+      id: `msg_${randomUUID()}`,
+      sessionId: id,
+      role: 'user',
+      senderUserId: user.id,
+      senderUsername: user.username,
+      content,
+      mentions,
+      attachments,
+    });
+
+    sseHub.broadcast(id, {
+      type: 'message_created',
+      message: msgResult.message,
+    });
+
+    // TODO(后续在 formatIncrementalMessages 中消费 senderUsername)
+    router.handleUserMessage(id, msgResult.message.id, routerContent, cmdResult.isCommand ? {
+      commandText: cmdResult.commandText!,
+      targetBotId: cmdResult.targetBotId,
+    } : undefined);
+
+    return c.json(msgResult.message, 202);
+  });
+
+  // 编辑用户消息：更新锚点内容，截断其后所有消息，重置游标与节点本地会话，再从锚点重新派发
+  app.put('/api/sessions/:id/messages/:messageId', async (c) => {
+    const id = c.req.param('id');
+    const messageId = c.req.param('messageId');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    const session = sRes.session;
+
+    const found = db.getMessageById(messageId);
+    if (!found || found.message.sessionId !== id) {
+      return c.json({ error: 'Message not found' }, 404);
+    }
+    const message = found.message;
+
+    const body = (await c.req.json<{ content?: string }>().catch(() => ({ content: '' }))) as {
+      content?: string;
+    };
+    if (!body || typeof body.content !== 'string' || !body.content.trim()) {
+      return c.json({ error: 'Missing content' }, 400);
+    }
+
+    if (session.status === 'running') {
+      return c.json({ error: 'Stop the session before editing messages' }, 409);
+    }
+    if (message.role !== 'user') {
+      return c.json({ error: 'Only user messages can be edited' }, 400);
+    }
+
+    // 先校验斜杠命令，避免截断发生后才发现无法派发
+    const validBots = router.getValidBotIds(session);
+    const cmdResult = parseSlashCommand(body.content, validBots);
+    if (cmdResult.error) {
+      return c.json({ error: cmdResult.error }, 400);
+    }
+
+    const mentions = cmdResult.targetBotId
+      ? [cmdResult.targetBotId]
+      : (cmdResult.isCommand ? [] : extractMentions(body.content, validBots));
+
+    // 验证输入后，使用 Router 统一失效旧队列，复用 cancelSession
+    await router.cancelSession(id);
+
+    const anchorRowid = found.rowid;
+    const updated = db.updateMessageContent(messageId, body.content, mentions);
+    if (!updated) {
+      return c.json({ error: 'Message not found' }, 404);
+    }
+
+    db.deleteMessagesAfter(id, anchorRowid);
+    db.resetSessionCursors(id);
+    await router.resetMemberSessions(id);
+    sseHub.broadcast(id, {
+      type: 'messages_truncated',
+      sessionId: id,
+      anchorMessageId: messageId,
+    });
+
+    router.handleUserMessage(id, messageId, body.content, cmdResult.isCommand ? {
+      commandText: cmdResult.commandText!,
+      targetBotId: cmdResult.targetBotId,
+    } : undefined);
+
+    return c.json(updated, 200);
+  });
+}
