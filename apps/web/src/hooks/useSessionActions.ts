@@ -73,11 +73,17 @@ export const useSessionActions = (params: SessionActionsParams) => {
     const session = sessions.find((s) => s.id === sessionId);
     if (!session) return;
 
+    // workspaceDir 字段由并行分支写入 protocol，此处以结构化扩展安全读取
+    const inheritedWorkspaceDir = (
+      session as SessionRecord & { workspaceDir?: string }
+    ).workspaceDir;
+
     try {
       const input: CreateSessionInput = {
         title: botMap.get(session.leadBotId)?.name || session.title,
         leadBotId: session.leadBotId,
-      };
+        ...(inheritedWorkspaceDir ? { workspaceDir: inheritedWorkspaceDir } : {}),
+      } as CreateSessionInput;
 
       const created = await api.createSession(input);
       setSessions((prev) => [created, ...prev]);

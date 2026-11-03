@@ -1,7 +1,43 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Bot, Loader2 } from 'lucide-react';
+import { X, Bot, Loader2, FolderGit2 } from 'lucide-react';
 import type { BotConfig, CreateSessionInput } from '@botd/protocol';
 import { orderBotsAsTree } from '../utils/bots.js';
+
+/**
+ * 节点本地 Git 仓库扫描结果（GET /api/nodes/:nodeId/spaces）。
+ * 接口由并行分支落地，此处仅声明前端消费的形状，静默容错。
+ */
+export interface NodeSpaceEntry {
+  path: string;
+  name: string;
+  branch?: string;
+  isGitRepo: boolean;
+}
+
+/** 轻量 spaces 拉取：失败静默返回空列表（仅保留手动输入） */
+export async function fetchNodeSpaces(nodeId: string): Promise<NodeSpaceEntry[]> {
+  try {
+    const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/spaces`, {
+      credentials: 'include',
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+    return data
+      .filter(
+        (item): item is NodeSpaceEntry =>
+          item && typeof item.path === 'string' && typeof item.name === 'string'
+      )
+      .map((item) => ({
+        path: item.path,
+        name: item.name,
+        branch: typeof item.branch === 'string' ? item.branch : undefined,
+        isGitRepo: Boolean(item.isGitRepo),
+      }));
+  } catch {
+    return [];
+  }
+}
 
 export interface CreateSessionDraft {
   title: string;
@@ -112,6 +148,9 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
   const [leadBotId, setLeadBotId] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 项目 Space（工作区目录）：可手输或从节点扫描的 Git 仓库中快选
+  const [workspaceDir, setWorkspaceDir] = useState<string>('');
+  const [nodeSpaces, setNodeSpaces] = useState<NodeSpaceEntry[]>([]);
 
   const initializedRef = useRef(false);
   const wasOpenRef = useRef(false);
@@ -143,8 +182,26 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
       setTitle(step.nextDraft.title);
       setLeadBotId(step.nextDraft.leadBotId);
       setError(step.nextDraft.error);
+      // 重置草稿时同步清空 Space 选择，避免残留上一个会话的目录
+      setWorkspaceDir('');
     }
   }, [isOpen, bots]);
+
+  // 弹窗打开且已选中主控智能体时，扫描其节点本地的 Git 仓库作为 Space 快选项（静默容错）
+  const spacesNodeId = isOpen && leadBotId ? bots.find((b) => b.id === leadBotId)?.nodeId || '' : '';
+  useEffect(() => {
+    if (!spacesNodeId) {
+      setNodeSpaces([]);
+      return;
+    }
+    let active = true;
+    fetchNodeSpaces(spacesNodeId).then((spaces) => {
+      if (active) setNodeSpaces(spaces);
+    });
+    return () => {
+      active = false;
+    };
+  }, [spacesNodeId]);
 
   if (!isOpen) return null;
 
@@ -165,12 +222,23 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
       await onCreateSession({
         title: finalTitle,
         leadBotId,
-      });
+        workspaceDir: workspaceDir.trim() || undefined,
+      } as CreateSessionInput);
       onClose();
     } catch (err: any) {
       setError(err?.message || '创建会话失败');
     } finally {
       setLoading(false);
+    }
+  };
+
+  /** 快选某个扫描到的项目 Space：填入目录；若标题仍是默认 Bot 名则智能改为项目名 */
+  const handlePickSpace = (space: NodeSpaceEntry) => {
+    setWorkspaceDir(space.path);
+    const selectedBot = bots.find((b) => b.id === leadBotId);
+    const defaultTitle = selectedBot?.name || leadBotId;
+    if (!title.trim() || title.trim() === defaultTitle) {
+      setTitle(space.name);
     }
   };
 
@@ -258,6 +326,50 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
                   placeholder="留空默认使用智能体名称"
                   className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
+              </div>
+
+              {/* 项目 Space：绑定工作区目录，会话将直接在该仓库下工作 */}
+              <div>
+                <label htmlFor="create-session-workspace-input" className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5">
+                  项目空间（可选）
+                </label>
+                <input
+                  id="create-session-workspace-input"
+                  type="text"
+                  value={workspaceDir}
+                  onChange={(e) => setWorkspaceDir(e.target.value)}
+                  placeholder="绑定真实项目目录，如 /root/code/botd"
+                  className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg font-mono text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                {nodeSpaces.length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {nodeSpaces.map((space) => {
+                      const selected = workspaceDir.trim() === space.path;
+                      return (
+                        <button
+                          key={space.path}
+                          type="button"
+                          onClick={() => handlePickSpace(space)}
+                          title={space.path}
+                          className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded-full border transition-colors cursor-pointer ${
+                            selected
+                              ? 'bg-indigo-50 dark:bg-indigo-950/60 border-indigo-300 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300'
+                              : 'bg-zinc-50 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                          }`}
+                        >
+                          {space.isGitRepo && <FolderGit2 className="w-3 h-3" />}
+                          <span>{space.name}</span>
+                          {space.branch && (
+                            <span className="text-zinc-400 dark:text-zinc-500 font-mono">({space.branch})</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
+                  绑定后智能体将直接在该仓库下执行命令、加载项目 AGENTS.md，并基于该仓库创建子代理 Worktree。
+                </p>
               </div>
             </>
           )}

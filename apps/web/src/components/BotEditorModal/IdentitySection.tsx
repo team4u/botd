@@ -1,7 +1,40 @@
 import React from 'react';
-import { Server, Lock, Users } from 'lucide-react';
+import { Server, Lock, Users, FolderGit2 } from 'lucide-react';
 import type { NodeWithBots, SubagentColor } from '@botd/protocol';
 import { SUBAGENT_COLOR_OPTIONS } from './shared';
+
+/** 节点本地 Git 仓库扫描结果（与 CreateSessionModal 保持同形，静默容错拉取） */
+export interface NodeSpaceEntry {
+  path: string;
+  name: string;
+  branch?: string;
+  isGitRepo: boolean;
+}
+
+/** 轻量 spaces 拉取：失败静默返回空列表（仅保留手动输入） */
+export async function fetchNodeSpaces(nodeId: string): Promise<NodeSpaceEntry[]> {
+  try {
+    const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/spaces`, {
+      credentials: 'include',
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+    return data
+      .filter(
+        (item): item is NodeSpaceEntry =>
+          item && typeof item.path === 'string' && typeof item.name === 'string'
+      )
+      .map((item) => ({
+        path: item.path,
+        name: item.name,
+        branch: typeof item.branch === 'string' ? item.branch : undefined,
+        isGitRepo: Boolean(item.isGitRepo),
+      }));
+  } catch {
+    return [];
+  }
+}
 
 interface IdentitySectionProps {
   isSubagent: boolean;
@@ -17,9 +50,12 @@ interface IdentitySectionProps {
   setColor: (c: SubagentColor) => void;
   visibility: 'private' | 'team';
   setVisibility: (v: 'private' | 'team') => void;
+  /** 主 BOT 默认工作区目录（仅非子代理时编辑） */
+  workspaceDir?: string;
+  setWorkspaceDir?: (v: string) => void;
 }
 
-/** 基础配置 Tab 的身份区：徽标颜色、所属节点、唯一标识、名称与简介、可见范围。 */
+/** 基础配置 Tab 的身份区：徽标颜色、所属节点、唯一标识、名称与简介、可见范围、默认工作区。 */
 export const IdentitySection: React.FC<IdentitySectionProps> = ({
   isSubagent,
   node,
@@ -34,7 +70,28 @@ export const IdentitySection: React.FC<IdentitySectionProps> = ({
   setColor,
   visibility,
   setVisibility,
-}) => (
+  workspaceDir = '',
+  setWorkspaceDir,
+}) => {
+  const nodeId = node?.id || '';
+
+  // 节点本地 Git 仓库扫描（静默容错）：仅在线时尝试，作为 Space 快选芯片
+  const [nodeSpaces, setNodeSpaces] = React.useState<NodeSpaceEntry[]>([]);
+  React.useEffect(() => {
+    if (isSubagent || !nodeId || node?.status !== 'online') {
+      setNodeSpaces([]);
+      return;
+    }
+    let active = true;
+    fetchNodeSpaces(nodeId).then((spaces) => {
+      if (active) setNodeSpaces(spaces);
+    });
+    return () => {
+      active = false;
+    };
+  }, [isSubagent, nodeId, node?.status]);
+
+  return (
   <>
     {/* Subagent color picker */}
     {isSubagent && (
@@ -176,5 +233,53 @@ export const IdentitySection: React.FC<IdentitySectionProps> = ({
           : '仅限节点创建者本人可见与使用'}
       </p>
     </div>
+    {/* Default workspace directory (primary bots only) */}
+    {!isSubagent && setWorkspaceDir && (
+      <div>
+        <label htmlFor="bot-workspace-dir-input" className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+          默认工作区目录 (Space Path)
+        </label>
+        <input
+          id="bot-workspace-dir-input"
+          type="text"
+          value={workspaceDir}
+          aria-label="默认工作区目录"
+          onChange={(e) => setWorkspaceDir(e.target.value)}
+          placeholder="例如：/root/code/botd"
+          className="w-full h-8 px-2.5 text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-lg font-mono focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
+        />
+        {nodeSpaces.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {nodeSpaces.map((space) => {
+              const selected = workspaceDir.trim() === space.path;
+              return (
+                <button
+                  key={space.path}
+                  type="button"
+                  onClick={() => setWorkspaceDir(space.path)}
+                  title={space.path}
+                  className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded-full border transition-colors cursor-pointer ${
+                    selected
+                      ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-transparent'
+                      : 'bg-zinc-50 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                  }`}
+                >
+                  {space.isGitRepo && <FolderGit2 className="w-3 h-3" />}
+                  <span>{space.name}</span>
+                  {space.branch && (
+                    <span className="font-mono opacity-70">({space.branch})</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+        <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
+          绑定真实项目目录（如 /root/code/botd）后，该智能体将直接在该仓库下执行命令、自动加载项目
+          AGENTS.md 并基于该仓库创建子代理 Worktree。留空则使用默认沙盒目录。
+        </p>
+      </div>
+    )}
   </>
-);
+  );
+};
