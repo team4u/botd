@@ -201,16 +201,35 @@ pnpm node join http://localhost:3002 --code 123456 --name my-laptop
 ### install
 
 ```text
-install <source> [--kind auto|skill|extension] [--id <customId>]
+install <source> [--kind auto|skill|extension] [--id <customId>] [--bot <botIds...>]
 ```
 
 在本机安装技能或扩展。安装完成后，若守护进程在线，自动触发一次 `reload`。
 
 | 参数或选项 | 说明 |
 | --- | --- |
-| `<source>` | 资源来源 |
+| `<source>` | 资源来源，见下表 |
 | `--kind <kind>` | 资源类型：`auto`（默认）、`skill`、`extension` |
 | `--id <customId>` | 自定义资源标识 |
+| `--bot <botIds...>` | 安装后立即绑定到这些 Bot 并启用（可写多个）。省略时只安装不启用 |
+
+`<source>` 支持的语法：
+
+| 来源 | 示例 | 行为 |
+| --- | --- |
+| npm 包 | `npm:@scope/pkg@1.0.0` | 在扩展目录下 `npm install` 该包并重导出其默认导出。带 `pi-package` 关键字与 `pi` 清单（Pi Package manifest）的包会被完整装载 |
+| Git 仓库 | `git:github.com/owner/repo@ref` | 浅克隆仓库并切到 `ref`（分支 / 标签），识别根目录 `SKILL.md`、`skills/`、`.agents/skills/` 等标准布局 |
+| GitHub 简写 | `owner/repo` 或 `owner/repo@skillName` | 等价 `https://github.com/owner/repo.git`；带 `@skillName` 时只装仓库内同名技能 |
+| GitHub 子路径 | `https://github.com/o/r/tree/main/skills/x` | 克隆后只装子路径，`@ref` 段作为分支 |
+| 本地文件 / 目录 | `./my-skill`、`./ext.ts` | 目录含 `SKILL.md` 视为技能，否则视为扩展；`.md` 文件视为技能 |
+
+```bash
+# 从 npm 安装扩展并立即绑定给两个 Bot
+botd install npm:@scope/pi-tools@1.2.0 --bot ops-bot lead-bot
+
+# 从 GitHub 指定分支安装
+botd install git:github.com/example/botd-exts@v1
+```
 
 ## 会话内工具命令
 
