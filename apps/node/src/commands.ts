@@ -11,7 +11,7 @@ import {
   type ResourceLoader,
 } from '@earendil-works/pi-coding-agent';
 import type { BotConfig, ChatCommand, DelegateSessionResult } from '@botd/protocol';
-import { assertSafeId, ensureDir, getBotDir, writeAtomicFile } from './storage.js';
+import { assertSafeId, ensureDir, getBotDir, readNodeIdentity, writeAtomicFile } from './storage.js';
 import subagentsExtension from '@tintinweb/pi-subagents/dist/index.js';
 import {
   setDefaultsDisabled,
@@ -141,6 +141,33 @@ export function triggerActiveSubagentHandoff(): boolean {
 }
 
 /**
+ * 以当前 BOT 的目录为唯一事实来源，重置 pi-subagents 的全局状态：
+ * `PI_CODING_AGENT_DIR` 是进程级可变环境变量，多个主 BOT 共享同一 daemon 时，
+ * 并发回合会互相覆盖它（A 的 Agent 工具执行时可能读到 B 刚写入的值），导致
+ * 子代理注册表解析成别的 BOT 的（空）目录——工具描述里列出的类型在执行时
+ * 变成 "Available: (none)"。本函数在派发/解析前同步调用，保证解析窗口内
+ * 全局目录与注册表属于当前 BOT。
+ */
+function rebindSubagentGlobalsForBot(botDir: string): void {
+  process.env.PI_CODING_AGENT_DIR = botDir;
+  setDefaultsDisabled(true);
+  setFallbackSubagent(NO_FALLBACK);
+  registerAgents(loadCustomAgents(botDir));
+}
+
+/**
+ * 框架内部（delegate_bot / 工作流跨 BOT 步骤）连接 Hub：优先节点身份的 hubUrl。
+ * cli.json 是用户侧 CLI 的持久化状态，可能残留过期地址（如 Hub 换端口后），
+ * 框架内部调用不应被它劫持——daemon 自己的 node.json 才是当前配对事实。
+ * 未配对时退回 cli.json / 默认登录路径，保持 CLI 手动配置仍可用。
+ */
+async function connectHubAsNode(dataDir: string): Promise<import('./cli/hub-client.js').HubClient> {
+  const { HubClient } = await import('./cli/hub-client.js');
+  const identity = await readNodeIdentity(dataDir);
+  return HubClient.connect(identity?.hubUrl ? { dataDir, hubUrl: identity.hubUrl } : { dataDir });
+}
+
+/**
  * 包装 Agent 工具 execute：主 Bot 前台等待子代理时，若用户在主会话发新消息
  * （steerBotTurn → triggerActiveSubagentHandoff），等待立即解除，返回提示文本让主 Bot
  * 接管新消息并用 stop_subagent / steer_subagent / get_subagent_result 控制子代理。
@@ -150,9 +177,23 @@ export function triggerActiveSubagentHandoff(): boolean {
  * get_subagent_result 只退出等待、子代理继续后台运行且保留完成通知；父级会话取消信号
  * （用户点了整个会话的停止）则额外停掉该子代理。
  */
-function wrapAgentToolForHandoff(tool: any, handoffScope: SubagentHandoffScope): any {
+function wrapAgentToolForHandoff(tool: any, handoffScope: SubagentHandoffScope | undefined, botDir?: string): any {
   const originalExecute = tool.execute?.bind(tool);
   if (typeof originalExecute !== 'function') return tool;
+
+  const dispatchWithThisBotsAgents = (
+    toolCallId: string,
+    params: any,
+    signal: AbortSignal | undefined,
+    onUpdate: ((update: unknown) => void) | undefined,
+    ctx: any,
+  ) => {
+    // 同步重置全局注册表再进入原 execute：pi-subagents 的 execute 前缀
+    // （reloadCustomAgents + resolveSpawnType）是同步的，JS 单线程内这一步
+    // 之后、首个 await 之前的解析不会被并发回合的环境覆盖。
+    if (botDir) rebindSubagentGlobalsForBot(botDir);
+    return originalExecute(toolCallId, params, signal, onUpdate, ctx);
+  };
 
   const makeTextResult = (text: string, isError = false) =>
     ({ content: [{ type: 'text', text }], ...(isError ? { isError } : {}) }) as any;
@@ -178,22 +219,22 @@ function wrapAgentToolForHandoff(tool: any, handoffScope: SubagentHandoffScope):
     const wantsForeground = params?.run_in_background === false || params?.run_in_background === undefined;
     // 仅拦截“新前台调用且非 resume”：resume / 后台 / 定时调用走原路径
     if (!wantsForeground || params?.resume || params?.schedule) {
-      return originalExecute(toolCallId, params, signal, onUpdate, ctx);
+      return dispatchWithThisBotsAgents(toolCallId, params, signal, onUpdate, ctx);
     }
 
     // 已被接管（用户已发新消息）：这次调用直接按后台跑，不再阻塞
-    if (handoffScope.wasTriggered()) {
-      return originalExecute(toolCallId, { ...params, run_in_background: true }, signal, onUpdate, ctx);
+    if (handoffScope?.wasTriggered()) {
+      return dispatchWithThisBotsAgents(toolCallId, { ...params, run_in_background: true }, signal, onUpdate, ctx);
     }
 
     const getResultTool = findTool(ctx, 'get_subagent_result');
     if (!getResultTool) {
       // 找不到等待工具（扩展未激活）：退回原生行为
-      return originalExecute(toolCallId, params, signal, onUpdate, ctx);
+      return dispatchWithThisBotsAgents(toolCallId, params, signal, onUpdate, ctx);
     }
 
     // 以后台方式启动子代理，拿到 agentId
-    const bgResult = await originalExecute(toolCallId, { ...params, run_in_background: true }, signal, onUpdate, ctx);
+    const bgResult = await dispatchWithThisBotsAgents(toolCallId, { ...params, run_in_background: true }, signal, onUpdate, ctx);
     const agentId = String((bgResult as any)?.details?.agentId || '').trim();
     if (!agentId) {
       // 启动失败（未知类型等）：原样返回错误/结果
@@ -360,6 +401,7 @@ function wrapWorkflowToolForCrossBot(
 ): any {
   const originalExecute = tool.execute?.bind(tool);
   if (typeof originalExecute !== 'function') return tool;
+  const { dataDir, botDir, workspaceDir, pi, handoffScope } = deps;
 
   const textResult = (text: string, isError = false, details?: Record<string, unknown>) =>
     ({
@@ -375,7 +417,9 @@ function wrapWorkflowToolForCrossBot(
     _onUpdate: ((update: unknown) => void) | undefined,
     ctx: any,
   ) => {
-    const { dataDir, workspaceDir, pi, handoffScope } = deps;
+    // 与 Agent 工具包装器同理：进入原 execute 前同步重置为本 BOT 的全局注册表，
+    // 防止并发回合的环境覆盖导致本地步骤类型解析成别的 BOT 的（空）目录。
+    rebindSubagentGlobalsForBot(botDir);
 
     // 1) 准备 .workflows 目录与断点日志回放
     const workflowsDir = path.join(workspaceDir, '.workflows');
@@ -484,6 +528,9 @@ function wrapWorkflowToolForCrossBot(
         const rawType = String(request.agentType || '').trim();
         const cleanType = rawType.replace(/^(?:@|bot:)/, '');
         const forceRemote = rawType.startsWith('@') || rawType.startsWith('bot:');
+        // 本地类型解析前重置为本 BOT 的注册表：工作流脚本在异步执行中到达这里，
+        // 与工具入口的重置之间可能已插入其他 BOT 的回合。
+        if (!forceRemote) rebindSubagentGlobalsForBot(botDir);
         const localDispatch = !forceRemote ? resolveSpawnType(cleanType) : { ok: false as const };
 
         // Branch A：本地子代理
@@ -518,9 +565,8 @@ function wrapWorkflowToolForCrossBot(
         if (!effectiveSessionId) {
           return { ok: false, error: 'Missing sessionId for cross-bot delegation in workflow.' };
         }
-        const { HubClient } = await import('./cli/hub-client.js');
         const { delegateSessionAndWait } = await import('./cli/commands/sessions.js');
-        const client = await HubClient.connect({ dataDir });
+        const client = await connectHubAsNode(dataDir);
 
         let effectivePrompt = request.prompt;
         if (request.schema !== undefined) {
@@ -636,8 +682,7 @@ function wrapWorkflowToolForCrossBot(
       abortAgent(agentId: string) {
         const remote = remoteSessions.get(agentId);
         if (remote) {
-          import('./cli/hub-client.js')
-            .then(({ HubClient }) => HubClient.connect({ dataDir }))
+          connectHubAsNode(dataDir)
             .then((client) =>
               client.post(`/api/sessions/${encodeURIComponent(remote.childSessionId)}/cancel`).catch(() => {}),
             )
@@ -857,7 +902,7 @@ export async function loadBotResources(
         if (tool?.name !== 'Agent') {
           return realRegisterTool(tool);
         }
-        const wrappedTool = handoffScope ? wrapAgentToolForHandoff(tool, handoffScope) : tool;
+        const wrappedTool = wrapAgentToolForHandoff(tool, handoffScope, botDir);
         return realRegisterTool(wrappedTool);
       }) as typeof pi.registerTool;
       const scopedPi = new Proxy(pi as ExtensionAPI, {
@@ -1015,9 +1060,8 @@ export async function loadBotResources(
             } as any;
           }
 
-          const { HubClient } = await import('./cli/hub-client.js');
           const { delegateSessionAndWait } = await import('./cli/commands/sessions.js');
-          const client = await HubClient.connect({ dataDir });
+          const client = await connectHubAsNode(dataDir);
 
           // 后台模式：立即返回，子会话完成后由 Hub 自动唤醒父会话（all-settled 汇总）
           if (params?.run_in_background === true) {

@@ -474,7 +474,9 @@ export function registerNodeCommands(program: Command): void {
         const result = await stopDaemon(dataDir);
         if (json) console.log(JSON.stringify({ stopped: result === 'stopped' }));
         else if (result === 'stopped') console.log('Stopped running daemon.');
-        await runStart(options, command);
+        // restart 一律分离(detach)开启新 daemon：若沿用前台分支，本命令会变成 daemon 宿主
+        // 进程且永不返回，Ctrl+C 还会连带杀掉刚启动的 daemon。前台语义留给 `botd start`。
+        await runStart({ ...options, detach: true }, command);
       }),
     );
 
