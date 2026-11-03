@@ -51,6 +51,13 @@ export function registerTriggersCommands(program: Command): void {
     .option('--skill <skillId>', 'Skill ID to invoke via /skill:<id> prefix when the trigger fires')
     .option('--secret <secret>', 'HMAC secret for webhook signature verification (X-Hub-Signature-256)')
     .option('--event-types <csv>', 'Comma-separated webhook event types to accept (e.g. pull_request.opened,push)', '')
+    .option('--event-source <source>', 'Webhook event source to match (e.g. github)')
+    .option(
+      '--match <key=value...>',
+      'Webhook payload field match (supports dot-path, e.g. pull_request.draft=false, repeatable)',
+      (val: string, prev: string[]) => [...prev, val],
+      [] as string[],
+    )
     .action(
       (sessionId: string, options: Record<string, unknown>, command: Command) =>
         cliAction(async (_opts, cmd) => {
@@ -119,18 +126,53 @@ export function registerTriggersCommands(program: Command): void {
 
           const eventTypesCsv =
             typeof options.eventTypes === 'string' ? options.eventTypes.trim() : '';
-          if (eventTypesCsv) {
-            const types = eventTypesCsv
-              .split(',')
-              .map((t) => t.trim())
-              .filter(Boolean);
-            if (types.length === 0) {
-              throw new Error('--event-types must be a comma-separated list of event types');
+          const eventSource =
+            typeof options.eventSource === 'string' ? options.eventSource.trim() : '';
+          const matchArgs = Array.isArray(options.match) ? (options.match as string[]) : [];
+
+          if (eventSource && kind !== 'webhook') {
+            throw new Error('--event-source is only valid for --kind webhook');
+          }
+          if (matchArgs.length > 0 && kind !== 'webhook') {
+            throw new Error('--match is only valid for --kind webhook');
+          }
+
+          const payloadMatch: Record<string, string | number | boolean> = {};
+          for (const raw of matchArgs) {
+            const eq = raw.indexOf('=');
+            if (eq <= 0) {
+              throw new Error('--match must be in key=value format');
             }
+            const key = raw.slice(0, eq).trim();
+            const rawVal = raw.slice(eq + 1);
+            if (!key) {
+              throw new Error('--match must be in key=value format');
+            }
+            if (rawVal === 'true') payloadMatch[key] = true;
+            else if (rawVal === 'false') payloadMatch[key] = false;
+            else if (/^-?\d+(?:\.\d+)?$/.test(rawVal)) payloadMatch[key] = Number(rawVal);
+            else payloadMatch[key] = rawVal;
+          }
+
+          const types = eventTypesCsv
+            ? eventTypesCsv
+                .split(',')
+                .map((t) => t.trim())
+                .filter(Boolean)
+            : [];
+          if (eventTypesCsv && types.length === 0) {
+            throw new Error('--event-types must be a comma-separated list of event types');
+          }
+
+          if (eventSource || types.length > 0 || Object.keys(payloadMatch).length > 0) {
             if (kind !== 'webhook') {
-              throw new Error('--event-types is only valid for --kind webhook');
+              throw new Error('--event-types/--event-source/--match are only valid for --kind webhook');
             }
-            body.eventFilter = { types };
+            body.eventFilter = {
+              ...(eventSource ? { source: eventSource } : {}),
+              ...(types.length > 0 ? { types } : {}),
+              ...(Object.keys(payloadMatch).length > 0 ? { payloadMatch } : {}),
+            };
           }
 
           const trigger = await client.post<TriggerRecord>(

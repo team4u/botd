@@ -45,9 +45,10 @@ function validateEventFilter(f: unknown): string | null {
   if (
     f.payloadMatch !== undefined &&
     (!isObject(f.payloadMatch) ||
-      !Object.values(f.payloadMatch).every((v) => ['string', 'number', 'boolean'].includes(typeof v)))
+      !Object.values(f.payloadMatch).every((v) => ['string', 'number', 'boolean'].includes(typeof v)) ||
+      !Object.keys(f.payloadMatch).every((k) => k.trim().length > 0))
   ) {
-    return 'eventFilter.payloadMatch values must be string/number/boolean';
+    return 'eventFilter.payloadMatch values must be string/number/boolean with non-empty keys';
   }
   return null;
 }
@@ -153,6 +154,7 @@ type PatchTriggerBody = {
   dispatchMode?: string;
   skillId?: string | null;
   secret?: string | null;
+  eventFilter?: TriggerEventFilter | null;
 };
 
 /** 校验触发器 PATCH 入参并构造 patch 对象；空 patch 返回错误（统一 400） */
@@ -216,6 +218,15 @@ function parseTriggerPatch(
       patch.secret = b.secret.trim();
     } else {
       return { ok: false, error: 'Invalid secret' };
+    }
+  }
+  if (b.eventFilter !== undefined) {
+    if (b.eventFilter === null) {
+      patch.eventFilter = null;
+    } else {
+      const err = validateEventFilter(b.eventFilter);
+      if (err) return { ok: false, error: err };
+      patch.eventFilter = b.eventFilter;
     }
   }
   if (Object.keys(patch).length === 0) {

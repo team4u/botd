@@ -1656,11 +1656,12 @@ export const MessageItem: React.FC<MessageItemProps> = ({
     );
   }
 
-  // [PASS] 智能体略过发言紧凑单行展示
+  // [PASS]/[IGNORE] 智能体略过发言紧凑单行展示
+  const trimmedContent = message.content.trim();
   const isPassMessage =
     isAssistant &&
-    (message.content.trim() === '[PASS]' ||
-      (message.content.trim().startsWith('[PASS]') && message.content.trim().length < 40));
+    (/^\[(?:PASS|IGNORE)\]$/i.test(trimmedContent) ||
+      (/^\[(?:PASS|IGNORE)\](?:\s|[:：—-])/i.test(trimmedContent) && trimmedContent.length < 80));
 
   if (isPassMessage) {
     return (

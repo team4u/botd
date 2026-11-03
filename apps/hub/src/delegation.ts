@@ -11,6 +11,12 @@ import type { GroupRouter } from './group-router.js';
 import type { SseHub } from './sse.js';
 import { resolveOwnedSession } from './http-helpers.js';
 
+/** 判定回复是否为静默略过（以 [PASS] 或 [IGNORE] 开头，后接空白、标点或结尾） */
+export function isSilentSkipReply(content: string | undefined | null): boolean {
+  if (typeof content !== 'string') return false;
+  return /^\[(?:PASS|IGNORE)\](?:$|\s|[:：—-])/i.test(content.trim());
+}
+
 export interface WatchSubSessionOptions {
   db: HubDatabase;
   sseHub?: SseHub | null;
@@ -20,6 +26,8 @@ export interface WatchSubSessionOptions {
   baselineArtifactIds?: Set<string>;
   inheritedStoragePaths?: Set<string>;
   emitParentCallback?: boolean;
+  /** 子会话以 [PASS]/[IGNORE] 结束且无新产出附件时，静默跳过父会话 callback 消息投递 */
+  suppressSkipCallback?: boolean;
   onSettled?: (status: 'idle' | 'failed', triggerMsgId?: string) => void;
 }
 
@@ -33,6 +41,7 @@ export function watchSubSessionCompletion(options: WatchSubSessionOptions): () =
     baselineArtifactIds,
     inheritedStoragePaths,
     emitParentCallback = true,
+    suppressSkipCallback = false,
     onSettled,
   } = options;
 
@@ -93,6 +102,14 @@ export function watchSubSessionCompletion(options: WatchSubSessionOptions): () =
         const messages = db.getMessages(childSession.id);
         const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
         const summary = lastAssistant?.content?.trim() || '(无回复内容)';
+
+        // 静默跳过原语：子会话以 [PASS]/[IGNORE] 收敛且无新产出附件时，
+        // 不向父会话投递 callback（有产物则仍回传，避免丢失交付物引用）。
+        if (suppressSkipCallback && isSilentSkipReply(lastAssistant?.content) && returnedAttachments.length === 0) {
+          onSettled?.('idle');
+          return;
+        }
+
         let callbackContent = `✅ 子会话「[${childSession.title}](#?s=${childSession.id})」已完成：\n\n${summary}`;
 
         if (returnedAttachments.length > 0) {

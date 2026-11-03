@@ -16,6 +16,7 @@ import type { NodeConnectionManager } from './ws-hub.js';
 import type { SseHub } from './sse.js';
 import { AskCoordinator } from './ask-coordinator.js';
 import { SubagentRunMirror, type SubagentStreamEvent } from './subagent-run-mirror.js';
+import { isSilentSkipReply } from './delegation.js';
 
 const MENTION_REGEX = /(?:^|\s)@([a-zA-Z0-9_-]+)/g;
 
@@ -902,7 +903,9 @@ export class GroupRouter {
       return 'cancelled';
     }
 
-    const replyMentions = extractMentions(turnResult.replyText, validBotIds).filter((id) => id !== item.botId);
+    const replyMentions = isSilentSkipReply(turnResult.replyText)
+      ? []
+      : extractMentions(turnResult.replyText, validBotIds).filter((id) => id !== item.botId);
     const maxRowidBeforeInsert = this.db.getMaxMessageRowid(sessionId);
 
     const nativeRuns: SubagentRunRecord[] = (turnResult.subagentRuns || []).map((r) => {
