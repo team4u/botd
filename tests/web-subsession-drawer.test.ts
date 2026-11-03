@@ -46,12 +46,54 @@ test('2. ChatView 正常导出且内联检视接线不破坏既有导出', async
   const chatViewModule = (await import('../apps/web/src/components/ChatView.js' as any)) as {
     ChatView: unknown;
     pickPollIntervalMs: (hasActiveWork: boolean) => number;
+    resolveRunInspectionTarget: (
+      run: import('../packages/protocol/src/index.js').SubagentRunRecord | null
+    ) =>
+      | { kind: 'none' }
+      | { kind: 'subsession'; childSessionId: string }
+      | { kind: 'subagent'; run: import('../packages/protocol/src/index.js').SubagentRunRecord };
   };
 
   assert.equal(typeof chatViewModule.ChatView, 'function', 'ChatView 组件应可导出');
   assert.equal(typeof chatViewModule.pickPollIntervalMs, 'function');
   assert.equal(chatViewModule.pickPollIntervalMs(true), 5000);
   assert.equal(chatViewModule.pickPollIntervalMs(false), 30000);
+  assert.equal(
+    typeof chatViewModule.resolveRunInspectionTarget,
+    'function',
+    'resolveRunInspectionTarget 纯函数应可导出'
+  );
+
+  // null → 不打开任何抽屉
+  assert.deepEqual(chatViewModule.resolveRunInspectionTarget(null), { kind: 'none' });
+
+  // 带 childSessionId 的工作流步骤 → 跨BOT子会话抽屉
+  const crossBotRun = {
+    id: 'run_1',
+    subagentId: 'bot_writer',
+    task: '并行写作',
+    status: 'done',
+    childSessionId: 'sess_child_1',
+  } as import('../packages/protocol/src/index.js').SubagentRunRecord;
+  assert.deepEqual(chatViewModule.resolveRunInspectionTarget(crossBotRun), {
+    kind: 'subsession',
+    childSessionId: 'sess_child_1',
+  });
+
+  // 无 childSessionId 的本地子代理运行 → 子代理运行抽屉
+  const localRun = {
+    id: 'run_2',
+    subagentId: 'bot_local',
+    task: '本地检索',
+    status: 'done',
+  } as import('../packages/protocol/src/index.js').SubagentRunRecord;
+  const localTarget = chatViewModule.resolveRunInspectionTarget(localRun);
+  assert.equal(localTarget.kind, 'subagent');
+  assert.equal(
+    localTarget.kind === 'subagent' ? localTarget.run.id : '',
+    'run_2',
+    '应原样返回本地子代理运行记录'
+  );
 });
 
 test('3. 子会话内联检视遵循字号与控件尺寸约定（AGENTS.md）', async () => {
@@ -109,4 +151,68 @@ test('4. ChatView 子任务药丸点击打开内联抽屉而非跳转', async ()
   );
   // 抽屉渲染接线
   assert.match(source, /<SubSessionDrawer/, '应渲染 SubSessionDrawer 组件');
+  // 跨BOT工作流步骤检视接线：带 childSessionId 的运行记录应路由到子会话抽屉
+  assert.match(
+    source,
+    /resolveRunInspectionTarget/,
+    '应导出 resolveRunInspectionTarget 纯函数供单测直接验证'
+  );
+  assert.match(
+    source,
+    /onInspectSubagentRun=\{handleInspectRun\}/,
+    'MessageTimeline 应接收 handleInspectRun 包装回调'
+  );
+});
+
+test('5. MessageItem 子代理面板为跨BOT子会话步骤渲染专属徽标', async () => {
+  const { createRequire } = await import('node:module');
+  const req = createRequire(import.meta.resolve('../apps/web/package.json'));
+  const React = req('react');
+  const ReactDOMServer = req('react-dom/server');
+
+  const messageItemModule = (await import('../apps/web/src/components/MessageItem.js' as any)) as {
+    SubagentRunsPanel: React.FC<{
+      runs: import('../packages/protocol/src/index.js').SubagentRunRecord[];
+      onInspectSubagentRun?: (
+        run: import('../packages/protocol/src/index.js').SubagentRunRecord
+      ) => void;
+    }>;
+  };
+
+  const baseRun = {
+    id: 'run_wf_1',
+    subagentId: 'bot_writer',
+    subagentName: '写手',
+    task: '并行写作阶段',
+    phase: 'write',
+    // running 使面板初始即展开（useState(hasRunning)），SSR 无副作用也能渲染步骤行
+    status: 'running' as const,
+    durationMs: 1200,
+  };
+
+  // 带 childSessionId（跨BOT子会话步骤）：渲染「跨BOT子会话」徽标
+  const htmlWithChild = ReactDOMServer.renderToStaticMarkup(
+    React.createElement(messageItemModule.SubagentRunsPanel, {
+      runs: [{ ...baseRun, childSessionId: 'sess_child_1' } as any],
+    })
+  );
+  assert.match(
+    htmlWithChild,
+    /跨BOT子会话/,
+    'childSessionId 存在时应渲染跨BOT子会话徽标'
+  );
+  assert.match(htmlWithChild, /write/, 'phase 徽标应正常渲染');
+
+  // 不带 childSessionId（本地子代理步骤）：不渲染该徽标
+  const htmlLocal = ReactDOMServer.renderToStaticMarkup(
+    React.createElement(messageItemModule.SubagentRunsPanel, {
+      runs: [baseRun as any],
+    })
+  );
+  assert.doesNotMatch(
+    htmlLocal,
+    /跨BOT子会话/,
+    '无 childSessionId 时不应渲染跨BOT子会话徽标'
+  );
+  assert.match(htmlLocal, /write/, 'phase 徽标应正常渲染');
 });
