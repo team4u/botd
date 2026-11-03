@@ -36,6 +36,62 @@ import {
 } from './session.js';
 
 /**
+ * 未完成工作流断点标记：<workspaceDir>/.workflows/latest-unfinished.json。
+ * 工作流启动时写入，正常跑完删除；失败 / 中断 / 进程被杀则保留，
+ * 下一回合由 readUnfinishedWorkflowHint 注入提示，模型可从断点续跑。
+ */
+export function latestUnfinishedPath(workspaceDir: string): string {
+  return path.join(workspaceDir, '.workflows', 'latest-unfinished.json');
+}
+
+/** 工作流启动后写入断点标记（prepareWorkflowRun 成功后调用） */
+export async function markWorkflowRunStarted(
+  workspaceDir: string,
+  meta: { runId: string; workflowName: string; scriptPath: string },
+): Promise<void> {
+  await writeAtomicFile(
+    latestUnfinishedPath(workspaceDir),
+    JSON.stringify({ ...meta, updatedAt: new Date().toISOString() }, null, 2),
+  ).catch(() => {}); // 标记写失败不影响工作流本身
+}
+
+/** 工作流正常跑完后删除断点标记（失败 / 中断路径不删） */
+export async function markWorkflowRunFinished(workspaceDir: string): Promise<void> {
+  await fs.rm(latestUnfinishedPath(workspaceDir), { force: true }).catch(() => {});
+}
+
+/**
+ * 读取未完成工作流断点提示（注入主 Bot 回合的追加系统提示）。
+ * 文件不存在、损坏或对应脚本 / 日志已不存在时返回 ''。
+ */
+export async function readUnfinishedWorkflowHint(workspaceDir: string): Promise<string> {
+  const marker = latestUnfinishedPath(workspaceDir);
+  if (!existsSync(marker)) return '';
+  try {
+    const parsed = JSON.parse(await fs.readFile(marker, 'utf8')) as {
+      runId?: unknown;
+      workflowName?: unknown;
+      scriptPath?: unknown;
+    };
+    const runId = typeof parsed.runId === 'string' ? parsed.runId : '';
+    const workflowName = typeof parsed.workflowName === 'string' ? parsed.workflowName : '';
+    const scriptPath = typeof parsed.scriptPath === 'string' ? parsed.scriptPath : '';
+    if (!runId || !scriptPath) return '';
+    // 断点对应的脚本副本或日志必须仍存在，否则提示无意义
+    const workflowsDir = path.join(workspaceDir, '.workflows');
+    const journalExists = existsSync(path.join(workflowsDir, `${runId}.workflow.jsonl`));
+    const scriptExists = existsSync(scriptPath) || existsSync(path.join(workflowsDir, `${runId}.mjs`));
+    if (!journalExists && !scriptExists) return '';
+    return (
+      `[未完成工作流断点提醒]\n工作区存在上次中断或未跑完的工作流 "${workflowName}"（runId: ${runId}，脚本: ${scriptPath}）。` +
+      `若用户要求继续或重试，请调用 SubagentWorkflow({ scriptPath: "${scriptPath}", resumeFromRunId: "${runId}" }) 从断点续跑，已完成的步骤会自动从日志缓存复用。`
+    );
+  } catch {
+    return '';
+  }
+}
+
+/**
  * 跨 Bot 工作流编排：把 wrapWorkflowToolForCrossBot 的机制拆为独立单元——
  * 纯函数（JSON 提取 / agentType 路由 / 脚本源与断点日志解析 / 结果聚合文本）、
  * 子会话映射持久化（断点续跑幂等重连）、CompositeWorkflowHost 组装，

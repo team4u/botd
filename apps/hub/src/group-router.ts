@@ -730,7 +730,7 @@ export class GroupRouter {
     groupContextPrompt: string,
     validBotIds: Set<string>,
     turnGen: number
-  ): Promise<'success' | 'failed' | 'cancelled'> {
+  ): Promise<'success' | 'failed' | 'cancelled' | 'disconnected'> {
     const { item, rpc } = prep;
     const sessionId = session.id;
 
@@ -819,6 +819,35 @@ export class GroupRouter {
         return 'cancelled';
       }
       if (turnGen !== state.generation) return 'cancelled';
+      // 节点断连（而非执行错误）：不报失败，转入离线队列等节点重连后补发。
+      // 节点侧正在执行的回合会继续跑完，重发时会附着在途回合或消费离线回执，不会双跑。
+      const nodeGone = !this.connections.getNodeRpc(prep.bot.nodeId)
+        || /\[birpc\] rpc is closed|WebSocket is not open|socket hang up|Connection closed|ECONNRESET/i
+          .test(String(err?.message || ''));
+      if (nodeGone) {
+        this.db.enqueueOutboundTask({
+          nodeId: prep.bot.nodeId,
+          botId: item.botId,
+          sessionId,
+          taskType: 'turn',
+          payload: {
+            generation: item.generation,
+            wakeupMessage: item.wakeupMessage,
+            commandText: item.commandText,
+          },
+        });
+        state.queue.unshift(item);
+        this.db.updateSessionStatus(sessionId, 'queued', undefined);
+        this.sseHub.broadcast(sessionId, {
+          type: 'session_status',
+          sessionId,
+          status: 'queued',
+          activeBotId: undefined,
+          activeBotIds: [],
+          queuePlan: this.getQueuePlan(sessionId),
+        });
+        return 'disconnected';
+      }
       const errorText = err?.message || String(err);
       const sysMsg = this.db.createMessage({
         id: `msg_${randomUUID()}`,
@@ -1015,7 +1044,8 @@ export class GroupRouter {
           validBotIds,
           turnGen
         );
-        if (result === 'failed') {
+        if (result === 'failed' || result === 'disconnected') {
+          // disconnected：与离线节点分支一致，退出循环等待 onNodeOnline 恢复补发
           break;
         }
 

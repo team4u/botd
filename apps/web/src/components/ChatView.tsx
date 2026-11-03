@@ -13,6 +13,7 @@ import {
   Clock,
   Hourglass,
   Package,
+  PlayCircle,
   SquareTerminal,
   FileDiff,
   Share2,
@@ -1061,6 +1062,25 @@ export const ChatView: React.FC<ChatViewProps> = ({
         <div className="mx-3 sm:mx-4 mt-2.5 px-3 py-2 bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/60 rounded-lg flex items-center gap-2 text-xs text-amber-800 dark:text-amber-300 shrink-0">
           <Hourglass className="w-3.5 h-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
           <span>目标计算节点当前离线，任务已挂起排队，节点恢复上线后将自动继续执行。</span>
+        </div>
+      )}
+
+      {/* 中断恢复横幅：失败 / 中断会话一键继续（已完成的工作区变更与步骤已保留） */}
+      {session.status === 'failed' && !isRunning && (
+        <div className="mx-3 sm:mx-4 mt-2.5 px-3 py-2 bg-blue-50/90 dark:bg-blue-950/40 border border-blue-200/80 dark:border-blue-900/60 rounded-lg flex items-center justify-between gap-2 text-xs text-blue-800 dark:text-blue-300 shrink-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <PlayCircle className="w-3.5 h-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
+            <span>上次执行已中断或失败，已完成的工作区变更与步骤已保留。</span>
+          </div>
+          <button
+            type="button"
+            disabled={Boolean(directBot && !isDirectNodeOnline)}
+            onClick={() => void onSendMessage('继续')}
+            title={directBot && !isDirectNodeOnline ? '目标计算节点离线，恢复上线后可继续' : '发送「继续」接着执行'}
+            className="inline-flex items-center gap-1 px-2.5 py-1 bg-white dark:bg-zinc-900 border border-blue-300 dark:border-blue-800 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-950/60 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-xs font-medium transition-colors shrink-0 cursor-pointer shadow-2xs"
+          >
+            继续执行
+          </button>
         </div>
       )}
 

@@ -29,6 +29,7 @@ import {
 import { loadTurnDeps } from './turn-deps.js';
 import { createHubStreamSink, type HubStream } from './hub-stream.js';
 import { runRegistry, purgeStaleSubagentManager, subagentSessionFiles } from './run-registry.js';
+import { readUnfinishedWorkflowHint } from '../cross-bot/workflow.js';
 import { resolveEffectiveBot, resolveBotPaths, cleanupEphemeralAgents } from './bot-context.js';
 import { buildMemoryPromptSection, canBotWriteMemory } from './memory-prompt.js';
 import { ensureBotdBinWrapper } from './bin-wrapper.js';
@@ -189,6 +190,10 @@ export async function executeBotTurn(
     });
     // 主 BOT 挂载 pi-subagents 底座：获得 Agent / SubagentWorkflow 工具，可调度 .pi/agents/ 下的子代理。
     // 子代理（parentBotId 已设置）不挂载，防套娃；扩展内部另有 inChildSessionContext 防重入双保险。
+    // 主 BOT 额外注入未完成工作流断点提示：中断后下一回合模型才知道上次未跑完的 runId
+    const unfinishedWorkflowHint = !bot.parentBotId
+      ? await readUnfinishedWorkflowHint(workspaceDir)
+      : '';
     const resourceLoader = await loadBotResources(
       dataDir,
       effectiveBot,
@@ -215,6 +220,7 @@ export async function executeBotTurn(
             ? `[已注入专属环境变量]\n当前命令执行环境已预置以下环境变量（可直接在命令或脚本中通过 $VAR 引用，请勿在公屏直接打印密钥明文）：${botEnvKeys.map((k) => `$${k}`).join(', ')}`
             : '',
           skillContents.length > 0 ? `[框架内置 Skills]\n\n${skillContents.join('\n\n')}` : '',
+          unfinishedWorkflowHint,
         ].filter(Boolean),
       { enableSubagents: !bot.parentBotId, sessionId: input.sessionId },
     );
