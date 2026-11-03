@@ -18,8 +18,21 @@ import {
   setFallbackSubagent,
   NO_FALLBACK,
   registerAgents,
+  resolveSpawnType,
 } from '@tintinweb/pi-subagents/dist/agent-types.js';
 import { loadCustomAgents } from '@tintinweb/pi-subagents/dist/custom-agents.js';
+import { runWorkflow, validateScript, type WorkflowHost } from '@tintinweb/pi-subagents/dist/workflow/runtime.js';
+import { createWorkflowHost } from '@tintinweb/pi-subagents/dist/workflow/host.js';
+import { appendJournal, readJournal, type WorkflowJournalEntry } from '@tintinweb/pi-subagents/dist/workflow/journal.js';
+import {
+  completeWorkflowTask,
+  createWorkflowTask,
+  failWorkflowTask,
+  updateWorkflowProgressBatch,
+  workflowResultText,
+  workflowRunId,
+} from '@tintinweb/pi-subagents/dist/workflow/task.js';
+import { resolveWorkflowScript, resolveWorkflowSource } from '@tintinweb/pi-subagents/dist/workflow/saved.js';
 import type { ExtensionFactory, ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 /** pi-subagents 扩展工厂：为主 BOT 提供 Agent / SubagentWorkflow 编排底座。 */
@@ -236,6 +249,528 @@ function wrapAgentToolForHandoff(tool: any, handoffScope: SubagentHandoffScope):
   return { ...tool, execute: wrappedExecute };
 }
 
+/** 从文本回复中提取结构化 JSON：优先整体解析，其次 ```json 围栏，最后首尾大括号截取 */
+function extractJsonFromText(text: string): unknown | undefined {
+  const trimmed = text.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // fall through
+  }
+  const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) {
+    try {
+      return JSON.parse(fence[1]);
+    } catch {
+      // fall through
+    }
+  }
+  const first = trimmed.indexOf('{');
+  const last = trimmed.lastIndexOf('}');
+  if (first >= 0 && last > first) {
+    try {
+      return JSON.parse(trimmed.slice(first, last + 1));
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/** 子代理记录的终态（与 pi-subagents host 的 toSpawnResult 成败判定对齐） */
+const SUBAGENT_TERMINAL_STATUSES = new Set(['completed', 'steered', 'error', 'stopped', 'aborted']);
+
+/**
+ * 把全局 subagent manager 注册表（Symbol.for('pi-subagents:manager')，仅暴露
+ * spawn/getRecord/hasRunning/waitForAll）适配成 createWorkflowHost 需要的
+ * AgentManager 形状：spawnAndWait 通过 spawn(isBackground) + 终态轮询实现，
+ * abort / consume 通过事件总线 RPC（subagents:rpc:stop / :consume）实现。
+ * 消费结果（consume）避免本地步骤完成后又被扩展补发一条完成通知，
+ * 与 Agent 工具的 get_subagent_result(wait) 消费语义一致。
+ */
+function createLocalWorkflowManager(
+  registry: NonNullable<ReturnType<typeof getGlobalSubagentManager>>,
+  pi: ExtensionAPI,
+): unknown {
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  return {
+    getRecord: (id: string) => registry.getRecord?.(id),
+    abort: (id: string) => {
+      // 异步尽力停止：stop RPC 拒绝非运行中的代理时静默吞掉
+      void requestSubagentsRpc(pi, 'subagents:rpc:stop', { agentId: id });
+      return true;
+    },
+    async resume() {
+      // 注册表未暴露 resume：返回 undefined 让 host 报告“无可恢复会话”
+      return undefined;
+    },
+    async spawnAndWait(
+      piRef: unknown,
+      ctxRef: unknown,
+      type: string,
+      prompt: string,
+      options: Record<string, any>,
+      onSpawned?: (id: string) => void,
+    ) {
+      // spawnTopLevel 强制 detached（不占前台池）：自行轮询记录终态
+      const id = registry.spawn!(piRef, ctxRef, type, prompt, { ...options, isBackground: true });
+      onSpawned?.(id);
+      const signal = options?.signal as AbortSignal | undefined;
+      for (;;) {
+        if (signal?.aborted) {
+          void requestSubagentsRpc(pi, 'subagents:rpc:stop', { agentId: id });
+          await sleep(300);
+          const record = registry.getRecord?.(id);
+          return { record: record ?? { status: 'stopped', error: 'Stopped.' } };
+        }
+        const record = registry.getRecord?.(id);
+        if (record && SUBAGENT_TERMINAL_STATUSES.has(String((record as any).status))) {
+          // 已终态：标记结果已消费，抑制扩展补发的后台完成通知
+          void requestSubagentsRpc(pi, 'subagents:rpc:consume', { agentId: id });
+          return { record };
+        }
+        await sleep(100);
+      }
+    },
+  };
+}
+
+/**
+ * 包装 SubagentWorkflow 工具：为跨 BOT 协同提供 CompositeWorkflowHost。
+ *
+ * 行为变化（相对原生 SubagentWorkflow）：
+ * - 前台同步执行（原生是后台 + 通知）；完成后直接返回结构化摘要文本。
+ * - 工作流步骤的 agentType 可以写 "@<botId>" 或 "bot:<botId>" 强制路由到另一个主 BOT
+ *   （通过 Hub 子会话委派）；不带前缀时先尝试本地子代理，解析失败即视为跨 BOT 目标。
+ * - 每次运行把脚本副本与 `<runId>.workflow.jsonl` 断点日志落盘到 `<workspaceDir>/.workflows/`，
+ *   失败后可用 `{ scriptPath, resumeFromRunId: "<runId>" }` 从失败步骤断点续跑
+ *   （已完成步骤直接从日志缓存回放，不再重新调用子代理/子会话）。
+ */
+function wrapWorkflowToolForCrossBot(
+  tool: any,
+  deps: {
+    dataDir: string;
+    bot: BotConfig;
+    botDir: string;
+    workspaceDir: string;
+    sessionId?: string;
+    pi: ExtensionAPI;
+    handoffScope: SubagentHandoffScope | undefined;
+  },
+): any {
+  const originalExecute = tool.execute?.bind(tool);
+  if (typeof originalExecute !== 'function') return tool;
+
+  const textResult = (text: string, isError = false, details?: Record<string, unknown>) =>
+    ({
+      content: [{ type: 'text', text }],
+      ...(details ? { details } : {}),
+      ...(isError ? { isError } : {}),
+    }) as any;
+
+  const wrappedExecute = async (
+    toolCallId: string,
+    params: any,
+    signal: AbortSignal | undefined,
+    _onUpdate: ((update: unknown) => void) | undefined,
+    ctx: any,
+  ) => {
+    const { dataDir, workspaceDir, pi, handoffScope } = deps;
+
+    // 1) 准备 .workflows 目录与断点日志回放
+    const workflowsDir = path.join(workspaceDir, '.workflows');
+    await ensureDir(workflowsDir);
+
+    let replayEntries: WorkflowJournalEntry[] | undefined;
+    const resumeFromRunId = typeof params?.resumeFromRunId === 'string' ? params.resumeFromRunId.trim() : '';
+    if (resumeFromRunId) {
+      if (!/^wf_[a-z0-9-]+$/i.test(resumeFromRunId)) {
+        return textResult(`Invalid resumeFromRunId "${resumeFromRunId}": expected a workflow run id like "wf_ab12cd34ef56".`, true);
+      }
+      const prevJournalPath = path.join(workflowsDir, `${resumeFromRunId}.workflow.jsonl`);
+      const prevScriptPath = path.join(workflowsDir, `${resumeFromRunId}.mjs`);
+      if (!existsSync(prevJournalPath) && !existsSync(prevScriptPath)) {
+        return textResult(
+          `Cannot resume workflow "${resumeFromRunId}": run journal not found in ${workflowsDir}.`,
+          true,
+        );
+      }
+      replayEntries = readJournal(prevJournalPath);
+    }
+
+    // 2) 解析脚本源（script > scriptPath > name > 断点脚本副本）
+    let scriptSource = '';
+    if (typeof params?.script === 'string' && params.script.trim() !== '') {
+      scriptSource = params.script;
+    } else if (typeof params?.scriptPath === 'string' && params.scriptPath.trim() !== '') {
+      const resolved = path.resolve(workspaceDir, params.scriptPath);
+      try {
+        scriptSource = await fs.readFile(resolved, 'utf8');
+      } catch (err) {
+        return textResult(`Could not read workflow script "${resolved}": ${err instanceof Error ? err.message : String(err)}`, true);
+      }
+    } else if (typeof params?.name === 'string' && params.name.trim() !== '') {
+      const saved = resolveWorkflowScript({ name: params.name }, workspaceDir);
+      if (!saved.ok) return textResult(saved.message, true);
+      scriptSource = saved.script;
+    } else if (resumeFromRunId && existsSync(path.join(workflowsDir, `${resumeFromRunId}.mjs`))) {
+      scriptSource = await fs.readFile(path.join(workflowsDir, `${resumeFromRunId}.mjs`), 'utf8');
+    } else {
+      return textResult(
+        'Provide `script` (inline source), `scriptPath` (a file to read), `name` (a saved workflow), or `resumeFromRunId` (re-run a previous run\'s persisted script).',
+        true,
+      );
+    }
+
+    // 3) 校验脚本 meta（失败直接返回作者可修复的报错）
+    let validated: ReturnType<typeof validateScript>;
+    try {
+      validated = validateScript(scriptSource);
+    } catch (err) {
+      return textResult(err instanceof Error ? err.message : String(err), true);
+    }
+
+    // 4) 落盘脚本副本 + 新建本次运行的 journal
+    const runId = workflowRunId();
+    const runScriptPath = path.join(workflowsDir, `${runId}.mjs`);
+    const scriptPath = typeof params?.scriptPath === 'string' && params.scriptPath.trim() !== ''
+      ? path.resolve(workspaceDir, params.scriptPath)
+      : runScriptPath;
+    try {
+      await writeAtomicFile(scriptPath, scriptSource);
+      if (scriptPath !== runScriptPath) await writeAtomicFile(runScriptPath, scriptSource);
+    } catch (err) {
+      return textResult(`Could not persist workflow script: ${err instanceof Error ? err.message : String(err)}`, true);
+    }
+    const journalPath = path.join(workflowsDir, `${runId}.workflow.jsonl`);
+
+    // 5) 组合 abort 信号：父级取消（会话停止）中止整个工作流；接管（新消息）仅解除等待
+    const effectiveSessionId = deps.sessionId || process.env.BOTD_SESSION_ID || '';
+    const workflowAbortController = new AbortController();
+    let handedOff = false;
+    const onParentAbort = () => workflowAbortController.abort();
+    const onHandoff = () => {
+      handedOff = true;
+      workflowAbortController.abort();
+    };
+    if (signal?.aborted) onParentAbort();
+    else signal?.addEventListener('abort', onParentAbort, { once: true });
+    const handoffPoll = setInterval(() => {
+      if (handoffScope?.wasTriggered()) onHandoff();
+    }, 80);
+    const cleanupListeners = () => {
+      clearInterval(handoffPoll);
+      signal?.removeEventListener?.('abort', onParentAbort);
+    };
+
+    // 6) CompositeWorkflowHost：本地子代理走 pi-subagents manager，
+    //    未注册类型（或 @/bot: 前缀）走 Hub 子会话跨 BOT 委派。
+    const remoteSessions = new Map<string, { childSessionId: string; botId: string; label: string; phaseTitle?: string }>();
+    const globalManager = getGlobalSubagentManager();
+    const localHost = globalManager
+      ? createWorkflowHost({
+          pi,
+          ctx,
+          manager: createLocalWorkflowManager(globalManager, pi) as any,
+          signal: workflowAbortController.signal,
+          ...(effectiveSessionId ? { rootSessionId: effectiveSessionId } : {}),
+          workflowId: runId,
+        })
+      : undefined;
+
+    const host: WorkflowHost = {
+      async spawnAgent(request) {
+        const stepRunId = `${runId}_${request.agentId}`;
+        const rawType = String(request.agentType || '').trim();
+        const cleanType = rawType.replace(/^(?:@|bot:)/, '');
+        const forceRemote = rawType.startsWith('@') || rawType.startsWith('bot:');
+        const localDispatch = !forceRemote ? resolveSpawnType(cleanType) : { ok: false as const };
+
+        // Branch A：本地子代理
+        if (localDispatch.ok && localHost) {
+          const startMs = Date.now();
+          const description = request.label || request.prompt.slice(0, 80);
+          pi.events.emit('subagents:started', {
+            id: stepRunId,
+            type: localDispatch.type,
+            description,
+            ...(request.phaseTitle !== undefined ? { phase: request.phaseTitle } : {}),
+          });
+          const res = await localHost.spawnAgent({ ...request, agentType: localDispatch.type });
+          pi.events.emit(res.ok ? 'subagents:completed' : 'subagents:failed', {
+            id: stepRunId,
+            type: localDispatch.type,
+            description,
+            ...(request.phaseTitle !== undefined ? { phase: request.phaseTitle } : {}),
+            status: res.skipped ? 'stopped' : res.ok ? 'completed' : 'error',
+            ...(res.ok && res.text !== undefined ? { result: res.text } : {}),
+            ...(res.ok ? {} : { error: res.error || 'Agent failed.' }),
+            durationMs: Date.now() - startMs,
+            ...(res.toolCalls ? { toolUses: res.toolCalls } : {}),
+          });
+          return res;
+        }
+
+        // Branch B：跨主 BOT / 对端主 BOT
+        if (!cleanType) {
+          return { ok: false, error: `Cannot resolve agent type "${rawType}" for workflow step "${request.label}".` };
+        }
+        if (!effectiveSessionId) {
+          return { ok: false, error: 'Missing sessionId for cross-bot delegation in workflow.' };
+        }
+        const { HubClient } = await import('./cli/hub-client.js');
+        const { delegateSessionAndWait } = await import('./cli/commands/sessions.js');
+        const client = await HubClient.connect({ dataDir });
+
+        let effectivePrompt = request.prompt;
+        if (request.schema !== undefined) {
+          effectivePrompt +=
+            `\n\n[Structured Output Requirement]\nYou MUST respond with a valid JSON object matching this JSON Schema (either as raw JSON or inside a \`\`\`json code fence):\n${JSON.stringify(request.schema.schema)}`;
+        }
+
+        const startMs = Date.now();
+        let waitRes: Awaited<ReturnType<typeof delegateSessionAndWait>> | undefined;
+        try {
+          waitRes = await delegateSessionAndWait(
+            client,
+            effectiveSessionId,
+            {
+              botId: cleanType,
+              prompt: effectivePrompt,
+              title: `[${request.phaseTitle || validated.meta.name}] ${request.label || cleanType}`,
+              autoWakeParent: false,
+            },
+            {
+              waitSeconds: 600,
+              signal: workflowAbortController.signal,
+              onChildCreated: (created) => {
+                remoteSessions.set(request.agentId, {
+                  childSessionId: created.childSession.id,
+                  botId: cleanType,
+                  label: request.label || cleanType,
+                  ...(request.phaseTitle !== undefined ? { phaseTitle: request.phaseTitle } : {}),
+                });
+                request.onResolved?.({ recordId: created.childSession.id, modelId: cleanType });
+                pi.events.emit('subagents:started', {
+                  id: stepRunId,
+                  type: cleanType,
+                  description: request.label || request.prompt.slice(0, 80),
+                  ...(request.phaseTitle !== undefined ? { phase: request.phaseTitle } : {}),
+                  childSessionId: created.childSession.id,
+                });
+              },
+            },
+          );
+        } catch (err) {
+          // 接管 / 父级取消不算步骤失败：工作流 abort 已在 flight 中，直接返回失败占位
+          const message = err instanceof Error ? err.message : String(err);
+          return { ok: false, error: handedOff || workflowAbortController.signal.aborted ? 'Workflow aborted.' : message };
+        }
+
+        if (waitRes.status === 'failed') {
+          pi.events.emit('subagents:failed', {
+            id: stepRunId,
+            type: cleanType,
+            description: request.label || cleanType,
+            ...(request.phaseTitle !== undefined ? { phase: request.phaseTitle } : {}),
+            childSessionId: waitRes.childSession.id,
+            status: 'error',
+            error: waitRes.reply || 'Cross-bot sub-session failed',
+            durationMs: Date.now() - startMs,
+          });
+          return { ok: false, error: waitRes.reply || 'Cross-bot sub-session failed' };
+        }
+
+        let outText = waitRes.reply;
+        if (waitRes.returnedArtifacts.length > 0 && request.schema === undefined) {
+          outText +=
+            `\n\n[Returned Artifacts]\n${waitRes.returnedArtifacts.map((a) => `- ${a.filename} (id: ${a.id}, url: ${a.url})`).join('\n')}`;
+        }
+        if (request.schema !== undefined) {
+          const parsedJson = extractJsonFromText(waitRes.reply);
+          if (parsedJson === undefined) {
+            const error = 'Structured output schema validation failed: the sub-session reply was not valid JSON.';
+            pi.events.emit('subagents:failed', {
+              id: stepRunId,
+              type: cleanType,
+              description: request.label || cleanType,
+              ...(request.phaseTitle !== undefined ? { phase: request.phaseTitle } : {}),
+              childSessionId: waitRes.childSession.id,
+              status: 'error',
+              error,
+              durationMs: Date.now() - startMs,
+            });
+            return { ok: false, error };
+          }
+          const check = request.schema.check(parsedJson);
+          if (check !== true) {
+            const error = `Structured output schema validation failed: ${check}`;
+            pi.events.emit('subagents:failed', {
+              id: stepRunId,
+              type: cleanType,
+              description: request.label || cleanType,
+              ...(request.phaseTitle !== undefined ? { phase: request.phaseTitle } : {}),
+              childSessionId: waitRes.childSession.id,
+              status: 'error',
+              error,
+              durationMs: Date.now() - startMs,
+            });
+            return { ok: false, error };
+          }
+          outText = JSON.stringify(parsedJson);
+        }
+
+        pi.events.emit('subagents:completed', {
+          id: stepRunId,
+          type: cleanType,
+          description: request.label || cleanType,
+          ...(request.phaseTitle !== undefined ? { phase: request.phaseTitle } : {}),
+          childSessionId: waitRes.childSession.id,
+          status: 'completed',
+          result: outText,
+          durationMs: Date.now() - startMs,
+        });
+        return { ok: true, text: outText };
+      },
+
+      abortAgent(agentId: string) {
+        const remote = remoteSessions.get(agentId);
+        if (remote) {
+          import('./cli/hub-client.js')
+            .then(({ HubClient }) => HubClient.connect({ dataDir }))
+            .then((client) =>
+              client.post(`/api/sessions/${encodeURIComponent(remote.childSessionId)}/cancel`).catch(() => {}),
+            )
+            .catch(() => {});
+        } else {
+          localHost?.abortAgent(agentId);
+        }
+      },
+
+      async resumeAgent(agentId: string, prompt: string, onResolved?: (info: { recordId?: string }) => void) {
+        const remote = remoteSessions.get(agentId);
+        if (remote && !localHost) {
+          return { ok: false, error: `Cannot resume "${agentId}": cross-bot sub-session "${remote.childSessionId}" has no resumable in-process context. Use a new agent() step to follow up with @${remote.botId}.` };
+        }
+        if (!localHost?.resumeAgent) {
+          return { ok: false, error: 'Resume not supported' };
+        }
+        return localHost.resumeAgent(agentId, prompt, onResolved as any);
+      },
+
+      async runGate(command: string, gate: { agentId: string; cwd?: string }) {
+        if (localHost?.runGate) return localHost.runGate(command, gate);
+        // 无本地 host（纯跨 BOT 场景）：退化为在主工作区执行
+        const result = await pi.exec(process.platform === 'win32' ? 'cmd' : 'sh',
+          process.platform === 'win32' ? ['/c', command] : ['-c', command],
+          { cwd: gate.cwd ?? workspaceDir, timeout: 10 * 60_000 });
+        const output = [result.stdout, result.stderr].map((s) => s.trim()).filter(Boolean).join('\n');
+        return { ok: !result.killed && result.code === 0, output: output || (result.killed ? `Gate command timed out: ${command}` : output) };
+      },
+
+      loadWorkflow(ref: { name?: string; scriptPath?: string }) {
+        return resolveWorkflowSource(ref, workspaceDir);
+      },
+    };
+
+    // 7) 断点回放步骤的 UI 桥接：cached done 条目补发 completed 事件
+    const emittedCachedSteps = new Set<number>();
+    const task = createWorkflowTask({
+      id: runId,
+      script: scriptSource,
+      scriptPath,
+      args: params?.args,
+      meta: validated.meta,
+      toolCallId,
+      journalPath,
+      ...(replayEntries && replayEntries.length > 0 ? { replay: replayEntries, resumedFrom: resumeFromRunId } : {}),
+    });
+    const onProgress = (entries: readonly any[]) => {
+      updateWorkflowProgressBatch(task, entries);
+      for (const entry of entries) {
+        if (
+          entry &&
+          entry.type === 'workflow_agent' &&
+          entry.cached === true &&
+          entry.state === 'done' &&
+          typeof entry.index === 'number' &&
+          !emittedCachedSteps.has(entry.index)
+        ) {
+          emittedCachedSteps.add(entry.index);
+          pi.events.emit('subagents:completed', {
+            id: `${runId}_cached_${entry.index}`,
+            type: entry.agentType || 'agent',
+            description: `[\u5df2\u7f13\u5b58] ${entry.label ?? ''}`,
+            ...(entry.phaseTitle !== undefined ? { phase: entry.phaseTitle } : {}),
+            status: 'completed',
+            result: entry.resultPreview || '\uff08\u65ad\u70b9\u7eed\u8dd1\uff1a\u5df2\u590d\u7528\u4e0a\u6b21\u6210\u529f\u7ed3\u679c\uff09',
+            durationMs: 0,
+          });
+        }
+      }
+    };
+
+    // 8) 前台跑完整个工作流并返回结构化摘要
+    try {
+      const result = await runWorkflow({
+        script: scriptSource,
+        args: params?.args,
+        signal: workflowAbortController.signal,
+        host,
+        onProgress,
+        journal: {
+          ...(replayEntries ? { entries: replayEntries } : {}),
+          append: (entry) => appendJournal(journalPath, entry),
+        },
+      });
+      completeWorkflowTask(task, result);
+
+      const lines = [
+        `Workflow "${validated.meta.name}" ${result.status} (runId: ${runId})`,
+        `Script: ${scriptPath}`,
+      ];
+      if (result.replayedCount > 0) {
+        lines.push(`Replayed from ${resumeFromRunId}: ${result.replayedCount}/${result.agentCount} step(s) from journal cache.`);
+      }
+      if (result.status === 'failed' && result.error) {
+        lines.push(`Error: ${result.error}`);
+      }
+      lines.push(`Result: ${workflowResultText(task)}`);
+      if (result.status === 'failed') {
+        lines.push(
+          `To retry from the failed step without re-running completed steps, call SubagentWorkflow with { scriptPath: "${scriptPath}", resumeFromRunId: "${runId}" }.`,
+        );
+      }
+      return {
+        content: [{ type: 'text', text: lines.join('\n') }],
+        details: {
+          taskId: runId,
+          runId,
+          scriptPath,
+          status: result.status,
+          value: result.value,
+          replayedCount: result.replayedCount,
+          agentCount: result.agentCount,
+        },
+        ...(result.status === 'failed' ? { isError: true } : {}),
+      } as any;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      failWorkflowTask(task, message);
+      return textResult(`Workflow "${validated.meta.name}" failed (runId: ${runId}): ${message}\nScript: ${scriptPath}`, true, {
+        taskId: runId,
+        runId,
+        scriptPath,
+        status: 'failed',
+      });
+    } finally {
+      cleanupListeners();
+    }
+  };
+
+  return { ...tool, execute: wrappedExecute };
+}
+
 async function resolveExtensionPaths(dataDir: string, ids: string[]): Promise<string[]> {
   const paths: string[] = [];
   for (const id of ids) {
@@ -306,6 +841,19 @@ export async function loadBotResources(
       const realRegisterTool = pi.registerTool.bind(pi);
       const handoffScope = getActiveSubagentHandoffScope();
       const wrappedRegisterTool: typeof pi.registerTool = ((tool: any) => {
+        if (tool?.name === 'SubagentWorkflow') {
+          return realRegisterTool(
+            wrapWorkflowToolForCrossBot(tool, {
+              dataDir,
+              bot,
+              botDir,
+              workspaceDir,
+              sessionId: options?.sessionId,
+              pi,
+              handoffScope,
+            }),
+          );
+        }
         if (tool?.name !== 'Agent') {
           return realRegisterTool(tool);
         }

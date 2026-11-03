@@ -339,6 +339,11 @@ export const SubagentRunsPanel: React.FC<{
                           {run.phase}
                         </span>
                       )}
+                      {(run as { childSessionId?: string }).childSessionId && (
+                        <span className="px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/50 border border-blue-200/60 dark:border-blue-800/60 text-[10px] font-medium text-blue-600 dark:text-blue-300">
+                          跨BOT子会话
+                        </span>
+                      )}
                       {typeof run.durationMs === 'number' && (
                         <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500">
                           {formatDuration(run.durationMs)}

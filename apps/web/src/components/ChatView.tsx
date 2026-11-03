@@ -102,6 +102,45 @@ export function pickPollIntervalMs(hasActiveWork: boolean): number {
   return hasActiveWork ? 5000 : 30000;
 }
 
+/** 点击工作流/子代理步骤后的检视目标 */
+export type RunInspectionTarget =
+  | { kind: 'none' }
+  | { kind: 'subsession'; childSessionId: string }
+  | { kind: 'subagent'; run: SubagentRunRecord };
+
+/**
+ * 纯函数：判定点击某条 SubagentRunRecord 应打开哪种检视抽屉。
+ * - 带childSessionId 的工作流/编排步骤 → 跨BOT子会话抽屉（SubSessionDrawer）
+ * - 普通本地子代理运行 → 子代理运行抽屉（SubagentRunDrawer）
+ */
+export function resolveRunInspectionTarget(run: SubagentRunRecord | null): RunInspectionTarget {
+  if (!run) return { kind: 'none' };
+  const childSessionId = (run as { childSessionId?: string }).childSessionId;
+  if (childSessionId) return { kind: 'subsession', childSessionId };
+  return { kind: 'subagent', run };
+}
+
+/** 从实时子代理轨迹与已落库消息中按 childSessionId 反查工作流步骤运行记录 */
+function findSubagentRunByChildSessionId(
+  activeSubagentRuns: Record<string, SubagentRunRecord[]>,
+  messages: MessageRecord[],
+  childSessionId: string
+): SubagentRunRecord | undefined {
+  for (const runs of Object.values(activeSubagentRuns)) {
+    const hit = runs.find(
+      (r) => (r as { childSessionId?: string }).childSessionId === childSessionId
+    );
+    if (hit) return hit;
+  }
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const hit = messages[i].subagentRuns?.find(
+      (r) => (r as { childSessionId?: string }).childSessionId === childSessionId
+    );
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
 export const ChatView: React.FC<ChatViewProps> = ({
   session,
   messages,
@@ -271,10 +310,36 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // 内联检视的子会话 ID：点击子任务药丸 / 消息内 #?s= 链接时打开右侧 SubSessionDrawer，不离开父会话
   const [inspectingSubSessionId, setInspectingSubSessionId] = useState<string | null>(null);
 
-  const inspectingSubSession = useMemo(
-    () => subSessions.find((s) => s.id === inspectingSubSessionId) ?? null,
-    [subSessions, inspectingSubSessionId]
-  );
+  const inspectingSubSession = useMemo(() => {
+    const found = subSessions.find((s) => s.id === inspectingSubSessionId);
+    if (found) return found;
+    // 目标子会话尚未出现在列表（轮询未刷新 / 点击历史消息中的工作流步骤）：
+    // 先用匹配的 SubagentRunRecord 合成一条兜底 SessionRecord，让 SubSessionDrawer 立即打开，
+    // listSubSessions 刷新后自然替换为真实记录
+    if (!inspectingSubSessionId) return null;
+    const matchingRun = findSubagentRunByChildSessionId(
+      activeSubagentRuns,
+      messages,
+      inspectingSubSessionId
+    );
+    const leadId = matchingRun?.subagentId || session.leadBotId;
+    return {
+      id: inspectingSubSessionId,
+      title: matchingRun?.task || inspectingSubSessionId,
+      mode: 'direct' as const,
+      leadBotId: leadId,
+      memberBotIds: [leadId],
+      status:
+        matchingRun?.status === 'running'
+          ? ('running' as const)
+          : matchingRun?.status === 'error'
+            ? ('failed' as const)
+            : ('idle' as const),
+      parentSessionId: session.id,
+      createdAt: matchingRun?.startedAt || session.createdAt,
+      updatedAt: matchingRun?.startedAt || session.updatedAt,
+    };
+  }, [subSessions, inspectingSubSessionId, activeSubagentRuns, messages, session]);
 
   const loadSubSessions = useCallback(async () => {
     const capturedSessionId = session.id;
@@ -340,6 +405,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
   loadSubSessionsRef.current = loadSubSessions;
   const fetchBgJobsRef = useRef(fetchBgJobs);
   fetchBgJobsRef.current = fetchBgJobs;
+  const subSessionsRef = useRef(subSessions);
+  subSessionsRef.current = subSessions;
+
+  // 检视目标尚未出现在 subSessions 列表时立即补拉一次（仅随目标 ID 变化触发一次，避免失败重试循环）；
+  // 抽屉先以上面合成的兜底记录打开，listSubSessions 返回后自然替换为真实数据
+  useEffect(() => {
+    if (!inspectingSubSessionId) return;
+    if (subSessionsRef.current.some((s) => s.id === inspectingSubSessionId)) return;
+    void loadSubSessionsRef.current();
+  }, [inspectingSubSessionId]);
 
   // 切换会话时重置抽屉与状态标记
   const prevMessagesLengthRef = useRef(messages.length);
@@ -614,6 +689,26 @@ export const ChatView: React.FC<ChatViewProps> = ({
       setInspectingSubSessionId(match[1]);
     },
     [subSessionIds]
+  );
+
+  // 工作流步骤 / 本地子代理运行的统一检视入口：
+  // 带 childSessionId 的编排步骤打开跨BOT子会话抽屉，否则走本地子代理运行抽屉
+  const handleInspectRun = useCallback(
+    (run: SubagentRunRecord | null) => {
+      if (!run) {
+        onInspectSubagentRun?.(null);
+        return;
+      }
+      const childSid = (run as { childSessionId?: string }).childSessionId;
+      if (childSid) {
+        onInspectSubagentRun?.(null);
+        setInspectingSubSessionId(childSid);
+        return;
+      }
+      setInspectingSubSessionId(null);
+      onInspectSubagentRun?.(run);
+    },
+    [onInspectSubagentRun]
   );
 
   return (
@@ -993,7 +1088,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         highlightMessageId={highlightMessageId}
         onStartEdit={startEdit}
         onForkMessage={handleForkMessage}
-        onInspectSubagentRun={onInspectSubagentRun}
+        onInspectSubagentRun={handleInspectRun}
         editingMessage={editingMessage}
         canEdit={canEdit}
         hasEarlierMessages={hasEarlierMessages}

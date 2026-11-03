@@ -141,6 +141,34 @@ botd sessions delegate "$BOTD_SESSION_ID" --bot <botId> --prompt "<task>" [--wai
 
 \`--wait <seconds>\` blocks until the sub-session finishes and prints its reply (plus returned artifacts); without it the command returns immediately after creating the sub-session. \`--artifacts\` restricts which session artifacts are shared (default: all).
 
+### Cross-bot pipelines via \`SubagentWorkflow\` (跨 BOT 多阶段流水线与断点续跑)
+
+\`SubagentWorkflow\` can orchestrate multi-stage pipelines that mix local subagents AND cross-bot steps in one script:
+- \`agent("...", { agentType: "<subId>" })\` dispatches your local subagent (same workspace);
+- \`agent("...", { agentType: "@<botId>" })\` (or \`"bot:<botId>"\`) force-delegates that step to another primary BOT's isolated sub-session — even on another node. Use \`{ schema }\` to demand validated JSON from a bot step, and \`phase("...")\` to group stages.
+
+\`\`\`js
+export const meta = { name: "release-pipeline", description: "Build once, test on two platforms" }
+phase("Build")
+const build = await agent("produce the release", {
+  agentType: "@bot_builder",
+  schema: { type: "object", properties: { version: { type: "string" } }, required: ["version"] },
+});
+const reports = await parallel([
+  () => agent(\`test version \${build.version} on linux\`, { agentType: "@bot_tester_linux", phase: "Test" }),
+  () => agent(\`test version \${build.version} on mac\`, { agentType: "@bot_tester_mac", phase: "Test" }),
+]);
+return { version: build.version, reports: reports.filter(Boolean) };
+\`\`\`
+
+**Crash-safe resume**: every run persists its script copy and a \`.workflow.jsonl\` checkpoint journal under \`<workspace>/.workflows/\`. A failed run's result text includes its \`runId\` — fix the broken bot/script and resume WITHOUT re-running completed steps (they replay from the journal cache):
+
+\`\`\`
+SubagentWorkflow({ scriptPath: "<workspace>/.workflows/wf_xxx.mjs", resumeFromRunId: "wf_xxx" })
+\`\`\`
+
+Resume replays the unchanged leading steps (completed ones are never re-called) and re-runs live from the first failed/changed step onward.
+
 ## Generative UI (Dynamic Cards, Interactive Forms & Concept Deep-Dives)
 
 botd supports dynamic UI components rendered natively via json-render:
