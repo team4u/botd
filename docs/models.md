@@ -40,9 +40,27 @@ Hub 集中托管模型目录与调用凭据。
 
 - `id` 与 `name`：模型标识与名称。
 - `reasoning`：是否具备显式推理能力。
-- `thinkingLevels`：支持的思考深度等级。
+- `thinkingLevels`：支持的思考深度等级列表。
 - `input`：输入模态支持范围（包含 `text` 或 `image`）。
 - `contextWindow` 与 `maxTokens`：上下文窗口大小与最大输出长度。
+
+### 细粒度思考档位（Thinking Levels）
+
+系统支持为每个角色分身独立配置思考预算。档位逐级递增：
+
+- `off`：关闭显式推理。
+- `minimal`、`low`、`medium`：适合低延迟与中等复杂度任务。
+- `high`、`xhigh`、`max`：适合复杂架构设计与深度代码重构（`max` 自动钳制为底层的 `xhigh`）。
+
+Router 前台调度与 Worker 后台执行均按角色独立下发思考档位。
+
+### 多模态输入支持（Multimodal）
+
+系统统一支持文本与图片混合输入：
+
+- 前端在消息输入框中粘贴或上传图片。
+- 载荷携带 `images` 数组（包含 `mimeType` 与 Base64 编码数据）。
+- 系统将文本与图片组织为标准消息块，投递给支持视觉的大语言模型。
 
 ## BYOM 机制
 
@@ -63,6 +81,10 @@ BYOM 即 Bring Your Own Model。
   "model": {
     "provider": "anthropic",
     "modelId": "claude-3-7-sonnet"
+  },
+  "thinkingLevel": "high",
+  "env": {
+    "NODE_ENV": "development"
   }
 }
 ```

@@ -355,7 +355,24 @@ Hub 支持三种身份鉴权方式：
 
 ### GET /api/bots/:botId/commands
 
-获取指定 Bot 支持的斜杠指令列表。
+获取指定 Bot 支持的斜杠指令列表。Hub 聚合该 Bot 启用的技能（含父分身继承列表）与扩展，提取 frontmatter 描述直接返回。零节点在线时仍可正常使用。节点在线时自动追加其自定义指令并按名称去重。
+
+响应示例：
+
+```json
+[
+  {
+    "name": "code-review",
+    "description": "分析代码差异并提供评审建议",
+    "source": "skill"
+  },
+  {
+    "name": "github-helper",
+    "description": "扩展 github-helper",
+    "source": "extension"
+  }
+]
+```
 
 ---
 
@@ -458,14 +475,20 @@ Hub 支持三种身份鉴权方式：
 
 ### POST /api/sessions/:id/messages
 
-向会话发送用户消息，触发后台推理回合。
+向会话发送用户消息，触发后台推理回合。支持纯文本、斜杠指令与多模态图片附件。
 
 请求体：
 
 ```json
 {
-  "content": "请分析当前仓库的代码结构",
-  "attachments": []
+  "content": "请结合架构图分析代码结构",
+  "attachments": [
+    {
+      "type": "image",
+      "mimeType": "image/png",
+      "data": "iVBORw0KGgoAAAANSUhEUgAA..."
+    }
+  ]
 }
 ```
 
@@ -473,7 +496,7 @@ Hub 支持三种身份鉴权方式：
 
 ### PUT /api/sessions/:id/messages/:messageId
 
-编辑已发送的用户消息。Hub 截断该消息后的历史并重新触发推理。
+编辑已发送的用户消息。Hub 委托 pi-durable 原生原语回滚上下文至该消息前，更新文本并重新触发推理。
 
 请求体：
 
@@ -680,18 +703,30 @@ Hub 支持三种身份鉴权方式：
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/skills` | 列出 Hub 全局托管的 Skills 列表。 |
-| GET | `/api/skills/:skillId` | 获取全局 Skill 的 Markdown 内容。 |
-| PUT | `/api/skills/:skillId` | 创建或修改全局 Skill 内容。 |
+| GET | `/api/skills/:skillId` | 获取全局 Skill 内容。支持 `?path=` 查询包内相对文件。 |
+| PUT | `/api/skills/:skillId` | 写入全局 Skill 内容。支持单文件或多文件对象字典。 |
 | DELETE | `/api/skills/:skillId` | 删除全局 Skill。 |
-| GET | `/api/nodes/:nodeId/skills/:skillId` | 获取指定节点本地专属 Skill 内容。 |
-| PUT | `/api/nodes/:nodeId/skills/:skillId` | 写入指定节点本地专属 Skill 内容。 |
-| DELETE | `/api/nodes/:nodeId/skills/:skillId` | 删除指定节点本地专属 Skill。 |
+| GET | `/api/nodes/:nodeId/skills/:skillId` | 获取指定节点专属 Skill 内容。 |
+| PUT | `/api/nodes/:nodeId/skills/:skillId` | 写入指定节点专属 Skill 内容。 |
+| DELETE | `/api/nodes/:nodeId/skills/:skillId` | 删除指定节点专属 Skill。 |
 
-PUT 请求体格式：
+GET 响应示例：
 
 ```json
 {
-  "content": "---\nname: my-skill\ndescription: 技能描述\n---\n正文"
+  "content": "---\nname: review\ndescription: 代码评审\n---\n正文",
+  "files": ["SKILL.md", "references/guide.md"]
+}
+```
+
+PUT 请求体格式（单文件或多文件包）：
+
+```json
+{
+  "files": {
+    "SKILL.md": "---\nname: review\ndescription: 代码评审\n---\n正文",
+    "references/guide.md": "# 评审指南"
+  }
 }
 ```
 
@@ -700,12 +735,12 @@ PUT 请求体格式：
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/extensions` | 列出 Hub 全局托管的 Extensions 列表。 |
-| GET | `/api/extensions/:extId` | 获取全局 Extension 的代码内容。 |
-| PUT | `/api/extensions/:extId` | 创建或修改全局 Extension 代码。 |
+| GET | `/api/extensions/:extId` | 获取全局 Extension 代码。支持 `?path=` 查询包内相对文件。 |
+| PUT | `/api/extensions/:extId` | 写入全局 Extension 代码。支持单文件或多文件对象字典。 |
 | DELETE | `/api/extensions/:extId` | 删除全局 Extension。 |
-| GET | `/api/nodes/:nodeId/extensions/:extId` | 获取指定节点本地专属 Extension 内容。 |
-| PUT | `/api/nodes/:nodeId/extensions/:extId` | 写入指定节点本地专属 Extension 内容。 |
-| DELETE | `/api/nodes/:nodeId/extensions/:extId` | 删除指定节点本地专属 Extension。 |
+| GET | `/api/nodes/:nodeId/extensions/:extId` | 获取指定节点专属 Extension 内容。 |
+| PUT | `/api/nodes/:nodeId/extensions/:extId` | 写入指定节点专属 Extension 内容。 |
+| DELETE | `/api/nodes/:nodeId/extensions/:extId` | 删除指定节点专属 Extension。 |
 
 ---
 

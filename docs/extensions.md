@@ -95,7 +95,7 @@ flowchart TD
 
 扩展将 Hub 托管的技能与记忆转化为标准工具：
 
-- `load_skill`：根据技能标识，按需读取 Hub SQLite 中存储的 `SKILL.md` 全文。
+- `load_skill`：按需读取技能目录的 `SKILL.md`，支持传入 `path` 参数读取包内指定辅助文件。
 - `update_memory`：直接修改或追加当前角色的 `MEMORY.md` 长期记忆。
 - `available_skills` 片段：自动汇总当前角色启用的技能标识与简短描述，指导模型适时加载。
 
@@ -107,15 +107,15 @@ flowchart TD
 
 新架构实现免节点 Hub 直管全局体系。
 
-所有技能与扩展统一持久化在 Hub 文件系统包目录（单一事实源，SQLite 不再存储内容）：
+所有技能与扩展统一存储在 Hub 文件系统包目录（单一事实源，SQLite 不再存储内容）：
 
-- `<dataDir>/skills/<id>/`：多文件技能目录（`SKILL.md`、`references/*.md`、`scripts/*` 等）。
-- `<dataDir>/extensions/<id>/`：多文件扩展包目录（入口 `index.ts`，可相对导入 `./helper.ts`、`./ui/card.ts`）。
+- `<dataDir>/skills/<id>/`：多文件技能目录（包含 `SKILL.md`、`references/*.md`、`scripts/*` 等）。
+- `<dataDir>/extensions/<id>/`：多文件扩展包目录（入口 `index.ts`，支持相对导入 `./helper.ts` 等文件）。
 
-此外，Bot 工作区（`workspaceDir`）与用户主目录下的标准 Agent 技能目录会被自动发现：
+此外，系统自动扫描并发现 Bot 工作区与用户主目录下的标准技能目录：
 
-- `<workspaceDir>/.agents/skills/<id>/`、`<workspaceDir>/.agent/skills/<id>/`
-- `~/.agents/skills/<id>/`、`~/.agent/skills/<id>/`
+- `<workspaceDir>/.agents/skills/<id>/` 与 `<workspaceDir>/.agent/skills/<id>/`
+- `~/.agents/skills/<id>/` 与 `~/.agent/skills/<id>/`
 
 Node 节点完全退化为无状态执行环境，无需安装任何扩展代码。
 
@@ -125,16 +125,17 @@ Node 节点完全退化为无状态执行环境，无需安装任何扩展代码
 
 实现位于 `apps/hub/src/harness/dynamic-extension-loader.ts`。
 
-`loadDynamicDurableExtension` 负责从源码动态编译并加载扩展。
+`loadDynamicDurableExtension` 与 `loadDynamicDurableExtensionFromDir` 负责从目录包动态编译并加载扩展。
 
 ### 模块解析与加载流程
 
-1. 加载器在 Hub 依赖树的 `node_modules/.botd-dyn/<uuid>/` 目录下创建临时目录。
-2. 加载器将 TypeScript 源码写入临时 `.mts` 文件。
-3. 临时目录位于 `node_modules` 内部，确保正确解析 `@earendil-works/pi-durable` 等依赖包。
-4. 加载器使用 `tsx/esm/api` 的 `tsImport` 动态导入模块。
-5. 每次加载采用唯一的 UUID 路径，彻底避开 Node.js 的 ESM 模块缓存。
-6. 加载器校验导出对象符合 `Extension` 规范，清理临时文件并返回扩展实例。
+1. 加载器读取扩展包目录（定位 `package.json` 入口或约定的 `index.ts`）。
+2. 加载器自动补齐 ESM 标记与工作区 `node_modules` 符号链接，支持跨文件相对导入。
+3. 加载器在 Hub 依赖树的 `node_modules/.botd-dyn/<uuid>/` 目录下创建临时目录。
+4. 临时目录位于 `node_modules` 内部，确保正确解析 `@earendil-works/pi-durable` 等依赖包。
+5. 加载器使用 `tsx/esm/api` 的 `tsImport` 动态导入模块。
+6. 每次加载采用唯一的 UUID 路径，彻底避开 Node.js 的 ESM 模块缓存。
+7. 加载器校验导出对象符合 `Extension` 规范，清理临时文件并返回扩展实例。
 
 ### 声明式 Generative UI 格式化
 

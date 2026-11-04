@@ -211,6 +211,15 @@ classDiagram
 - 文档修改与会话条目（Transcript Entry）同事务落库。
 - 彻底避免内存状态与磁盘状态不一致。
 
+### 4.3 会话原生原语与上下文控制
+
+运行时接入 `pi-durable` 原生会话操作原语：
+
+- **零拷贝 Fork（`forkConversation`）**：调用 `conv.fork(at)` 继承上下文并重定向 `TargetDoc`，派生独立会话。
+- **消息回滚（`rewindDurableSessionBeforeMessage`）**：编辑历史消息时，回滚上下文至指定锚点并重新计算。
+- **上下文重置与压缩（`resetConversation` / `compactConversation`）**：注入 `pi.reset` 标记重启上下文，支持手动触发压缩任务。
+- **机密注入执行环境（`SecretInjectingEnv`）**：执行命令时动态注入 `SecretStash` 中的活跃环境变量，实现零泄漏执行。
+
 ## 5. 脑手分离协议与远程执行环境
 
 ### 5.1 协议契约重构
