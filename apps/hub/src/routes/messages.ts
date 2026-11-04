@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto';
 import type { MessageAttachment } from '@botd/protocol';
 import { extractMentions, parseSlashCommand } from '../group-router.js';
 import { resolveOwnedSession } from '../http-helpers.js';
-import { submitSessionMessageToDurable, type DurableSessionMirror } from './workers.js';
+import {
+  rewindDurableSessionBeforeMessage,
+  submitSessionMessageToDurable,
+  type DurableSessionMirror,
+} from './workers.js';
 import type { HubDurableRuntime } from '../harness/hub-harness.js';
 import type { HubApp, HubContext } from './context.js';
 
@@ -144,6 +148,10 @@ export function registerMessageRoutes(
           session.leadBotId,
           content,
           durableMirror,
+          {
+            attachments,
+            ...(cmdResult.isCommand && cmdResult.commandText ? { commandText: cmdResult.commandText } : {}),
+          },
         );
         if (submitted !== undefined) return c.json(msgResult.message, 202);
       } catch (err: any) {
@@ -203,6 +211,11 @@ export function registerMessageRoutes(
     await router.cancelSession(id);
 
     const anchorRowid = found.rowid;
+    // 记录锚点之前的历史消息（用于 pi-durable 原生 conv.fork(prevEntryId) 精确回滚上下文）
+    const allBeforeTruncate = db.getMessages(id);
+    const anchorIndex = allBeforeTruncate.findIndex((m) => m.id === messageId);
+    const messagesBeforeEdited = anchorIndex > 0 ? allBeforeTruncate.slice(0, anchorIndex) : [];
+
     const updated = db.updateMessageContent(messageId, body.content, mentions);
     if (!updated) {
       return c.json({ error: 'Message not found' }, 404);
@@ -216,6 +229,32 @@ export function registerMessageRoutes(
       sessionId: id,
       anchorMessageId: messageId,
     });
+
+    const dctx = durableCtx();
+    if (dctx.durableRuntime !== undefined) {
+      try {
+        const rt = dctx.getDurableRuntime ? await dctx.getDurableRuntime() : dctx.durableRuntime;
+        if (rt !== undefined) {
+          await rewindDurableSessionBeforeMessage(rt, {
+            sessionId: id,
+            botId: session.leadBotId,
+            previousMessage: messagesBeforeEdited.at(-1),
+            messagesBeforeEdited,
+          });
+        }
+        const submitted = await submitSessionMessageToDurable(
+          dctx,
+          id,
+          session.leadBotId,
+          body.content,
+          durableMirror,
+          cmdResult.isCommand && cmdResult.commandText ? { commandText: cmdResult.commandText } : undefined,
+        );
+        if (submitted !== undefined) return c.json(updated, 200);
+      } catch (err: any) {
+        console.warn('[messages] durable rewind/submit failed, falling back to GroupRouter:', err?.message || err);
+      }
+    }
 
     router.handleUserMessage(id, messageId, body.content, cmdResult.isCommand ? {
       commandText: cmdResult.commandText!,

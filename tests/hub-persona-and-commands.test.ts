@@ -23,6 +23,7 @@ import { createModels, fauxAssistantMessage, fauxProvider } from '@earendil-work
 import { MemoryStorage } from '@earendil-works/pi-durable';
 
 import { startHub } from '../apps/hub/src/index.js';
+import { ensureRouterConversationId } from '../apps/hub/src/routes/workers.js';
 import { HubDurableRuntime, type BotPersonaConfig } from '../apps/hub/src/harness/hub-harness.js';
 
 const PASSWORD = 'test-admin-password';
@@ -334,3 +335,126 @@ test('GET /api/bots/:botId/commands serves skills from Hub SQLite with zero node
     { name: 'status-card', description: '扩展 status-card', source: 'extension' },
   ]);
 });
+
+test(
+  'HTTP routes wire native pi-durable fork (/api/sessions/:id/fork) and rewind (PUT /api/sessions/:id/messages/:messageId)',
+  { timeout: 30_000 },
+  async (t) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'botd-fork-rewind-route-'));
+    const { runtime, faux } = await openRuntime();
+    const hub = await startHub({
+      port: 0,
+      host: '127.0.0.1',
+      dbPath: path.join(dir, 'hub.sqlite'),
+      adminPassword: PASSWORD,
+      durableRuntime: runtime,
+    });
+    const addr = hub.server.address();
+    assert(addr && typeof addr !== 'string');
+    const base = `http://127.0.0.1:${addr.port}`;
+    t.after(async () => {
+      hub.server.closeAllConnections();
+      await hub.close();
+      await runtime.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    const login = await fetch(base + '/api/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: PASSWORD }),
+    });
+    const cookie = login.headers.get('set-cookie')!.split(';')[0];
+    const json = async <T = any>(route: string, method = 'GET', body?: unknown): Promise<T> => {
+      const res = await fetch(base + route, {
+        method,
+        headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), cookie },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const data = await res.json();
+      assert(res.ok, `${method} ${route}: ${res.status} ${JSON.stringify(data)}`);
+      return data as T;
+    };
+
+    await json('/api/bots', 'POST', {
+      id: 'architect',
+      nodeId: 'local',
+      name: 'Architect',
+      description: 'Lead',
+      modelProvider: 'faux',
+      modelId: 'main',
+      thinkingLevel: 'high',
+      enabledSkills: [],
+      systemMd: 'You are the architect.',
+    });
+
+    const session = await json<{ id: string }>('/api/sessions', 'POST', {
+      title: 'Fork & Rewind',
+      leadBotId: 'architect',
+    });
+
+    // Turn 1
+    faux.setResponses([fauxAssistantMessage('reply-1')]);
+    await json<{ id: string }>(`/api/sessions/${session.id}/messages`, 'POST', {
+      content: 'turn-1-question',
+    });
+    await runtime.harness.waitForIdle(BACKGROUND_CONTEXT);
+
+    const messagesAfterTurn1 = await waitFor(
+      () => json<Array<{ id: string; role: string; content: string }>>(`/api/sessions/${session.id}/messages`),
+      (list) => list.some((m) => m.role === 'assistant' && m.content === 'reply-1'),
+      'reply-1 mirrored',
+    );
+    const reply1 = messagesAfterTurn1.find((m) => m.role === 'assistant' && m.content === 'reply-1')!;
+
+    // Turn 2
+    faux.setResponses([fauxAssistantMessage('reply-2')]);
+    const userMsg2 = await json<{ id: string }>(`/api/sessions/${session.id}/messages`, 'POST', {
+      content: 'turn-2-question',
+    });
+    await runtime.harness.waitForIdle(BACKGROUND_CONTEXT);
+
+    const extractContextTexts = async (convId: string): Promise<string[]> => {
+      const conv = await runtime.conversation(convId, BACKGROUND_CONTEXT);
+      assert(conv);
+      const ctx = await conv.context(BACKGROUND_CONTEXT);
+      return ctx.messages
+        .map((m) => {
+          if (typeof m.content === 'string') return m.content;
+          if (Array.isArray(m.content)) {
+            return m.content
+              .map((b) => (b && typeof b === 'object' && 'text' in b ? String((b as { text?: string }).text ?? '') : ''))
+              .filter(Boolean)
+              .join('\n');
+          }
+          return '';
+        })
+        .filter(Boolean);
+    };
+
+    // 1. Native Fork at reply1 via POST /api/sessions/:id/fork
+    const forkedSession = await json<{ id: string }>(`/api/sessions/${session.id}/fork`, 'POST', {
+      anchorMessageId: reply1.id,
+    });
+    const forkedConvId = await ensureRouterConversationId(runtime, forkedSession.id, 'architect');
+    assert.deepEqual(
+      await extractContextTexts(forkedConvId),
+      ['turn-1-question', 'reply-1'],
+      'POST /api/sessions/:id/fork binds a native pi-durable forked conversation at reply1',
+    );
+
+    // 2. Native Rewind via PUT /api/sessions/:id/messages/:messageId on userMsg2
+    faux.setResponses([fauxAssistantMessage('reply-2-edited')]);
+    await json(`/api/sessions/${session.id}/messages/${userMsg2.id}`, 'PUT', {
+      content: 'turn-2-edited',
+    });
+    await runtime.harness.waitForIdle(BACKGROUND_CONTEXT);
+
+    const rewoundConvId = await ensureRouterConversationId(runtime, session.id, 'architect');
+    assert.deepEqual(
+      await extractContextTexts(rewoundConvId),
+      ['turn-1-question', 'reply-1', 'turn-2-edited', 'reply-2-edited'],
+      'PUT /messages/:messageId rewinds via native conv.fork(prevEntryId) preserving turn 1 and replacing turn 2',
+    );
+  },
+);

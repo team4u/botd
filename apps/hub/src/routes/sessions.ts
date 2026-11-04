@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isSafeId } from '@botd/protocol';
 import type { CreateSessionInput } from '@botd/protocol';
 import { resolveOwnedSession } from '../http-helpers.js';
-import { cancelDurableSession, resetDurableSession } from './workers.js';
+import { cancelDurableSession, forkDurableSession, resetDurableSession } from './workers.js';
 import type { HubApp, HubContext } from './context.js';
 
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -171,6 +171,24 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
     const forked = db.forkSession(id, body.anchorMessageId);
     if (!forked) {
       return c.json({ error: 'Session or anchor message not found' }, 404);
+    }
+
+    // Durable 侧同步零拷贝分叉：若源会话已有 Durable Router 会话，通过 pi-durable 原生
+    // conv.fork(atEntryId) 在锚点消息对应的 Entry 处分叉并绑定到新会话。
+    if (ctx.durableRuntime) {
+      const forkedMessages = db.getMessages(forked.id);
+      const anchorMsg = forkedMessages.at(-1);
+      if (anchorMsg) {
+        await forkDurableSession(ctx.durableRuntime, {
+          sourceSessionId: id,
+          targetSessionId: forked.id,
+          anchorMessage: anchorMsg,
+          botId: forked.leadBotId,
+          messagesUpToAnchor: forkedMessages,
+        }).catch((err) => {
+          console.warn('[sessions] durable fork skipped:', err instanceof Error ? err.message : err);
+        });
+      }
     }
 
     return c.json(forked, 201);

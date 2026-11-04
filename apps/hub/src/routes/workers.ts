@@ -10,8 +10,8 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { defineDocFamily } from '@earendil-works/pi-durable';
 import { randomUUID } from 'node:crypto';
 import { resolveOwnedSession } from '../http-helpers.js';
-import type { PendingAskRecord, ToolCallRecord, TurnUsage } from '@botd/protocol';
-import type { HubDurableRuntime } from '../harness/hub-harness.js';
+import type { MessageAttachment, PendingAskRecord, ToolCallRecord, TurnUsage } from '@botd/protocol';
+import { stringToConversationId, type HubDurableRuntime } from '../harness/hub-harness.js';
 import { AskDoc, type AskEntry } from '../harness/docs.js';
 import type { WorkerEntry } from '../harness/docs.js';
 import {
@@ -574,23 +574,24 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
   });
 }
 
+const messageText = (message: unknown): string => {
+  if (message === null || typeof message !== 'object') return '';
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((block) =>
+      block !== null && typeof block === 'object' && typeof (block as { text?: unknown }).text === 'string'
+        ? (block as { text: string }).text
+        : '',
+    )
+    .filter(Boolean)
+    .join('\n');
+};
+
 /** 会话最近 Transcript 条目的轻量摘录（id / kind / role / 文本）。 */
 async function transcriptOf(conversation: NonNullable<Awaited<ReturnType<HubDurableRuntime['conversation']>>>): Promise<Array<{ id: string; kind: string; role?: string; text: string }>> {
   const page = await conversation.entries({ order: 'ascending' }, 50, undefined, BACKGROUND_CONTEXT);
-  const messageText = (message: unknown): string => {
-    if (message === null || typeof message !== 'object') return '';
-    const content = (message as { content?: unknown }).content;
-    if (typeof content === 'string') return content;
-    if (!Array.isArray(content)) return '';
-    return content
-      .map((block) =>
-        block !== null && typeof block === 'object' && typeof (block as { text?: unknown }).text === 'string'
-          ? (block as { text: string }).text
-          : '',
-      )
-      .filter(Boolean)
-      .join('\n');
-  };
   return page.items.map((entry) => {
     const first = entry.model?.[0];
     return {
@@ -839,9 +840,31 @@ export function createDurableSessionMirror(
 }
 
 /**
+ * 从 MessageAttachment[] 提取可供 pi-ai 多模态消费的 base64 图片列表。
+ */
+function extractImageAttachments(
+  attachments?: readonly MessageAttachment[],
+): Array<{ mimeType: string; data: string }> {
+  if (!Array.isArray(attachments) || attachments.length === 0) return [];
+  const images: Array<{ mimeType: string; data: string }> = [];
+  for (const att of attachments) {
+    if (!att || typeof att.dataUrl !== 'string' || !att.dataUrl) continue;
+    const match = /^data:([^;]+);base64,([\s\S]+)$/.exec(att.dataUrl);
+    const mimeType = att.mimeType || match?.[1] || '';
+    const data = match ? match[2] : att.dataUrl;
+    if (mimeType.startsWith('image/') && data) {
+      images.push({ mimeType, data });
+    }
+  }
+  return images;
+}
+
+/**
  * 用户消息 → Durable Router 会话提交（全双工：`whenBusy: "steer"`）：
- * 确保 Router 会话存在（懒建）并提交用户消息，镜像先行挂接。
- * 无 durable runtime 时返回 undefined，调用方继续走原 GroupRouter 路径。
+ * - 支持内置斜杠原语：`/compact [instructions]` 直接触发 `pi-durable` 原生非阻塞上下文压缩，
+ *   `/new [handoff]` 直接触发 `pi-durable` 原生 `pi.reset` 开启新上下文；
+ * - 支持多模态图片附件（`attachments` 自动转 `ImageContent`）；
+ * - 无 durable runtime 时返回 undefined，调用方继续走原 GroupRouter 路径。
  */
 export async function submitSessionMessageToDurable(
   ctx: Pick<HubContext, 'db' | 'sseHub'> & {
@@ -852,6 +875,10 @@ export async function submitSessionMessageToDurable(
   botId: string,
   content: string,
   mirror?: DurableSessionMirror,
+  options?: {
+    attachments?: readonly MessageAttachment[];
+    commandText?: string;
+  },
 ): Promise<string | undefined> {
   // getDurableRuntime 优先：每次提交前重新同步分身（新建 Bot 即刻可路由），
   // 同一 Hub 生命周期内返回同一实例。
@@ -859,11 +886,138 @@ export async function submitSessionMessageToDurable(
   if (rt === undefined) return undefined;
   const routerId = await ensureRouterConversationId(rt, sessionId, botId);
   await mirror?.ensure(sessionId);
+
+  const rawCommand = (options?.commandText ?? content).trim();
+  const compactMatch = /^\/compact(?:\s+([\s\S]*))?$/i.exec(rawCommand);
+  if (compactMatch) {
+    const instructions = compactMatch[1]?.trim() || undefined;
+    await rt.compactConversation(stringToConversationId(routerId), instructions, BACKGROUND_CONTEXT);
+    return routerId;
+  }
+
+  const newMatch = /^\/new(?:\s+([\s\S]*))?$/i.exec(rawCommand);
+  if (newMatch) {
+    const handoff = newMatch[1]?.trim() || undefined;
+    await rt.resetConversation(stringToConversationId(routerId), handoff, BACKGROUND_CONTEXT);
+    return routerId;
+  }
+
+  const images = extractImageAttachments(options?.attachments);
   await rt.submitUserMessage(routerId, content, {
     requestId: `hub-msg:${sessionId}:${Date.now()}`,
     whenBusy: 'steer',
+    ...(images.length > 0 ? { images } : {}),
   });
   return routerId;
+}
+
+/**
+ * 在 Durable Router 会话的 Entry 历史中定位某条 botd 消息对应的 EntryId：
+ * 1. 若消息 id 为镜像生成的 `msg_dur_<sessionId>_<entryId>`，直接提取 `<entryId>`；
+ * 2. 否则按升序遍历会话 Entry，按角色与文本序号匹配对应的 `pi.user` / `pi.assistant` 条目。
+ */
+async function resolveDurableEntryIdForMessage(
+  rt: HubDurableRuntime,
+  conversationId: string,
+  anchorMessage: { id: string; role: string; content: string },
+  messagesUpToAnchor?: ReadonlyArray<{ id: string; role: string; content: string }>,
+): Promise<import('@earendil-works/pi-durable').EntryId | undefined> {
+  const mirroredMatch = /^msg_dur_.+_(\d+)$/.exec(anchorMessage.id);
+  if (mirroredMatch) {
+    return Number(mirroredMatch[1]) as import('@earendil-works/pi-durable').EntryId;
+  }
+  const conv = await rt.conversation(conversationId, BACKGROUND_CONTEXT);
+  if (!conv) return undefined;
+  const page = await conv.entries({ order: 'ascending' }, 500, undefined, BACKGROUND_CONTEXT);
+  const targetRole = anchorMessage.role === 'assistant' ? 'assistant' : 'user';
+  // 计算在锚点之前（含锚点）同角色同文本出现的次数，确保重复文本也能精确定位第 N 次出现
+  const desiredOccurrence = messagesUpToAnchor
+    ? Math.max(
+        1,
+        messagesUpToAnchor.filter(
+          (m) => (m.role === 'assistant' ? 'assistant' : 'user') === targetRole && m.content === anchorMessage.content,
+        ).length,
+      )
+    : 1;
+  let seenSameContent = 0;
+  let lastMatchedId: import('@earendil-works/pi-durable').EntryId | undefined;
+  for (const entry of page.items) {
+    const first = entry.model?.[0] as { role?: string; content?: unknown } | undefined;
+    if (!first || first.role !== targetRole) continue;
+    const text = (entry.model ?? []).map(messageText).filter(Boolean).join('\n');
+    if (text === anchorMessage.content) {
+      lastMatchedId = entry.id;
+      seenSameContent++;
+      if (seenSameContent === desiredOccurrence) return entry.id;
+    }
+  }
+  return lastMatchedId;
+}
+
+/**
+ * 使用 `pi-durable` 原生 `conv.fork(atEntryId)` 分叉会话：
+ * 将源会话 Router Conversation 在 `anchorMessage` 对应的 `EntryId` 处零拷贝分叉，
+ * 并将新 `ConversationId` 绑定到 `targetSessionId` 的 `SessionRouterDoc`。
+ */
+export async function forkDurableSession(
+  rt: HubDurableRuntime,
+  input: {
+    sourceSessionId: string;
+    targetSessionId: string;
+    anchorMessage: { id: string; role: string; content: string };
+    botId: string;
+    messagesUpToAnchor?: ReadonlyArray<{ id: string; role: string; content: string }>;
+  },
+): Promise<string | undefined> {
+  const sourceRouterId = await findRouterConversationId(rt, input.sourceSessionId);
+  if (sourceRouterId === undefined) return undefined;
+  const entryId = await resolveDurableEntryIdForMessage(
+    rt,
+    sourceRouterId,
+    input.anchorMessage,
+    input.messagesUpToAnchor,
+  );
+  if (entryId === undefined) return undefined;
+  const forkedConv = await rt.forkConversation(
+    stringToConversationId(sourceRouterId),
+    entryId,
+    input.botId,
+    BACKGROUND_CONTEXT,
+  );
+  await rt.harness.commit(async (tx) => {
+    const doc = await tx.doc(SessionRouterDoc, input.targetSessionId, null);
+    doc.conversationId = String(forkedConv.id);
+  }, BACKGROUND_CONTEXT);
+  return String(forkedConv.id);
+}
+
+/**
+ * 编辑历史用户消息时的原生 `pi-durable` 时间线回滚（Rewind）：
+ * - 若被编辑的是会话第一条消息（`previousMessage === undefined`），直接重置 `SessionRouterDoc` 开启全新上下文；
+ * - 若前面已有历史消息，调用原生 `conv.fork(prevEntryId)` 生成精确停在 `previousMessage` 时刻的分支并切流过去，
+ *   完整保留编辑点之前的全部工具调用与模型上下文！
+ */
+export async function rewindDurableSessionBeforeMessage(
+  rt: HubDurableRuntime,
+  input: {
+    sessionId: string;
+    botId: string;
+    previousMessage?: { id: string; role: string; content: string };
+    messagesBeforeEdited?: ReadonlyArray<{ id: string; role: string; content: string }>;
+  },
+): Promise<string | undefined> {
+  await cancelDurableSession(rt, input.sessionId);
+  if (!input.previousMessage) {
+    await resetDurableSession(rt, input.sessionId);
+    return undefined;
+  }
+  return await forkDurableSession(rt, {
+    sourceSessionId: input.sessionId,
+    targetSessionId: input.sessionId,
+    anchorMessage: input.previousMessage,
+    botId: input.botId,
+    messagesUpToAnchor: input.messagesBeforeEdited,
+  });
 }
 
 /**

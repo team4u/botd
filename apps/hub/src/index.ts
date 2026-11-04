@@ -161,13 +161,16 @@ export function createHub(options?: HubOptions): HubInstance {
               setBotMemory: (botId, content) => db.setBotFile(botId, 'memory', content),
             },
             // Brain in Hub, Hands on Node：会话的目标节点在线时，工具执行走远端
-            // RemoteExecutionEnv；否则退回本地 NodeExecutionEnv。
+            // RemoteExecutionEnv；否则退回本地 NodeExecutionEnv（自动合并分身 env）。
             env: async ({ conversationId, cwd }) => {
-              const nodeId = await remoteNodeIdFor(String(conversationId), cwd);
-              if (nodeId !== undefined && connections.getNodeEnvRpc(nodeId) !== undefined) {
-                return connections.createRemoteEnv({ nodeId, cwd: cwd ?? process.cwd() });
+              const targetInfo = await remoteTargetFor(String(conversationId), cwd);
+              if (targetInfo.nodeId !== undefined && connections.getNodeEnvRpc(targetInfo.nodeId) !== undefined) {
+                return connections.createRemoteEnv({ nodeId: targetInfo.nodeId, cwd: cwd ?? process.cwd() });
               }
-              return new NodeExecutionEnv({ cwd: cwd ?? process.cwd() });
+              return new NodeExecutionEnv({
+                cwd: cwd ?? process.cwd(),
+                ...(targetInfo.shellEnv ? { shellEnv: targetInfo.shellEnv } : {}),
+              });
             },
           },
         );
@@ -185,43 +188,83 @@ export function createHub(options?: HubOptions): HubInstance {
     }
     return durableRuntimeOpening;
   };
-  /**
-   * 解析会话应使用的目标节点：优先读 durable 侧 `botd.target` 文档（Router/
-   * Worker 会话记录了 nodeId），否则按 Bot 的 workspaceDir 匹配 cwd。
-   */
-  const remoteNodeIdFor = async (conversationId: string, cwd?: string): Promise<string | undefined> => {
-    if (durableRuntime === undefined) return undefined;
+  /** 解析 Bot 的自定义环境变量（存储在 Hub SQLite bot_files.env）。 */
+  const readBotEnvMap = (botId: string): Record<string, string> | undefined => {
+    const raw = db.getBotFile(botId, 'env').trim();
+    if (!raw) return undefined;
     try {
-      const numeric = Number(conversationId);
-      if (Number.isInteger(numeric)) {
-        const target = await durableRuntime.harness.snapshot(
-          TargetDoc,
-          numeric as import('@earendil-works/pi-durable').ConversationId,
-          BACKGROUND_CONTEXT,
-        );
-        if (target !== undefined && target.nodeId !== '') return target.nodeId;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+        if (typeof v === 'string') out[k] = v;
       }
+      return Object.keys(out).length > 0 ? out : undefined;
     } catch {
-      // 快照失败退回 Bot 配置匹配
+      return undefined;
     }
-    if (cwd === undefined || cwd === '') return undefined;
-    return db.getAllBots().find((bot) => bot.workspaceDir && bot.workspaceDir === cwd)?.nodeId;
   };
-  /** Hub 数据库 Bot → 持久分身（SYSTEM/MEMORY、模型、Skills、Extensions 全部来自 Hub 权威存储）。 */
+
+  /**
+   * 解析会话应使用的目标节点与分身环境变量：优先读 durable 侧 `botd.target` 文档（Router/
+   * Worker 会话记录了 botId 与 nodeId），否则按 Bot 的 workspaceDir 匹配 cwd。
+   */
+  const remoteTargetFor = async (
+    conversationId: string,
+    cwd?: string,
+  ): Promise<{ nodeId?: string; shellEnv?: Record<string, string> }> => {
+    if (durableRuntime !== undefined) {
+      try {
+        const numeric = Number(conversationId);
+        if (Number.isInteger(numeric)) {
+          const target = await durableRuntime.harness.snapshot(
+            TargetDoc,
+            numeric as import('@earendil-works/pi-durable').ConversationId,
+            BACKGROUND_CONTEXT,
+          );
+          if (target !== undefined) {
+            const shellEnv = target.botId ? readBotEnvMap(target.botId) : undefined;
+            if (target.nodeId !== '') return { nodeId: target.nodeId, ...(shellEnv ? { shellEnv } : {}) };
+            if (shellEnv) return { shellEnv };
+          }
+        }
+      } catch {
+        // 快照失败退回 Bot 配置匹配
+      }
+    }
+    if (cwd === undefined || cwd === '') return {};
+    const matched = db.getAllBots().find((bot) => bot.workspaceDir && bot.workspaceDir === cwd);
+    if (!matched) return {};
+    const shellEnv = readBotEnvMap(matched.id);
+    return { nodeId: matched.nodeId, ...(shellEnv ? { shellEnv } : {}) };
+  };
+  /** Hub 数据库 Bot → 持久分身（SYSTEM/MEMORY、模型、思考档位、Skills、Extensions、环境变量全部来自 Hub 权威存储）。 */
   const syncBotPersonas = async (runtime: HubDurableRuntime): Promise<void> => {
     for (const bot of db.getAllBots()) {
+      const parent = bot.parentBotId ? db.getBot(bot.parentBotId) : undefined;
+      const effectiveModel =
+        bot.inheritModel && parent
+          ? { provider: parent.modelProvider, modelId: parent.modelId }
+          : { provider: bot.modelProvider, modelId: bot.modelId };
+      const effectiveSkills =
+        bot.inheritSkills && parent
+          ? (parent.enabledSkills ?? bot.enabledSkills ?? [])
+          : (bot.enabledSkills ?? []);
       const systemMd = db.getBotFile(bot.id, 'system').trim();
       const memoryMd = db.getBotFile(bot.id, 'memory').trim();
+      const botEnv = readBotEnvMap(bot.id);
       const persona: BotPersonaConfig = {
         botId: bot.id,
         name: bot.name,
-        model: { provider: bot.modelProvider, modelId: bot.modelId },
+        model: effectiveModel,
+        ...(bot.thinkingLevel ? { thinkingLevel: bot.thinkingLevel } : {}),
         instructions:
           systemMd ||
           `You are "${bot.name}", the lead bot of this hub.${bot.description ? ` ${bot.description}` : ''}`,
         ...(memoryMd ? { memory: memoryMd } : {}),
-        enabledSkills: bot.enabledSkills,
+        enabledSkills: effectiveSkills,
         enabledExtensions: bot.enabledExtensions,
+        ...(botEnv ? { env: botEnv } : {}),
         nodeId: bot.nodeId,
         cwd: bot.workspaceDir?.trim() || process.cwd(),
       };

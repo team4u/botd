@@ -127,9 +127,9 @@ const primaryBot: BotConfig = {
   description: '项目经理',
   modelProvider: 'openai',
   modelId: 'gpt-4o',
-  systemMd: '',
   enabledSkills: [],
   enabledExtensions: [],
+  updatedAt: new Date().toISOString(),
 };
 
 const subagentBot: BotConfig = {

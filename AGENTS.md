@@ -35,7 +35,7 @@ pnpm dev:web
 ## 版本发布与分发规范
 
 - **触发事实源**：以 GitHub Release 作为唯一触发源，由 `scripts/release.ts` 驱动全流程（版本同步 → 质量检验 → 规范提交 → 创建 Release）。本地不手工打 Git 标签，禁止脱离发行流程直接 `npm publish`。
-- **发布清单与拓扑**：仅发布 `@botd/protocol` → `@botd/models` → `@botd/node`（按依赖拓扑序）。hub 与 web 保持 private，绝不在发布清单。
+- **发布清单与拓扑**：仅发布 `@botd/protocol` → `@botd/node`（按依赖拓扑序）。hub、web 与 models 保持 private，绝不在发布清单。
 - **全仓版本强一致**：发版时根目录与全部 workspace 包版本号统一同步（`scripts/bump-version.ts`），发布前做强一致性断言，避免 npm 回退加载旧版本。
 - **分发标签隔离**：正式版本使用 `latest`；预发布版本（如 `0.2.0-beta.1`）自动使用 `beta`/`alpha` 独立标签，严禁覆盖 `latest` 指针。注意：节点升级检查默认查 `@botd/node` 的 `latest` 标签，未发布的预发布版本不会触发升级。
 - **不可变发布**：CI 发布前逐包 shasum 幂等校验，同版本号摘要不一致直接终止；摘要一致则跳过，重跑安全。
