@@ -1,696 +1,940 @@
 # CLI 参考
 
-botd CLI 同时承担两种角色：管理本机 Node Agent 守护进程，以及执行 Hub 管理操作。[文档目录](README.md)
+botd CLI 提供命令行管理入口。用户可通过 CLI 管理本机 Node 守护进程，也可管理 Hub 资源。[返回文档目录](README.md)
 
 ## 命令入口
 
-三种入口运行同一套命令：
+用户可通过三种入口执行 CLI 命令：
 
-| 入口 | 场景 |
+| 入口 | 说明 |
 | --- | --- |
-| `pnpm node` | 源码仓库内开发调试。实际执行 `pnpm --filter @botd/node cli` |
-| `node apps/node/dist/cli.js` | 仓库内执行 `pnpm build` 后使用。输出干净，适合脚本捕获 |
-| `botd` | 通过 npm 包安装后的全局命令。`package.json` 声明 `bin` 字段指向 `dist/cli.js` |
+| `pnpm node` | 源码仓库开发命令。映射到 `pnpm --filter @botd/node cli`。 |
+| `node apps/node/dist/cli.js` | 编译产物入口。输出内容纯净，适合脚本解析。 |
+| `botd` | 全局安装命令。包入口指向 `dist/cli.js`。 |
 
-查看帮助：
+查看全局帮助信息：
 
 ```bash
-pnpm node --help
-pnpm node sessions --help
-pnpm node chat send --help
+botd --help
+botd sessions --help
+botd chat send --help
 ```
 
-下文语法块中，尖括号 `<value>` 表示需要填入的值，方括号表示可省略。
+尖括号 `<value>` 表示必填参数。方括号 `[value]` 表示选填参数。
 
 ## 全局选项
 
-所有子命令共享以下选项：
+全局选项适用于全部子命令：
 
-| 选项 | 说明 |
-| --- | --- |
-| `--json` | 输出机器可读 JSON |
-| `--data-dir <dir>` | 数据目录。优先级：该参数、环境变量 `BOTD_DATA_DIR`、默认 `~/.botd` |
-| `--hub <url>` | 覆盖目标 Hub URL。默认读取 `botd login` 保存的地址或环境变量 `BOTD_HUB_URL` |
-| `--password <password>` | Hub 登录密码。后备为环境变量 `BOTD_ADMIN_PASSWORD` |
-| `--timeout <seconds>` | HTTP 请求超时秒数，默认 `30` |
-| `-V, --version` | 打印版本号 |
-| `-h, --help` | 打印当前命令帮助 |
-
-部分子命令有同名但含义不同的选项。例如 `ask --timeout` 控制等待用户回答的秒数，不控制 HTTP 超时。
+| 选项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--json` | 无 | 输出 JSON 格式数据。 |
+| `--data-dir <dir>` | `~/.botd` | 指定数据目录。优先级高于 `BOTD_DATA_DIR`。 |
+| `--hub <url>` | `cli.json` 所存地址 | 指定目标 Hub 地址。优先级高于环境变量。 |
+| `--password <password>` | 无 | 指定 Hub 登录密码。优先级高于 `BOTD_ADMIN_PASSWORD`。 |
+| `--timeout <seconds>` | `30` | 指定 HTTP 请求超时秒数。 |
+| `-V, --version` | 无 | 显示当前版本号。 |
+| `-h, --help` | 无 | 显示当前命令帮助信息。 |
 
 ## 输出格式与错误处理
 
-`--json` 直接输出接口返回的原始 JSON。
+添加 `--json` 选项时，CLI 输出原始 JSON 数据。
 
-不加 `--json` 时按人类可读格式渲染：对象数组渲染为对齐表格，单对象渲染为 `key  value` 行，字符串原样打印。`skills get`、`bots system get` 等内容类命令直接输出文档正文，便于管道传递。
+省略 `--json` 选项时，CLI 采用文本格式输出：
 
-命令失败时退出码为 `1`。错误信息写入 stderr。`--json` 模式下错误为 `{"error": "原因"}`。参数解析错误由 Commander 自行处理。
+- 对象列表渲染为表格。
+- 单个对象渲染为键值对。
+- 内容类命令（如 `skills get`）直接输出正文。
 
-## 登录与凭据
+命令执行失败时，进程退出码为 `1`。CLI 将错误原因写入标准错误。在 `--json` 模式下，CLI 输出 `{"error": "原因"}`。
+
+## 登录与鉴权
 
 ```text
-login <hubUrl> [--username <name>] [--save-credentials]
-logout
-health
+botd login <hubUrl> [--username <name>] [--save-credentials]
+botd logout
+botd health
 ```
 
 ### login
 
-登录 Hub 并保存会话令牌。
+登录 Hub 并保存会话凭据。
 
 ```bash
-pnpm node login http://localhost:3002 --username admin --password 'your-password'
+botd login http://localhost:3002 --username admin --password 'your-password'
 ```
 
-本机开发时 Hub 运行在 3002 端口（启动命令带 `BOTD_PORT=3002`）。生产部署默认端口为 3000。
+本地开发环境 Hub 监听 `3002` 端口。生产环境 Hub 默认监听 `3000` 端口。
 
 | 参数或选项 | 说明 |
 | --- | --- |
-| `<hubUrl>` | Hub 地址，末尾斜杠会被去掉 |
-| `--username <name>` | 登录用户名。后备顺序：`--username` 参数、环境变量 `BOTD_USERNAME`、默认 `admin` |
-| `--save-credentials` | 将密码明文保存到 `cli.json`（权限 0600）。默认不保存密码 |
+| `<hubUrl>` | Hub 服务地址。CLI 自动裁剪末尾斜杠。 |
+| `--username <name>` | 登录用户名。默认读取 `BOTD_USERNAME` 或使用 `admin`。 |
+| `--save-credentials` | 将密码明文写入 `cli.json`（权限 0600）。默认不保存。 |
 
-密码必须通过全局 `--password` 或环境变量 `BOTD_ADMIN_PASSWORD` 提供，否则命令报错。
+用户必须提供密码。用户可通过 `--password` 选项或 `BOTD_ADMIN_PASSWORD` 环境变量传入密码。
 
-登录成功后，令牌写入 `<数据目录>/cli.json`。CLI 随后调用 `GET /api/auth/me` 验证会话有效。
+登录成功后，CLI 将令牌写入 `<数据目录>/cli.json`。CLI 随后调用 `GET /api/auth/me` 验证有效性。
 
 ### logout
 
-登出当前 Hub。CLI 尽力调用 `POST /api/auth/logout`，然后清空 `cli.json`。
+登出当前 Hub。CLI 请求 `POST /api/auth/logout`，随后清空 `cli.json` 文件。
 
 ### health
 
-匿名调用 `GET /api/health`，检查 Hub 可达性。Hub 地址取自 `--hub` 或已保存配置。
+检查 Hub 服务健康状态。CLI 匿名调用 `GET /api/health` 接口。
+
+```bash
+botd health
+```
 
 ### 凭据解析规则
 
-Hub 地址的解析优先级：`--hub` 参数、环境变量 `BOTD_HUB_URL`、`cli.json` 中保存的地址。
+CLI 按以下顺序解析 Hub 地址：
 
-已保存的令牌只在目标 Hub 与保存地址一致时复用。命令收到 `401` 且有可用密码时，自动重新登录并重试一次。
+1. 命令行选项 `--hub`。
+2. 环境变量 `BOTD_HUB_URL`。
+3. `cli.json` 文件中的 `hubUrl` 字段。
 
-没有令牌和密码时，CLI 回退到本机配对身份 `node.json`。此时请求携带 `x-botd-node-id` 与 `x-botd-node-token` 头，以节点账户身份访问 Hub。
+CLI 仅在目标地址与已存地址一致时复用令牌。收到 `401` 错误且具备密码时，CLI 自动重新登录。
 
-## 节点守护进程
+无令牌且无密码时，CLI 读取本地配对凭据 `node.json`。CLI 携带节点凭据头访问 Hub。
 
-这组命令管理本机 Node Agent，通过本地 IPC 接口通信，不经过 Hub、免登录。守护进程使用：POSIX 系统使用 `<数据目录>/agent.sock`，Windows 使用命名管道。新版守护进程在 `<数据目录>/ipc-token` 写入令牌，CLI 每次请求自动携带。CLI 与守护进程版本不匹配时，请求返回 `401`，此时执行 `botd restart` 或升级到匹配版本。
+## 节点守护进程管理
+
+这组命令管理本机 Node 守护进程。命令通过本地 IPC 通信，无需登录 Hub。
+
+POSIX 系统使用 Unix Domain Socket：`<数据目录>/agent.sock`。
+
+Windows 系统使用命名管道：`\\.\pipe\botd-agent-<hash>`。
+
+守护进程将通信令牌写入 `<数据目录>/ipc-token`（权限 0600）。CLI 自动携带该令牌。
 
 ### start
 
-```text
-start [-d | --detach] [--log-file <path>]
-```
-
-启动本机守护进程。默认前台运行，`Ctrl+C` 或 `SIGTERM` 触发优雅退出。
-
-| 选项 | 说明 |
-| --- | --- |
-| `-d, --detach` | 后台运行，日志写入 `--log-file` |
-| `--log-file <path>` | 后台模式日志文件。默认 `<数据目录>/daemon.log` |
+启动 Node 守护进程。
 
 ```bash
-pnpm node start -d
+# 前台启动
+botd start
+
+# 后台启动
+botd start -d --log-file ~/.botd/daemon.log
 ```
 
-`--json` 输出 `{ ok, pid, logFile }`。
-
-### stop
-
-```text
-stop
-```
-
-优雅停止守护进程。CLI 先通过 IPC 调用 `/shutdown`。IPC 不可达时，读取 `<数据目录>/daemon.pid` 并发送 `SIGTERM`。
+| 选项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-d, --detach` | `false` | 转入后台执行。 |
+| `--log-file <path>` | `<数据目录>/daemon.log` | 指定后台日志文件路径。 |
 
 ### restart
 
-```text
-restart [-d | --detach] [--log-file <path>]
+重启 Node 守护进程。CLI 先停止已启动的守护进程，随后在后台启动新守护进程。
+
+```bash
+botd restart
 ```
-
-先执行 `stop`，再执行 `start`。选项含义与 `start` 相同。
-
-### status
-
-```text
-status
-```
-
-查询守护进程状态。输出 PID、运行时长、版本、节点名、Hub 连接状态与 IPC 地址。守护进程未运行时退出码为 `1`。`--json` 输出完整状态对象。
 
 ### reload
 
-```text
-reload
+重载 Node 资源配置。守护进程重新扫描本地 Skills、Extensions 与 Bots，并同步至 Hub。
+
+```bash
+botd reload
 ```
 
-让守护进程向 Hub 重新注册技能、扩展和 Bot 清单。在 Web 之外修改了资源文件后执行此命令。
+### stop
 
-### service
+停止本地 Node 守护进程。
 
-```text
-service <install|uninstall|status> [--dry-run]
+```bash
+botd stop
 ```
 
-管理操作系统级后台服务。
+### status
 
-| 位置参数 | 说明 |
-| --- | --- |
-| `install` | 安装并启用服务 |
-| `uninstall` | 停止并移除服务 |
-| `status` | 查询服务安装状态 |
+查询本地 Node 守护进程状态。
 
-各平台实现：Linux 使用 systemd 用户单元 `botd.service`，macOS 使用 LaunchAgent `dev.botd.agent.plist`，Windows 使用计划任务 `BotdNodeAgent`。
+```bash
+botd status
+```
 
-`--dry-run` 只生成配置文件，不改动系统。
+守护进程执行时，输出 PID、运行时长、节点名称、Node ID 与 Hub 连接状态。未启动时退出码为 `1`。
 
 ### upgrade
 
-```text
-upgrade [--version <ver>] [--registry <url>] [--check] [--force]
-```
+检查或执行 Node 节点程序升级。
 
-检查或执行本机节点升级。
+```bash
+# 检查可用更新
+botd upgrade --check
+
+# 执行升级
+botd upgrade
+
+# 指定版本与 npm 源升级
+botd upgrade --version 0.2.1 --registry https://registry.npmmirror.com
+```
 
 | 选项 | 说明 |
 | --- | --- |
-| `--check` | 只检查是否有可用更新，不执行升级 |
-| `--version <ver>` | 指定目标版本 |
-| `--registry <url>` | 指定 npm registry 地址 |
-| `--force` | 版本一致时也强制升级 |
+| `--check` | 仅检查可用更新，不执行升级操作。 |
+| `--version <ver>` | 指定升级目标版本号。 |
+| `--registry <url>` | 指定 npm registry 地址。 |
+| `--force` | 强制执行升级操作。 |
 
-守护进程运行中时，升级请求经 IPC 转发（超时 600 秒）。守护进程未运行时，CLI 直接本地执行升级。
+### service
+
+管理操作系统后台服务（systemd / launchd / Windows Service）。
+
+```bash
+# 安装系统服务
+botd service install
+
+# 查看系统服务状态
+botd service status
+
+# 卸载系统服务
+botd service uninstall
+```
+
+| 选项 | 说明 |
+| --- | --- |
+| `--dry-run` | 创建服务配置文件，不应用系统修改。 |
 
 ### join
 
-```text
-join <hubUrl> --code <code> --name <name>
-```
+将本机节点配对连接至 Hub。
 
-用 Web 生成的配对码注册本机节点。CLI 调用 `POST <hubUrl>/api/nodes/pairing/exchange`，成功后将节点身份写入 `node.json`。
+```bash
+botd join http://localhost:3002 --code 123456 --name my-node
+```
 
 | 参数或选项 | 说明 |
 | --- | --- |
-| `<hubUrl>` | Hub 地址 |
-| `--code <code>` | 必填，Web 生成的配对码 |
-| `--name <name>` | 必填，节点名称 |
+| `<hubUrl>` | 目标 Hub 服务地址。 |
+| `--code <code>` | Hub 创建的 6 位一次性配对码。 |
+| `--name <name>` | 节点显示名称。 |
 
-```bash
-pnpm node join http://localhost:3002 --code 123456 --name my-laptop
-```
-
-### install
-
-```text
-install <source> [--kind auto|skill|extension] [--id <customId>] [--bot <botIds...>]
-```
-
-在本机安装技能或扩展。安装完成后，若守护进程在线，自动触发一次 `reload`。
-
-| 参数或选项 | 说明 |
-| --- | --- |
-| `<source>` | 资源来源，见下表 |
-| `--kind <kind>` | 资源类型：`auto`（默认）、`skill`、`extension` |
-| `--id <customId>` | 自定义资源标识 |
-| `--bot <botIds...>` | 安装后立即绑定到这些 Bot 并启用（可写多个）。省略时只安装不启用 |
-
-`<source>` 支持的语法：
-
-| 来源 | 示例 | 行为 |
-| --- | --- |
-| npm 包 | `npm:@scope/pkg@1.0.0` | 默认装为扩展：在扩展目录下 `npm install` 该包并重导出其默认导出。包声明 Pi Package `pi` 清单的 `pi.extensions` 字段时，改写为相对安装目录的清单路径由加载器完整装载 |
-| Git 仓库 | `git:github.com/owner/repo@ref` | 浅克隆仓库并切到 `ref`（分支 / 标签），识别根目录 `SKILL.md`、`skills/`、`.agents/skills/` 等标准布局 |
-| GitHub 简写 | `owner/repo` 或 `owner/repo@skillName` | 等价 `https://github.com/owner/repo.git`；带 `@skillName` 时只装仓库内同名技能 |
-| GitHub 子路径 | `https://github.com/o/r/tree/main/skills/x` | 克隆后只装子路径，`@ref` 段作为分支 |
-| 本地文件 / 目录 | `./my-skill`、`./ext.ts` | 目录含 `SKILL.md` 视为技能，否则视为扩展；`.md` 文件视为技能 |
-
-```bash
-# 从 npm 安装扩展并立即绑定给两个 Bot
-botd install npm:@scope/pi-tools@1.2.0 --bot ops-bot lead-bot
-
-# 从 GitHub 指定分支安装
-botd install git:github.com/example/botd-exts@v1
-```
-
-## 会话内工具命令
-
-以下命令面向 Bot 工具环境和外部脚本，需要本机守护进程运行。会话相关参数可用环境变量 `BOTD_SESSION_ID` 与 `BOTD_BOT_ID` 提供。
+配对成功后，CLI 将配对凭据写入 `<数据目录>/node.json`。
 
 ### wake
 
-```text
-wake --message <msg> [--session <id>] [--bot <id>] [--reply-to <botId>] [--no-turn] [--delay <duration>]
-```
+向会话发送唤醒触发指令。
 
-向会话投递唤醒消息。
+```bash
+# 立即唤醒会话并触发推理
+botd wake --session sess_1 --bot bot_1 --message "外部构建已完成"
+
+# 仅插入消息，不触发模型推理
+botd wake --session sess_1 --bot bot_1 --message "记录日志" --no-turn
+
+# 延迟 15 分钟唤醒
+botd wake --session sess_1 --bot bot_1 --message "检查长任务" --delay 15m
+```
 
 | 选项 | 说明 |
 | --- | --- |
-| `--message <msg>` | 必填，唤醒时投递的消息 |
-| `--session <id>` | 会话 ID，后备 `BOTD_SESSION_ID` |
-| `--bot <id>` | Bot ID，后备 `BOTD_BOT_ID` |
-| `--reply-to <botId>` | 唤醒后移交或提及的目标 Bot |
-| `--no-turn` | 只投递消息，不触发模型回合 |
-| `--delay <duration>` | 延迟投递，格式如 `30s`、`15m`、`2h`、`1d` |
+| `--session <id>` | 目标会话 ID。默认读取 `BOTD_SESSION_ID`。 |
+| `--bot <id>` | 目标 Bot ID。默认读取 `BOTD_BOT_ID`。 |
+| `--message <msg>` | 投递的唤醒消息文本。 |
+| `--reply-to <botId>` | 唤醒后转交或提及的 Bot ID。 |
+| `--no-turn` | 仅插入消息并广播 SSE，不触发模型推理。 |
+| `--delay <duration>` | 延迟唤醒时长（例如 `30s`、`15m`、`2h`、`1d`）。 |
 
-`--delay` 生效时，守护进程请求 Hub 创建计划触发器。`--json` 输出包含 `scheduledTriggerId`。
+## 产物管理（Artifacts）
 
-```bash
-botd wake --message "构建完成，请继续" --delay 30m
-```
-
-### ask
+产物管理命令通过本地守护进程 IPC 上传或下载会话文件。
 
 ```text
-ask [prompt] [--options <items>] [--timeout <seconds>] [--session <id>] [--bot <id>]
-    [--file <path>] [--diff] [--stdin] [--ui] [--ui-schema]
-    [--risk <level>] [--reason <text>] [--resource <target>]
+botd artifact put <filePath> [--session <id>] [--bot <id>] [--message <msg>]
+botd artifact pull <artifactId> [-o, --output <path>]
+botd artifact list [--session <id>]
 ```
 
-在会话中向用户提问并阻塞等待回答。答案打印到 stdout，可直接被 shell 捕获：
+### artifact put
+
+将本地文件上传为会话产物。
 
 ```bash
-choice=$(botd ask "是否继续部署" --options "继续,取消")
+botd artifact put ./report.pdf --session sess_1 --bot bot_1 --message "输出测试报告"
 ```
-
-| 参数或选项 | 说明 |
-| --- | --- |
-| `[prompt]` | 问题正文，充当卡片标题 |
-| `--options <items>` | 逗号分隔的选项，如 `"确认,取消"` |
-| `--timeout <seconds>` | 等待秒数，默认 `300`。`0` 表示无限等待 |
-| `--session <id>` | 会话 ID，后备 `BOTD_SESSION_ID` |
-| `--bot <id>` | Bot ID，后备 `BOTD_BOT_ID` |
-| `--file <path>` | 附件预览文件。按后缀自动识别类型：`.ui.json` 为 UI，`.diff`/`.patch` 为 diff，`.md` 为 markdown，其余为纯文本 |
-| `--diff` | 预览类型标记为 diff。未给 `--file` 时读取 stdin |
-| `--stdin` | 从 stdin 读取预览内容 |
-| `--ui` | 将预览内容作为 `botd.v1` 生成式 UI 卡片渲染，写入前先校验 |
-| `--ui-schema` | 打印 `botd.v1` UI 规范与组件目录后退出 |
-| `--risk <level>` | 自动生成风险审批卡，取值 `low`、`medium`、`high` |
-| `--reason <text>` | 需要人工审批的原因，作为审批卡提示正文 |
-| `--resource <target>` | 受影响的资源、服务或路径 |
-
-预览内容上限 256KB，超出部分截断。
-
-任一 `--risk`、`--reason`、`--resource` 出现且未给 `--ui` 时，进入审批卡模式：CLI 自动生成包含风险标识、资源信息、预览折叠与操作按钮的 UI 卡片。此时未指定 `--options` 则默认按钮为「批准」「拒绝」。回答输出纯决定文本。
-
-### bg
-
-管理带自动唤醒回调的后台任务。任务在 Bot 工作区执行，结束时守护进程自动向会话回报。
-
-#### bg run
-
-```text
-bg run [--session <id>] [--bot <id>] [--reply-to <botId>] [--no-turn] -- <command...>
-```
-
-以后台任务运行 shell 命令。命令部分写在 `--` 之后，避免与选项混淆。
 
 | 选项 | 说明 |
 | --- | --- |
-| `--session <id>` | 会话 ID，后备 `BOTD_SESSION_ID` |
-| `--bot <id>` | Bot ID，后备 `BOTD_BOT_ID` |
-| `--reply-to <botId>` | 任务完成后移交或提及的目标 Bot |
-| `--no-turn` | 完成后只投递日志摘要，不触发模型回合 |
+| `<filePath>` | 本地文件路径。 |
+| `--session <id>` | 关联会话 ID。默认读取 `BOTD_SESSION_ID`。 |
+| `--bot <id>` | 发送方 Bot ID。默认读取 `BOTD_BOT_ID`。 |
+| `--message <msg>` | 随产物发送的说明消息。 |
+
+### artifact pull
+
+从会话下载指定产物文件至本地。
 
 ```bash
-botd bg run -- npm run build
+botd artifact pull art_123 -o ./downloaded.pdf
 ```
-
-`--json` 输出任务记录，包含 `id`、`pid`、`command`、`logPath`。
-
-#### bg list
-
-```text
-bg list [--session <id>] [--bot <id>]
-```
-
-列出本机后台任务。`--session` 与 `--bot` 按会话或 Bot 过滤。
-
-#### bg logs
-
-```text
-bg logs <jobId> [--lines <n>]
-```
-
-查看任务日志尾部。`--lines` 默认 `100`。
-
-#### bg kill
-
-```text
-bg kill <jobId>
-```
-
-终止一个运行中的后台任务。
-
-### artifact
-
-在会话与节点之间传递产物文件。命令组名 `artifact`，别名 `artifacts`。上传下载优先走 Hub HTTP 接口直传（单文件上限 15MB），失败时回落到节点 WebSocket birpc 通道。
-
-#### artifact put
-
-```text
-artifact put <filePath> [--session <id>] [--bot <id>] [--message <msg>]
-```
-
-上传本地文件为会话产物。
 
 | 参数或选项 | 说明 |
 | --- | --- |
-| `<filePath>` | 本地文件路径，必须存在 |
-| `--session <id>` | 会话 ID，后备 `BOTD_SESSION_ID` |
-| `--bot <id>` | Bot ID，后备 `BOTD_BOT_ID` |
-| `--message <msg>` | 随产物一并投递的消息 |
+| `<artifactId>` | 产物唯一标识 ID。 |
+| `-o, --output <path>` | 本地保存路径。默认使用产物原始文件名。 |
 
-#### artifact pull
+### artifact list
 
-```text
-artifact pull <artifactId> [-o | --output <path>]
-```
-
-下载产物到本机。未给 `-o` 时，保存为当前目录下产物同名文件。文件名只取最后一段路径，防止路径穿越。无有效文件名时回退为 `artifact-<artifactId>`。
-
-#### artifact list
-
-```text
-artifact list [--session <id>]
-```
-
-列出会话产物。`--session` 后备 `BOTD_SESSION_ID`。
-
-## Hub 管理命令
-
-这组命令经 Hub API 操作，覆盖 Web 界面的管理能力。执行前需要完成 `login`，或具备节点配对身份。
-
-### nodes
-
-```text
-nodes list
-nodes pair
-nodes install <nodeId> <source> [--kind auto|skill|extension] [--id <customId>]
-nodes upgrade <nodeId> [--version <ver>] [--registry <url>] [--check]
-```
-
-#### nodes list
-
-列出已连接节点及其托管的 Bot。
-
-#### nodes pair
-
-生成节点配对码。输出配对码与过期时间，并提示目标机器上执行的 `botd join` 命令。
+列出会话关联的全部产物文件。
 
 ```bash
-pnpm node nodes pair
+botd artifact list --session sess_1
 ```
 
-#### nodes install
+## Hub 节点管理
 
-向指定节点安装技能或扩展。要求拥有该节点且节点在线。
+```text
+botd nodes list
+botd nodes pair
+botd nodes install <nodeId> <source> [--kind <auto|skill|extension>] [--id <customId>]
+botd nodes upgrade <nodeId> [--version <ver>] [--registry <url>] [--check]
+```
+
+### nodes list
+
+列出 Hub 当前连接的全部节点及其承载的 Bot 列表。
+
+```bash
+botd nodes list
+```
+
+### nodes pair
+
+创建新节点配对码。
+
+```bash
+botd nodes pair
+```
+
+命令输出配对码与过期时间。目标机器使用该配对码执行 `botd join`。
+
+### nodes install
+
+向指定在线节点安装 Skill 或 Extension 资产。
+
+```bash
+botd nodes install node_1 github:user/repo --kind skill --id my-skill
+```
 
 | 参数或选项 | 说明 |
 | --- | --- |
-| `<nodeId>` | 目标节点 ID |
-| `<source>` | 资源来源 |
-| `--kind <kind>` | 资源类型：`auto`、`skill`、`extension` |
-| `--id <customId>` | 自定义资源标识 |
+| `<nodeId>` | 目标节点 ID。 |
+| `<source>` | 资产来源路径或 Git 仓库地址。 |
+| `--kind <kind>` | 资产类型：`auto`、`skill`、`extension`。 |
+| `--id <customId>` | 自定义安装标识 ID。 |
 
-#### nodes upgrade
+### nodes upgrade
 
-检查或触发指定节点的升级。
+远程检查或触发指定在线节点的程序升级。
+
+```bash
+botd nodes upgrade node_1 --check
+botd nodes upgrade node_1 --version 0.2.1
+```
+
+## Bot 管理
+
+```text
+botd bots list [--node <nodeId>] [--parent <parentBotId>]
+botd bots create <botId> --name <name> --model <provider/modelId> [选项...]
+botd bots update <botId> [选项...]
+botd bots delete <botId>
+botd bots system get <botId>
+botd bots system put <botId> [--file <path>]
+botd bots memory get <botId>
+botd bots memory put <botId> [--file <path>]
+botd bots env list <botId>
+botd bots env set <botId> <KEY=VALUE...> [--replace]
+botd bots env unset <botId> <KEY...>
+```
+
+### bots list
+
+列出当前 Hub 全部 Bot 及子代理。
+
+```bash
+botd bots list --node node_1
+```
+
+### bots create
+
+创建新 Bot 配置。
+
+```bash
+botd bots create code-reviewer \
+  --name "代码评审员" \
+  --model anthropic/claude-sonnet-4-5 \
+  --desc "负责分析代码变更并提出建议" \
+  --thinking medium \
+  --skill git-review \
+  --system-file ./prompts/reviewer.md \
+  --workspace /home/user/project
+```
 
 | 参数或选项 | 说明 |
 | --- | --- |
-| `<nodeId>` | 目标节点 ID |
-| `--check` | 只检查可用更新，不执行 |
-| `--version <ver>` | 指定目标版本 |
-| `--registry <url>` | 指定 npm registry 地址 |
+| `<botId>` | Bot 唯一标识 ID。 |
+| `--name <name>` | 必填，Bot 显示名称。 |
+| `--model <provider/modelId>` | 必填，模型格式为供应商/模型 ID。 |
+| `--node <nodeId>` | 所属节点 ID。默认读取 `BOTD_NODE_ID` 或使用 `local`。 |
+| `--desc <desc>` | Bot 功能描述文本。 |
+| `--thinking <level>` | 思考预算级别：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。 |
+| `--skill <ids...>` | 启用的 Skill ID 列表。 |
+| `--extension <ids...>` | 启用的 Extension ID 列表。 |
+| `--system-file <path>` | 配置 SYSTEM.md 文件路径，`-` 表示标准输入。 |
+| `--workspace <dir>` | 绑定的项目工作区目录。 |
 
-### bots
+### bots update
 
-```text
-bots list [--node <nodeId>] [--parent <parentBotId>]
-bots create <botId> --node <nodeId> --name <name> [选项...]
-bots update <botId> [选项...]
-bots delete <botId>
-bots system get <botId>
-bots system put <botId> [--file <path>]
-bots memory get <botId>
-bots memory put <botId> [--file <path>]
-bots env list <botId>
-bots env set <botId> <KEY=value...> [--replace]
-bots env unset <botId> <keys...>
+修改已有 Bot 配置。选项与 `create` 一致。仅修改传入的字段。
+
+### bots delete
+
+删除指定的 Bot 配置。
+
+```bash
+botd bots delete code-reviewer
 ```
 
-#### bots list
+### bots system / memory
 
-列出全部 Bot 与子代理。`--node` 按节点过滤，`--parent` 按父 Bot 过滤。
+读取或写入 Bot 的系统提示词 `SYSTEM.md` 与长期记忆 `MEMORY.md`。
 
-#### bots create
+```bash
+# 读取 SYSTEM.md
+botd bots system get code-reviewer
 
-创建 Bot 配置。
+# 写入 SYSTEM.md
+botd bots system put code-reviewer --file ./SYSTEM.md
+
+# 读取 MEMORY.md
+botd bots memory get code-reviewer
+
+# 写入 MEMORY.md
+botd bots memory put code-reviewer --file ./MEMORY.md
+```
+
+### bots env
+
+管理 Bot 的独立环境变量与密钥配置。
+
+```bash
+# 列出环境变量键名列表
+botd bots env list code-reviewer
+
+# 设置环境变量
+botd bots env set code-reviewer GITHUB_TOKEN=ghp_xxx API_KEY=sk_xxx
+
+# 全量替换环境变量
+botd bots env set code-reviewer GITHUB_TOKEN=ghp_xxx --replace
+
+# 删除指定环境变量
+botd bots env unset code-reviewer API_KEY
+```
+
+## 会话管理（Sessions）
+
+```text
+botd sessions list
+botd sessions create --title <title> --lead <botId>
+botd sessions update <sessionId> [--title <title>] [--lead <botId>] [--archive <true|false>]
+botd sessions messages <sessionId>
+botd sessions search <query...> [--session <sessionId>] [--limit <n>]
+botd sessions cancel <sessionId>
+botd sessions delete <sessionId>
+botd sessions clear <sessionId>
+botd sessions edit <sessionId> <messageId> [words...]
+botd sessions fork <sessionId> --anchor <messageId>
+botd sessions share <sessionId> [--revoke] [--regenerate]
+botd sessions subsessions <parentSessionId>
+```
+
+### sessions create
+
+创建新会话。
+
+```bash
+botd sessions create --title "重构接口" --lead code-reviewer
+```
+
+### sessions update
+
+修改会话标题、主导 Bot 或归档状态。
+
+```bash
+botd sessions update sess_1 --title "新标题" --archive true
+```
+
+### sessions messages
+
+查看会话历史消息记录列表。
+
+```bash
+botd sessions messages sess_1
+```
+
+### sessions search
+
+在会话消息历史中检索关键词。
+
+```bash
+botd sessions search "性能优化" --limit 20
+botd sessions search "重构" --session sess_1
+```
+
+### sessions cancel
+
+取消当前正在执行的会话推理回合。
+
+```bash
+botd sessions cancel sess_1
+```
+
+### sessions clear
+
+清空指定会话的消息历史，并重置 Bot 本地会话上下文。
+
+```bash
+botd sessions clear sess_1
+```
+
+### sessions edit
+
+修改已发送的用户消息。Hub 截断该消息后的历史并重新触发推理。
+
+```bash
+botd sessions edit sess_1 msg_100 "请改用 Python 实现上述逻辑"
+```
+
+### sessions fork
+
+从指定的锚点消息分叉派生新会话。新会话复制锚点前的全部历史记录。
+
+```bash
+botd sessions fork sess_1 --anchor msg_100
+```
+
+### sessions share
+
+创建、查看或吊销会话的公开分享链接。
+
+```bash
+# 创建或获取分享链接
+botd sessions share sess_1
+
+# 重新创建分享凭据令牌
+botd sessions share sess_1 --regenerate
+
+# 吊销公开分享链接
+botd sessions share sess_1 --revoke
+```
+
+### sessions subsessions
+
+列出指定父会话派生的全部独立子会话。
+
+```bash
+botd sessions subsessions sess_1
+```
+
+## 后台 Worker 管理（Super-agent）
+
+Worker 命令管理会话派生的后台工作单元。Worker 支持独立 Git Worktree 隔离与异步事件投递。
+
+```text
+botd workers list <sessionId>
+botd workers spawn <sessionId> --title <title> --task <prompt> [选项...]
+botd workers steer <sessionId> <workerId> <message...> [--mode <steer|followUp>]
+botd workers stop <sessionId> <workerId>
+botd workers recall <sessionId> <workerId>
+```
+
+### workers list
+
+列出会话下的全部后台 Worker 及其状态。
+
+```bash
+botd workers list sess_1
+```
+
+输出字段包含 `workerId`、`title`、`status`（`running`、`completed`、`failed`、`aborted`）、`worktreePath` 与 `threadKeys`。
+
+### workers spawn
+
+派生后台 Worker 执行长耗时任务。命令立即返回 Worker 概要信息。
+
+```bash
+botd workers spawn sess_1 \
+  --title "重构用户模块" \
+  --task "将用户登录逻辑迁移到独立服务，并补齐测试" \
+  --bot code-reviewer \
+  --worktree \
+  --thread-key ci-deploy
+```
 
 | 参数或选项 | 说明 |
 | --- | --- |
-| `<botId>` | Bot 标识 |
-| `--node <nodeId>` | 必填，归属节点 ID |
-| `--name <name>` | 必填，显示名称 |
-| `--model <provider/modelId>` | 模型，格式如 `anthropic/claude-sonnet-4-5`。子代理可省略，默认继承父 Bot 模型 |
-| `--desc <description>` | 描述 |
-| `--thinking <level>` | 思考预算，取值 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，默认 `medium` |
-| `--skill <ids...>` | 启用的技能 ID，可多个 |
-| `--extension <ids...>` | 启用的扩展 ID，可多个 |
-| `--system-file <path>` | SYSTEM.md 文件路径，`-` 表示 stdin |
-| `--parent <parentBotId>` | 父 Bot ID。指定后创建子代理 |
-| `--inherit-model` / `--no-inherit-model` | 是否继承父 Bot 模型 |
-| `--inherit-skills` / `--no-inherit-skills` | 是否继承父 Bot 技能 |
-| `--tool-scope <scope>` | 子代理工具权限：`all`、`readonly`、`custom` |
-| `--custom-tools <tools...>` | `--tool-scope custom` 时的工具白名单 |
+| `<sessionId>` | 归属的父会话 ID。 |
+| `--title <title>` | 必填，Worker 任务短标题。 |
+| `--task <prompt>` | 必填，Worker 任务完整指令。 |
+| `--bot <botId>` | 指定身份 Bot。默认使用会话主导 Bot。 |
+| `--worktree` | 在项目仓库中分配独立的 Git Worktree 隔离目录。 |
+| `--thread-key <keys...>` | 订阅的事件线程键。匹配事件直通该 Worker。 |
 
-省略 `--model` 且未指定 `--parent` 时命令报错。指定 `--parent` 但找不到父 Bot 时，模型回退为 `anthropic/claude-sonnet-4-5`。
+### workers steer
 
-子代理共享主控 Bot 的工作区目录，可被主控 Bot 的 `Agent` 工具并发调度。详见[用户指南](user-guide.md)。
+向执行中的 Worker 注入追加消息。
 
 ```bash
-pnpm node bots create research-bot --node node-1 --name 调研 \
-  --model anthropic/claude-sonnet-4-5 --thinking high
+# 中途插话引导（中断当前操作）
+botd workers steer sess_1 wrk_100 "优先修复编译错误" --mode steer
+
+# 追加跟进指令（排队至本轮结束后执行）
+botd workers steer sess_1 wrk_100 "完成后输出测试覆盖率" --mode followUp
 ```
 
-#### bots update
+### workers stop
 
-更新 Bot 配置。支持 `bots create` 中除 `--node` 与 `--parent` 外的全部选项，只修改显式给出的字段。
+强制终止指定后台 Worker 的执行。主会话与其他 Worker 不受影响。
 
-#### bots delete
+```bash
+botd workers stop sess_1 wrk_100
+```
 
-删除 Bot 配置。
+### workers recall
 
-#### bots system
+检视 Worker 的记忆回忆链（Chain-of-Recall）节点与最近执行 Transcript。
 
-读写 Bot 的 SYSTEM.md。`get` 输出文档正文。`put` 从 `--file` 或 stdin 读取内容并写入，`--file -` 同样表示 stdin。
+```bash
+botd workers recall sess_1 wrk_100
+```
 
-#### bots memory
+## 人机协同交互（Asks）
 
-读写 Bot 的 MEMORY.md。用法与 `bots system` 相同。
+Bot 可发起 Ask 请求等待人工确认。用户通过该命令检视并代答。
 
-#### bots env
+```text
+botd asks list <sessionId>
+botd asks respond <sessionId> <askId> <answer...>
+```
 
-管理 Bot 的环境变量。这些变量供 Bot 工具使用，不用于模型供应商凭据。
+### asks list
 
-| 子命令 | 说明 |
+列出指定会话当前处于等待状态的人机协同请求。
+
+```bash
+botd asks list sess_1
+```
+
+输出包含 `id`、`prompt`、`options`、`status` 与 `previewType`（`diff`、`markdown`、`text`、`ui`）。
+
+### asks respond
+
+回答指定的待确认请求。
+
+```bash
+botd asks respond sess_1 ask_100 批准执行
+```
+
+## 事件路由管线（Events）
+
+将外部事件摄入 Super-agent EventRouter 管线。EventRouter 自动通过 `threadKey` 直通 Worker 或交付 Router 会话。
+
+```text
+botd events ingest --source <source> --type <type> [选项...]
+```
+
+```bash
+# 摄入 GitHub CI 事件
+botd events ingest \
+  --source github \
+  --type check_suite.completed \
+  --repo team4u/botd \
+  --branch main \
+  --content "CI checks passed on commit a1b2c3d"
+
+# 通过文件或标准输入导入事件载荷
+cat payload.json | botd events ingest --source ci --type build.failed --file -
+```
+
+| 选项 | 说明 |
 | --- | --- |
-| `list <botId>` | 列出全部变量及键名 |
-| `set <botId> <KEY=value...> [--replace]` | 设置一个或多个变量。`--replace` 替换全部存量变量，默认合并 |
-| `unset <botId> <keys...>` | 按键名删除变量 |
+| `--source <source>` | 必填，事件来源（例如 `github`、`ci`、`custom`）。 |
+| `--type <type>` | 必填，事件类型（例如 `push`、`pull_request.opened`）。 |
+| `--content <content>` | 事件正文或载荷内容。 |
+| `--file <path>` | 从指定文件或标准输入（`-`）读取正文。 |
+| `--title <title>` | 事件简要标题。 |
+| `--sender <sender>` | 事件发送者标识。 |
+| `--repo <repo>` | 关联仓库（格式为 `owner/repo`）。 |
+| `--pr <number>` | 关联 Pull Request 编号。 |
+| `--issue <number>` | 关联 Issue 编号。 |
+| `--branch <branch>` | 关联 Git 分支名称。 |
+| `--session <sessionId>` | 显式投递的目标会话 ID。 |
+| `--bot <botId>` | 目标 Bot 标识 ID。 |
+
+## 系统健康诊断（Watchdog）
+
+查看耐久运行时（Durable Runtime）系统健康诊断报告。
 
 ```bash
-pnpm node bots env set my-bot GITHUB_TOKEN=ghp_xxx
+# 查看当前健康报告
+botd watchdog health
+
+# 先触发一轮主动巡检，再输出诊断
+botd watchdog health --run-pass
 ```
 
-### sessions
+输出包含系统健康状态布尔值、摘要说明、错误发现列表与干预记录。
+
+## 触发器管理（Triggers）
+
+管理会话自动化触发器。
 
 ```text
-sessions list
-sessions create --title <title> --lead <botId>
-sessions update <sessionId> [--title <title>] [--lead <botId>] [--archive <boolean>]
-sessions messages <sessionId>
-sessions search <query...> [--session <sessionId>] [--limit <n>]
-sessions cancel <sessionId>
-sessions delete <sessionId>
-sessions clear <sessionId>
-sessions edit <sessionId> <messageId> [words...]
-sessions fork <sessionId> --anchor <messageId>
-sessions share <sessionId> [--revoke] [--regenerate]
-sessions delegate <parentSessionId> --bot <botId> --prompt <prompt> [--title <title>]
-sessions subsessions <parentSessionId>
+botd triggers list <sessionId>
+botd triggers create <sessionId> --name <name> --bot <botId> --prompt <prompt> [选项...]
+botd triggers delete <triggerId>
 ```
 
-会话为单聊模式（`direct`），`--lead` 指定主控 Bot。多角色协同由主控 Bot 调度子代理完成。
+### triggers create
 
-#### 子命令说明
-
-| 子命令 | 说明 |
-| --- | --- |
-| `list` | 列出全部会话 |
-| `create` | 创建会话。`--title` 与 `--lead` 必填 |
-| `update` | 更新会话。`--archive true` 归档，`--archive false` 恢复 |
-| `messages <sessionId>` | 列出会话消息历史 |
-| `search <query...>` | 跨会话搜索消息。`--session` 限定范围，`--limit` 默认 `30` |
-| `cancel <sessionId>` | 取消当前执行中的回合 |
-| `delete <sessionId>` | 删除会话及全部消息，Bot 记忆被重置 |
-| `clear <sessionId>` | 清空消息历史并重置 Bot 记忆，保留会话 |
-| `edit <sessionId> <messageId> [words...]` | 编辑已发送的用户消息。后续回复被删除并重新生成 |
-| `fork <sessionId> --anchor <messageId>` | 从锚点消息派生新会话。锚点消息及其之前的历史被复制 |
-| `share <sessionId>` | 创建公开分享链接。`--revoke` 撤销，`--regenerate` 换新令牌 |
-| `delegate <parentSessionId>` | 委派任务给子会话。`--bot` 与 `--prompt` 必填，`--title` 可选 |
-| `subsessions <parentSessionId>` | 列出父会话的全部子会话 |
+创建会话自动化触发器。
 
 ```bash
-pnpm node sessions create --title 部署检查 --lead ops-bot
-pnpm node sessions delegate sess-1 --bot research-bot --prompt "调研竞品定价" --title 竞品调研
+# 创建定时 Cron 触发器
+botd triggers create sess_1 \
+  --name "每晨构建巡检" \
+  --bot code-reviewer \
+  --kind cron \
+  --cron "0 9 * * 1-5" \
+  --prompt "检查夜间构建产物并汇总失败项"
+
+# 创建 Webhook 触发器
+botd triggers create sess_1 \
+  --name "GitHub PR 提醒" \
+  --bot code-reviewer \
+  --kind webhook \
+  --secret "my-hmac-secret" \
+  --event-source github \
+  --event-types "pull_request.opened,pull_request.synchronize" \
+  --dispatch subsession \
+  --prompt "分析新提交的 PR 变更"
+
+# 创建一次性延时触发器
+botd triggers create sess_1 \
+  --name "延迟复查" \
+  --bot code-reviewer \
+  --kind once \
+  --delay 30m \
+  --prompt "复查后台部署结果"
 ```
-
-### chat
-
-#### chat send
-
-```text
-chat send <sessionId> <message...> [--wait [seconds]]
-```
-
-向会话发送消息。默认只发送后立即返回。
-
-带 `--wait` 时，CLI 先订阅会话事件流，再发送消息，等待会话回到 `idle` 或 `failed` 状态。省略秒数时默认等待 `300` 秒。
-
-文本模式输出本轮收集的全部 Bot 回复。`--json` 输出消息数组。会话以 `failed` 状态结束时退出码为 `1`。
-
-等待超时只表示 CLI 停止等待，任务仍在 Hub 继续执行。需要中止时另调用 `sessions cancel`。
-
-```bash
-botd chat send sess-1 "总结昨天的部署" --wait 120
-```
-
-#### chat watch
-
-```text
-chat watch <sessionId> [--duration <seconds>]
-```
-
-订阅会话 SSE 事件流，每行输出一个 JSON 事件。`--duration` 为 `0`（默认）时持续接收直到连接断开。
-
-```bash
-botd chat watch sess-1 --duration 60
-```
-
-### triggers
-
-```text
-triggers list <sessionId>
-triggers create <sessionId> --name <name> --bot <botId> --prompt <prompt> [选项...]
-triggers delete <triggerId>
-```
-
-#### triggers create
-
-创建会话触发器。
 
 | 参数或选项 | 说明 |
 | --- | --- |
-| `<sessionId>` | 目标会话 |
-| `--name <name>` | 必填，触发器名称 |
-| `--bot <botId>` | 必填，触发时执行的 Bot |
-| `--prompt <prompt>` | 必填，触发时投递的提示词 |
-| `--kind <kind>` | 类型：`webhook`（默认）、`cron`、`once` |
-| `--cron <expr>` | 5 字段 cron 表达式，按 Hub 服务器本地时间。仅 `cron` 类型可用 |
-| `--delay <duration>` | 延迟时长，如 `30s`、`15m`、`2h`。仅 `once` 类型可用 |
-| `--at <isoOrDuration>` | ISO 时间戳或时长。仅 `once` 类型可用 |
-| `--dispatch <mode>` | 派发方式：`append`（默认）追加到当前会话，`subsession` 派生独立子会话 |
-| `--skill <skillId>` | 触发时以 `/skill:<id>` 前缀调用的技能 |
-| `--secret <secret>` | Webhook HMAC 签名验证密钥，对应 `X-Hub-Signature-256` 头。仅 `webhook` 类型可用 |
-| `--event-types <csv>` | 接受的 Webhook 事件类型，逗号分隔，如 `pull_request.opened,push`。仅 `webhook` 类型可用 |
+| `<sessionId>` | 关联会话 ID。 |
+| `--name <name>` | 必填，触发器名称。 |
+| `--bot <botId>` | 必填，触发时执行任务的 Bot ID。 |
+| `--prompt <prompt>` | 必填，触发时投递的任务提示词。 |
+| `--kind <kind>` | 触发器类型：`webhook`（默认）、`cron`、`once`。 |
+| `--cron <expr>` | 5 字段 Cron 表达式（服务器本地时间）。`cron` 类型必填。 |
+| `--delay <duration>` | 相对延迟时长（如 `30s`、`15m`、`2h`）。`once` 类型选填。 |
+| `--at <isoOrDuration>` | 绝对 ISO 时间戳。`once` 类型选填。 |
+| `--dispatch <mode>` | 派发模式：`append` 追加到原会话，`subsession` 自动派生子会话。 |
+| `--skill <skillId>` | 触发时前缀调用的 Skill ID。 |
+| `--secret <secret>` | Webhook HMAC-SHA256 签名密钥。 |
+| `--event-source <source>` | Webhook 事件来源匹配规则（如 `github`）。 |
+| `--event-types <csv>` | Webhook 允许的事件类型列表（逗号分隔）。 |
+| `--match <key=val...>` | Webhook 载荷键值精确匹配规则（支持点路径，可重复）。 |
 
-`cron` 类型必须给 `--cron`。`once` 类型必须给 `--delay` 或 `--at` 之一。`--cron`、`--delay`/`--at`、`--secret`、`--event-types` 用在不匹配的类型上时命令报错。
+### triggers delete
+
+删除指定的触发器。
 
 ```bash
-pnpm node triggers create sess-1 --name 每晨简报 --bot ops-bot \
-  --kind cron --cron "30 9 * * *" --prompt "生成晨间简报"
+botd triggers delete trg_100
 ```
 
-#### 其他子命令
-
-`triggers list <sessionId>` 列出会话触发器。`triggers delete <triggerId>` 删除触发器。Webhook 调用方式见[自动化指南](automation.md)。
-
-### skills 与 extensions
+## 会话对话交互（Chat）
 
 ```text
-skills get <nodeId> <skillId>
-skills put <nodeId> <skillId> [--file <path>]
-skills delete <nodeId> <skillId>
-extensions get <nodeId> <extId>
-extensions put <nodeId> <extId> [--file <path>]
-extensions delete <nodeId> <extId>
+botd chat send <sessionId> <message...> [--wait [seconds]]
+botd chat watch <sessionId> [--duration <seconds>]
 ```
 
-管理节点上的技能与扩展。操作要求拥有目标节点且节点在线。
+### chat send
 
-`put` 从 `--file` 指定的文件读取内容。未给 `--file` 或给 `-` 时读取 stdin。`get` 在文本模式下输出资源正文。
+向指定会话发送消息。
 
 ```bash
-cat SKILL.md | pnpm node skills put node-1 my-skill
+# 异步发送消息立即返回
+botd chat send sess_1 "总结当前的测试覆盖率"
+
+# 发送并等待回复结束（默认等待 300 秒）
+botd chat send sess_1 "编写项目文档" --wait 120
 ```
 
-### providers
+携带 `--wait` 选项时，CLI 优先创建会话 SSE 订阅流，随后发送消息，持续收集回复直至会话恢复 `idle` 或 `failed` 状态。
+
+### chat watch
+
+实时监听会话 SSE 事件流，以 JSON Lines 格式逐行输出事件。
+
+```bash
+# 持续监听事件流
+botd chat watch sess_1
+
+# 监听 60 秒后自动退出
+botd chat watch sess_1 --duration 60
+```
+
+## 全局与节点 Skills 直管
+
+CLI 支持免指定 `nodeId` 直接管理 Hub 全局托管的 Skills。节点无需在线。CLI 也支持指定 `nodeId` 操作特定节点上的专属 Skills。
 
 ```text
-providers login <nodeId> <providerId> --method api_key|oauth [--wait [seconds]]
-providers status <nodeId> <loginId>
-providers respond <nodeId> <loginId> --prompt <promptId> [--value <value>]
-providers cancel <nodeId> <loginId>
-providers logout <nodeId> <providerId>
+# 全局模式（单参数）
+botd skills list
+botd skills get <skillId>
+botd skills put <skillId> [--file <path>]
+botd skills delete <skillId>
+
+# 节点模式（双参数）
+botd skills get <nodeId> <skillId>
+botd skills put <nodeId> <skillId> [--file <path>]
+botd skills delete <nodeId> <skillId>
 ```
-
-管理节点上的模型供应商认证。
-
-| 子命令 | 说明 |
-| --- | --- |
-| `login` | 发起登录流程。`--method` 必填，取值 `api_key` 或 `oauth`。`--wait` 持续轮询直到完成，省略秒数时默认 `120` 秒。超时仍为 `pending` 时退出码为 `1` |
-| `status` | 查询登录状态，展示事件与待答复的提示 |
-| `respond` | 回答登录流程中的交互提示。`--prompt` 必填。未给 `--value` 时读取 stdin |
-| `cancel` | 取消进行中的登录 |
-| `logout` | 删除该供应商的认证凭据 |
-
-登录流程可能产生多次交互。命令输出会给出下一步要执行的 `respond` 命令。详见[模型指南](models.md)。
 
 ```bash
-pnpm node providers login node-1 github --method oauth --wait
+# 查看 Hub 全局 Skills 列表
+botd skills list
+
+# 读取全局 Skill 内容
+botd skills get code-review
+
+# 上传或修改全局 Skill（读取标准输入）
+cat SKILL.md | botd skills put code-review
+
+# 上传指定文件为全局 Skill
+botd skills put code-review --file ./SKILL.md
+
+# 删除全局 Skill
+botd skills delete code-review
+
+# 操作 node_1 节点的专属 Skill
+botd skills put node_1 local-tool --file ./LOCAL_SKILL.md
 ```
 
-### models
+## 全局与节点 Extensions 直管
+
+CLI 支持免指定 `nodeId` 直接管理 Hub 全局托管的 Extensions 代码。CLI 也支持指定 `nodeId` 操作特定节点上的专属 Extensions。
 
 ```text
-models catalog [--node <nodeId>]
-```
+# 全局模式（单参数）
+botd extensions list
+botd extensions get <extId>
+botd extensions put <extId> [--file <path>]
+botd extensions delete <extId>
 
-列出模型供应商及其支持的模型目录。`--node` 指定从某个节点查询。文本模式输出供应商、认证方式与模型列表。
+# 节点模式（双参数）
+botd extensions get <nodeId> <extId>
+botd extensions put <nodeId> <extId> [--file <path>]
+botd extensions delete <nodeId> <extId>
+```
 
 ```bash
-pnpm node models catalog
+# 查看 Hub 全局 Extensions 列表
+botd extensions list
+
+# 读取全局 Extension 入口代码
+botd extensions get github-notifier
+
+# 上传全局 Extension
+botd extensions put github-notifier --file ./index.ts
+
+# 删除全局 Extension
+botd extensions delete github-notifier
+
+# 操作 node_1 节点的专属 Extension
+botd extensions put node_1 custom-ext --file ./index.ts
 ```
 
-## JSON 输出脚本示例
+## 模型供应商与凭据管理（Providers）
 
-`--json` 输出接口原始数据，可直接交给 `jq` 处理：
+CLI 支持免指定 `nodeId` 直接管理 Hub 全局模型供应商登录认证与凭据。CLI 也支持指定 `nodeId` 管理特定节点上的供应商凭据。
+
+```text
+# 全局模式（单参数）
+botd providers login <providerId> --method <api_key|oauth> [--wait [seconds]]
+botd providers status <loginId>
+botd providers respond <loginId> --prompt <promptId> [--value <value>]
+botd providers cancel <loginId>
+botd providers logout <providerId>
+
+# 节点模式（双参数）
+botd providers login <nodeId> <providerId> --method <api_key|oauth> [--wait [seconds]]
+botd providers status <nodeId> <loginId>
+botd providers respond <nodeId> <loginId> --prompt <promptId> [--value <value>]
+botd providers cancel <nodeId> <loginId>
+botd providers logout <nodeId> <providerId>
+```
 
 ```bash
-# 列出未归档会话的 ID 与标题
-node apps/node/dist/cli.js --json sessions list \
-  | jq -r '.[] | select(.archived != true) | "\(.id)  \(.title)"'
+# 发起 Anthropic API Key 登录流程
+botd providers login anthropic --method api_key
 
-# 发送消息并等待回复，取第一条回复正文
-node apps/node/dist/cli.js --json chat send sess-1 "检查 CI 状态" --wait 300 \
-  | jq -r '.[0].content'
+# 回答 API Key 输入提示
+botd providers respond login_100 --prompt api_key --value "sk-ant-api03-xxx"
+
+# 发起 GitHub Copilot OAuth 登录并等待交互
+botd providers login github --method oauth --wait 120
+
+# 查看指定登录流程状态
+botd providers status login_100
+
+# 取消进行中的登录流程
+botd providers cancel login_100
+
+# 退出指定供应商登录并清除凭据
+botd providers logout anthropic
 ```
 
-脚本建议使用构建后入口，避免 pnpm 向 stdout 混入运行提示。
+## 模型目录检视（Models）
 
-## 与其他文档的关系
+查询模型供应商与模型目录。
 
-CLI 未覆盖全部 HTTP 接口。用户管理、部分团队权限和通知通道等操作请使用 Web 或 [HTTP API](api.md)。
+```text
+botd models catalog [--node <nodeId>]
+```
 
-后台任务、唤醒与审批的完整示例见[自动化指南](automation.md)。环境变量与数据目录详见[配置参考](configuration.md)。新增选项以当前版本的 `--help` 输出为准。
+```bash
+# 查询 Hub 模型目录
+botd models catalog
+
+# 查询指定节点上报的模型目录
+botd models catalog --node node_1
+```
+
+输出包含供应商名称、认证方式支持列表（`api_key` / `oauth`）、是否已配置凭据，以及每个模型支持的思考级别。
+
+## 自动化脚本示例
+
+在自动化脚本中组合使用 `--json` 选项与 `jq` 工具：
+
+```bash
+# 列出未归档的会话 ID
+botd --json sessions list | jq -r '.[] | select(.archived != true) | .id'
+
+# 向会话发送任务并提取第一条文本回复
+botd --json chat send sess_1 "检查构建状态" --wait 60 | jq -r '.[0].content'
+
+# 派生后台 Worker 并提取 Worker ID
+WORKER_ID=$(botd --json workers spawn sess_1 --title "测试" --task "执行回归测试" | jq -r '.workerId')
+echo "已启动 Worker: $WORKER_ID"
+```
