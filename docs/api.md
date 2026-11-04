@@ -420,23 +420,6 @@ Hub 支持三种身份鉴权方式：
 
 获取当前父会话派生的全部独立子会话。
 
-### POST /api/sessions/:id/subagents/:runId/stop
-
-终止指定子代理的单次执行（兼容接口。新开发请使用后台 Worker 接口 `/api/sessions/:id/workers/:workerId/stop`）。
-
-### POST /api/sessions/:id/subagents/:runId/interact
-
-向执行中的子代理发送插话或追问（兼容接口。新开发请使用后台 Worker 接口 `/api/sessions/:id/workers/:workerId/steer`）。
-
-请求体：
-
-```json
-{
-  "message": "跳过冗长扫描，直接定位配置文件",
-  "mode": "steer"
-}
-```
-
 ### GET /api/sessions/:id/share
 
 获取会话的公开分享记录。

@@ -44,6 +44,7 @@
 | `BOTD_OUTBOX_MAX_ATTEMPTS` | `5` | 出站通知最大重试次数（下限 1）。 |
 | `BOTD_OUTBOX_RETRY_MS` | `5000` | 出站通知基础退避重试毫秒数（下限 100）。 |
 | `BOTD_OUTBOX_POLL_MS` | `2000` | 通知出站队列轮询毫秒数（下限 100）。 |
+| `BOTD_AUTO_UPGRADE_NODES` | 无 | 设为 `1` 时由 Hub 自动升级接入的节点。 |
 
 ### Hub 配置规则
 
@@ -60,13 +61,9 @@
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `BOTD_DATA_DIR` | `~/.botd` | Node 本地数据主目录。 |
-| `BOTD_CODE_DIR` | `~/code` | Space 本地项目扫描根目录。 |
 | `BOTD_SKILLS_DIRS` | 无 | 追加本地 Skills 搜索路径（多路径用系统分隔符隔开）。 |
-| `BOTD_API_KEY_<PROVIDER>` | 无 | 显式指定供应商 API Key（大写下划线命名）。 |
-| `BOTD_AUTO_COMPACT` | `1` | 设为 `0` 时关闭会话上下文自动压缩。 |
-| `BOTD_CROSS_BOT_TIMEOUT_SECONDS` | `600` | 跨 Bot 工作流等待单次子会话执行超时秒数。 |
 | `BOTD_DAEMON_LOG` | `<数据目录>/daemon.log` | 守护进程后台执行日志文件。 |
-| `BOTD_SHELL_PATH` | 系统默认 Shell | POSIX 平台执行任务所用 Shell 路径。 |
+| `BOTD_DAEMON_BIND_RETRY_MS` | `0` | 守护进程 IPC 绑定重试延迟毫秒数。 |
 | `BOTD_BASH_PATH` | 自动探测 | Windows 平台 Bash 绝对路径。 |
 | `BOTD_MINGIT_URL` | 官方 Release 地址 | Windows 平台托管 MinGit 下载源。 |
 | `BOTD_WS_MIN_RECONNECT_DELAY_MS` | `200` | 连接 Hub WebSocket 最小重连延迟毫秒数。 |
@@ -78,10 +75,9 @@
 
 ### Node 配置规则
 
-1. 凭据优先级：`BOTD_API_KEY_<PROVIDER>` 优先于 `.agent/auth.json` 中的凭据。
-2. 供应商命名映射：供应商 ID 转为全大写，非字母数字字符转为下划线。例如 `zai-coding-cn` 对应 `BOTD_API_KEY_ZAI_CODING_CN`。
-3. Windows 平台 Bash 探测顺序：`BOTD_BASH_PATH` > 托管 MinGit > Git 安装目录 > 系统 PATH 中的 `bash.exe`。全部缺失时自动拉取托管 MinGit。
-4. 自动升级保障：升级执行时先检查版本摘要。守护进程通过排空、金丝雀启动与自动回滚保证可用性。
+1. 无状态执行：Node 作为远端执行环境。Node 不执行模型推理，不保存模型供应商凭据。
+2. Windows 平台 Bash 探测顺序：`BOTD_BASH_PATH` > 托管 MinGit > Git 安装目录 > 系统 PATH 中的 `bash.exe`。全部缺失时自动拉取托管 MinGit。
+3. 自动升级保障：升级执行时先检查版本摘要。守护进程通过排空、金丝雀启动与自动回滚保证可用性。
 
 ---
 
@@ -122,23 +118,33 @@ Hub 与 Node 默认共享或独立使用 `~/.botd` 目录。
 │       ├── MEMORY.md          # Bot 长期记忆文件
 │       ├── memory/            # Bot 分层渐进披露的主题记忆归档目录
 │       │   └── <topic>.md
-│       ├── workspace/         # Bot 默认私有工作区目录
-│       └── agents/            # 所属子代理定义目录（Subagents）
+│       └── workspace/         # Bot 默认私有工作区目录
 ├── skills/                    # 本地 Node 专属 Skills 资产目录
 │   └── <skillId>/
 │       └── SKILL.md
-├── extensions/                # 本地 Node 专属 Extensions 资产目录
-│   └── <extId>/
-│       └── index.ts
-└── .agent/
-    └── auth.json              # Node 本地模型供应商认证凭据（0600）
+└── extensions/                # 本地 Node 专属 Extensions 资产目录
+    └── <extId>/
+        └── index.ts
 ```
 
 ---
 
 ## 数据库结构（hub.sqlite）
 
-Hub 使用 SQLite 记录全部核心元数据。
+Hub 使用 SQLite 记录全部核心元数据与 Pi Durable 持久状态。
+
+### 1. Pi Durable 状态表（前缀 pi_）
+
+| 表名 | 说明 |
+| --- | --- |
+| `pi_conversations` | 会话元数据与任务所有权树表。 |
+| `pi_entries` | 会话 Transcript 条目历史表（包含用户输入、推理与工具调用）。 |
+| `pi_tasks` | 持久任务状态机表（管理状态、所有权、检查点与重放标记）。 |
+| `pi_docs` | 事务型应用文档表（保存 TargetDoc、WorkerRegistryDoc、RecallIndexDoc 等）。 |
+| `pi_timers` | 持久化定时器与 Watchdog 周期任务表。 |
+| `pi_blobs` | 二进制大对象持久保存表。 |
+
+### 2. 应用核心表
 
 | 表名 | 说明 |
 | --- | --- |
@@ -169,16 +175,10 @@ Hub 使用 SQLite 记录全部核心元数据。
 
 botd 采用 Hub 集中凭据管理机制：
 
-### 1. Hub 全局凭据（推荐与默认）
+### 集中凭据保存
 
 - 保存位置：`hub.sqlite` 中的 `provider_credentials` 表。
-- 架构定位：Hub 作为系统大脑统一执行模型推理，Node 执行端不接触密钥明文。
-- 鉴权支持：支持 API Key 与 OAuth 认证。
-- 直管接口：CLI `botd providers login <providerId>`（免指定 nodeId）或 Web 控制台配置。
-- 环境变量：支持通过 `BOTD_API_KEY_<PROVIDER>` 预置密钥。
-
-### 2. 节点专属凭据（可选覆盖）
-
-- 保存位置：Node 节点 `<数据目录>/.agent/auth.json`。
-- 适用场景：特定节点的专属模型覆盖。
-- 直管接口：CLI `botd providers login <nodeId> <providerId>`。
+- 架构定位：Hub 作为系统大脑统一执行模型推理。Node 执行端不保存密钥明文。
+- 认证类型：支持 API Key 与 OAuth 认证。
+- 直管接口：CLI `botd providers login <providerId>` 或 Web 控制台配置。
+- 别名路由：支持通过 `botd providers login <nodeId> <providerId>` 绑定节点别名。凭据统一保存至 Hub 数据库。

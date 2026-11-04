@@ -96,10 +96,9 @@ CREATE TABLE IF NOT EXISTS provider_credentials (
 
 ### 集中凭据的安全机制
 
-- 凭据仅由 Hub 统一持久化，Node 端不持有密钥明文。
+- 凭据仅由 Hub 统一持久化。Node 端不持有密钥明文。
 - API 接口向前端返回目录时，只指示 `configured: true`。
-- Hub 绝向前端回显 API Key 原始内容。
-- 环境变量支持通过 `BOTD_API_KEY_<PROVIDER>` 预置密钥。
+- Hub 绝不向前端回显 API Key 原始内容。
 
 ## 凭据配置流程
 
@@ -119,24 +118,23 @@ CREATE TABLE IF NOT EXISTS provider_credentials (
 
 1. 客户端发起登录请求：
    ```bash
-   POST /api/providers/login
-   {"providerId": "deepseek", "method": "api_key"}
+   POST /api/providers/deepseek/login
+   {"method": "api_key"}
    ```
 2. Hub 创建待处理会话并返回交互提示：
    ```json
    {
-     "ok": true,
-     "state": {
-       "id": "login_uuid",
-       "status": "pending",
-       "prompt": { "id": "api_key", "type": "secret" }
-     }
+     "id": "login_uuid",
+     "providerId": "deepseek",
+     "method": "api_key",
+     "status": "pending",
+     "prompt": { "id": "api_key", "type": "secret" }
    }
    ```
 3. 客户端应答凭据：
    ```bash
-   POST /api/providers/respond
-   {"loginId": "login_uuid", "promptId": "api_key", "value": "sk-xxxxxx"}
+   POST /api/provider-logins/login_uuid/respond
+   {"promptId": "api_key", "value": "sk-xxxxxx"}
    ```
 4. Hub 校验输入非空后写入 SQLite，立即标记配置成功。
 

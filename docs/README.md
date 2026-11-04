@@ -12,7 +12,7 @@
 | :--- | :--- |
 | [快速入门指南](file:///root/code/botd/docs/getting-started.md) | 安装依赖、启动服务与配对第一个节点。 |
 | [用户协同指南](file:///root/code/botd/docs/user-guide.md) | 使用全双工会话、派发后台任务、实时插话与查看执行进度。 |
-| [工作区指南](file:///root/code/botd/docs/workspace.md) | 绑定项目目录并审查代码差异。 |
+| [工作区指南](file:///root/code/botd/docs/workspace.md) | Git Worktree 隔离机制与远端执行环境。 |
 | [模型与供应商](file:///root/code/botd/docs/models.md) | 配置模型服务商与 API 密钥。 |
 
 ### 系统管理员与运维

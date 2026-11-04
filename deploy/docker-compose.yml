@@ -43,12 +43,6 @@ services:
       - cloud-node
     environment:
       - BOTD_DATA_DIR=/data/node
-      # Model provider API keys (optional direct environment variable overrides)
-      - BOTD_API_KEY_ANTHROPIC=${BOTD_API_KEY_ANTHROPIC:-}
-      - BOTD_API_KEY_OPENAI=${BOTD_API_KEY_OPENAI:-}
-      - BOTD_API_KEY_DEEPSEEK=${BOTD_API_KEY_DEEPSEEK:-}
-      - BOTD_API_KEY_GOOGLE=${BOTD_API_KEY_GOOGLE:-}
-      - BOTD_API_KEY_OPENROUTER=${BOTD_API_KEY_OPENROUTER:-}
     volumes:
       - node-data:/data/node
     depends_on:

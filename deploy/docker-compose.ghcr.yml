@@ -9,7 +9,7 @@
 #      或使用最新版：
 #        docker compose -f docker-compose.ghcr.yml up -d
 #
-# .env 可放置 BOTD_ADMIN_PASSWORD、BOTD_API_KEY_ANTHROPIC 等变量，
+# .env 可放置 BOTD_ADMIN_PASSWORD、BOTD_HOST、BOTD_PORT 等变量，
 # docker compose 会自动读取同目录下的 .env 文件做变量替换。
 # ==============================================================================
 
@@ -52,12 +52,6 @@ services:
       - cloud-node
     environment:
       - BOTD_DATA_DIR=/data/node
-      # Model provider API keys (optional direct environment variable overrides)
-      - BOTD_API_KEY_ANTHROPIC=${BOTD_API_KEY_ANTHROPIC:-}
-      - BOTD_API_KEY_OPENAI=${BOTD_API_KEY_OPENAI:-}
-      - BOTD_API_KEY_DEEPSEEK=${BOTD_API_KEY_DEEPSEEK:-}
-      - BOTD_API_KEY_GOOGLE=${BOTD_API_KEY_GOOGLE:-}
-      - BOTD_API_KEY_OPENROUTER=${BOTD_API_KEY_OPENROUTER:-}
     volumes:
       - node-data:/data/node
     depends_on:

@@ -110,8 +110,6 @@ services:
       - cloud-node
     environment:
       - BOTD_DATA_DIR=/data/node
-      - BOTD_API_KEY_ANTHROPIC=${BOTD_API_KEY_ANTHROPIC:-}
-      - BOTD_API_KEY_OPENAI=${BOTD_API_KEY_OPENAI:-}
     volumes:
       - node-data:/data/node
     depends_on:
