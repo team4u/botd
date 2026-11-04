@@ -10,7 +10,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { defineDocFamily } from '@earendil-works/pi-durable';
 import { randomUUID } from 'node:crypto';
 import { resolveOwnedSession } from '../http-helpers.js';
-import type { PendingAskRecord } from '@botd/protocol';
+import type { PendingAskRecord, ToolCallRecord, TurnUsage } from '@botd/protocol';
 import type { HubDurableRuntime } from '../harness/hub-harness.js';
 import { AskDoc, type AskEntry } from '../harness/docs.js';
 import type { WorkerEntry } from '../harness/docs.js';
@@ -162,6 +162,18 @@ async function resolveRouterForEvent(
   }
 }
 
+/** 读取会话下所有可能挂 AskDoc 的会话：Router 会话 + 其全部后台 Worker 会话。 */
+async function askConversations(
+  rt: HubDurableRuntime,
+  routerId: string,
+): Promise<string[]> {
+  const ids = [routerId];
+  for (const w of await rt.getActiveWorkers(routerId)) {
+    if (!ids.includes(w.conversationId)) ids.push(w.conversationId);
+  }
+  return ids;
+}
+
 export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
   const { db, router, sseHub } = ctx;
 
@@ -171,36 +183,43 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
 
   // --- 会话 Ask（人机协同）路由 -------------------------------------------
   // GroupRouter 路径：内存 + pending_asks 表（router.getPendingAsks/respondToAsk）。
-  // Durable 路径：ask_human 工具写入会话 Router 会话的 AskDoc，这里合并透出。
+  // Durable 路径：ask_human 工具写入会话 Router/Worker 会话的 AskDoc，这里合并透出。
 
   const durablePendingAsks = async (sessionId: string): Promise<PendingAskRecord[]> => {
     const rt = await runtime();
     if (rt === undefined) return [];
     const routerId = await findRouterConversationId(rt, sessionId);
     if (routerId === undefined) return [];
-    try {
-      const numeric = Number(routerId);
-      if (!Number.isInteger(numeric)) return [];
-      const doc = await rt.harness.snapshot(
-        AskDoc,
-        numeric as import('@earendil-works/pi-durable').ConversationId,
-        BACKGROUND_CONTEXT,
-      );
-      if (!doc) return [];
-      return Object.values(doc.asks as Record<string, AskEntry>)
-        .filter((ask) => ask.status === 'pending')
-        .map((ask) => ({
-          id: ask.askId,
-          sessionId,
-          botId: db.getSession(sessionId)?.leadBotId ?? '',
-          prompt: ask.prompt,
-          options: ask.options ?? [],
-          status: 'pending' as const,
-          createdAt: new Date(ask.createdAt).toISOString(),
-        }));
-    } catch {
-      return [];
+    const botId = db.getSession(sessionId)?.leadBotId ?? '';
+    const out: PendingAskRecord[] = [];
+    // Router 与其全部 Worker 的 AskDoc 都要透出：Worker 一样能调 ask_human。
+    for (const conversationId of await askConversations(rt, routerId)) {
+      try {
+        const numeric = Number(conversationId);
+        if (!Number.isInteger(numeric)) continue;
+        const doc = await rt.harness.snapshot(
+          AskDoc,
+          numeric as import('@earendil-works/pi-durable').ConversationId,
+          BACKGROUND_CONTEXT,
+        );
+        if (!doc) continue;
+        for (const ask of Object.values(doc.asks as Record<string, AskEntry>)) {
+          if (ask.status !== 'pending') continue;
+          out.push({
+            id: ask.askId,
+            sessionId,
+            botId,
+            prompt: ask.prompt,
+            options: ask.options ?? [],
+            status: 'pending' as const,
+            createdAt: new Date(ask.createdAt).toISOString(),
+          });
+        }
+      } catch {
+        // 会话缺失等：跳过该会话
+      }
     }
+    return out;
   };
 
   app.get('/api/sessions/:id/asks', async (c) => {
@@ -262,10 +281,54 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
     }
 
     const resolved = router.respondToAsk(id, askId, body.answer.trim());
-    if (!resolved) {
-      return c.json({ error: 'Ask not found' }, 404);
+    if (resolved) {
+      return c.json({ ok: true, ask: resolved });
     }
-    return c.json({ ok: true, ask: resolved });
+
+    // Durable 路径：在会话的 Router/Worker 会话 AskDoc 里找这条 pending ask，
+    // 落 answered 并把答案作为用户消息 steer 回提问的会话（唤醒等待中的 agent）。
+    const rt = await runtime();
+    const answer = body.answer.trim();
+    if (rt !== undefined) {
+      const routerId = await findRouterConversationId(rt, id);
+      if (routerId !== undefined) {
+        for (const conversationId of await askConversations(rt, routerId)) {
+          const numeric = Number(conversationId);
+          if (!Number.isInteger(numeric)) continue;
+          let prompt: string | undefined;
+          try {
+            await rt.harness.commit(async (tx) => {
+              const doc = await tx.doc(
+                AskDoc,
+                numeric as import('@earendil-works/pi-durable').ConversationId,
+              );
+              const ask = doc.asks[askId];
+              if (ask !== undefined && ask.status === 'pending') {
+                ask.status = 'answered';
+                ask.answer = answer;
+                ask.answeredAt = Date.now();
+                // doc 代理在 commit 结算后不可读：所需字段在事务内拷出。
+                prompt = String(ask.prompt);
+              }
+            }, BACKGROUND_CONTEXT);
+          } catch {
+            continue;
+          }
+          if (prompt === undefined) continue;
+          sseHub.broadcast(id, { type: 'interaction_resolved', sessionId: id, askId, answer });
+          // 唤醒提问方：答案以用户消息 steer 回去，等待中的回合继续推进。
+          await rt
+            .submitUserMessage(
+              String(conversationId),
+              `[Human Response to Ask "${prompt}"]: ${answer}`,
+              { requestId: `ask-reply:${askId}`, whenBusy: 'steer' },
+            )
+            .catch(() => undefined);
+          return c.json({ ok: true, ask: { id: askId, sessionId: id, status: 'answered', answer } });
+        }
+      }
+    }
+    return c.json({ error: 'Ask not found' }, 404);
   });
 
   // --- Workers 生命周期 -------------------------------------------------
@@ -527,6 +590,57 @@ function assistantEntryText(entry: { model?: readonly unknown[] }): string | und
   return text || undefined;
 }
 
+/**
+ * 提取 assistant 消息里的 toolCalls（ToolCallRecord[]）：工具调用按调用次序，
+ * 状态统一 done（镜像写入点在回合落定后），输出预览取调用参数摘要。
+ */
+function assistantEntryToolCalls(entry: { model?: readonly unknown[] }): ToolCallRecord[] | undefined {
+  const first = entry.model?.[0] as
+    | { role?: string; content?: unknown }
+    | undefined;
+  if (first === undefined || first.role !== 'assistant' || !Array.isArray(first.content)) return undefined;
+  const calls: ToolCallRecord[] = [];
+  for (const block of first.content) {
+    if (block === null || typeof block !== 'object') continue;
+    const call = block as { type?: string; id?: string; name?: string; arguments?: unknown };
+    if (call.type !== 'toolCall' || typeof call.name !== 'string') continue;
+    calls.push({
+      ...(typeof call.id === 'string' ? { id: call.id } : {}),
+      name: call.name,
+      ...(call.arguments !== null && typeof call.arguments === 'object'
+        ? { args: call.arguments as Record<string, unknown> }
+        : {}),
+      status: 'done',
+    });
+  }
+  return calls.length > 0 ? calls : undefined;
+}
+
+/** 提取 assistant 消息上的 token 用量（pi-ai Usage → botd TurnUsage）。 */
+function assistantEntryUsage(entry: { model?: readonly unknown[] }): TurnUsage | undefined {
+  const first = entry.model?.[0] as
+    | {
+        role?: string;
+        usage?: {
+          input?: number;
+          output?: number;
+          cacheRead?: number;
+          cacheWrite?: number;
+          totalTokens?: number;
+        };
+      }
+    | undefined;
+  if (first === undefined || first.role !== 'assistant' || first.usage === undefined) return undefined;
+  const u = first.usage;
+  return {
+    inputTokens: u.input ?? 0,
+    outputTokens: u.output ?? 0,
+    totalTokens: u.totalTokens ?? (u.input ?? 0) + (u.output ?? 0),
+    ...(u.cacheRead !== undefined ? { cacheReadTokens: u.cacheRead } : {}),
+    ...(u.cacheWrite !== undefined ? { cacheWriteTokens: u.cacheWrite } : {}),
+  };
+}
+
 /** worker 完成通知（以 UserMessage 提交给 Router）：透传以 [Worker Completed: 开头的文本。 */
 function workerReportText(entry: { model?: readonly unknown[] }): string | undefined {
   const first = entry.model?.[0] as { role?: string; content?: unknown } | undefined;
@@ -547,7 +661,8 @@ export interface DurableSessionMirror {
 /**
  * Durable Router 会话 → botd 会话消息镜像：`HubDurableRuntime` 产生新的 assistant
  * 回复或 worker 完成通知时落库 `db.createMessage({ role: 'assistant' })` 并广播
- * `message_created`，前端时间线自动更新。
+ * `message_created`，前端时间线自动更新；新 pending 的 AskDoc 条目同步广播
+ * `interaction_request`（前端 AskCard 即时弹出）。
  *
  * - 每个 Router 会话一个 watch，按已镜像的最大 entry id 增量推进；
  * - message id 确定性（`msg_dur_<sessionId>_<entryId>`），重启重放幂等（主键冲突吞掉）；
@@ -558,12 +673,35 @@ export function createDurableSessionMirror(
 ): DurableSessionMirror {
   const { db, sseHub } = ctx;
   const watches = new Map<string, { unwatch: () => Promise<void>; lastMirrored: number }>();
+  /** 已广播过 interaction_request 的 askId（按会话去重，重启后由 GET /asks 兜底）。 */
+  const broadcastAskIds = new Map<string, Set<string>>();
   let closed = false;
 
   const mirror = (sessionId: string, botId: string, entry: { id: unknown; kind: string; model?: readonly unknown[] }): void => {
     if (closed) return;
-    const text = entry.kind === 'botd.worker-report' ? workerReportText(entry) : assistantEntryText(entry);
-    if (text === undefined) return;
+    if (entry.kind === 'botd.worker-report') {
+      const text = workerReportText(entry);
+      if (text === undefined) return;
+      let message;
+      try {
+        message = db.createMessage({
+          id: `msg_dur_${sessionId}_${Number(entry.id)}`,
+          sessionId,
+          role: 'assistant',
+          senderBotId: botId,
+          content: text,
+        });
+      } catch {
+        return; // 主键冲突：重启重放，该条已落库
+      }
+      sseHub.broadcast(sessionId, { type: 'message_created', message: message.message });
+      return;
+    }
+    const text = assistantEntryText(entry);
+    const toolCalls = assistantEntryToolCalls(entry);
+    const usage = assistantEntryUsage(entry);
+    // 纯工具调用回合无文本，但 toolCalls/usage 仍是时间线的一部分：照常镜像。
+    if (text === undefined && toolCalls === undefined) return;
     let message;
     try {
       message = db.createMessage({
@@ -571,12 +709,51 @@ export function createDurableSessionMirror(
         sessionId,
         role: 'assistant',
         senderBotId: botId,
-        content: text,
+        content: text ?? '',
+        ...(toolCalls ? { toolCalls } : {}),
+        ...(usage ? { usage } : {}),
       });
     } catch {
       return; // 主键冲突：重启重放，该条已落库
     }
     sseHub.broadcast(sessionId, { type: 'message_created', message: message.message });
+  };
+
+  /** 新 pending ask 广播：同一 askId 只广播一次 interaction_request。 */
+  const broadcastNewAsks = async (sessionId: string, botId: string, conversationId: string): Promise<void> => {
+    const rt = ctx.durableRuntime;
+    if (rt === undefined || closed) return;
+    const numeric = Number(conversationId);
+    if (!Number.isInteger(numeric)) return;
+    try {
+      const doc = await rt.harness.snapshot(
+        AskDoc,
+        numeric as import('@earendil-works/pi-durable').ConversationId,
+        BACKGROUND_CONTEXT,
+      );
+      if (!doc) return;
+      const seen = broadcastAskIds.get(sessionId) ?? new Set<string>();
+      broadcastAskIds.set(sessionId, seen);
+      for (const ask of Object.values(doc.asks as Record<string, AskEntry>)) {
+        if (ask.status !== 'pending' || seen.has(ask.askId)) continue;
+        seen.add(ask.askId);
+        sseHub.broadcast(sessionId, {
+          type: 'interaction_request',
+          sessionId,
+          ask: {
+            id: ask.askId,
+            sessionId,
+            botId,
+            prompt: ask.prompt,
+            options: ask.options ?? [],
+            status: 'pending' as const,
+            createdAt: new Date(ask.createdAt).toISOString(),
+          },
+        });
+      }
+    } catch {
+      // 快照失败：GET /asks 轮询兜底
+    }
   };
 
   const attach = async (sessionId: string, conversationId: string): Promise<void> => {
@@ -599,6 +776,7 @@ export function createDurableSessionMirror(
           current.lastMirrored = entryId;
           mirror(sessionId, botId, entry);
         }
+        void broadcastNewAsks(sessionId, botId, conversationId);
       });
       if (closed) {
         watches.delete(conversationId);
@@ -641,7 +819,9 @@ export async function submitSessionMessageToDurable(
   content: string,
   mirror?: DurableSessionMirror,
 ): Promise<string | undefined> {
-  const rt = ctx.durableRuntime ?? (ctx.getDurableRuntime ? await ctx.getDurableRuntime() : undefined);
+  // getDurableRuntime 优先：每次提交前重新同步分身（新建 Bot 即刻可路由），
+  // 同一 Hub 生命周期内返回同一实例。
+  const rt = ctx.getDurableRuntime ? await ctx.getDurableRuntime() : ctx.durableRuntime;
   if (rt === undefined) return undefined;
   const routerId = await ensureRouterConversationId(rt, sessionId, botId);
   await mirror?.ensure(sessionId);
@@ -650,4 +830,20 @@ export async function submitSessionMessageToDurable(
     whenBusy: 'steer',
   });
   return routerId;
+}
+
+/**
+ * 停止会话的 Durable 侧：全部 running Worker 置 aborted 并中止其会话，
+ * 再中止 Router 会话自身正在进行的回合。找不到映射时静默返回（会话从未走 Durable）。
+ */
+export async function cancelDurableSession(rt: HubDurableRuntime, sessionId: string): Promise<void> {
+  const routerId = await findRouterConversationId(rt, sessionId);
+  if (routerId === undefined) return;
+  for (const w of await rt.getActiveWorkers(routerId)) {
+    if (w.status === 'running') {
+      await rt.stopWorker(routerId, w.workerId).catch(() => undefined);
+    }
+  }
+  const conv = await rt.conversation(routerId, BACKGROUND_CONTEXT);
+  await conv?.abort(BACKGROUND_CONTEXT).catch(() => undefined);
 }

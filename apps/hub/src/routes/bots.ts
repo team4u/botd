@@ -88,6 +88,7 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
 
     db.saveBot(botConfig);
     db.setBotFile(botConfig.id, 'system', body.systemMd || '');
+    void ctx.refreshDurablePersonas?.();
     return c.json(botConfig);
   });
 
@@ -139,6 +140,7 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
     if (requestedSystem !== undefined) {
       db.setBotFile(botId, 'system', requestedSystem);
     }
+    void ctx.refreshDurablePersonas?.();
     return c.json(botConfig);
   });
 
@@ -148,6 +150,7 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
     if (!botRes.ok) return botRes.response;
 
     db.deleteBot(botId);
+    void ctx.refreshDurablePersonas?.();
     return c.json({ ok: true });
   });
 
@@ -177,6 +180,7 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
       const body = await c.req.json<{ content?: string }>().catch(() => null);
       if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
       db.setBotFile(botId, kind, body.content);
+      void ctx.refreshDurablePersonas?.();
       return c.json({ ok: true });
     });
   }
@@ -203,6 +207,7 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
     const body = await c.req.json<{ content?: string }>().catch(() => null);
     if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
     db.setBotFile(botId, kind as BotFileKind, body.content);
+    void ctx.refreshDurablePersonas?.();
     return c.json({ ok: true });
   });
 
@@ -238,6 +243,7 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
     }
     const base = body.merge ? readBotEnv(botId) : {};
     const saved = writeBotEnv(botId, { ...base, ...sanitized });
+    void ctx.refreshDurablePersonas?.();
     return c.json({ ok: true, keys: Object.keys(saved), env: saved });
   });
 
@@ -250,6 +256,7 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
     const current = readBotEnv(botId);
     delete current[key];
     const saved = writeBotEnv(botId, current);
+    void ctx.refreshDurablePersonas?.();
     return c.json({ ok: true, keys: Object.keys(saved), env: saved });
   });
 

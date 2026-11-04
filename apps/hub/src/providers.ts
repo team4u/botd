@@ -22,7 +22,8 @@ interface HubLoginSession extends ProviderLoginState {
  */
 export function registerProviderRoutes(
   app: Hono<{ Variables: { user: UserRecord } }>,
-  db: HubDatabase
+  db: HubDatabase,
+  options?: { onCredentialSaved?: () => void },
 ): void {
   const loginSessions = new Map<string, HubLoginSession>();
 
@@ -90,6 +91,7 @@ export function registerProviderRoutes(
     session.status = 'success';
     session.prompt = undefined;
     session.events.push({ type: 'progress', message: 'API Key 已保存到 Hub' });
+    options?.onCredentialSaved?.();
     // 绝不回显 key 本体
     return { ...session };
   };

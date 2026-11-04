@@ -32,6 +32,7 @@ import { registerSessionRoutes } from './routes/sessions.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerWorkerRoutes, createDurableSessionMirror, type DurableSessionMirror } from './routes/workers.js';
+import { runWatchdogPass } from './harness/watchdog.js';
 import type { HubApp, HubContext } from './routes/context.js';
 
 export interface HubOptions {
@@ -48,6 +49,8 @@ export interface HubOptions {
 export interface StartHubOptions extends HubOptions {
   port?: number;
   host?: string;
+  /** 生产启动时后台 Watchdog 巡检间隔（默认 30s）；仅 `startHub` 生效。 */
+  watchdogIntervalMs?: number;
 }
 
 export interface HubInstance {
@@ -114,12 +117,20 @@ export function createHub(options?: HubOptions): HubInstance {
   });
   app.notFound(c => c.json({ error: 'Not found' }, 404));
 
-  const ctx = { db, auth, connections, router, sseHub, artifacts };
-
   // Super-agent 持久运行时：懒创建（createHub 保持同步，不破坏既有调用方）。
-  // 首次使用时打开 HubDurableRuntime（dbPath 存在时用 SQLite，否则 MemoryStorage），
-  // 并把 Hub 数据库里的全部 Bot 同步为持久分身。
+  // 声明先于 ctx：注入的 runtime 直接上 ctx（sessions cancel 等路由即取即用），
+  // 懒创建路径由 ensureDurableRuntime 打开后补写。
   let durableRuntime: HubDurableRuntime | undefined = options?.durableRuntime;
+
+  const ctx: HubContext = {
+    db,
+    auth,
+    connections,
+    router,
+    sseHub,
+    artifacts,
+    ...(durableRuntime ? { durableRuntime } : {}),
+  };
   let durableRuntimeOpening: Promise<HubDurableRuntime> | undefined;
   const ensureDurableRuntime = async (): Promise<HubDurableRuntime> => {
     if (durableRuntime !== undefined) {
@@ -163,6 +174,12 @@ export function createHub(options?: HubOptions): HubInstance {
         runtime.harness.resume();
         await syncBotPersonas(runtime);
         durableRuntime = runtime;
+        // 运行时就绪后补齐镜像与路由上下文：懒创建路径下 messages/sessions
+        // 也要看到活跃的 durableRuntime 与 durableMirror。
+        durableMirror ??= createDurableSessionMirror({ db, sseHub, durableRuntime: runtime });
+        ctx.durableRuntime = runtime;
+        messageCtx.durableRuntime = runtime;
+        messageCtx.durableMirror = durableMirror;
         return runtime;
       })();
     }
@@ -224,7 +241,7 @@ export function createHub(options?: HubOptions): HubInstance {
   };
 
   // Durable Router 会话 → botd 会话消息镜像（SSE 桥）：注入的 runtime 直接建，
-  // 懒创建路径在 runtime 打开后建（mirror 持有当时的 runtime 引用）。
+  // 懒创建路径在 runtime 打开后建（见 ensureDurableRuntime）。
   let durableMirror: DurableSessionMirror | undefined = durableRuntime !== undefined
     ? createDurableSessionMirror({ db, sseHub, durableRuntime })
     : undefined;
@@ -234,20 +251,54 @@ export function createHub(options?: HubOptions): HubInstance {
   registerNodeRoutes(app, ctx);
   registerBotRoutes(app, ctx);
   registerSessionRoutes(app, ctx);
-  // 主线切流仅在外部注入 durableRuntime 时生效（显式启用）；懒创建路径仍走 GroupRouter，
-  // 避免无模型配置的 Hub 因首次消息误开持久运行时而阻塞。
-  const messageCtx: HubContext & { durableMirror?: DurableSessionMirror } = {
+  // 主线切流：注入的 runtime 立即生效；懒创建路径在 ensureDurableRuntime 打开
+  // 运行时后写入 messageCtx（见上），首次消息后同样走 Durable 主线。
+  const messageCtx: HubContext & {
+    durableRuntime?: HubDurableRuntime;
+    durableMirror?: DurableSessionMirror;
+    getDurableRuntime?: () => Promise<HubDurableRuntime>;
+    durableInjected?: boolean;
+  } = {
     ...ctx,
-    ...(durableRuntime ? { durableRuntime, ...(durableMirror ? { durableMirror } : {}) } : {}),
+    ...(durableRuntime ? { durableRuntime } : {}),
+    ...(durableMirror ? { durableMirror } : {}),
+    // 提交路径优先走 ensureDurableRuntime：每次提交前重新同步分身（注入路径下
+    // 测试后置的种子 Bot 也能被看到），懒打开后此处直接复用同一实例。
+    getDurableRuntime: ensureDurableRuntime,
+    ...(options?.durableRuntime !== undefined ? { durableInjected: true } : {}),
   };
   registerMessageRoutes(app, messageCtx);
   registerEventRoutes(app, ctx);
-  registerProviderRoutes(app, db);
+  registerProviderRoutes(app, db, {
+    onCredentialSaved: () => {
+      // 凭据落库后新打开的持久运行时才能用；已打开的重新同步（模型目录/凭据按需重读）。
+      void ctx.refreshDurablePersonas?.();
+    },
+  });
   registerArtifactRoutes(app, artifacts);
   registerShareRoutes(app, db, getSessionOwnerId);
   const triggerScheduler = registerTriggerRoutes(app, db, router, getSessionOwnerId, { sseHub, artifacts });
   const unsubscribeChannels = registerChannelRoutes(app, db, router, sseHub);
   registerWorkerRoutes(app, { ...ctx, getDurableRuntime: ensureDurableRuntime, ...(durableRuntime ? { durableRuntime } : {}) });
+
+  // 热同步分身：配置面（Bot/Skill/Extension/凭据）任一变更后，把 Hub SQLite 的
+  // 最新权威配置推送到已打开的持久运行时；未打开时静默跳过（下次打开时全量同步）。
+  ctx.refreshDurablePersonas = async () => {
+    // 热同步与请求生命周期解耦（fire-and-forget）：失败（含 Hub 关闭后的 DB 已关）
+    // 只记日志，绝不上抛成未处理拒绝。
+    if (durableRuntime === undefined) return;
+    try {
+      await syncBotPersonas(durableRuntime);
+    } catch (err) {
+      console.warn('[hub] durable persona refresh failed:', err instanceof Error ? err.message : err);
+    }
+  };
+  // 注入的 runtime 视为显式启用：创建时同步一次分身（异步，不破坏 createHub 同步性）。
+  if (options?.durableRuntime !== undefined) {
+    void syncBotPersonas(options.durableRuntime).catch((err) => {
+      console.warn('[hub] injected durable runtime persona sync warning:', err);
+    });
+  }
 
   // 静态 Web 文件 & SPA fallback
   app.use('*', createStaticMiddleware(options?.webDir));
@@ -323,11 +374,29 @@ export async function startHub(options?: StartHubOptions): Promise<StartHubResul
 
   await serverReady;
 
+  // 生产启动：打开（或复用注入的）持久运行时，并随后台 Watchdog 周期巡检。
+  // 打开失败不阻断 Hub 启动（HTTP 面仍可用，Durable 路由返回 503）。
+  await hub.ensureDurableRuntime().catch((err) => {
+    console.warn('[hub] durable runtime init warning:', err);
+  });
+  let watchdogTimer: NodeJS.Timeout | undefined;
+  if (hub.durableRuntime !== undefined) {
+    const runtime = hub.durableRuntime;
+    watchdogTimer = setInterval(() => {
+      void runWatchdogPass(runtime.harness, undefined, BACKGROUND_CONTEXT).catch((err) => {
+        console.warn('[hub] watchdog pass failed:', err instanceof Error ? err.message : err);
+      });
+    }, options?.watchdogIntervalMs ?? 30_000);
+    watchdogTimer.unref();
+  }
+
   const addr = server.address();
   const resolvedPort = typeof addr === 'object' && addr ? addr.port : requestedPort;
 
   const originalClose = hub.close;
   hub.close = async (): Promise<void> => {
+    // 0. Stop the background watchdog first
+    if (watchdogTimer !== undefined) clearInterval(watchdogTimer);
     // 1. Close application resources, WebSockets and DB first
     await originalClose();
 

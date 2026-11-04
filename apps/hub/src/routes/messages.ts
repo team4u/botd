@@ -3,12 +3,29 @@ import type { MessageAttachment } from '@botd/protocol';
 import { extractMentions, parseSlashCommand } from '../group-router.js';
 import { resolveOwnedSession } from '../http-helpers.js';
 import { submitSessionMessageToDurable, type DurableSessionMirror } from './workers.js';
+import type { HubDurableRuntime } from '../harness/hub-harness.js';
 import type { HubApp, HubContext } from './context.js';
 
-export function registerMessageRoutes(app: HubApp, ctx: HubContext & { durableMirror?: DurableSessionMirror }): void {
+export function registerMessageRoutes(
+  app: HubApp,
+  ctx: HubContext & {
+    durableRuntime?: HubDurableRuntime;
+    durableMirror?: DurableSessionMirror;
+    getDurableRuntime?: () => Promise<HubDurableRuntime>;
+    /** runtime 由 HubOptions 显式注入（测试/生产显式启用）时为 true。 */
+    durableInjected?: boolean;
+  },
+): void {
   const { db, router, sseHub } = ctx;
   const durableMirror = ctx.durableMirror;
-  const durableCtx = () => ({ ...ctx, durableRuntime: ctx.durableRuntime });
+  // 主线切流门槛：仅当 runtime 为显式注入，或 Hub 已配置任一 Provider 凭据时生效。
+  // 否则（如无凭据的测试 Hub）直接走 GroupRouter，避免提交给无凭据的 Durable 运行时阻塞。
+  const durableCtx = () => ({
+    ...ctx,
+    durableRuntime:
+      ctx.durableInjected || db.listProviderCredentials().length > 0 ? ctx.durableRuntime : undefined,
+    ...(ctx.getDurableRuntime ? { getDurableRuntime: ctx.getDurableRuntime } : {}),
+  });
 
   app.get('/api/messages/search', (c) => {
     const q = (c.req.query('q') ?? '').trim();
@@ -115,13 +132,14 @@ export function registerMessageRoutes(app: HubApp, ctx: HubContext & { durableMi
       message: msgResult.message,
     });
 
-    // 主线切流：durable runtime 显式注入时，用户消息直接提交给会话的 Router 会话
-    //（全双工 whenBusy: "steer"），assistant 回复经镜像回写时间线；未注入或提交失败时
-    // 退回原 GroupRouter 路径。
-    if (ctx.durableRuntime !== undefined) {
+    // 主线切流：显式注入 runtime 或已配置 Provider 凭据时，用户消息直接提交给会话的
+    // Router 会话（全双工 whenBusy: "steer"），assistant 回复经镜像回写时间线；
+    // 未注入且无凭据（或提交失败）时退回原 GroupRouter 路径。
+    const dctx = durableCtx();
+    if (dctx.durableRuntime !== undefined) {
       try {
         const submitted = await submitSessionMessageToDurable(
-          durableCtx(),
+          dctx,
           id,
           session.leadBotId,
           content,
