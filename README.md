@@ -137,7 +137,7 @@ BOTD_PORT=3002 pnpm dev
 打开另一个终端，链接并接入本机节点：
 
 ```bash
-npm link apps/node
+npm link ./apps/node
 botd join http://localhost:3001 --code 123456 --name my-worker
 botd start
 ```

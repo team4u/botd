@@ -45,7 +45,7 @@ pnpm install
 pnpm build
 
 # 链接 botd 命令行工具至全局 PATH
-npm link apps/node
+npm link ./apps/node
 ```
 
 链接完成后，用户在任意终端中均可直接执行 `botd` 命令。
