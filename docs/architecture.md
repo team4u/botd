@@ -1,436 +1,391 @@
-# 架构说明
+# 系统架构说明
 
-[文档目录](README.md)
+[文档目录](file:///root/code/botd/docs/README.md)
 
-本文解释 botd 的组件划分、消息流转、调度模型与可靠性边界。当前实现以源码为准。使用步骤见[入门指南](getting-started.md)。
+本文档说明 botd 的系统架构、组件交互、调度模型与可靠性设计。系统实现以代码库为准。
 
-## 总览
+## 1. 架构总览与系统拓扑
 
-botd 把任务调度与任务执行放在两台机器上。Hub 管账户、会话和存储。Node Agent 在任务所在的机器上调用模型和工具。
+botd 采用脑手分离的三层架构：Web 客户端、Hub 中心服务与 Node 执行节点。
 
 ```mermaid
 flowchart TB
-    subgraph 客户端
-        Web["Web / PWA"]
-        CLI["CLI"]
-    end
-    subgraph Hub["Hub（一台服务器）"]
-        HTTP["HTTP API<br/>Hono 路由"]
-        SSE["SseHub<br/>会话流 / 全局流"]
-        Router["GroupRouter<br/>会话队列与调度"]
-        WS["NodeConnectionManager<br/>WS + birpc"]
-        DB[("SQLite<br/>hub.sqlite")]
-        ART[("产物目录")]
-    end
-    subgraph NodeA["节点 A"]
-        DA["Node Agent 守护进程"]
-        PA["Pi SDK<br/>模型 + 工具循环"]
-        SA["子代理"]
-        FA[("节点数据目录<br/>~/.botd")]
-    end
-    subgraph NodeB["节点 B"]
-        DB2["Node Agent 守护进程"]
-        FB[("节点数据目录")]
+    subgraph Client["客户端与外部事件源"]
+        Web["Web 前端<br/>全双工对话 / ActiveWorkersBar / WorkerInspectDrawer"]
+        Ext["外部事件<br/>Webhook / Cron / IM 渠道"]
     end
 
-    Web <-->|"HTTP + SSE"| HTTP
-    CLI <-->|"HTTP"| HTTP
-    HTTP --> Router
-    HTTP --> SSE
-    Router --> WS
-    SSE <--> WS
-    Router <--> DB
-    WS <-->|"WS /ws/node + birpc"| DA
-    DA --> PA
-    PA --> SA
-    DA --> FA
-    WS <-->|"WS + birpc"| DB2
-    DB2 --> FB
-    Router --> ART
+    subgraph Hub["Hub（中心大脑 · Pi Durable Harness over SQLite）"]
+        ER["EventRouter<br/>1.快路径过滤 2.ThreadKey直通<br/>3.Inline&Spill 4.推测执行"]
+        subgraph Harness["Pi Durable Harness (tablePrefix: pi_)"]
+            R["Router 前台会话<br/>常驻主会话 / 专项话题会话<br/>工具: spawn_worker / delegate_to_bot / recall / ask_human"]
+            W1["Worker 后台会话 1<br/>fork 继承上下文<br/>工具: CodingTools + subagent + SubagentWorkflow"]
+            W2["Worker 后台会话 2<br/>跨角色委派 / 订阅 PR 线程<br/>工具: CodingTools + subagent + SubagentWorkflow"]
+            WD["WatchdogTask<br/>周期巡检 LiveDoc / 纠偏与自愈"]
+            Docs[("Transactional Docs<br/>TargetDoc / WorkerRegistryDoc<br/>RecallIndexDoc / AskDoc")]
+        end
+        REnv["RemoteExecutionEnv<br/>按 TargetDoc(nodeId, worktreePath) 路由"]
+    end
+
+    subgraph Node["Node 守护进程（无状态执行环境）"]
+        EnvSrv["NodeEnvRpcServer<br/>封装 NodeExecutionEnv"]
+        WT["Git Worktree 隔离器<br/>.botd-worktrees/<workerId>"]
+    end
+
+    Web <-->|"HTTP + SSE"| Harness
+    Ext --> ER
+    ER -->|"未订阅事件 (慢路径)"| R
+    ER -->|"已订阅 ThreadKey (快路径直通)"| W2
+    R -->|"spawn_worker / fork()"| W1
+    R -->|"delegate_to_bot()"| W2
+    W1 & W2 -->|"afterRun 自动回传摘要"| R
+    WD -.->|"巡检与纠偏"| W1 & W2
+    W1 & W2 --> REnv
+    REnv <-->|"WS + birpc (NodeEnvRpcFunctions)"| EnvSrv
+    EnvSrv --> WT
 ```
 
-每个 Bot 属于固定节点。Hub 不运行 Bot 的命令，也不迁移 Bot。跨机器任务通过子会话委派完成。
+三层架构具有明确的分工边界：
 
-## 组件与职责
+- **Web 客户端**：提供全双工对话界面、顶部 `ActiveWorkersBar` 任务栏与 `WorkerInspectDrawer` 抽屉。
+- **Hub**：系统状态中心。Hub 托管单个 `Pi Durable Harness` 实例与 SQLite 数据库。
+- **Node**：无状态远程执行节点。Node 提供文件系统、Shell 执行与 Git Worktree 隔离。
 
-| 组件 | 职责 | 代码入口 |
-| --- | --- | --- |
-| Hub | 认证、资源管理、会话调度、消息与产物存储、SSE 推送 | [index.ts](../apps/hub/src/index.ts) |
-| WS 连接管理 | 节点注册、birpc 通道、心跳、节点侧 RPC 实现入口 | [ws-hub.ts](../apps/hub/src/ws-hub.ts) |
-| 会话路由器 | 会话队列、回合派发、接力预算、取消与恢复 | [group-router.ts](../apps/hub/src/group-router.ts) |
-| Hub 数据库 | SQLite 全部表结构、游标、离线任务队列 | [db.ts](../apps/hub/src/db.ts) |
-| 子会话委派 | delegate 路由、父子会话同步、产物引用回传 | [delegation.ts](../apps/hub/src/delegation.ts) |
-| Node Agent | 节点注册、重连、资源读写、本地 IPC、后台任务 | [daemon.ts](../apps/node/src/daemon.ts) |
-| 模型运行时门面 | 回合编排入口与生命周期 API 汇总 | [runtime.ts](../apps/node/src/runtime.ts) |
-| 回合执行 | 一个回合的十四步编排 | [execute-turn.ts](../apps/node/src/runtime/execute-turn.ts) |
-| 回合生命周期 | 会话重置、取消、全量取消 | [turn-lifecycle.ts](../apps/node/src/runtime/turn-lifecycle.ts) |
-| 子代理控制 | steer、stop、interact（回合外操控） | [subagent-control.ts](../apps/node/src/runtime/subagent-control.ts) |
-| 回合注册表 | runKey 占位、取消标记、活跃回合上下文 | [run-registry.ts](../apps/node/src/runtime/run-registry.ts) |
-| Web | 会话操作、流式渲染、节点配置、确认卡片 | [App.tsx](../apps/web/src/App.tsx) |
-| 共享协议 | HTTP 类型、RPC 契约、SSE 事件、校验 | [protocol](../packages/protocol/src/index.ts) |
+## 2. 算存分离与 Pi Durable Harness 引擎
 
-生产 Hub 同时托管构建后的 Web 页面。本机开发时 web 占 `3001`，Hub 占 `3002`，启动命令带 `BOTD_PORT=3002`。生产默认端口仍是 `3000`。
+### 2.1 架构演进背景
 
-## 通道协议
+传统智能体架构存在四个结构限制：
 
-系统有三种通信通道。每种通道承载不同内容。
+1. **状态源分裂**：会话元数据存储在 Hub，推理上下文存储在 Node 本地文件。
+2. **连接中断丢状态**：网络断开会导致正在执行的回合直接终止。
+3. **单目录锁限制并发**：同一工作区串行执行，阻塞多个并发任务。
+4. **半双工阻塞对话**：前台会话执行长任务时，用户无法输入新消息。
 
-### 客户端与 Hub：HTTP + SSE
+### 2.2 单一持久状态源
 
-浏览器和 CLI 用 HTTP API 管理资源。路由挂在 `/api/*` 下。登录后持有 `botd_token` Cookie（`HttpOnly`、`SameSite=Strict`）。
+Hub 独占本地 `hub.sqlite` 数据库。系统使用 `pi_` 作为数据表前缀。
 
-SSE 承担实时推送。有两路订阅：
+Hub 统一管理所有会话记录、任务检查点与状态文档：
 
-- `GET /api/sessions/:id/events` 订阅单个会话。连接建立后先收到一条 `session_status` 事件。每 15 秒发一次 `ping` 保活。
-- `GET /api/events` 订阅登录用户的全局事件。首条事件为 `hello` 握手。该路推送用户所有会话的事件与节点上下线通知。
+- 核心实现位于 [hub-harness.ts](file:///root/code/botd/apps/hub/src/harness/hub-harness.ts)。
+- 系统创建全局唯一的 `Harness` 实例。
+- 角色分身、后台 Worker 与子代理统一作为 Harness 内部的 `Conversation` 与 `Task` 执行。
+- 任务派发与跨角色委派转化为本地数据库事务。
 
-会话内事件类型包括：
+### 2.3 崩溃自愈与断点重放
 
-| 事件 | 内容 |
-| --- | --- |
-| `text_delta` | 回复文本增量 |
-| `thinking_stream` | 思考流增量与状态 |
-| `tool_status` | 工具调用状态、参数预览、输出预览 |
-| `subagent_status` | 子代理运行记录（含 blocks、steers） |
-| `message_created` | 消息落库（用户、assistant、system、callback） |
-| `session_status` | 会话状态与队列计划 |
-| `messages_truncated` | 编辑重发截断通知 |
-| `interaction_request` / `interaction_resolved` | 人工确认卡片 |
-| `extension_ui` | 扩展 UI 实时事件（notify / status / working_message / widget / editor_text） |
-| `artifact_created` | 新产物 |
+Harness 提供任务所有权树（Ownership Tree）与检查点机制：
 
-全局事件额外包含 `node_status`（节点上下线）。详细契约见 [API 参考](api.md)。
+- 系统将每个关键步骤写入 SQLite 事务。
+- 只读工具标记为 `replay: "safe"`。重启后 Harness 会直接重放只读工具。
+- 产生副作用的工具不会重复执行。系统会保留中断前的输出与诊断信息。
+- Hub 进程重启时调用 `harness.resume()`。调度器自动恢复未完成的任务。
 
-### 节点与 Hub：WebSocket + birpc
+## 3. 双层智能体架构（Router 与 Worker 分离）
 
-节点主动连接 `GET /ws/node?nodeId=<id>&token=<token>`。连接用配对得到的节点令牌认证。同一 `nodeId` 的新连接会顶掉旧连接。
-
-通道上跑 `birpc` 双向 RPC。调用超时 30 分钟，覆盖长回合。
-
-Hub 侧可调的节点函数（`NodeRpcFunctions`）：
-
-| 函数 | 用途 |
-| --- | --- |
-| `runTurn` | 执行一个回合 |
-| `cancelTurn` / `steerBotTurn` | 取消回合 / 运行中注入消息 |
-| `stopSubagent` / `interactSubagent` | 单停子代理 / 插话与追问 |
-| `resetSession` | 删除节点本地 Pi 会话文件 |
-| `saveBot` / `deleteBot` / `readFile` / `writeFile` | Bot 与资源读写 |
-| `installResource` / `deleteResource` | 安装、删除技能或扩展 |
-| `getModelCatalog` / `getCommands` | 模型目录、斜杠命令 |
-| `startProviderLogin` 系列 / `logoutProvider` | 模型供应商登录 |
-| `restartDaemon` / `checkUpgrade` / `upgradeDaemon` | 节点自管理 |
-| `listBgJobs` / `getBgJobLogs` / `killBgJob` | 后台任务 |
-
-节点侧可调的 Hub 函数（`HubRpcFunctions`）：
-
-| 函数 | 用途 |
-| --- | --- |
-| `registerNode` | 全量上报节点清单（bots、技能、扩展、pid、版本） |
-| `heartbeat` | 每 20 秒心跳 |
-| `onSessionStream` | 回合流式事件上报 |
-| `requestWakeupTurn` | 后台任务唤醒会话（`noTurn` 只落库；`delaySeconds` 延时） |
-| `requestHumanInput` | 请求用户确认（写入 `pending_asks`，默认 300 秒超时） |
-| `uploadArtifact` / `downloadArtifact` / `listSessionArtifacts` | 物产上传下载 |
-
-节点可以部署在只允许出站连接的内网中。Hub 从不需要主动连节点。
-
-### 本机 CLI 与 Node Agent：本地 IPC
-
-`botd wake`、`botd ask` 等本机命令走本地 HTTP IPC。macOS 和 Linux 用数据目录里的 Unix socket。Windows 用命名管道。socket 权限 `0600`，请求带 `ipc-token` 鉴权。此通道不监听 TCP 端口。
-
-## 一条消息的完整生命周期
-
-从用户按下发送到前端渲染完成，一条消息经过以下阶段。
+系统在每个角色分身内部实现 Router 与 Worker 的双层分离。
 
 ```mermaid
 sequenceDiagram
     actor U as 用户
-    participant W as Web 前端
-    participant H as Hub (HTTP + Router)
-    participant DB as Hub SQLite
-    participant SSE as SseHub
-    participant N as Node Agent
-    participant P as Pi SDK 会话
+    participant R as Router 前台会话
+    participant W as Worker 后台会话
+    participant N as Node 执行环境
+    participant D as RecallIndexDoc
 
-    U->>W: 输入消息
-    W->>H: POST /api/sessions/:id/messages
-    H->>DB: 校验归属，落库用户消息
-    H->>SSE: 广播 message_created
-    H->>H: 解析斜杠命令与 @提及，入队
-    H-->>W: 202 Accepted
-    H->>DB: 会话置 running
-    H->>SSE: 广播 session_status
-    H->>N: birpc runTurn(增量消息)
-    N->>N: runRegistry.reserve 占位
-    N->>N: 下载附件到 workspace/inbox/
-    N->>N: 解析生效模型与目录
-    N->>N: 加载技能/扩展/系统提示
-    N->>P: 打开/复用 sessions/<id>.jsonl
-    loop 模型与工具循环
-        P-->>N: 文本/思考增量
-        N--)H: onSessionStream(asEvent)
-        H--)SSE: text_delta / thinking_stream
-        SSE--)W: 流式渲染
-        P->>P: 调用工具（Bash/read/edit…）
-        P-->>N: 工具状态
-        N--)H: onSessionStream
-        H--)SSE: tool_status
+    U->>R: 发送开发需求
+    R->>R: 识别为复杂任务
+    R->>W: spawn_worker(forkContext=true)
+    R-->>U: 返回任务 ID，前台保持空闲
+    W->>N: envAcquireWorktree(创建隔离分支)
+    loop 编码与测试
+        W->>N: 执行 read / edit / bash 工具
+        N-->>W: 返回执行结果与输出流
     end
-    P-->>N: 回合结束
-    N-->>H: 返回 replyText + blocks + usage
-    H->>DB: 落库 assistant 消息，推进游标
-    H->>SSE: 广播 message_created
-    H->>H: 解析回复中的 @提及，接力或收尾
-    H->>DB: 会话置 idle
-    H->>SSE: 广播 session_status
+    W->>W: 任务完成，触发 afterRun 钩子
+    W->>D: 写入执行摘要与关联 ID
+    W->>R: 提交完成汇报（确定性 requestId）
+    R-->>U: 向用户输出最终结论
 ```
 
-分步说明：
+### 3.1 角色分身（Bot Personas）
 
-1. Hub 校验会话归属，把用户消息写入 `messages` 表，广播 `message_created`，返回 `202`。
-2. Router 解析内容。斜杠命令按 `parseSlashCommand` 定向。普通消息按 `extractMentions` 提取 `@Bot`。无命令无提及时，派给主控 Bot。
-3. Router 按增量游标（`cursor_map_json`，每 Bot 一个 rowid）收集未读消息，组装 `incrementalMessages`。Bot 自己发的消息不计入。游标在该 Bot 的回合成功结束后才推进：断线补发时按游标重新收集全部未读，同一回合的输入保持不变，补发幂等。
-4. 会话状态改为 `running`，Router 通过节点 RPC 调 `runTurn`。
-5. Node Agent 以 `runKey = sessionId:botId` 占位。占位失败说明同 Bot 同会话已有回合在跑，直接报错。
-6. 附件经 `downloadArtifact` 落盘到 `workspace/inbox/`。视觉类图片转为模型输入。
-7. 运行时解析生效配置：子代理可按 `inheritModel`、`inheritSkills` 跟随主控 Bot。子代理的工作区挂主控 Bot 目录，会话文件独立存放。
-8. 主控 Bot 挂载 pi-subagents 底座，获得 `Agent` 与 `SubagentWorkflow` 工具。子代理不挂载，防止套娃。
-9. Pi SDK 打开 `bots/<botId>/sessions/<sessionId>.jsonl`。文件存在则复用上下文，不存在则新建。
-10. 回合进入模型与工具循环。节点把每个事件用 `onSessionStream` 单向推给 Hub。推流失败静默，不影响回合结果。
-11. Hub 校验流事件（Bot 属该节点、是会话成员、会话在运行），转发为 SSE。
-12. 回合结束后，节点返回 `replyText`、`blocks`、`toolCalls`、`usage`、`subagentRuns`。
-13. Hub 落库 assistant 消息，推进该 Bot 的游标，广播 `message_created`。
-14. Router 解析回复中的 `@提及`。命中时消耗接力预算并入队下一棒。预算 `MAX_RELAY_TURNS = 5`。回复以 `[PASS]` 开头时跳过路由。
-15. 队列清空后会话置 `idle`，广播 `session_status`。
+每个角色分身拥有独立的配置：
 
-## 会话队列与并发模型
+- 独立系统指令：读取分身目录下的 `SYSTEM.md`。
+- 独立记忆文件：读取分身目录下的 `MEMORY.md`。
+- 专属模型配置：指定默认模型服务商与模型名称。
+- 默认绑定节点与工作目录：定义任务的默认执行位置。
+- 会话结构：每个分身拥有一个常驻主会话与多个专项话题会话。
 
-### 串行主回合
+### 3.2 Router 前台层
 
-每个会话有一份内存态 `SessionRuntimeState`，包含 `queue`、`isRunning`、`generation`、`activeBotIds`。`processQueue` 用 `isRunning` 防重入。同一会话同一时刻最多跑一个主回合批次。
+Router 前台层负责即时沟通、意图识别与任务分发：
 
-队列按先进先出消费。串行回合失败时会话置 `failed` 并清空剩余队列。
+- 核心实现位于 [router-extension.ts](file:///root/code/botd/apps/hub/src/harness/router-extension.ts)。
+- 会话仅挂载 `botd-router` 扩展。
+- 系统物理移除 `CodingTools`（`read`、`write`、`edit`、`bash`）。
+- Router 遇到耗时编码任务必须调用 `spawn_worker`。
+- 前台会话在百毫秒内完成回复，不会阻塞后续消息。
 
-### 并行批次
+Router 专有工具列表：
 
-带 `parallelGroupId` 的队列项组成并行批次。Router 把同组项一次 `shift` 出队，用 `Promise.all` 并发执行。批次内某个 Bot 失败只从 `activeBotIds` 移除自己，不阻塞其他成员。
+| 工具名称 | 功能说明 | 关键行为 |
+| :--- | :--- | :--- |
+| `spawn_worker` | 派发后台 Worker 会话 | 异步启动后台任务，立即返回任务标识。 |
+| `delegate_to_bot` | 跨角色分身委派任务 | 加载目标分身配置并启动后台 Worker。 |
+| `steer_worker` | 干预正在执行的 Worker | 向后台 Worker 注入指导指令。 |
+| `stop_worker` | 中止后台 Worker 任务 | 中止会话并释放关联的 Git Worktree。 |
+| `recall` | 检索历史或外溢上下文 | 按 ID 查询摘要、正文预览与关联节点。 |
+| `ask_human` | 发起人机确认请求 | 登记待确认事项，等待人工决策。 |
 
-会话内并发还有第二层：主控 Bot 可在同一回合内并发调用多个子代理（`Agent` 工具多次调用、`SubagentWorkflow` 编排）。这层并发发生在节点内，不经过会话队列。
+### 3.3 Worker 后台层
 
-### 运行中插话
+Worker 后台层负责执行复杂代码修改与长耗时任务：
 
-会话运行中收到新用户消息时，Router 先尝试 `steerBotTurn`。节点把消息注入正在运行的回合，同时把阻塞中的前台子代理切为后台。注入成功则推进游标，不入队。节点不支持或注入失败时，回落到普通入队，等待当前回合结束后执行。
+- 核心实现位于 [worker-extension.ts](file:///root/code/botd/apps/hub/src/harness/worker-extension.ts)。
+- Worker 会话挂载 `botd-worker`、`CodingTools` 与 `SubagentWorkflow`。
+- 支持通过 `conversation.fork()` 零拷贝继承父会话的历史上下文。
+- Worker 拥有独立的 `ConversationId`，可以在后台并发执行。
 
-### queue append 与 skip
+### 3.4 完成自动汇报机制
 
-两个 HTTP 端点直接操作队列：
+Worker 执行结束时，`afterRun` 钩子自动处理汇报：
 
-- `POST /api/sessions/:id/queue/append`：body 带 `orchestration` 表达式。Router 解析其中的 `@提及`，为每个提到的 Bot 生成一个新 stage 入队。
-- `POST /api/sessions/:id/queue/skip`：body 带 `stageId` 或 `botId`。按 stage 移除整个并行组，或按 Bot 移除单个队列项。
+1. 提取 Worker 最终回复文本。
+2. 创建 200 字以内的任务摘要。
+3. 将摘要与关联 ID 写入 `RecallIndexDoc`。
+4. 将父会话 `WorkerRegistryDoc` 中的状态更新为 `completed`。
+5. 向父 Router 会话提交格式化汇报：
+   `[Worker Completed: <workerId> | <title>]`
+6. 汇报使用确定性 `requestId`，防止重启后重复通知。
+7. 父 Router 唤醒后向用户总结任务产出。
 
-两个端点都广播更新后的 `session_status`（含 `queuePlan`）。
+## 4. 事务型状态文档模型（Transactional Docs）
 
-### generation 取消语义
+Hub 通过 `defineDoc` 与 `defineDocFamily` 定义事务型状态文档。
 
-`cancelSession` 执行四步：
-
-1. 把该会话的离线暂存任务标记 `failed`。
-2. 拒绝全部待确认请求，`pending_asks` 置 `expired`。
-3. `generation` 递增，清空队列。
-4. 向节点 fire-and-forget 调 `cancelTurn`（5 秒超时保护，节点可能已失联）。
-
-飞行中的回合返回后，Router 比对 `turnGen !== state.generation`，丢弃旧代结果。中止的部分输出仍会落盘（见下文）。
-
-## 子会话委派
-
-子会话委派把一个独立任务派给另一个 Bot。父子会话可以跨节点。实现见 [delegation.ts](../apps/hub/src/delegation.ts)。
+核心实现位于 [docs.ts](file:///root/code/botd/apps/hub/src/harness/docs.ts)。所有文档与对话记录在同一事务中提交。
 
 ```mermaid
-flowchart TB
-    A["POST /api/sessions/:id/delegate"] --> B["创建子会话<br/>记录 parentSessionId"]
-    B --> C["父会话插入 callback 通知"]
-    C --> D{"指定 artifactIds？"}
-    D -->|是| E["按 id 取父会话产物"]
-    D -->|否| F["取父会话全部产物"]
-    E --> G["零拷贝引用给子会话<br/>同 storagePath 新增行"]
-    F --> G
-    G --> H["子会话插入初始用户消息<br/>含附件清单"]
-    H --> I["router.handleUserMessage<br/>启动子会话回合"]
-    I --> J["监听子会话 SSE"]
-    J --> K{"session_status"}
-    K -->|idle| L["markSessionParentNotified<br/>幂等防重"]
-    K -->|failed| M["markSessionParentNotified"]
-    L --> N["摘取最后 assistant 回复"]
-    N --> O["新产物零拷贝回传父会话<br/>继承的产物不回传"]
-    O --> P["父会话插入完成 callback"]
-    P --> Q["autoWakeParent<br/>@主控Bot 唤醒汇总"]
-    M --> R["父会话插入失败 callback"]
-    R --> Q
+classDiagram
+    class TargetDoc {
+        +string botId
+        +BotdRole role
+        +string nodeId
+        +string cwd
+        +string worktreePath
+        +string[] threadKeys
+    }
+    class WorkerRegistryDoc {
+        +Record~string, WorkerEntry~ workers
+    }
+    class RecallIndexDoc {
+        +Record~string, RecallNode~ nodes
+    }
+    class AskDoc {
+        +Record~string, AskEntry~ asks
+    }
+
+    TargetDoc <.. WorkerRegistryDoc : 关联工作会话
+    WorkerRegistryDoc ..> RecallIndexDoc : 索引任务摘要
+    TargetDoc <.. AskDoc : 会话级人机确认
 ```
 
-关键语义：
+### 4.1 核心文档定义
 
-- 委派要求目标 Bot 所在节点的 owner 是请求用户，否则 `403`。
-- 产物传递是零拷贝引用：同一 `storagePath` 新增多行，不复制文件。删除安全性依赖按引用计数回收（`reclaimUnreferencedFiles`）。禁止改成删行即删文件。
-- 子会话记录继承产物的 `storagePath` 集合。完成回传时只回传新产出，父会话自己的文件不会原样传回。
-- 完成与失败回调通过 `markSessionParentNotified` 做幂等防重。Hub 重启后首个到达的回调仍然生效。
-- `autoWakeParent !== false` 时，回调消息以 `@主控Bot` 前缀唤醒父会话执行汇总回合。
-- 触发器的 `subsession` 分发模式复用同一机制。Webhook 原始载荷落盘为 `event_<id>.json` 产物投递到 inbox，防止提示词注入。
-- Barrier 汇合：父会话下有多个子会话并发时，先完成的子会话只落库 callback 消息与回传产物，不立即唤醒父会话；等最后一个子会话收敛后再统一唤醒主控 Bot 汇总，避免多次汇总回合。
-- 静默收敛：子会话回复以 `[PASS]` 或 `[IGNORE]` 开头且无新产出附件时，跳过父会话 callback 投递与唤醒，不产生噪音消息（外部通道通知同样跳过）。
+| 文档名称 | 作用域 | Fork 策略 | 存储内容 |
+| :--- | :--- | :--- | :--- |
+| `TargetDoc` | `conversation` | `asOf` | 记录会话的角色分身、节点标识、工作目录与分支。 |
+| `WorkerRegistryDoc` | `conversation` | `initial` | 记录 Router 派生的所有后台 Worker 状态表。 |
+| `AskDoc` | `conversation` | `initial` | 记录会话内待确认与已确认的人机交互请求。 |
+| `RecallIndexDoc` | `session` | 不适用 | 维护全局上下文召回索引，支持按跳检索。 |
+| `ThreadSubscriptionsDoc` | `session` | 不适用 | 维护外部事件线程到活跃 Worker 的多对多映射。 |
 
-## Space 与工作区
+### 4.2 原子提交机制
 
-Space 是会话或主 BOT 绑定的项目工作目录（`workspaceDir`），会话级绑定优先于 BOT 级兜底，两者都未绑定时回落到节点 `bots/<botId>/workspace/` 默认目录。绑定入口与使用方法见[工作区指南](workspace.md)。
+状态更新使用原子事务接口：
 
-节点侧的关键行为：
+- 调用 `runtime.commit` 写入文档。
+- 文档修改与会话条目（Transcript Entry）同事务落库。
+- 彻底避免内存状态与磁盘状态不一致。
 
-- 回合的工作目录（`cwd`）设为工作区，工具默认在此目录执行；工作区根目录的 `AGENTS.md` 自动注入系统提示。
-- 子代理默认共享主控 Bot 的工作区；`isolation: "worktree"` 时基于绑定仓库创建 Git worktree。
-- 同一工作区目录上的回合跨会话串行（`runRegistry.acquireWorkspace`，FIFO 排队），不同 Space 互不阻塞。这层互斥与 Hub 的会话队列相互独立：Hub 串行化的是会话内回合，节点串行化的是同目录写操作。
-- 工作区还承载运行时文件：附件落 `inbox/`、后台任务日志落 `.bg/<jobId>.log`、跨 BOT 工作流断点落 `.workflows/`。
+## 5. 脑手分离协议与远程执行环境
 
-## 可靠性
+### 5.1 协议契约重构
 
-### 长任务容错与恢复
+系统废弃旧版 `runTurn` 巨石 RPC。
 
-一个回合可能运行几十分钟，期间 Hub 重启、网络闪断都是常态。设计目标：模型的推理恰好执行一次，结果可靠交付，中断处可继续。
+系统引入细粒度的环境调用接口：
 
-四层机制配合：
+- 协议定义位于 [env-rpc.ts](file:///root/code/botd/packages/protocol/src/env-rpc.ts)。
+- 节点端实现位于 [env-rpc-server.ts](file:///root/code/botd/apps/node/src/env-rpc-server.ts)。
+- Hub 端实现位于 [remote-env.ts](file:///root/code/botd/apps/hub/src/harness/remote-env.ts)。
 
-| 机制 | 覆盖场景 | 保证 |
-| --- | --- | --- |
-| 断连不杀回合 | 节点与 Hub 之间 WS 断开 | 在途回合继续执行，不因断连中止 |
-| 在途附着 + 单槽回执 | 断连期间同一回合被重发 | 模型推理恰好执行一次 |
-| Hub 离线队列 | 回合派发时节点不在线 / 派发后断连 | 节点上线后补发，会话不置 failed |
-| 工作流断点 | 跨 BOT 工作流中断 | 下回合注入断点提示，续跑不重复已完成步骤 |
+核心 RPC 方法列表：
 
-**断连不杀回合。** 节点检测到 WS 断开时不取消在途回合，只递增连接代数（`hubEpoch`）。推流走 `dynamicHubRpc` 动态代理——每次调用转发到当前最新的 birpc 实例，重连后推流自动切到新连接恢复，无需重建回合上下文。
+| 方法名称 | 传输方向 | 职责说明 |
+| :--- | :--- | :--- |
+| `envReadTextFile` | Hub → Node | 读取文本文件内容。 |
+| `envWriteFile` | Hub → Node | 写入二进制或文本文件。 |
+| `envEdit` | Hub → Node | 执行文本查找与替换。 |
+| `envExec` | Hub → Node | 启动远端进程并指定输出采样窗口。 |
+| `envAbortExec` | Hub → Node | 依据执行标识强制终止进程树。 |
+| `envAcquireWorktree` | Hub → Node | 创建独立的 Git Worktree 与临时分支。 |
+| `envReleaseWorktree` | Hub → Node | 移除 Git Worktree 并清理临时分支。 |
+| `onEnvExecOutput` | Node → Hub | 实时单向推送标准输出与错误流数据块。 |
 
-**在途附着 + 单槽回执。** Hub 断连后会把回合转入离线队列并在节点重连后重发（`runKey = sessionId:botId`，回合签名由增量消息与命令文本派生）。节点收到重发时：
+### 5.2 远程执行适配器（RemoteExecutionEnv）
 
-1. 同签名的回合仍在执行：直接附着到同一个 Promise，等待同一结果，不重复调用模型。
-2. 回合已在断连期间跑完、发起连接已死且无人附着：结果此前已原子写入 `<botDir>/sessions/<sessionId>.receipt.json`，此时消费该回执——读一次、删一次，只消费一次。
-3. 结果经当前活跃 RPC 正常返回：清除旧回执。
+`RemoteExecutionEnv` 实现 `pi-durable` 的 `ExecutionEnv` 接口：
+
+- 标识符格式固定为 `node:<nodeId>`。
+- 内置工具根据目标节点与路径执行写入串行化。
+- 工作目录自动指向 `target.worktreePath` 或 `target.cwd`。
+
+### 5.3 节点离线韧性（BYOM）
+
+系统支持自带设备（BYOM）的离线恢复：
+
+- 节点离线时，文件与命令操作不会立即抛错。
+- 系统进入挂起等待状态，等待节点重连。
+- 系统监听 Chord 取消信号。用户取消时立即中止等待。
+- 节点重连后，挂起的执行流程自动恢复。
+
+## 6. Git Worktree 并发隔离机制
+
+多个 Worker 同时修改同一代码仓库时，传统单目录锁会导致严重的排队问题。
+
+botd 采用 Git Worktree 隔离方案解决并发写入冲突。
 
 ```mermaid
-sequenceDiagram
-    participant H as Hub
-    participant N as Node Agent
-    H->>N: runTurn（连接 A）
-    N->>N: 回合执行中
-    H--xN: 连接 A 断开（回合继续跑）
-    N->>N: 回合跑完，无人附着消费<br/>原子写 receipt.json
-    H->>N: 重连（连接 B）后补发同一回合
-    N->>N: 签名一致 → 消费回执（读后即删）
-    N-->>H: 返回缓存结果，模型未重复执行
+flowchart TD
+    Repo["主代码仓库目录<br/>/projects/my-repo (main 分支)"]
+    W1["Worker 1 (修复用户认证)"]
+    W2["Worker 2 (编写系统测试)"]
+    WT1[".botd-worktrees/w-1<br/>分支: botd-w-1"]
+    WT2[".botd-worktrees/w-2<br/>分支: botd-w-2"]
+
+    W1 -->|"envAcquireWorktree"| WT1
+    W2 -->|"envAcquireWorktree"| WT2
+    WT1 -.->|"独立工作目录与索引"| Repo
+    WT2 -.->|"独立工作目录与索引"| Repo
 ```
 
-取消与重置会话时清除对应回执；`aborted` 结果不写回执。
+### 6.1 隔离流程
 
-**steer 接管。** 会话运行中收到新用户消息时优先走 `steerBotTurn` 实时注入当前回合（前台子代理自动转后台），失败才回落入队。见上文[运行中插话](#运行中插话)。
+1. Router 调用 `spawn_worker` 并指定 `worktree: true`。
+2. Hub 向目标节点发送 `envAcquireWorktree` 请求。
+3. Node 执行 `git worktree add -B <branch> <path> HEAD`。
+4. 隔离目录路径格式为 `<repoDir>/.botd-worktrees/<workerId>`。
+5. Node 将新路径写入 Worker 的 `TargetDoc.worktreePath`。
+6. Worker 在独立工作树中执行文件读写与测试命令。
 
-**工作流断点。** 跨 BOT 工作流启动时写入 `<workspaceDir>/.workflows/latest-unfinished.json`，正常跑完删除；失败、中断或进程被杀则保留。主 BOT 的下一回合读到断点标记，在上下文中注入提示（含 `runId` 与脚本路径），模型调用 `SubagentWorkflow({ scriptPath, resumeFromRunId })` 即可从失败步骤续跑——已完成步骤从 `.workflows/<runId>.workflow.jsonl` 日志缓存回放，不再重新调用子代理或子会话。
+### 6.2 资源释放
 
-### Hub 重启恢复
+1. 用户中止 Worker 任务或任务执行完毕。
+2. Hub 调用 `envReleaseWorktree` 接口。
+3. Node 执行 `git worktree remove --force <path>`。
+4. Node 执行 `git worktree prune` 移除工作树记录。
+5. Node 移除对应的临时开发分支。
 
-Hub 启动时执行 `resetStaleMetadata`，按磁盘状态诚实交代中断：
+## 7. 外部事件驱动流水线（EventRouter）
 
-- 全部节点状态重置为 `offline`。
-- 有未过期 `queued_offline` 待发任务的会话保持 `queued`，节点重连后由 `onNodeOnline` 补发恢复。
-- `running` 且无待发任务的会话说明 Hub 在回合运行期间重启：置 `failed` 并插入一条系统消息，提示已完成的工作区变更与工作流断点已保留、发送「继续」即可接着执行。
-- `queued` 且无待发任务的会话：内存队列已随重启丢失，回到 `idle`。
+核心实现位于 [event-router.ts](file:///root/code/botd/apps/hub/src/harness/event-router.ts)。
 
-节点重连后重新 `registerNode`，恢复 `online`。SQLite 中的消息、产物、触发器、待确认记录全部保留。登录签名密钥存数据库，正常重启后登录仍有效。
+外部事件经由四步流水线处理：
 
-内存中的活动队列与接力状态不跨重启保留。运行中的模型调用不支持从断开的流恢复。配对码存内存，Hub 重启后失效。
+```mermaid
+flowchart LR
+    E["外部事件到达<br/>Webhook / IM / Cron"] --> F{"1. 快路径过滤<br/>filterEventFastPath"}
+    F -->|"不匹配白名单"| Drop["丢弃事件<br/>0ms 耗时，不调用模型"]
+    F -->|"通过过滤"| T{"2. 匹配 ThreadKey<br/>ThreadSubscriptionsDoc"}
+    T -->|"存在活跃订阅 Worker"| Pass["直通注入 Worker<br/>跳过 Router 推理"]
+    T -->|"无订阅者"| S["3. 内联与外溢<br/>超长载荷写入 SpillStoreDoc"]
+    S --> Spec{"4. 匹配推测策略?"}
+    Spec -->|"匹配推测规则"| SW["后台启动推测 Worker<br/>仅验证成功后汇报"]
+    Spec -->|"常规事件"| R["提交至目标 Router 会话"]
+```
 
-`HUB_SCHEMA_VERSION` 当前为 `5`。升级迁移前先 `VACUUM INTO` 备份。数据库文件权限 `0600`。
+### 7.1 快路径过滤
 
-停机走 `drain`：清空各会话队列，把 `queued` 会话置 `idle`，等待活动回合最多 25 秒，然后关闭。`/api/health` 公开返回 `draining` 与 `activeTurns`，供外部探活。
+`filterEventFastPath` 依据规则评估入站事件：
 
-### 节点断线重连
+- 纯代码规则判断，不调用大语言模型。
+- 检查事件来源、事件类型与发送者白名单。
+- 无效事件在 0 毫秒内丢弃。
 
-节点用 `ReconnectingWebSocket` 维持连接：
+### 7.2 线程直通路由（Pass-through）
 
-- 连接超时 `10_000` ms。
-- 最小重连间隔 `BOTD_WS_MIN_RECONNECT_DELAY_MS`，默认 `200` ms。
-- 重试次数无上限。
+系统维护 `ThreadSubscriptionsDoc` 订阅表：
 
-每次 `open` 事件重建 birpc 实例并全量 `registerNode`。Hub 侧同一节点新连接顶掉旧连接。
+- 订阅键格式例如 `github:pr:repo#42`。
+- 一个 Worker 可以订阅多个线程标识。
+- 命中订阅的后续事件直接注入对应的 Worker 会话。
+- 事件跳过 Router 前台推理，减少调用延迟。
 
-Hub 侧也有心跳保护。服务端每 30 秒 `ping` 一次。连续 2 轮无 `pong` 即 `terminate`，触发下线清理。这防止 NAT 静默失联后 `runTurn` RPC 永久挂死。
+### 7.3 内联与外溢（Inline & Spill）
 
-断开时节点只递增连接代数、清空 RPC 句柄，**不取消在途回合**（见[长任务容错与恢复](#长任务容错与恢复)）。`cancelAllBotTurns` 仅在守护进程主动停机（`close`）时执行。
+系统控制注入模型的上下文长度：
 
-### 离线暂存
+- 默认仅内联事件 ID、标题与前 120 字符摘要。
+- 超长载荷自动写入 `SpillStoreDoc`。
+- 系统在消息末尾附带召回标识：
+  `[Spilled: <spillId> | Call recall({ id: "<spillId>" })]`。
+- 模型通过 `recall` 工具按需拉取完整载荷。
 
-回合派发时节点不在线，或派发后连接断开（非执行错误），Router 把任务写入 `outbound_task_queue`（状态 `queued_offline`，TTL 默认 72 小时），队列项放回内存队首，会话置 `queued`、不置 `failed`。节点上线触发 `onNodeOnline`：
+### 7.4 推测执行（Speculative Execution）
 
-1. 读取该节点的全部 `queued_offline` 任务。
-2. 同一 Bot 已在内存队列时跳过该任务（防双跑），仅触发队列处理。
-3. 不同 Bot 的任务全部入队，由串行消费逐个执行。
-4. 任务确认入队后才标记 `dispatched`。
+系统支持对特定事件执行推测性验证：
 
-补发任务只携带旧的 `wakeupMessage` 引用。回合输入按增量游标重新收集全部未读消息，语义等于执行最新增量。过期任务（`expires_at` 到期，默认 72 小时）在读取时标记 `expired`。
+- 外部错误报告触发推测策略。
+- 系统在后台静默启动推测 Worker 尝试复现。
+- 推测失败则静默丢弃任务。
+- 验证成功后才向 Router 会话汇报结论。
 
-同一回合的模型推理由节点侧在途附着与单槽回执保证恰好执行一次（见[长任务容错与恢复](#长任务容错与恢复)）。但离线补发不消除工具的外部副作用边界：过期后用户重新发送的消息是新回合，副作用脚本仍需自行处理重复请求。
+## 8. Watchdog 巡检与自愈控制循环
 
-### 节点升级体系
+核心实现位于 [watchdog.ts](file:///root/code/botd/apps/hub/src/harness/watchdog.ts)。
 
-节点支持手动升级（`botd upgrade`，或 Hub 侧 `nodes upgrade` 转发 `upgradeDaemon` RPC）与自动升级循环（`BOTD_AUTO_UPGRADE`，默认关闭；检查间隔 `BOTD_AUTO_UPGRADE_INTERVAL_MS`，默认 6 小时，下限 60 秒）。自动升级复用手动升级的完整链路，不依赖 Hub 连接。
+```mermaid
+flowchart TD
+    Timer["WatchdogTask 定时唤醒<br/>(默认每 60 秒巡检一次)"] --> Scan["扫描活跃 Worker 与 LiveDoc"]
+    Scan --> C1{"无进展时长 > maxStallMs?"}
+    C1 -->|"是"| S1["提交 steer 指令纠偏<br/>多次超时则强制中止并告警"]
+    C1 -->|"否"| C2{"检测到瞬态模型报错?"}
+    C2 -->|"是"| S2["提交 continue 指令自动恢复"]
+    C2 -->|"否"| C3{"连续工具调用错误?"}
+    C3 -->|"是"| S3["提交 steer 指令调整执行策略"]
+    C3 -->|"否"| Log["记录健康状态至 WatchdogLogDoc"]
+```
 
-一次升级的完整链路：
+### 8.1 巡检机制
 
-1. **封禁检查**：目标版本在金丝雀失败封禁冷却期内（默认 30 分钟，`BOTD_UPGRADE_BLOCK_COOLDOWN_MS`）则拒绝；拒绝降级，`force` 可覆盖。
-2. **排空**：等待节点活跃回合清零，默认 30 秒超时，超时放弃本次升级。
-3. **下载校验**：`npm pack` 拉取精确版本的 tarball 到 staging 目录，sha512 摘要对 registry 元数据中的 `dist.integrity` 逐字节校验，不匹配即中止。（已知残余：只校验顶层 botd 包，依赖 tarball 的供应链信任继承自 registry 与 npm 策略。）
-4. **金丝雀验证**：`spawnReplacementDaemon` 以新版本拉起子进程，15 秒内收到 `botd:daemon-ready` IPC 信号才算成功。
-5. **切换或回滚**：金丝雀成功则旧进程平滑退出，新进程接管；失败则保留旧进程、回滚 staging，目标版本写入封禁记录，冷却期内不再尝试。
+`WatchdogTask` 作为常驻任务执行：
 
-### 回合中断与保留
+- 使用 `runtime.sleepUntil` 维持固定巡检周期（默认 60 秒）。
+- 支持通过 `runWatchdogPass` 执行按需体检。
+- 检查所有活跃 Worker 的 `LiveDoc` 状态。
 
-用户点击停止后发生两级协作：
+### 8.2 错误处置策略
 
-- Hub：`cancelSession` 递增 generation、清队列，并尽力通知节点。
-- 节点：`cancelBotTurn` 先 `abortAll` 全部子代理（含后台），再 `session.abort()` 主会话。
+- **卡死检测**：Worker 处于执行状态超过 `maxStallMs` 且无进展时，系统自动发送纠偏指令。
+- **连续纠偏失败**：纠偏无效后，Watchdog 强制中止任务并向父 Router 发送告警。
+- **瞬态错误恢复**：检测到网络抖动或临时模型错误时，自动提交 `continue` 恢复执行。
+- **健康诊断接口**：提供 `diagnoseSystemHealth` 接口，支持用自然语言查询系统执行状态。
 
-中止的回合不丢弃已产生的输出。节点正常返回时带 `aborted: true` 与已收集的部分 `blocks`、`toolCalls`。Hub 把这些落盘为带 `aborted` 标记的 assistant 消息，跳过黑板提取与后续路由。节点抛出取消错误时，Hub 补一条空的「已中止」占位消息。
+## 9. 核心源码索引
 
-该行为由 `tests/turn-cancel-preserve.test.ts` 验证：中止后返回 `aborted: true`、部分文本保留在 blocks、无工具停留在 `running` 状态。
-
-## 数据归属
-
-| 数据 | 存储位置 | 同步方式 |
-| --- | --- | --- |
-| 用户、密码散列、`token_epoch` | Hub SQLite `users` | 仅 Hub |
-| 节点注册信息、在线状态、清单缓存 | Hub SQLite `nodes` | 节点注册时单向上报 |
-| Bot 元数据缓存 | Hub SQLite `bots` | 节点权威，注册时对账 |
-| 会话、每 Bot 增量游标 | Hub SQLite `sessions` | 仅 Hub |
-| 公屏消息、blocks、工具轨迹、用量 | Hub SQLite `messages` | 节点回合结果落库 |
-| 产物元数据 | Hub SQLite `artifacts` | 上传时写入 |
-| 产物文件内容 | Hub 产物目录 | 节点经 RPC 上传/下载 |
-| 触发器、自动化事件 | Hub SQLite `triggers` / `automation_events` | 仅 Hub |
-| 离线待发任务 | Hub SQLite `outbound_task_queue` | 节点上线重放 |
-| 待确认记录 | Hub SQLite `pending_asks` | 仅 Hub |
-| 会话参与者 | Hub SQLite `session_participants` | 仅 Hub |
-| Bot 配置、SYSTEM.md、MEMORY.md、env.json | 节点 `bots/<botId>/` | Hub 经 RPC 转发读写 |
-| Pi 会话完整记录 | 节点 `bots/<botId>/sessions/<sessionId>.jsonl` | 仅节点；重置时删除 |
-| 断连回合结果回执 | 节点 `bots/<botId>/sessions/<sessionId>.receipt.json` | 单槽原子写；消费一次即删 |
-| 工作区文件与 inbox | 节点 `bots/<botId>/workspace/` | 仅节点 |
-| 模型凭据 | 节点 `.agent/` | Hub 转发登录输入，不维护凭据库 |
-| 技能与扩展 | 节点 `skills/` 与 `extensions/` | Hub 经 RPC 安装读取 |
-
-两类数据双向流动：回合结果（节点 → Hub）与产物（双向）。其余数据各有唯一权威方。
-
-工具输出预览会进入公屏消息。完整日志保留在节点。「完整日志在节点」不代表「工具输出不传 Hub」。
-
-## 术语与边界
-
-- 子代理默认共享主控 Bot 的工作区目录。需要并发修改同一 Git 仓库时，可在调用 `Agent` 时传 `isolation: "worktree"`。Space 绑定与工作区行为详见[工作区指南](workspace.md)。
-- `SYSTEM.md` 提供角色设定。`MEMORY.md` 提供长期记忆。Bot 可用 `edit`/`write` 工具更新自己的记忆文件。
-- 清空、编辑重发、删除会话会调用 `resetSession` 删除节点本地会话文件。下一回合从 Hub 历史全量重建上下文。工作区普通文件不回滚。
-- 这是配置与上下文隔离，不是操作系统沙箱。工具能访问系统用户有权限访问的任何路径。
-
-部署与备份见[部署指南](deployment.md)。访问与工具权限见[安全边界](security.md)。环境变量清单见[配置参考](configuration.md)。
+| 架构分层 | 核心模块 | 代码路径 |
+| :--- | :--- | :--- |
+| Hub 调度底座 | Pi Durable Harness 门面 | [hub-harness.ts](file:///root/code/botd/apps/hub/src/harness/hub-harness.ts) |
+| Hub 状态文档 | 事务型状态文档模型 | [docs.ts](file:///root/code/botd/apps/hub/src/harness/docs.ts) |
+| Hub 智能体层 | 前台 Router 扩展与路由工具 | [router-extension.ts](file:///root/code/botd/apps/hub/src/harness/router-extension.ts) |
+| Hub 智能体层 | 后台 Worker 扩展与汇报钩子 | [worker-extension.ts](file:///root/code/botd/apps/hub/src/harness/worker-extension.ts) |
+| Hub 执行路由 | 远程执行环境适配器 | [remote-env.ts](file:///root/code/botd/apps/hub/src/harness/remote-env.ts) |
+| Hub 事件总线 | 事件驱动流水线与直通订阅 | [event-router.ts](file:///root/code/botd/apps/hub/src/harness/event-router.ts) |
+| Hub 可靠性 | Watchdog 巡检与自愈任务 | [watchdog.ts](file:///root/code/botd/apps/hub/src/harness/watchdog.ts) |
+| Hub 工作流 | 持久化 SubagentWorkflow | [workflow-extension.ts](file:///root/code/botd/apps/hub/src/harness/workflow-extension.ts) |
+| Node 执行层 | 节点环境 RPC 服务端 | [env-rpc-server.ts](file:///root/code/botd/apps/node/src/env-rpc-server.ts) |
+| 协议层 | 远程执行与流式推送协议契约 | [env-rpc.ts](file:///root/code/botd/packages/protocol/src/env-rpc.ts) |

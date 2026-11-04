@@ -5,11 +5,11 @@
 <h1 align="center">botd</h1>
 
 <p align="center">
-  <strong>个人与团队的多 Agent 协同工作空间：无论在一台服务器上运行多个专业主 Bot，还是连接多台机器，都能在同一个界面里对话、委派与编排跨 Bot 工作流。</strong>
+  <strong>多角色 Super-agent 协同平台。基于 Pi Durable 引擎构建，实现脑手分离与全双工交互。</strong>
 </p>
 
 <p align="center">
-  自托管 · 多模型 · 跨 Bot 工作流 · Web / PWA
+  自托管 · 状态持久化 · 双层智能体 · Git Worktree 隔离 · 崩溃自愈
 </p>
 
 <p align="center">
@@ -19,230 +19,154 @@
 </p>
 
 <p align="center">
-  <a href="docs/getting-started.md">开始使用</a> ·
-  <a href="#可以这样用">使用场景</a> ·
-  <a href="docs/deployment.md">自托管部署</a> ·
-  <a href="docs/README.md">完整文档</a> ·
+  <a href="docs/getting-started.md">快速开始</a> ·
+  <a href="docs/architecture.md">系统架构</a> ·
+  <a href="docs/user-guide.md">用户指南</a> ·
+  <a href="docs/README.md">文档导航</a> ·
   <a href="CONTRIBUTING.md">参与贡献</a>
 </p>
 
-你的代码在笔记本上，服务在 Linux 服务器上。团队共用一台服务器，想让协调、编码、审查、测试各有专职 Bot；或者机器分散在多处，想让它们在同一界面里协同。
+## 为什么选择 botd
 
-botd 为每个 Bot 提供一个单聊会话，把跨 Bot 协作收敛进同一条时间线。主控 Bot 在所属机器上执行命令、并发调度子代理，也可以用 `SubagentWorkflow` 把本地子代理、同节点其他主 Bot 与远端机器上的主 Bot 编排成一条工作流；任务需要独立上下文时，再委派成子会话，回复与文件自动带回。会话或 Bot 可以绑定本地 Git 仓库目录（Space），Bot 直接在你的真实仓库里工作，变更进入 Diff 抽屉审查与回滚。手机也能通过 PWA 接着用。
+复杂软件开发需要长时间执行的模型推理。传统方案常遇到三个瓶颈：
 
-从一台机器、一个 Bot 开始。需要分工时，在同一节点上加几个专职主 Bot；需要跨机时，接入第二台机器。
+1. 前台会话执行长耗时工具，用户无法继续对话。
+2. 进程崩溃或网络闪断后，执行状态丢失。
+3. 多个任务同时修改代码仓库，造成写冲突。
+
+botd 采用脑手分离架构。Hub 负责状态持久化与调度，Node 负责无状态环境执行。
 
 ```mermaid
-flowchart LR
-    U["浏览器 / 手机"] <--> H["botd Hub · 会话与子会话"]
-    subgraph SN["同一节点 · 多个主 Bot（独立工作区与记忆）"]
-        CO["coordinator 主控<br/>SubagentWorkflow 编排"]
-        CB["coder · reviewer · qa<br/>各司其职 · 工作区排队互斥"]
+flowchart TB
+    subgraph Client["客户端"]
+        Web["Web 界面<br/>全双工对话 / ActiveWorkersBar / 检视抽屉"]
     end
-    H <--> CO
-    CO <-. "阶段 / 并行 / 断点续跑" .-> CB
-    H <--> RN["另一台机器上的主 Bot<br/>跨节点子会话 · 产物零拷贝回传"]
-    CO <-. "混编远端主 Bot" .-> RN
+
+    subgraph Hub["Hub（中心大脑 · Pi Durable Harness over SQLite）"]
+        ER["EventRouter 事件流水线"]
+        R["Router 前台会话（轻量应答 / 任务分发）"]
+        Docs[("Transactional Docs<br/>Target / Workers / Recall")]
+        WD["Watchdog 巡检任务"]
+        REnv["RemoteExecutionEnv 路由"]
+    end
+
+    subgraph Node["Node（远程执行手 · 无状态守护进程）"]
+        EnvSrv["NodeEnvRpcServer"]
+        WT["Git Worktree 隔离目录"]
+    end
+
+    Web <-->|"HTTP + SSE"| Hub
+    R -->|"spawn_worker"| Hub
+    Hub --> REnv
+    REnv <-->|"WS + birpc"| EnvSrv
+    EnvSrv --> WT
+    WD -.->|"巡检纠偏"| Hub
+    ER -->|"直通路由"| Hub
 ```
 
-## 可以这样用
+## 核心设计
 
-### 跨 Bot 工作流：编排、观测、干预
+### 1. 脑手分离架构
 
-主控 Bot 用 `SubagentWorkflow` 编排跨 Bot 工作流：`phase()` 划分阶段，`parallel()` 并发执行；每一步可以指定共享工作区的本地子代理，也可以写 `agentType: "@<botId>"` 委派给同节点或远端机器上的主 Bot，并用 JSON Schema 约束结构化输出。脚本副本与断点日志落在 `<workspace>/.workflows/`，某步失败后用 `resumeFromRunId` 从断点续跑，已完成的步骤直接复用结果。
+Hub 独占 SQLite 存储。Hub 管理所有对话上下文、任务图和持久状态。
 
-需要独立上下文的任务委派成子会话：父会话文件零拷贝继承，子会话产物自动回传，`Barrier` 等所有分支汇合后再继续，`[PASS]`/`[IGNORE]` 让汇总静默收敛。运行中随时打开子会话抽屉，实时看思考流与工具调用；方向偏了就插话 `steer`（前台子代理自动转后台），跑完了 `resume` 追问，出问题可以单独停掉某个 run。
+Node 作为无状态执行节点。Node 通过 RPC 接收文件读写与命令执行指令。
 
-→ [多角色协同与子会话](docs/user-guide.md) · [自动化指南](docs/automation.md)
+节点断线重连后，任务自动从中断点继续执行。
 
-### Space：让 Bot 工作在你的 Git 仓库里
+### 2. 双层智能体模型（Router 与 Worker）
 
-把会话或 Bot 绑定到本地 Git 仓库目录。绑定后 `AGENTS.md` 自动注入上下文，输入 `#` 直接补全仓库文件，并发的子代理各自在独立 worktree 里工作，互不踩踏；同一目录的回合跨会话排队互斥，避免并发写入。
+系统为每个角色分身配备双层架构：
 
-每次代码变更进入 Git Diff 抽屉：Pin 双栏并排对比，消息里引用到具体行，不满意时按单文件两段式回滚。
+- **Router 前台层**：负责轻量沟通与任务分发。前台移除长耗时工具，响应时间保持在毫秒级。
+- **Worker 后台层**：负责多步骤编码与测试。Worker 挂载代码工具与工作流引擎。
 
-→ [工作区指南](docs/workspace.md)
+前台对话永不阻塞。
 
-### 触发器与外部通知：任务自己跑，结果找到你
+### 3. Git Worktree 并发隔离
 
-Webhook、Cron 与 once 三种触发器让会话自动开始：`eventFilter` 按点号路径匹配载荷字段与数组，`subsession` 派生模式让每次触发都拿到独立上下文，触发载荷隔离落盘。
+Worker 执行代码修改时，Node 会创建独立的 Git Worktree。
 
-结果推送到飞书、Slack、Telegram 或通用 Webhook。`tellPolicy` 决定什么时候可以打扰你，Outbox 指数退避保证送达；`botd ask` 在你不在线时降级为渠道摘要，附带免登录 HMAC 一键确认 URL，点链接就能拍板。
+每个 Worker 拥有独立的工作目录与分支。
 
-→ [触发器](docs/triggers.md) · [外部渠道](docs/channels.md)
+多个 Worker 可以并发修改同一个代码仓库，互不干扰。
 
-### 长任务不怕断连
+### 4. 崩溃持久恢复
 
-回合在节点上执行，浏览器断开或 Hub 重启不会杀掉正在跑的任务。重新连接后附着到在途回合，单槽磁盘回执保证每条指令恰好执行一次。Hub 重启后，无法确认结果的孤儿回合诚实标记为 failed 并提示「继续」；节点离线期间积压的任务在 72 小时内补投。
+系统基于 Pi Durable Harness 引擎构建。
 
-→ [架构说明](docs/architecture.md)
+所有步骤提交为任务检查点。
 
-### 从一台机器到一个机群
+Hub 重启后，调度器自动恢复未完成的任务。
 
-同一节点上创建 `coordinator`、`coder`、`reviewer` 等专职主 Bot，各自有独立工作目录、模型与记忆；多人共用时，Node 侧按工作区排队互斥。机器分散在多处时，每台接入自己的节点，主 Bot 照常跨节点委派与编排。
+### 5. 事件驱动与主动自愈
 
-节点支持手动或自动升级（`BOTD_AUTO_UPGRADE`）：金丝雀 15 秒就绪探针，失败自动回滚并封禁该版本 30 分钟冷却，tarball 经 sha512 供应链校验。
+EventRouter 提供事件四步流水线。外部事件经由线程标识直通活跃 Worker。
 
-→ [团队协作](docs/team.md) · [部署指南](docs/deployment.md)
+Watchdog 定时巡检任务状态。Watchdog 自动纠偏卡死任务并恢复临时错误。
 
-### 为高频操作保留肌肉记忆
+## 快速开始
 
-输入框就是终端：`#` 唤起四级模糊匹配的文件补全，`@` 点名 Bot，`/` 打开技能、提示词与扩展命令菜单；底栏秒切模型与七档思考（`off`~`max`）；空输入框按 `↑` 直接编辑上一条，本地保留 50 条发送历史。侧边栏用注意力状态灯标出每个会话的状态（failed 红、待验收绿、运行中蓝脉冲），活跃雷达置顶最多 4 条需要关注的会话，全局搜索直达任意历史消息。
+开发环境要求 **Node.js ≥ 24.12.0** 与 **pnpm 10.34.9**。
 
-→ [用户指南](docs/user-guide.md)
+### 1. 启动 Web 与 Hub
 
-## 先跑起来
-
-需要 **Node.js ≥ 24.12.0** 和 **pnpm 10.34.9**。首次体验需要一个可用的模型账号或 API Key。
-
-### 1. 启动 Web 和 Hub
+克隆代码仓库并安装依赖：
 
 ```bash
 git clone https://github.com/team4u/botd.git
 cd botd
 corepack enable
-corepack prepare pnpm@10.34.9 --activate
 pnpm install
 pnpm build
-
-# 把示例密码换成自己的密码，保留此终端运行
-BOTD_PORT=3002 BOTD_ADMIN_PASSWORD='replace-with-a-long-password' pnpm dev
 ```
 
-打开 **http://localhost:3001**。使用 `admin` 和刚才设置的密码登录。密码只在首次创建管理员时生效。
-
-开发时，浏览器通过 `3001` 访问前端。Hub 在 `3002` 接收代理请求。
-
-### 2. 接入第一台机器
-
-在网页的节点管理中生成配对码。另开一个终端，在仓库根目录执行：
+启动开发服务：
 
 ```bash
-# 将 123456 换成网页显示的配对码
-pnpm node join http://localhost:3001 --code 123456 --name my-workstation
-pnpm node start
-```
-
-保持此终端运行，等待网页显示节点在线。`pnpm dev` 只启动 Web 和 Hub，节点需要单独启动。
-
-### 3. 发出第一条任务
-
-1. 在网页的模型设置中选择在线节点，登录供应商。
-2. 在「节点与智能体」中编辑默认助手，选择可用模型。
-3. 打开与 Bot 的单聊，发送：
-
-   > 查看你的工作目录。运行命令，告诉我当前操作系统和 Node.js 版本。
-
-看到工具执行轨迹和回复后，你就有了第一个能在本机做事的 Bot。
-
-完整步骤、常见问题和停止方法见[入门指南](docs/getting-started.md)。长期运行可按[部署指南](docs/deployment.md)配置源码服务或 Docker Compose。
-
-## 能力一览
-
-### 对话体验
-
-| 能力 | 说明 |
-| --- | --- |
-| `#` 文件补全与 `@` 提及 | 四级模糊匹配补全仓库文件，`@` 直接点名 Bot |
-| 底栏秒切模型与思考档位 | 输入框底栏切换 Model 与七档思考（`off`~`max`），不进设置页 |
-| `↑` 编辑上一条 | 空输入框按 `↑` 直达编辑最近一条发送，本地保留 50 条历史 |
-| `/` 命令菜单 | 技能、提示词与扩展命令统一在一个菜单里渐进式披露 |
-| 消息分叉与只读分享 | 从任意消息分叉新话题；会话生成只读链接外发 |
-| 上下文水位与 `/compact` | 胶囊提示上下文余量，随时手动压缩 |
-| 生成式 UI | 17 个声明式组件（64KB / 64 元素 / 深 6），渲染确认卡、表单与命令面板 |
-
-### 工作区
-
-| 能力 | 说明 |
-| --- | --- |
-| Space 仓库绑定 | 会话 / Bot 绑定本地 Git 仓库目录，`AGENTS.md` 自动注入 |
-| 子代理 worktree 隔离 | 并发子代理各自在独立 worktree 里工作，互不踩踏 |
-| Git Diff 抽屉 | 双栏并排、行级引用、单文件两段式回滚 |
-| 回合互斥 | 同一目录的回合跨会话排队，避免并发写入 |
-
-### 多智能体
-
-| 能力 | 说明 |
-| --- | --- |
-| `SubagentWorkflow` | 阶段 / 并行 / 断点续跑，混编本地子代理与跨 Bot 步骤 |
-| 深度干预 | `steer` 插话、`resume` 追问、单停某个 run |
-| 跨 Bot 子会话委派 | 产物零拷贝继承、`Barrier` 汇合、`[PASS]`/`[IGNORE]` 静默收敛 |
-| 分层长期记忆 | 节点共享 / Bot 独立 / 按需读取的主题记忆三层 |
-
-### 自动化
-
-| 能力 | 说明 |
-| --- | --- |
-| 触发器 | `webhook` / `cron` / `once`；`eventFilter` 支持点号路径与数组匹配 |
-| 子会话派生 | 触发器按 `subsession` 模式派生独立会话，载荷隔离落盘 |
-| 后台任务与产物 | 耗时命令后台化并在抽屉里管理；产物跨会话、跨节点流转 |
-
-### 通知
-
-| 能力 | 说明 |
-| --- | --- |
-| 四渠道 | 飞书 / Slack / Telegram / 通用 Webhook |
-| `tellPolicy` | 按策略决定什么时候可以打扰你 |
-| Outbox 重试 | 指数退避，保证通知送达 |
-| `botd ask` 降级 | 你不在线时降级为渠道摘要，附带免登录 HMAC 一键确认 URL |
-
-### 可靠性
-
-| 能力 | 说明 |
-| --- | --- |
-| 断连容错 | 断连不杀回合；在途附着 + 单槽磁盘回执，保证恰好执行一次 |
-| 孤儿回合处理 | Hub 重启后诚实置 `failed`，提示一键「继续」 |
-| 离线补投 | 离线节点积压的任务 72 小时内补投 |
-| 节点升级 | 金丝雀 15s 就绪探针、失败自动回滚 + 版本封禁 30 分钟、tarball sha512 校验 |
-
-### 安全
-
-| 能力 | 说明 |
-| --- | --- |
-| 凭据本地化 | 模型凭据只保存在节点 `~/.botd/`，不经过 Hub |
-| 明确的权限边界 | 工具以节点系统用户权限执行，边界与部署要求见[安全文档](docs/security.md) |
-
-### 生态
-
-| 能力 | 说明 |
-| --- | --- |
-| 技能与扩展安装 | npm / git / GitHub 单目录 / Pi Package 兼容，`install --bot` 一键挂载到 Bot |
-| 跨节点技能同步 | 技能在节点之间自动同步 |
-| PWA | 手机安装到主屏幕，独立窗口使用 |
-
-## 运行在哪里，数据就怎样分工
-
-**Hub** 提供网页、账户、会话记录和任务调度。**Node Agent** 在每台接入的机器上运行，负责模型调用、文件读写和工具执行。一个 **Bot** 属于一个节点。
-
-模型凭据保存在节点本地。Bot 的配置、记忆、工作目录和模型会话文件默认放在 `~/.botd/`。Hub 保存公屏消息、用户与节点信息等数据。
-
-Bot 的 Bash 和文件工具使用 Node Agent 的系统用户权限。工作目录隔离不等于操作系统沙箱。部署前请了解[安全边界](docs/security.md)。
-
-实现使用 TypeScript、React / Vite、Hono、SQLite 和 Pi SDK。通信与存储的细节见[架构说明](docs/architecture.md)。
-
-## 文档
-
-全部文档按读者路径组织，见[文档目录](docs/README.md)。常用入口：
-
-- 上手：[入门指南](docs/getting-started.md) · [用户指南](docs/user-guide.md) · [工作区指南](docs/workspace.md)
-- 自动化：[自动化指南](docs/automation.md) · [触发器](docs/triggers.md) · [外部渠道](docs/channels.md)
-- 运维：[部署指南](docs/deployment.md) · [配置参考](docs/configuration.md) · [安全边界](docs/security.md) · [故障排查](docs/troubleshooting.md)
-- 开发：[开发指南](docs/development.md) · [架构说明](docs/architecture.md) · [扩展开发](docs/extensions.md) · [生成式 UI](docs/generative-ui.md) · [HTTP API](docs/api.md) · [CLI 参考](docs/cli.md) · [测试指南](docs/testing.md)
-
-## 开发与贡献
-
-需要 Node.js ≥ 24.12.0 和 pnpm 10.34.9。本机开发 Web 使用 `3001`、Hub 使用 `3002`（`BOTD_PORT=3002`），不占用 `3000`；生产部署与 Compose 默认端口仍为 `3000`。
-
-```bash
-git clone https://github.com/team4u/botd.git
-cd botd
-corepack enable
-corepack prepare pnpm@10.34.9 --activate
-pnpm install
-pnpm build
 BOTD_PORT=3002 pnpm dev
 ```
 
-提交 Pull Request 前请阅读[贡献指南](CONTRIBUTING.md)。欢迎提交问题、使用反馈和 Pull Request：描述具体任务、复现步骤与预期结果，能帮助我们更快定位问题。
+浏览器打开 `http://localhost:3001`。使用默认管理员账号登录。
 
-botd 使用 [MIT 许可证](LICENSE)。
+> [!IMPORTANT]
+> 本机开发必须指定 `BOTD_PORT=3002`。开发服务使用 3001 与 3002 端口，不占用 3000 端口。
+
+### 2. 接入执行节点
+
+打开另一个终端，接入本机节点：
+
+```bash
+pnpm node join http://localhost:3001 --code 123456 --name my-worker
+pnpm node start
+```
+
+Web 界面会显示节点在线状态。
+
+### 3. 体验全双工协同
+
+1. 在 Web 界面选择默认助手。
+2. 发送耗时指令：`分析当前项目目录并运行测试`。
+3. Router 会调用 `spawn_worker` 派发后台任务。
+4. 顶部 `ActiveWorkersBar` 显示实时任务胶囊。
+5. 你可以继续在前台输入其他消息，对话立即得到响应。
+6. 点击顶部胶囊打开 `WorkerInspectDrawer`，实时查看执行过程或发送插话指令。
+
+## 模块导览
+
+- [apps/hub](file:///root/code/botd/apps/hub)：Hub 服务端核心，包含 Pi Durable Harness、Router、Worker 与状态文档。
+- [apps/node](file:///root/code/botd/apps/node)：Node 守护进程，包含远程执行 RPC 服务与 Git Worktree 管理。
+- [apps/web](file:///root/code/botd/apps/web)：前端交互界面，提供全双工对话视图、ActiveWorkersBar 与 WorkerInspectDrawer。
+- [packages/protocol](file:///root/code/botd/packages/protocol)：共享协议契约，包含 `env-rpc.ts` 与模型类型定义。
+
+## 文档索引
+
+- [系统架构全景](file:///root/code/botd/docs/architecture.md)：三层拓扑、状态文档、并发隔离与自愈机制。
+- [用户协同指南](file:///root/code/botd/docs/user-guide.md)：角色分身、全双工会话、任务看板与实时插话。
+- [快速入门指南](file:///root/code/botd/docs/getting-started.md)：环境搭建与首条指令执行。
+- [部署与运维](file:///root/code/botd/docs/deployment.md)：生产环境 Docker Compose 部署。
+- [文档主页](file:///root/code/botd/docs/README.md)：系统全部文档清单。
+
+## 开源协议
+
+本项目基于 [MIT License](LICENSE) 协议开源。
