@@ -44,7 +44,10 @@ export interface IncrementalMessageResult {
   rowid: number;
 }
 
-export const HUB_SCHEMA_VERSION = 5;
+export const HUB_SCHEMA_VERSION = 6;
+
+/** Bot 级文件种类：system/memory 为 Markdown，env 为 JSON 序列化的环境变量表 */
+export type BotFileKind = 'system' | 'memory' | 'env';
 
 const PREVIEW_MAX_LENGTH = 60;
 
@@ -603,6 +606,34 @@ export class HubDatabase {
         expires_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_outbound_task_queue_node ON outbound_task_queue(node_id, status);
+
+      CREATE TABLE IF NOT EXISTS bot_files (
+        bot_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (bot_id, kind)
+      );
+
+      CREATE TABLE IF NOT EXISTS hub_skills (
+        id TEXT PRIMARY KEY,
+        content TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS hub_extensions (
+        id TEXT PRIMARY KEY,
+        content TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS provider_credentials (
+        provider_id TEXT PRIMARY KEY,
+        auth_type TEXT NOT NULL,
+        api_key TEXT,
+        oauth_json TEXT,
+        updated_at TEXT NOT NULL
+      );
     `);
 
     const migrations = [
@@ -1226,8 +1257,147 @@ export class HubDatabase {
   }
 
   deleteBot(id: string): void {
-    const stmt = this.db.prepare('DELETE FROM bots WHERE id = ?');
-    stmt.run(id);
+    return this.inTransaction(() => {
+      this.db.prepare('DELETE FROM bot_files WHERE bot_id = ?').run(id);
+      this.db.prepare('DELETE FROM bots WHERE id = ?').run(id);
+    });
+  }
+
+  // --- Bot Files（system / memory Markdown 与 env JSON，Hub 权威存储） ---
+  getBotFile(botId: string, kind: BotFileKind): string {
+    const row = this.db
+      .prepare('SELECT content FROM bot_files WHERE bot_id = ? AND kind = ?')
+      .get(botId, kind) as { content: string } | undefined;
+    return row?.content ?? '';
+  }
+
+  setBotFile(botId: string, kind: BotFileKind, content: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO bot_files (bot_id, kind, content, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(bot_id, kind) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at`
+      )
+      .run(botId, kind, content, now);
+  }
+
+  // --- Hub Skills / Extensions（内容权威存储） ---
+  listSkills(): Array<{ id: string; updatedAt: string }> {
+    const rows = this.db
+      .prepare('SELECT id, updated_at FROM hub_skills ORDER BY id ASC')
+      .all() as { id: string; updated_at: string }[];
+    return rows.map((r) => ({ id: r.id, updatedAt: r.updated_at }));
+  }
+
+  getSkillContent(id: string): string {
+    const row = this.db.prepare('SELECT content FROM hub_skills WHERE id = ?').get(id) as
+      | { content: string }
+      | undefined;
+    return row?.content ?? '';
+  }
+
+  saveSkillContent(id: string, content: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO hub_skills (id, content, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at`
+      )
+      .run(id, content, now);
+  }
+
+  deleteSkillContent(id: string): void {
+    this.db.prepare('DELETE FROM hub_skills WHERE id = ?').run(id);
+  }
+
+  listExtensions(): Array<{ id: string; updatedAt: string }> {
+    const rows = this.db
+      .prepare('SELECT id, updated_at FROM hub_extensions ORDER BY id ASC')
+      .all() as { id: string; updated_at: string }[];
+    return rows.map((r) => ({ id: r.id, updatedAt: r.updated_at }));
+  }
+
+  getExtensionContent(id: string): string {
+    const row = this.db.prepare('SELECT content FROM hub_extensions WHERE id = ?').get(id) as
+      | { content: string }
+      | undefined;
+    return row?.content ?? '';
+  }
+
+  saveExtensionContent(id: string, content: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO hub_extensions (id, content, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at`
+      )
+      .run(id, content, now);
+  }
+
+  deleteExtensionContent(id: string): void {
+    this.db.prepare('DELETE FROM hub_extensions WHERE id = ?').run(id);
+  }
+
+  // --- Provider Credentials（Hub 权威存储） ---
+  getProviderCredential(providerId: string):
+    | { providerId: string; authType: 'api_key' | 'oauth'; apiKey?: string; oauth?: unknown; updatedAt: string }
+    | undefined {
+    const row = this.db
+      .prepare('SELECT provider_id, auth_type, api_key, oauth_json, updated_at FROM provider_credentials WHERE provider_id = ?')
+      .get(providerId) as
+      | { provider_id: string; auth_type: string; api_key: string | null; oauth_json: string | null; updated_at: string }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      providerId: row.provider_id,
+      authType: row.auth_type === 'oauth' ? 'oauth' : 'api_key',
+      ...(row.api_key != null ? { apiKey: row.api_key } : {}),
+      ...(row.oauth_json ? { oauth: parseOptionalJson(row.oauth_json) } : {}),
+      updatedAt: row.updated_at,
+    };
+  }
+
+  listProviderCredentials(): Array<{ providerId: string; authType: 'api_key' | 'oauth' }> {
+    const rows = this.db
+      .prepare('SELECT provider_id, auth_type FROM provider_credentials ORDER BY provider_id ASC')
+      .all() as { provider_id: string; auth_type: string }[];
+    return rows.map((r) => ({
+      providerId: r.provider_id,
+      authType: r.auth_type === 'oauth' ? 'oauth' : 'api_key',
+    }));
+  }
+
+  saveProviderCredential(input: {
+    providerId: string;
+    authType: 'api_key' | 'oauth';
+    apiKey?: string;
+    oauth?: unknown;
+  }): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO provider_credentials (provider_id, auth_type, api_key, oauth_json, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(provider_id) DO UPDATE SET
+           auth_type = excluded.auth_type,
+           api_key = excluded.api_key,
+           oauth_json = excluded.oauth_json,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        input.providerId,
+        input.authType,
+        input.apiKey ?? null,
+        input.oauth !== undefined ? JSON.stringify(input.oauth) : null,
+        now
+      );
+  }
+
+  deleteProviderCredential(providerId: string): void {
+    this.db.prepare('DELETE FROM provider_credentials WHERE provider_id = ?').run(providerId);
   }
 
   // --- Sessions ---

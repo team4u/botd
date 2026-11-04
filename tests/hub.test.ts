@@ -152,7 +152,7 @@ async function fixture(t: TestContext) {
   return { hub, base, request, json, addNode, session, messages, idle, cookie: () => cookie, loginAs, forUser };
 }
 
-test('Pi catalog exposes full public metadata and routes native provider login through its node', async t => {
+test('Pi catalog exposes full public metadata and Hub-owned api_key provider login', async t => {
   const f = await fixture(t);
   assert.equal((await f.request('/api/models/catalog', 'GET', undefined, false)).status, 401);
   const catalog = await f.json('/api/models/catalog');
@@ -162,26 +162,54 @@ test('Pi catalog exposes full public metadata and routes native provider login t
   const codex = catalog.providers.find((provider: any) => provider.id === 'openai-codex');
   assert(codex.authMethods.some((method: any) => method.type === 'oauth'));
   assert.equal(codex.authMethods.some((method: any) => method.type === 'api_key'), false);
-  // The Hub no longer stores global API keys: the built-in catalog never reports any provider as configured
+  // 未配置任何凭据时，内置目录不把任何 provider 标记为 configured
   assert(catalog.providers.every((provider: any) => provider.configured === false));
+
   const node = await f.addNode(['worker']);
+  // 目录不再依赖节点：nodeId 仅做归属校验，结果与全局目录一致
   const nodeCatalog = await f.json(`/api/models/catalog?nodeId=${node.identity.nodeId}`);
   assert.equal(nodeCatalog.providers.length, catalog.providers.length);
+
+  // Hub 直连 api_key 登录：不接触任何节点 RPC
   const prefix = `/api/nodes/${node.identity.nodeId}`;
-  const login = await f.json(`${prefix}/providers/github-copilot/login`, 'POST', { method: 'oauth' });
+  const login = await f.json('/api/providers/openai/login', 'POST', { method: 'api_key' });
   assert.equal(login.status, 'pending');
-  const state = await f.json(`${prefix}/provider-logins/${login.id}`);
-  assert.equal(state.prompt.type, 'manual_code');
-  assert.equal((await f.request(`${prefix}/provider-logins/${login.id}/respond`, 'POST', { value: 'test-code' })).status, 400);
-  const completed = await f.json(`${prefix}/provider-logins/${login.id}/respond`, 'POST', { promptId: state.prompt.id, value: 'test-code' });
+  assert.equal(login.prompt.id, 'api_key');
+  assert.equal(login.prompt.type, 'secret');
+  const state = await f.json(`/api/provider-logins/${login.id}`);
+  assert.equal(state.prompt.id, 'api_key');
+  assert.equal((await f.request(`/api/provider-logins/${login.id}/respond`, 'POST', { value: 'sk-test' })).status, 400);
+  const completed = await f.json(`/api/provider-logins/${login.id}/respond`, 'POST', { promptId: 'api_key', value: 'sk-test-123' });
   assert.equal(completed.status, 'success');
-  assert.equal(JSON.stringify(completed).includes('test-code'), false);
-  await f.json(`${prefix}/providers/github-copilot/auth`, 'DELETE');
-  assert.deepEqual(node.authCalls, ['github-copilot']);
-  const other = await f.json(`${prefix}/providers/openai/login`, 'POST', { method: 'oauth' });
+  assert.equal(JSON.stringify(completed).includes('sk-test-123'), false, 'API key must never be echoed');
+
+  // 目录标记 configured + credentialType
+  const configured = await f.json('/api/models/catalog');
+  const openai = configured.providers.find((provider: any) => provider.id === 'openai');
+  assert.equal(openai.configured, true);
+  assert.equal(openai.credentialType, 'api_key');
+
+  // 凭据查询不泄露密钥
+  const credentials = await f.json('/api/providers/openai/credentials');
+  assert.deepEqual(Object.keys(credentials).sort(), ['authType', 'configured', 'updatedAt']);
+
+  // 节点维度别名路由映射到同一 Hub 实现
+  const alias = await f.json(`${prefix}/providers/anthropic/login`, 'POST', { method: 'api_key' });
+  assert.equal(alias.status, 'pending');
+  const aliasDone = await f.json(`${prefix}/provider-logins/${alias.id}/respond`, 'POST', { promptId: 'api_key', value: 'sk-ant' });
+  assert.equal(aliasDone.status, 'success');
+
+  // 注销：凭据删除后回到未配置状态
+  await f.json('/api/providers/openai/auth', 'DELETE');
+  const afterLogout = await f.json('/api/models/catalog');
+  assert.equal(afterLogout.providers.find((provider: any) => provider.id === 'openai').configured, false);
+
+  // 取消与校验路径
+  const other = await f.json(`${prefix}/providers/openai/login`, 'POST', { method: 'api_key' });
   await f.json(`${prefix}/provider-logins/${other.id}`, 'DELETE');
-  assert.equal((await f.json(`${prefix}/provider-logins/${other.id}`)).status, 'cancelled');
-  assert.equal((await f.request(`${prefix}/providers/openai/login`, 'POST', { method: 'invalid' })).status, 400);
+  assert.equal((await f.request(`${prefix}/provider-logins/${other.id}`)).status, 404, 'cancelled login sessions are gone');
+  assert.equal((await f.request('/api/providers/openai/login', 'POST', { method: 'invalid' })).status, 400);
+  assert.equal((await f.request('/api/providers/ghost-provider/login', 'POST', { method: 'api_key' })).status, 501);
 });
 
 test('auth, one-time pairing and authenticated node registration', async t => {
@@ -201,7 +229,8 @@ test('auth, one-time pairing and authenticated node registration', async t => {
   await f.json('/api/nodes/pairing/exchange', 'POST', input);
   assert.equal((await f.request('/api/nodes/pairing/exchange', 'POST', input)).status, 400);
   await node.rpc.registerNode({ nodeId: node.identity.nodeId, name: 'Test node', platform: 'linux', bots: [], skills: ['demo'] });
-  assert.equal((await f.json('/api/nodes'))[0].bots.length, 0, 'Local node inventory must replace the Hub metadata cache');
+  // Hub SQLite 是 Bot 配置的权威存储：节点上报空清单不再清除 Hub 侧存量 Bot
+  assert.equal((await f.json('/api/nodes'))[0].bots.length, 1, 'Hub-owned bots survive node re-registration');
 });
 
 test('isolates resources per user', async t => {
@@ -412,9 +441,13 @@ test('file management and offline nodes preserve metadata', async t => {
   assert.deepEqual(await f.json('/api/bots/bot/memory'), { content: 'Remember this.' }, 'Malformed writes must preserve the previous file');
   await f.json(`/api/nodes/${node.identity.nodeId}/skills/new-skill`, 'PUT', { content: '# CLI skill' });
   assert.deepEqual(await f.json(`/api/nodes/${node.identity.nodeId}/skills/new-skill`), { content: '# CLI skill' });
+  // 全局 Skill 路由与节点维度路由同一 Hub 存储
+  assert.deepEqual(await f.json('/api/skills/new-skill'), { content: '# CLI skill' });
+  assert.ok((await f.json('/api/skills')).some((s: any) => s.id === 'new-skill'));
 
   await f.json(`/api/nodes/${node.identity.nodeId}/extensions/bash-guard`, 'PUT', { content: 'export default function(pi) {}' });
   assert.deepEqual(await f.json(`/api/nodes/${node.identity.nodeId}/extensions/bash-guard`), { content: 'export default function(pi) {}' });
+  assert.deepEqual(await f.json('/api/extensions/bash-guard'), { content: 'export default function(pi) {}' });
   assert((await f.json('/api/nodes'))[0].extensions.includes('bash-guard'));
 
   await f.json(`/api/nodes/${node.identity.nodeId}/install`, 'POST', { source: 'https://github.com/example/ext', kind: 'extension', customId: 'git-ext' });
@@ -428,14 +461,17 @@ test('file management and offline nodes preserve metadata', async t => {
   const nodesAfterDelete = await f.json('/api/nodes');
   assert.equal(nodesAfterDelete[0].extensions.includes('git-ext'), false);
   assert.equal(nodesAfterDelete[0].skills.includes('new-skill'), false);
+  assert.deepEqual(await f.json('/api/skills/new-skill'), { content: '' }, 'deleted skill content is gone');
 
   node.socket.close();
   await once(node.socket, 'close');
   const nodes = await waitFor(() => f.json('/api/nodes'), list => list[0].status === 'offline');
   assert.equal(nodes[0].bots[0].id, 'bot');
   assert.deepEqual(nodes[0].bots[0].enabledExtensions, ['bash-guard', 'git-ext']);
-  const response = await f.request('/api/bots/bot/memory');
-  assert.equal(response.status, 503);
+  // Hub 权威存储：节点离线后 Markdown / Skill / Extension 依然可读可写
+  assert.deepEqual(await f.json('/api/bots/bot/memory'), { content: 'Remember this.' });
+  await f.json('/api/bots/bot/memory', 'PUT', { content: 'Updated offline.' });
+  assert.deepEqual(await f.json('/api/bots/bot/memory'), { content: 'Updated offline.' });
 });
 
 test('separate sessions execute concurrently while each session remains serial', async t => {
@@ -523,13 +559,13 @@ test('force removal discards an offline node together with its cached bots', asy
   const blocked = await f.request(`/api/nodes/${node.identity.nodeId}`, 'DELETE');
   assert.equal(blocked.status, 409, 'offline node hosting bots cannot be removed regularly');
 
-  // Deleting a bot on the offline node is a 503 — the historical deadlock
-  assert.equal((await f.request('/api/bots/bot-x', 'DELETE')).status, 503);
+  // Hub 权威存储：节点离线也能直接删除 Bot（历史死锁已解除）
+  assert.deepEqual(await f.json('/api/bots/bot-x', 'DELETE'), { ok: true });
 
   // Force removal unlocks it: cache dropped, node gone, bot records purged
   await f.json(`/api/nodes/${node.identity.nodeId}?force=1`, 'DELETE');
   assert.equal((await f.json('/api/nodes')).length, 0, 'forced node disappears from the registry');
-  assert.equal((await f.request('/api/bots/bot-x/system', 'GET')).status, 404, 'cached bots of the forced node are purged');
+  assert.equal((await f.request('/api/bots/bot-y/system', 'GET')).status, 404, 'cached bots of the forced node are purged');
 
   // Old credentials no longer authenticate a reconnect
   const stale = new WebSocket(`${f.base.replace('http:', 'ws:')}/ws/node?nodeId=${node.identity.nodeId}&token=${node.identity.token}`);
@@ -661,12 +697,12 @@ test('GET /api/bots/:botId/commands auth, offline, not-found and success', async
     { name: 'skill:calc', description: 'Calculator', source: 'skill' },
   ]);
 
-  // 4. Offline -> 503
+  // 4. Offline -> 200 with empty list (clean default, no failure)
   node.socket.close();
   await once(node.socket, 'close');
   const offline = await f.request('/api/bots/bot1/commands', 'GET');
-  assert.equal(offline.status, 503);
-  assert.deepEqual(await offline.json(), { error: 'Node is offline' });
+  assert.equal(offline.status, 200);
+  assert.deepEqual(await offline.json(), []);
 });
 
 test('command routing, execution and path compatibility', async t => {
@@ -1207,4 +1243,69 @@ test('global SSE delivers node online/offline events only to the node owner', as
   adminController.abort();
   carolController.abort();
   await Promise.allSettled([adminRead, carolRead]);
+});
+
+test('Hub full ownership: Bot CRUD, SYSTEM/MEMORY, env, skills, extensions and provider api_key with NO node connected', async t => {
+  const f = await fixture(t);
+  // 全程不连接任何 Node：Hub SQLite 是唯一事实源
+
+  // 1. Bot CRUD on a virtual "local" node
+  const botBody = {
+    id: 'hub-owned-bot',
+    nodeId: 'local',
+    name: 'Hub Owned',
+    description: 'Created without any node',
+    modelProvider: 'openai',
+    modelId: 'gpt-4o',
+    thinkingLevel: 'medium' as const,
+    enabledSkills: [],
+    systemMd: 'You are hub owned.',
+  };
+  const created = await f.json<BotConfig>('/api/bots', 'POST', botBody);
+  assert.equal(created.id, 'hub-owned-bot');
+  assert.equal(created.nodeId, 'local');
+  assert.ok((await f.json('/api/nodes')).some((n: any) => n.id === 'local'));
+
+  // system markdown persisted in Hub
+  assert.deepEqual(await f.json('/api/bots/hub-owned-bot/system'), { content: 'You are hub owned.' });
+  await f.json('/api/bots/hub-owned-bot/memory', 'PUT', { content: 'Remember hub ownership.' });
+  assert.deepEqual(await f.json('/api/bots/hub-owned-bot/memory'), { content: 'Remember hub ownership.' });
+  // node-dimension alias route reads the same Hub storage
+  assert.deepEqual(await f.json('/api/nodes/local/bots/hub-owned-bot/files/memory'), { content: 'Remember hub ownership.' });
+
+  // env CRUD entirely on Hub
+  await f.json('/api/bots/hub-owned-bot/env', 'PUT', { env: { GITHUB_TOKEN: 'gh-token', DB_URL: 'sqlite://x' } });
+  const env = await f.json<{ keys: string[]; env: Record<string, string> }>('/api/bots/hub-owned-bot/env');
+  assert.deepEqual(env.keys.sort(), ['DB_URL', 'GITHUB_TOKEN']);
+  await f.json('/api/bots/hub-owned-bot/env/GITHUB_TOKEN', 'DELETE');
+  assert.deepEqual((await f.json<{ env: Record<string, string> }>('/api/bots/hub-owned-bot/env')).env, { DB_URL: 'sqlite://x' });
+
+  // 2. Skills & extensions on global Hub routes
+  await f.json('/api/skills/review-skill', 'PUT', { content: '# Review skill' });
+  assert.deepEqual(await f.json('/api/skills/review-skill'), { content: '# Review skill' });
+  await f.json('/api/extensions/lint-ext', 'PUT', { content: 'export default 1' });
+  assert.deepEqual(await f.json('/api/extensions/lint-ext'), { content: 'export default 1' });
+
+  // 3. Provider api_key login with zero nodes
+  const login = await f.json('/api/providers/openai/login', 'POST', { method: 'api_key' });
+  assert.equal(login.status, 'pending');
+  assert.equal(login.prompt.id, 'api_key');
+  const done = await f.json(`/api/provider-logins/${login.id}/respond`, 'POST', { promptId: 'api_key', value: 'sk-hub-only' });
+  assert.equal(done.status, 'success');
+  const catalog = await f.json('/api/models/catalog');
+  const openai = catalog.providers.find((p: any) => p.id === 'openai');
+  assert.equal(openai.configured, true);
+  assert.equal(openai.credentialType, 'api_key');
+
+  // 4. Update + delete the bot with no node ever connected
+  const updated = await f.json<BotConfig>('/api/bots/hub-owned-bot', 'PUT', { thinkingLevel: 'high', systemMd: 'Updated prompt.' });
+  assert.equal(updated.thinkingLevel, 'high');
+  assert.deepEqual(await f.json('/api/bots/hub-owned-bot/system'), { content: 'Updated prompt.' });
+  // PUT without systemMd keeps the stored markdown
+  await f.json('/api/bots/hub-owned-bot', 'PUT', { name: 'Renamed' });
+  assert.deepEqual(await f.json('/api/bots/hub-owned-bot/system'), { content: 'Updated prompt.' });
+  assert.deepEqual(await f.json('/api/bots/hub-owned-bot', 'DELETE'), { ok: true });
+  assert.equal((await f.request('/api/bots/hub-owned-bot/system')).status, 404);
+  // bot files are cascade-deleted
+  assert.equal(f.hub.db.getBotFile('hub-owned-bot', 'system'), '');
 });

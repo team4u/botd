@@ -16,13 +16,10 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
 
     const hostedBots = db.getBotsForNode(nodeId);
     if (hostedBots.length > 0) {
-      // Regular removal requires an empty node: the node is authoritative for its
-      // BOT directories, so deleting them needs the agent to be online.
       if (c.req.query('force') !== '1') {
         return c.json({ error: `Node still hosts ${hostedBots.length} bot(s); delete them first or force=1` }, 409);
       }
-      // Force removal (node may be gone for good): drop the Hub cache and
-      // best-effort clean the node itself when it happens to be online.
+      // 强制移除（节点可能永久丢失）：清除 Hub 记录；节点恰好在线时尽力清理其本地目录
       const rpc = connections.getNodeRpc(nodeId);
       if (rpc) {
         await Promise.allSettled(hostedBots.map((bot) => rpc.deleteBot(bot.id)));
@@ -34,6 +31,58 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
     db.deleteNode(nodeId);
     return c.json({ ok: true });
   });
+
+  // --- Hub 全局 Skill / Extension 路由（内容存 Hub SQLite，与节点无关） ---
+
+  app.get('/api/skills', (c) => c.json(db.listSkills()));
+
+  app.get('/api/skills/:skillId', (c) => {
+    const skillId = c.req.param('skillId');
+    if (!isSafeId(skillId)) return c.json({ error: 'Invalid skill id format' }, 400);
+    return c.json({ content: db.getSkillContent(skillId) });
+  });
+
+  app.put('/api/skills/:skillId', async (c) => {
+    const skillId = c.req.param('skillId');
+    if (!isSafeId(skillId)) return c.json({ error: 'Invalid skill id format' }, 400);
+    const body = await c.req.json<{ content?: string }>().catch(() => null);
+    if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
+    db.saveSkillContent(skillId, body.content);
+    return c.json({ ok: true });
+  });
+
+  app.delete('/api/skills/:skillId', (c) => {
+    const skillId = c.req.param('skillId');
+    if (!isSafeId(skillId)) return c.json({ error: 'Invalid skill id format' }, 400);
+    db.deleteSkillContent(skillId);
+    return c.json({ ok: true });
+  });
+
+  app.get('/api/extensions', (c) => c.json(db.listExtensions()));
+
+  app.get('/api/extensions/:extId', (c) => {
+    const extId = c.req.param('extId');
+    if (!isSafeId(extId)) return c.json({ error: 'Invalid extension id format' }, 400);
+    return c.json({ content: db.getExtensionContent(extId) });
+  });
+
+  app.put('/api/extensions/:extId', async (c) => {
+    const extId = c.req.param('extId');
+    if (!isSafeId(extId)) return c.json({ error: 'Invalid extension id format' }, 400);
+    const body = await c.req.json<{ content?: string }>().catch(() => null);
+    if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
+    db.saveExtensionContent(extId, body.content);
+    return c.json({ ok: true });
+  });
+
+  app.delete('/api/extensions/:extId', (c) => {
+    const extId = c.req.param('extId');
+    if (!isSafeId(extId)) return c.json({ error: 'Invalid extension id format' }, 400);
+    db.deleteExtensionContent(extId);
+    return c.json({ ok: true });
+  });
+
+  // --- 节点维度 Skill / Extension 路由：读写 Hub 存储 + 维护节点清单 ---
 
   const nodeResourceConfigs = [
     {
@@ -53,20 +102,16 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
   ];
 
   for (const { kind, subpath, paramName, onAdd, onRemove } of nodeResourceConfigs) {
-    app.get(`/api/nodes/:nodeId/${subpath}/:${paramName}`, async (c) => {
+    app.get(`/api/nodes/:nodeId/${subpath}/:${paramName}`, (c) => {
       const nodeId = c.req.param('nodeId');
       const id = c.req.param(paramName);
       if (!isSafeId(id)) {
         return c.json({ error: `Invalid ${kind} id format` }, 400);
       }
-      const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
-      if (!nodeRpc.ok) return nodeRpc.response;
-      try {
-        const content = await nodeRpc.rpc.readFile({ kind, id });
-        return c.json({ content });
-      } catch (err: any) {
-        return c.json({ error: err?.message || `Failed to read ${kind}` }, 500);
-      }
+      const nodeRes = resolveOwnedNode(c, db, nodeId);
+      if (!nodeRes.ok) return nodeRes.response;
+      const content = kind === 'skill' ? db.getSkillContent(id) : db.getExtensionContent(id);
+      return c.json({ content });
     });
 
     app.put(`/api/nodes/:nodeId/${subpath}/:${paramName}`, async (c) => {
@@ -75,37 +120,32 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
       if (!isSafeId(id)) {
         return c.json({ error: `Invalid ${kind} id format` }, 400);
       }
-      const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
-      if (!nodeRpc.ok) return nodeRpc.response;
+      const nodeRes = resolveOwnedNode(c, db, nodeId);
+      if (!nodeRes.ok) return nodeRes.response;
       const body = await c.req.json<{ content?: string }>().catch(() => null);
       if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
-      try {
-        await nodeRpc.rpc.writeFile({ kind, id }, body.content);
-        onAdd(nodeId, id);
-        return c.json({ ok: true });
-      } catch (err: any) {
-        return c.json({ error: err?.message || `Failed to write ${kind}` }, 500);
-      }
+      if (kind === 'skill') db.saveSkillContent(id, body.content);
+      else db.saveExtensionContent(id, body.content);
+      onAdd(nodeId, id);
+      return c.json({ ok: true });
     });
 
-    app.delete(`/api/nodes/:nodeId/${subpath}/:${paramName}`, async (c) => {
+    app.delete(`/api/nodes/:nodeId/${subpath}/:${paramName}`, (c) => {
       const nodeId = c.req.param('nodeId');
       const id = c.req.param(paramName);
       if (!isSafeId(id)) {
         return c.json({ error: `Invalid ${kind} id format` }, 400);
       }
-      const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
-      if (!nodeRpc.ok) return nodeRpc.response;
-      try {
-        await nodeRpc.rpc.deleteResource({ kind, id });
-        onRemove(nodeId, id);
-        return c.json({ ok: true });
-      } catch (err: any) {
-        return c.json({ error: err?.message || `Failed to delete ${kind}` }, 500);
-      }
+      const nodeRes = resolveOwnedNode(c, db, nodeId);
+      if (!nodeRes.ok) return nodeRes.response;
+      if (kind === 'skill') db.deleteSkillContent(id);
+      else db.deleteExtensionContent(id);
+      onRemove(nodeId, id);
+      return c.json({ ok: true });
     });
   }
 
+  // --- 节点独有能力（安装/重启/升级）：仍需节点在线 ---
   app.post('/api/nodes/:nodeId/install', async (c) => {
     const { nodeId } = c.req.param();
     const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
@@ -132,8 +172,10 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
       });
       if (installed.kind === 'skill') {
         db.addNodeSkill(nodeId, installed.id);
+        db.saveSkillContent(installed.id, '');
       } else {
         db.addNodeExtension(nodeId, installed.id);
+        db.saveExtensionContent(installed.id, '');
       }
       return c.json(installed);
     } catch (err: any) {

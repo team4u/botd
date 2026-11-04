@@ -434,38 +434,32 @@ test('webhook trigger fires an unauthenticated wakeup turn; trigger CRUD validat
   assert.equal((await f.request('/api/triggers/trg_missing', 'DELETE')).status, 404);
 });
 
-// --- 6. Cross-node skill sync ---
+// --- 6. Skills are Hub-owned（跨节点同步已无必要：技能内容全局存储） ---
 
-test('skill sync copies a skill between nodes', async t => {
+test('skills live in Hub storage shared across nodes without any sync endpoint', async t => {
   const f = await fixture(t);
   const nodeA = await f.addNode(['author']);
   const nodeB = await f.addNode(['reader']);
 
-  // Seed a skill on node A
+  // 在节点 A 维度写入技能（Hub 存储）
   const skillMd = '# shared-skill\n\nAlways run tests before deploy.';
   await f.json(`/api/nodes/${nodeA.identity.nodeId}/skills/shared-skill`, 'PUT', { content: skillMd });
 
-  // Sync node A -> node B
-  const sync = await f.json<any>(`/api/nodes/${nodeA.identity.nodeId}/skills/shared-skill/sync`, 'POST', {
-    targetNodeIds: [nodeB.identity.nodeId],
-  });
-  assert.deepEqual(sync, { ok: true, syncedNodeIds: [nodeB.identity.nodeId], failedNodeIds: [] });
+  // 任意节点维度与全局路由读到的是同一份 Hub 内容：无需同步
   assert.deepEqual(await f.json(`/api/nodes/${nodeB.identity.nodeId}/skills/shared-skill`), { content: skillMd });
-  const nodesAfterSync = await f.json<any[]>('/api/nodes');
-  assert(nodesAfterSync.find(n => n.id === nodeB.identity.nodeId)!.skills.includes('shared-skill'), 'target node lists the synced skill');
+  assert.deepEqual(await f.json('/api/skills/shared-skill'), { content: skillMd });
 
-  // Sync validation and error paths
-  assert.equal((await f.request(`/api/nodes/${nodeA.identity.nodeId}/skills/shared-skill/sync`, 'POST', {})).status, 400);
-  assert.equal((await f.request(`/api/nodes/${nodeA.identity.nodeId}/skills/shared-skill/sync`, 'POST', { targetNodeIds: [] })).status, 400);
-  assert.equal((await f.request('/api/nodes/node_ghost/skills/shared-skill/sync', 'POST', { targetNodeIds: [nodeB.identity.nodeId] })).status, 404);
+  // 目标节点挂到自己的清单上即可（启用语义）
+  await f.json(`/api/nodes/${nodeB.identity.nodeId}/skills/shared-skill`, 'PUT', { content: skillMd });
+  const nodesAfter = await f.json<any[]>('/api/nodes');
+  assert(nodesAfter.find(n => n.id === nodeB.identity.nodeId)!.skills.includes('shared-skill'), 'node B lists the skill');
 
-  // An offline target lands in failedNodeIds instead of failing the request
-  nodeB.socket.close();
-  await once(nodeB.socket, 'close');
-  const partial = await f.json<any>(`/api/nodes/${nodeA.identity.nodeId}/skills/shared-skill/sync`, 'POST', {
-    targetNodeIds: [nodeB.identity.nodeId],
-  });
-  assert.deepEqual(partial, { ok: true, syncedNodeIds: [], failedNodeIds: [nodeB.identity.nodeId] });
+  // 旧同步端点已随节点代理一并移除
+  assert.equal(
+    (await f.request(`/api/nodes/${nodeA.identity.nodeId}/skills/shared-skill/sync`, 'POST', { targetNodeIds: [nodeB.identity.nodeId] })).status,
+    404,
+    'skill sync proxy endpoint is gone; skills are Hub-owned',
+  );
 });
 
 // --- 7. Builtin skill creator meta-skill ---

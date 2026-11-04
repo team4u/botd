@@ -8,8 +8,11 @@
  */
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { defineDocFamily } from '@earendil-works/pi-durable';
+import { randomUUID } from 'node:crypto';
 import { resolveOwnedSession } from '../http-helpers.js';
+import type { PendingAskRecord } from '@botd/protocol';
 import type { HubDurableRuntime } from '../harness/hub-harness.js';
+import { AskDoc, type AskEntry } from '../harness/docs.js';
 import type { WorkerEntry } from '../harness/docs.js';
 import {
   EventDropped,
@@ -160,11 +163,110 @@ async function resolveRouterForEvent(
 }
 
 export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
-  const { db } = ctx;
+  const { db, router, sseHub } = ctx;
 
   /** 取 Durable 运行时：直接携带者优先，否则走懒加载单例；均缺失时 503。 */
   const runtime = async (): Promise<HubDurableRuntime | undefined> =>
     ctx.durableRuntime ?? (ctx.getDurableRuntime ? await ctx.getDurableRuntime() : undefined);
+
+  // --- 会话 Ask（人机协同）路由 -------------------------------------------
+  // GroupRouter 路径：内存 + pending_asks 表（router.getPendingAsks/respondToAsk）。
+  // Durable 路径：ask_human 工具写入会话 Router 会话的 AskDoc，这里合并透出。
+
+  const durablePendingAsks = async (sessionId: string): Promise<PendingAskRecord[]> => {
+    const rt = await runtime();
+    if (rt === undefined) return [];
+    const routerId = await findRouterConversationId(rt, sessionId);
+    if (routerId === undefined) return [];
+    try {
+      const numeric = Number(routerId);
+      if (!Number.isInteger(numeric)) return [];
+      const doc = await rt.harness.snapshot(
+        AskDoc,
+        numeric as import('@earendil-works/pi-durable').ConversationId,
+        BACKGROUND_CONTEXT,
+      );
+      if (!doc) return [];
+      return Object.values(doc.asks as Record<string, AskEntry>)
+        .filter((ask) => ask.status === 'pending')
+        .map((ask) => ({
+          id: ask.askId,
+          sessionId,
+          botId: db.getSession(sessionId)?.leadBotId ?? '',
+          prompt: ask.prompt,
+          options: ask.options ?? [],
+          status: 'pending' as const,
+          createdAt: new Date(ask.createdAt).toISOString(),
+        }));
+    } catch {
+      return [];
+    }
+  };
+
+  app.get('/api/sessions/:id/asks', async (c) => {
+    const id = c.req.param('id');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+
+    const asks = router.getPendingAsks(id);
+    const durable = await durablePendingAsks(id);
+    const seen = new Set(asks.map((a) => a.id));
+    return c.json([...asks, ...durable.filter((a) => !seen.has(a.id))]);
+  });
+
+  // 手工创建待确认 ask（UI / 外部集成入口）：落 pending_asks 并广播 SSE
+  app.post('/api/sessions/:id/asks', async (c) => {
+    const id = c.req.param('id');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    const session = sRes.session;
+
+    const body = await (async () => {
+      try {
+        return await c.req.json<{ prompt?: string; options?: string[]; timeoutSeconds?: number; previewType?: PendingAskRecord['previewType']; previewContent?: string }>();
+      } catch {
+        return null;
+      }
+    })();
+    if (!body || typeof body.prompt !== 'string' || !body.prompt.trim()) {
+      return c.json({ error: 'prompt is required' }, 400);
+    }
+    const timeoutSeconds = typeof body.timeoutSeconds === 'number' && body.timeoutSeconds >= 0 ? body.timeoutSeconds : 0;
+    const now = new Date();
+    const record: PendingAskRecord = {
+      id: `ask_${randomUUID()}`,
+      sessionId: id,
+      botId: session.leadBotId,
+      prompt: body.prompt.trim(),
+      options: Array.isArray(body.options) ? body.options : [],
+      status: 'pending',
+      createdAt: now.toISOString(),
+      ...(timeoutSeconds > 0 ? { expiresAt: new Date(now.getTime() + timeoutSeconds * 1000).toISOString() } : {}),
+      ...(body.previewType ? { previewType: body.previewType } : {}),
+      ...(body.previewContent ? { previewContent: body.previewContent } : {}),
+    };
+    db.savePendingAsk(record);
+    sseHub.broadcast(id, { type: 'interaction_request', sessionId: id, ask: record });
+    return c.json(record, 201);
+  });
+
+  app.post('/api/sessions/:id/asks/:askId/respond', async (c) => {
+    const id = c.req.param('id');
+    const askId = c.req.param('askId');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+
+    const body = await c.req.json<{ answer?: string }>().catch(() => null);
+    if (!body || typeof body.answer !== 'string' || !body.answer.trim()) {
+      return c.json({ error: 'Missing answer' }, 400);
+    }
+
+    const resolved = router.respondToAsk(id, askId, body.answer.trim());
+    if (!resolved) {
+      return c.json({ error: 'Ask not found' }, 404);
+    }
+    return c.json({ ok: true, ask: resolved });
+  });
 
   // --- Workers 生命周期 -------------------------------------------------
 

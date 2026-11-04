@@ -8,7 +8,6 @@ import { HubDatabase } from '../apps/hub/src/db.js';
 import { SseHub } from '../apps/hub/src/sse.js';
 import { ArtifactService } from '../apps/hub/src/artifact-service.js';
 import { createHub } from '../apps/hub/src/index.js';
-import type { DelegateSessionResult } from '../packages/protocol/src/index.js';
 
 interface TestContextEnv {
   hub: ReturnType<typeof createHub>;
@@ -89,7 +88,7 @@ async function createTestEnv(t: TestContext): Promise<TestContextEnv> {
   };
 }
 
-test('Fix 4 — Delegation artifact copy shares storagePath and deletion does not unlink while child references it', async (t) => {
+test('Fix 4 — 子会话共享 storagePath 的会话删除不物理删除文件，直到最后一个引用消失', async (t) => {
   const env = await createTestEnv(t);
   const { hub, dir, adminUser, adminCookie, registerNodeWithBots, jsonRequest } = env;
 
@@ -97,17 +96,19 @@ test('Fix 4 — Delegation artifact copy shares storagePath and deletion does no
   const botWorker = 'bot_worker_del';
   registerNodeWithBots(adminUser.id, 'node_del', [botLead, botWorker]);
 
-  // Mock RPC to handle delegation task
-  hub.connections.getNodeRpc = () => ({
-    runTurn: async () => ({ replyText: 'ok', modelBadge: 'test/model' }),
-    resetSession: async () => {},
-  } as any);
-
   const parentSession = hub.db.createSession({
     id: 'sess_del_parent',
     title: 'Parent Session for Delegation',
     leadBotId: botLead,
     ownerId: adminUser.id,
+  });
+  // 子会话（trigger subsession 分发同款路径）：parentSessionId 关联父会话
+  const childSession = hub.db.createSession({
+    id: 'sess_del_child',
+    title: '[自动任务] 共享产物',
+    leadBotId: botWorker,
+    ownerId: adminUser.id,
+    parentSessionId: parentSession.id,
   });
 
   // Create temporary file with test content
@@ -127,21 +128,19 @@ test('Fix 4 — Delegation artifact copy shares storagePath and deletion does no
     storagePath: tempFilePath,
   });
 
-  // Delegate child session passing artifactIds
-  const delegateRes = await jsonRequest(`/api/sessions/${parentSession.id}/delegate`, 'POST', {
-    botId: botWorker,
-    prompt: 'Please review the shared report',
-    artifactIds: [parentArt.id],
-  }, adminCookie);
+  // 子会话引用同一 storagePath（委派/自动任务零拷贝回传同构）
+  const childArt = hub.db.createArtifact({
+    id: 'art_child_doc',
+    sessionId: childSession.id,
+    filename: 'shared-report.csv',
+    mimeType: 'text/csv',
+    sizeBytes: Buffer.byteLength(fileContent),
+    senderBotId: botWorker,
+    storagePath: tempFilePath,
+  });
 
-  assert.equal(delegateRes.status, 201, `Delegation failed: ${JSON.stringify(delegateRes.json)}`);
-  const delegateResult: DelegateSessionResult = delegateRes.json;
-  const childSessionId = delegateResult.childSession.id;
-
-  // Assert child session has an artifact row sharing the exact same storagePath
-  const childArtifacts = hub.db.listSessionArtifacts(childSessionId);
-  assert.equal(childArtifacts.length, 1);
-  const childArtWithStorage = hub.db.getArtifactWithStoragePath(childArtifacts[0].id);
+  // Assert child session artifact row shares the exact same storagePath
+  const childArtWithStorage = hub.db.getArtifactWithStoragePath(childArt.id);
   assert.ok(childArtWithStorage);
   assert.notEqual(childArtWithStorage.id, parentArt.id);
   assert.equal(childArtWithStorage.storagePath, tempFilePath);
@@ -167,7 +166,7 @@ test('Fix 4 — Delegation artifact copy shares storagePath and deletion does no
   assert.equal(text, fileContent);
 
   // Delete child session
-  const delChildRes = await jsonRequest(`/api/sessions/${childSessionId}`, 'DELETE', undefined, adminCookie);
+  const delChildRes = await jsonRequest(`/api/sessions/${childSession.id}`, 'DELETE', undefined, adminCookie);
   assert.equal(delChildRes.status, 200);
 
   // Both referencing sessions are deleted, physical file MUST now be reclaimed

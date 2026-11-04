@@ -201,12 +201,10 @@ export class NodeConnectionManager {
           }
         }
 
-        // Reconcile the cache with the node's authoritative local inventory.
+        // 与节点上报对账：Hub SQLite 是 Bot 配置的权威存储，节点上报只做 upsert，
+        // 不再删除 Hub 侧存量 Bot（离线期间创建/编辑的 Bot 不能因节点未同步而被清除）。
         this.db.inTransaction(() => {
           this.db.updateNodeMetadata(nodeId, info.name, info.platform, info.skills, extensions, pid, startedAt, info.version);
-          for (const cached of this.db.getBotsForNode(nodeId)) {
-            if (!botIds.has(cached.id)) this.db.deleteBot(cached.id);
-          }
           for (const bot of info.bots) {
             const existingBot = this.db.getBot(bot.id);
             this.db.saveBot({
