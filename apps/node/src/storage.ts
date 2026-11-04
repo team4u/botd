@@ -4,6 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isSafeId, isValidBotEnvKey, type BotConfig, type NodeIdentity } from '@botd/protocol';
+import {
+  decodePackageFile,
+  encodePackageFile,
+  type ResourcePackage,
+} from '@botd/protocol';
 
 export { isValidBotEnvKey } from '@botd/protocol';
 
@@ -465,6 +470,75 @@ export async function deleteResource(
     return;
   }
   throw new Error(`Unsupported resource kind: ${(target as any).kind}`);
+}
+
+async function fileExists(target: string): Promise<boolean> {
+  try {
+    await fs.access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 目录内全部文件（POSIX 相对路径，排除 .git；node_modules 仅在 includeDeps 时随包）。 */
+async function collectPackageFiles(
+  root: string,
+  includeDeps: boolean,
+): Promise<ResourcePackageFile[]> {
+  const files: ResourcePackageFile[] = [];
+  const walk = async (current: string, prefix: string): Promise<void> => {
+    const entries = await fs.readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === '.git') continue;
+      if (entry.name === 'node_modules' && !includeDeps) continue;
+      const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) await walk(full, rel);
+      else if (entry.isFile()) {
+        const data = await fs.readFile(full);
+        const executable = (entry.name === '.sh' || full.endsWith('.sh')) && (await fs.stat(full)).mode & 0o111;
+        files.push(encodePackageFile(rel, data, executable));
+      }
+    }
+  };
+  await walk(root, '');
+  return files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/** 读取节点本地资源包完整目录为 ResourcePackage（多文件 + 二进制保真）。 */
+export async function readResourcePackageDir(
+  dataDir: string,
+  target: { kind: 'skill' | 'extension'; id: string },
+): Promise<ResourcePackage> {
+  assertSafeId(target.id, `${target.kind === 'skill' ? 'Skill' : 'Extension'} ID`);
+  const dir = target.kind === 'skill'
+    ? resolveSkillDir(dataDir, target.id)
+    : getExtensionDir(dataDir, target.id);
+  if (!(await fileExists(path.join(dir, target.kind === 'skill' ? 'SKILL.md' : 'package.json')))
+    && !(await fileExists(path.join(dir, 'index.ts')))
+    && !(await fileExists(path.join(dir, 'index.js')))) {
+    throw new Error(`${target.kind === 'skill' ? 'Skill' : 'Extension'} "${target.id}" not found on node`);
+  }
+  const includeDeps = target.kind === 'extension';
+  const files = await collectPackageFiles(dir, includeDeps);
+  if (files.length === 0) {
+    throw new Error(`${target.kind === 'skill' ? 'Skill' : 'Extension'} "${target.id}" package is empty`);
+  }
+  let packageName: string | undefined;
+  try {
+    const pkg = JSON.parse(await fs.readFile(path.join(dir, 'package.json'), 'utf8')) as { name?: string };
+    if (typeof pkg.name === 'string' && pkg.name) packageName = pkg.name;
+  } catch {
+    // 无 package.json 或非法 JSON：非致命
+  }
+  return {
+    kind: target.kind,
+    id: target.id,
+    files,
+    ...(packageName ? { packageName } : {}),
+    ...(target.kind === 'skill' ? { entry: 'SKILL.md' } : {}),
+  };
 }
 
 export async function readFileTarget(

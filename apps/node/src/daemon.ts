@@ -27,6 +27,7 @@ import {
   listExtensions,
   listSkills,
   readIpcToken,
+  readResourcePackageDir,
   readFileTarget,
   readBot,
   readNodeIdentity,
@@ -735,6 +736,9 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       },
       installResource: async (input) => {
         return await installResourceToNode(dataDir, input);
+      },
+      readResourcePackage: async (target) => {
+        return await readResourcePackageDir(dataDir, target);
       },
       deleteResource: async (target) => {
         await deleteResource(dataDir, target);
