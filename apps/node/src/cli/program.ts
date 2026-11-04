@@ -1,5 +1,5 @@
+import { createRequire } from 'node:module';
 import { Command } from 'commander';
-import pkg from '../../package.json' with { type: 'json' };
 import { registerArtifactsCommands } from './commands/artifacts.js';
 import { registerAsksCommands } from './commands/asks.js';
 import { registerAuthCommands } from './commands/auth.js';
@@ -19,6 +19,9 @@ import { registerWorkersCommands } from './commands/workers.js';
 
 export function buildProgram(): Command {
   const program = new Command();
+  // createRequire 读 JSON：import attributes（with { type: 'json' }）在最早的
+  // Node 20 上不可用，而 @botd/node 承诺 engines >=20.0.0。
+  const pkg = createRequire(import.meta.url)('../../package.json') as { version: string };
 
   program
     .name('botd')

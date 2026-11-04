@@ -29,7 +29,7 @@
   "dependencies": {
     "@botd/protocol": "workspace:*",
     "birpc": "^2.9.0",
-    "commander": "^15.0.0",
+    "commander": "^14.0.3",
     "partysocket": "^1.1.1",
     "ws": "^8.18.0"
   },
