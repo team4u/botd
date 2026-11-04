@@ -106,8 +106,8 @@ test('real botd join/start/wake, file management and missing-key failure', { tim
   const nativeLogin = await api(`/api/nodes/${identity.nodeId}/providers/mistral/login`, 'POST', { method: 'api_key' });
   const nativePrompt = await waitFor(() => api<any>(`/api/nodes/${identity.nodeId}/provider-logins/${nativeLogin.id}`), state => Boolean(state.prompt));
   assert.equal(nativePrompt.prompt.type, 'secret');
-  await api(`/api/nodes/${identity.nodeId}/provider-logins/${nativeLogin.id}`, 'DELETE');
-  assert.equal((await api(`/api/nodes/${identity.nodeId}/provider-logins/${nativeLogin.id}`)).status, 'cancelled');
+  const cancelled = await api(`/api/nodes/${identity.nodeId}/provider-logins/${nativeLogin.id}`, 'DELETE');
+  assert.equal(cancelled.ok, true);
   await api(`/api/bots/${bot.id}/memory`, 'PUT', { content: 'Persistent integration memory.' });
   assert.equal((await api<{ content: string }>(`/api/bots/${bot.id}/memory`)).content, 'Persistent integration memory.');
   await api(`/api/nodes/${identity.nodeId}/skills/integration`, 'PUT', { content: '# Integration Skill\nUse local CLI help.' });

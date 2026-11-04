@@ -101,6 +101,7 @@ export function registerProviderRoutes(
     if (!session) return false;
     session.status = 'cancelled';
     session.prompt = undefined;
+    loginSessions.delete(loginId);
     return true;
   };
 
