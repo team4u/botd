@@ -30,3 +30,22 @@ pnpm dev:web
 ```
 
 `BOTD_PORT=3002` 必须带上；Vite 端口（3001）与代理目标（3002）已固化在 `apps/web/vite.config.ts`（`strictPort: true`，被占直接报错不漂移）。
+
+## 版本发布与分发规范
+
+- **触发事实源**：以 GitHub Release 作为唯一触发源，由 `scripts/release.ts` 驱动全流程（版本同步 → 质量检验 → 规范提交 → 创建 Release）。本地不手工打 Git 标签，禁止脱离发行流程直接 `npm publish`。
+- **发布清单与拓扑**：仅发布 `@botd/protocol` → `@botd/models` → `@botd/node`（按依赖拓扑序）。hub 与 web 保持 private，绝不在发布清单。
+- **全仓版本强一致**：发版时根目录与全部 workspace 包版本号统一同步（`scripts/bump-version.ts`），发布前做强一致性断言，避免 npm 回退加载旧版本。
+- **分发标签隔离**：正式版本使用 `latest`；预发布版本（如 `0.2.0-beta.1`）自动使用 `beta`/`alpha` 独立标签，严禁覆盖 `latest` 指针。注意：节点升级检查默认查 `@botd/node` 的 `latest` 标签，未发布的预发布版本不会触发升级。
+- **不可变发布**：CI 发布前逐包 shasum 幂等校验，同版本号摘要不一致直接终止；摘要一致则跳过，重跑安全。
+- **产物分发**：GitHub Release 触发 `publish.yml`，同步发布 npm 包（provenance）与 Docker 镜像到 `ghcr.io/team4u/botd`（稳定 semver 自动打 `latest`）。
+- **常用命令**：
+
+```bash
+node scripts/release.ts --patch --dry-run   # 模拟发版，查看计划
+node scripts/release.ts --patch             # 补丁版本发版
+node scripts/release.ts --prerelease beta   # 预发布版本（beta 标签）
+```
+
+- **发版提交格式**：统一为 `chore(release): release <version>`，正文附变更日志；提交信息遵循 `git-commit` 技能的中文规范。
+- **变更提炼**：发版脚本自动装配上一版本以来的提交明细；重大版本需在 `--notes` 补充包含背景、核心能力与迁移说明的解读。
