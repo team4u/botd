@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isSafeId } from '@botd/protocol';
 import type { CreateSessionInput } from '@botd/protocol';
 import { resolveOwnedSession } from '../http-helpers.js';
-import { cancelDurableSession } from './workers.js';
+import { cancelDurableSession, resetDurableSession } from './workers.js';
 import type { HubApp, HubContext } from './context.js';
 
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -153,49 +153,8 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
     return c.json({ ok: true });
   });
 
-  // 单独停掉某个运行中的子代理（按 runId），不中断主回合与其他并发子代理
-  app.post('/api/sessions/:id/subagents/:runId/stop', async (c) => {
-    const id = c.req.param('id');
-    const runId = c.req.param('runId');
-    const sRes = resolveOwnedSession(c, db, id);
-    if (!sRes.ok) return sRes.response;
-
-    try {
-      const result = await router.stopSubagent(id, runId);
-      if (!result.ok) {
-        return c.json({ error: result.error || 'Failed to stop subagent' }, 400);
-      }
-      return c.json({ ok: true });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to stop subagent' }, 500);
-    }
-  });
-
-  // 向某个子代理发送 steer（运行中插话）或 resume（结束后追问，同一 runId 上下文继续）
-  app.post('/api/sessions/:id/subagents/:runId/interact', async (c) => {
-    const id = c.req.param('id');
-    const runId = c.req.param('runId');
-    const sRes = resolveOwnedSession(c, db, id);
-    if (!sRes.ok) return sRes.response;
-
-    const body = await c.req
-      .json<{ message?: string; mode?: 'steer' | 'resume'; subagentId?: string }>()
-      .catch(() => null);
-    if (!body || typeof body.message !== 'string' || !body.message.trim()) {
-      return c.json({ error: 'message is required' }, 400);
-    }
-    const mode = body.mode === 'resume' ? 'resume' : 'steer';
-
-    try {
-      const result = await router.interactSubagent(id, runId, body.message, mode, body.subagentId);
-      if (!result.ok) {
-        return c.json({ error: result.error || 'Failed to interact with subagent', ...(result.run ? { run: result.run } : {}) }, 400);
-      }
-      return c.json({ ok: true, run: result.run });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to interact with subagent' }, 500);
-    }
-  });
+  // 子代理运行控制已迁移到 Durable Worker 路由：
+  // POST /api/sessions/:id/workers/:workerId/stop 与 /steer（routes/workers.ts）。
 
   // 会话分叉：以某条消息为锚点克隆出新会话（含锚点及其之前的消息），源会话完全不动。
   // 允许 running 中分叉：只读源会话 + 新建独立会话，不打扰执行中的回合；新会话尚无订阅者，无需 SSE 广播。
@@ -229,6 +188,10 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
     // 验证后，使用 Router 统一失效旧队列，复用 cancelSession
     await router.cancelSession(id);
 
+    // Durable 侧同步重置：停掉 running Worker / 中止 Router 回合，并清掉会话映射，
+    // 清空后的下一条消息重新懒建全新 Router 会话。
+    if (ctx.durableRuntime) await resetDurableSession(ctx.durableRuntime, id);
+
     db.clearSessionMessages(id);
     // 同步清空各成员节点的本地会话记忆（best-effort，失败在方法内部吞掉）
     await router.resetMemberSessions(id);
@@ -249,6 +212,9 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
 
     // 验证后，使用 Router 统一失效旧队列，复用 cancelSession
     await router.cancelSession(id);
+
+    // Durable 侧同步重置（与清空消息同构）：停 Worker + 清会话映射。
+    if (ctx.durableRuntime) await resetDurableSession(ctx.durableRuntime, id);
 
     // resetMemberSessions 内部要查会话成员，必须在 deleteSession 之前调用
     await router.resetMemberSessions(id);

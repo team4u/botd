@@ -277,8 +277,20 @@ export function createHub(options?: HubOptions): HubInstance {
   });
   registerArtifactRoutes(app, artifacts);
   registerShareRoutes(app, db, getSessionOwnerId);
-  const triggerScheduler = registerTriggerRoutes(app, db, router, getSessionOwnerId, { sseHub, artifacts });
-  const unsubscribeChannels = registerChannelRoutes(app, db, router, sseHub);
+  const triggerScheduler = registerTriggerRoutes(app, db, router, getSessionOwnerId, {
+    sseHub,
+    artifacts,
+    // 主线切流门槛与 messages.ts 一致：仅当 runtime 为显式注入，或 Hub 已配置
+    // 任一 Provider 凭据时生效（懒加载路径下 startHub 打开运行时后同样命中）。
+    shouldUseDurable: () =>
+      options?.durableRuntime !== undefined || db.listProviderCredentials().length > 0,
+    getDurableRuntime: ensureDurableRuntime,
+    getDurableMirror: () => durableMirror,
+  });
+  const unsubscribeChannels = registerChannelRoutes(app, db, router, sseHub, {
+    sseHub,
+    getDurableRuntime: () => durableRuntime,
+  });
   registerWorkerRoutes(app, { ...ctx, getDurableRuntime: ensureDurableRuntime, ...(durableRuntime ? { durableRuntime } : {}) });
 
   // 热同步分身：配置面（Bot/Skill/Extension/凭据）任一变更后，把 Hub SQLite 的
