@@ -17,6 +17,7 @@ import { createStaticMiddleware } from './static.js';
 import { ArtifactService } from './artifact-service.js';
 import { HubDurableRuntime, type BotPersonaConfig } from './harness/hub-harness.js';
 import { createHubCredentialStore } from './credential-store.js';
+import { loadDynamicDurableExtension } from './harness/dynamic-extension-loader.js';
 import { TargetDoc } from './harness/docs.js';
 import { registerProviderRoutes } from './providers.js';
 import { registerArtifactRoutes } from './artifacts.js';
@@ -123,7 +124,7 @@ export function createHub(options?: HubOptions): HubInstance {
   const ensureDurableRuntime = async (): Promise<HubDurableRuntime> => {
     if (durableRuntime !== undefined) {
       // Bot 配置可能已更新（新建/改模型/改工作目录）：每次取用都重新同步分身。
-      syncBotPersonas(durableRuntime);
+      await syncBotPersonas(durableRuntime);
       return durableRuntime;
     }
     if (durableRuntimeOpening === undefined) {
@@ -133,6 +134,21 @@ export function createHub(options?: HubOptions): HubInstance {
             ...(options?.dbPath ? { dbPath: `${options.dbPath}.durable.sqlite` } : {}),
             // 凭据来自 Hub SQLite（provider_credentials）：Hub 侧 LLM 请求直接解析认证
             models: options?.durableModels ?? createModels({ credentials: createHubCredentialStore(db) }),
+            // Hub 托管 Skills 与 Memory：分身的 Router/Worker 会话获得 load_skill /
+            // update_memory 工具，内容直接读写 Hub SQLite 权威存储
+            skills: {
+              getBotEnabledSkills: (botId) =>
+                db.getBot(botId)?.enabledSkills.map((skillId) => ({
+                  id: skillId,
+                  content: db.getSkillContent(skillId),
+                })) ?? [],
+              getSkillContent: (skillId) => {
+                const content = db.getSkillContent(skillId);
+                return content === '' ? undefined : content;
+              },
+              getBotMemory: (botId) => db.getBotFile(botId, 'memory'),
+              setBotMemory: (botId, content) => db.setBotFile(botId, 'memory', content),
+            },
             // Brain in Hub, Hands on Node：会话的目标节点在线时，工具执行走远端
             // RemoteExecutionEnv；否则退回本地 NodeExecutionEnv。
             env: async ({ conversationId, cwd }) => {
@@ -145,7 +161,7 @@ export function createHub(options?: HubOptions): HubInstance {
           },
         );
         runtime.harness.resume();
-        syncBotPersonas(runtime);
+        await syncBotPersonas(runtime);
         durableRuntime = runtime;
         return runtime;
       })();
@@ -174,17 +190,35 @@ export function createHub(options?: HubOptions): HubInstance {
     if (cwd === undefined || cwd === '') return undefined;
     return db.getAllBots().find((bot) => bot.workspaceDir && bot.workspaceDir === cwd)?.nodeId;
   };
-  /** Hub 数据库 Bot → 持久分身（模型/工作目录来自 Bot 配置）。 */
-  const syncBotPersonas = (runtime: HubDurableRuntime): void => {
+  /** Hub 数据库 Bot → 持久分身（SYSTEM/MEMORY、模型、Skills、Extensions 全部来自 Hub 权威存储）。 */
+  const syncBotPersonas = async (runtime: HubDurableRuntime): Promise<void> => {
     for (const bot of db.getAllBots()) {
+      const systemMd = db.getBotFile(bot.id, 'system').trim();
+      const memoryMd = db.getBotFile(bot.id, 'memory').trim();
       const persona: BotPersonaConfig = {
         botId: bot.id,
         name: bot.name,
         model: { provider: bot.modelProvider, modelId: bot.modelId },
-        instructions: `You are "${bot.name}", the lead bot of this hub.${bot.description ? ` ${bot.description}` : ''}`,
+        instructions:
+          systemMd ||
+          `You are "${bot.name}", the lead bot of this hub.${bot.description ? ` ${bot.description}` : ''}`,
+        ...(memoryMd ? { memory: memoryMd } : {}),
+        enabledSkills: bot.enabledSkills,
+        enabledExtensions: bot.enabledExtensions,
         nodeId: bot.nodeId,
         cwd: bot.workspaceDir?.trim() || process.cwd(),
       };
+      // 动态挂载 Hub 托管的用户扩展：首次遇到未安装的扩展时从源码加载并注册
+      for (const extId of bot.enabledExtensions ?? []) {
+        if (runtime.getDynamicExtension(extId) !== undefined) continue;
+        const source = db.getExtensionContent(extId);
+        if (!source.trim()) continue;
+        try {
+          runtime.installDynamicExtension(await loadDynamicDurableExtension(extId, source));
+        } catch (err) {
+          console.warn(`[hub] 加载动态扩展 ${extId} 失败（已跳过）:`, err instanceof Error ? err.message : err);
+        }
+      }
       runtime.registerPersona(persona);
     }
   };
