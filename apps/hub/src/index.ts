@@ -308,6 +308,9 @@ export function createHub(options?: HubOptions): HubInstance {
               ...(readBotEnvMap(target.botId) ?? {}),
               ...(target.botId ? { BOTD_BOT_ID: target.botId } : {}),
               ...(target.sessionId ? { BOTD_SESSION_ID: target.sessionId } : {}),
+              // 分身所在节点：botd-cli 技能的 `botd bots create --node "$BOTD_NODE_ID"`
+              // 依赖此变量；缺失时会落到 'local' 虚拟节点（显示离线且无法对话）。
+              ...(target.nodeId ? { BOTD_NODE_ID: target.nodeId } : {}),
             };
             let effectiveCwd = target.cwd || cwd || process.cwd();
             if (target.worktreePath) {

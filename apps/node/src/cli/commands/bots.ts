@@ -10,6 +10,7 @@ import { CliError } from '../errors.js';
 import { HubClient } from '../hub-client.js';
 import { readInput } from '../input.js';
 import { printContent, printResult } from '../render.js';
+import { readNodeIdentity } from '../../storage.js';
 
 function parseModel(model: string): { modelProvider: string; modelId: string } {
   const idx = model.indexOf('/');
@@ -72,9 +73,14 @@ export function registerBotsCommands(program: Command): void {
         const systemFile = options.systemFile as string | undefined;
         const systemMd = systemFile ? await readInput(systemFile) : '';
 
+        // 归属节点：--node > BOTD_NODE_ID > 本机已配对节点（node.json）> 'local'。
+        // 分身回合里 bots create 不传 --node 时，落到本机真实节点而不是虚拟 local。
+        const fallbackNodeId =
+          process.env.BOTD_NODE_ID || (await readNodeIdentity(g.dataDir))?.nodeId || 'local';
+
         const body: SaveBotInput = {
           id: botId,
-          nodeId: (options.node as string) || process.env.BOTD_NODE_ID || 'local',
+          nodeId: (options.node as string) || fallbackNodeId,
           name: options.name as string,
           description: (options.desc as string | undefined) ?? '',
           modelProvider,
