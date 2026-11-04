@@ -37,17 +37,19 @@ function npmCliOf(nodeBin: string): string {
   return found;
 }
 
-/** 把 >=x.y.z 语义的 engines 表达式解析成可比较的 [major, minor, patch]。 */
+/** 把 >=x.y / >=x 形式的 engines 表达式解析成可比较的 [major, minor, patch]。 */
 function parseFloor(range: string): [number, number, number] | null {
-  const match = /^>=\s*v?(\d+)\.(\d+)\.(\d+)/.exec(range.trim());
+  const match = /^>=\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(range.trim());
   if (!match) return null;
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
+  return [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)];
 }
 
 function coversNode20(range: string): boolean {
   const floor = parseFloor(range);
   if (!floor) return false;
-  return floor[0] < 20 || (floor[0] === 20 && floor[1] === 0 && floor[2] === 0);
+  const [major, minor, patch] = floor;
+  // 下限不高于 20.0.0 即覆盖（如 >=20、>=20.0、>=20.0.0）。
+  return major < 20 || (major === 20 && minor === 0 && patch === 0);
 }
 
 test('runtime dependency engines of @botd/node cover Node 20.0.0', async () => {
