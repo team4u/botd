@@ -5,9 +5,9 @@ import path from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isSafeId, isValidBotEnvKey, type BotConfig, type NodeIdentity } from '@botd/protocol';
 import {
-  decodePackageFile,
   encodePackageFile,
   type ResourcePackage,
+  type ResourcePackageFile,
 } from '@botd/protocol';
 
 export { isValidBotEnvKey } from '@botd/protocol';
@@ -497,7 +497,8 @@ async function collectPackageFiles(
       if (entry.isDirectory()) await walk(full, rel);
       else if (entry.isFile()) {
         const data = await fs.readFile(full);
-        const executable = (entry.name === '.sh' || full.endsWith('.sh')) && (await fs.stat(full)).mode & 0o111;
+        const executable =
+          (entry.name === '.sh' || full.endsWith('.sh')) && ((await fs.stat(full)).mode & 0o111) !== 0;
         files.push(encodePackageFile(rel, data, executable));
       }
     }

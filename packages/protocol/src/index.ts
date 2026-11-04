@@ -656,7 +656,7 @@ export function encodePackageFile(path: string, data: Buffer, executable = false
   if (Buffer.byteLength(text, 'utf8') !== data.length || Buffer.from(text, 'utf8').equals(data) === false) {
     return { path, contentBase64: data.toString('base64'), ...(executable ? { executable: true } : {}) };
   }
-  return { path, content, ...(executable ? { executable: true } : {}) };
+  return { path, content: text, ...(executable ? { executable: true } : {}) };
 }
 
 /** 解码包文件为原始字节；既无 content 又无 contentBase64 视为损坏载荷并抛错。 */
