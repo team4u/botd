@@ -241,14 +241,14 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
       ...(body.customId?.trim() ? { customId: body.customId.trim() } : {}),
     };
 
-    /** 入库 + 刷新分身：Hub SQLite 是权威存储，节点清单同步登记。 */
-    const persist = (kind: 'skill' | 'extension', id: string, content: string) => {
-      if (kind === 'skill') {
-        db.addNodeSkill(nodeId, id);
-        db.saveSkillContent(id, content);
+    /** 入库 + 刷新分身：Hub 文件系统包目录是权威存储，节点清单同步登记。 */
+    const persist = (installed: { kind: 'skill' | 'extension'; id: string; files: Record<string, string> }) => {
+      if (installed.kind === 'skill') {
+        db.addNodeSkill(nodeId, installed.id);
+        db.saveSkillFiles(installed.id, installed.files);
       } else {
-        db.addNodeExtension(nodeId, id);
-        db.saveExtensionContent(id, content);
+        db.addNodeExtension(nodeId, installed.id);
+        db.saveExtensionFiles(installed.id, installed.files);
       }
       void ctx.refreshDurablePersonas?.();
     };
@@ -260,7 +260,7 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
       }
       try {
         const installed = await installResourceLocally(input);
-        persist(installed.kind, installed.id, installed.content);
+        persist(installed);
         return c.json({ kind: installed.kind, id: installed.id });
       } catch (err: any) {
         return c.json({ error: err?.message || 'Failed to install resource locally' }, 500);
@@ -271,26 +271,30 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
     if (nodeRpc.ok) {
       try {
         const installed = await nodeRpc.rpc.installResource(input);
-        // 安装内容回读：从节点读回真实文件内容（而非空串占位），Hub 侧才是权威存储；
-        // 旧节点不支持 readFile 时退回 Hub 本地解析。
-        const content = await nodeRpc.rpc
-          .readFile({ kind: installed.kind, id: installed.id })
-          .catch(() => '');
-        if (content.trim()) {
-          persist(installed.kind, installed.id, content);
-          return c.json(installed);
+        // 安装内容回读：优先读回完整资源包（多文件 + 二进制保真）落盘为 Hub 权威
+        // 存储；旧节点不支持 readResourcePackage 时退回 Hub 本地解析。
+        const bundle = await nodeRpc.rpc.readResourcePackage(installed).catch(() => undefined);
+        if (bundle && bundle.files.length > 0) {
+          const files: Record<string, string> = {};
+          for (const file of bundle.files) {
+            files[file.path] = file.content ?? '';
+          }
+          persist({ kind: bundle.kind, id: bundle.id, files });
+          return c.json({ kind: installed.kind, id: installed.id });
         }
-        const local = await installResourceLocally(input).catch(() => undefined);
-        persist(installed.kind, installed.id, local?.content ?? '');
-        return c.json(installed);
-      } catch (err: any) {
-        // 节点安装失败（来源不可达 / 不支持）：Hub 能本地解析的来源降级本地安装。
         const local = await installResourceLocally(input).catch(() => undefined);
         if (local) {
-          persist(local.kind, local.id, local.content);
+          persist(local);
           return c.json({ kind: local.kind, id: local.id });
         }
-        return c.json({ error: err?.message || 'Failed to install resource' }, 500);
+        return c.json({ error: 'Node installed the resource but the package could not be read back' }, 502);
+      } catch (err: any) {
+        // 节点安装失败（来源不可达 / 不支持）：Hub 能本地解析的来源降级本地安装。
+        const local = await installResourceLocally(input).catch((localErr: any) => {
+          throw new Error(`${err?.message || 'Failed to install resource'}; local fallback: ${localErr?.message || 'failed'}`);
+        });
+        persist(local);
+        return c.json({ kind: local.kind, id: local.id });
       }
     }
 
@@ -299,7 +303,7 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
     if (!nodeRes.ok) return nodeRes.response;
     try {
       const installed = await installResourceLocally(input);
-      persist(installed.kind, installed.id, installed.content);
+      persist(installed);
       return c.json({ kind: installed.kind, id: installed.id });
     } catch (err: any) {
       return c.json(
@@ -336,10 +340,10 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
       });
       if (installed.kind === 'skill') {
         db.addNodeSkill('local', installed.id);
-        db.saveSkillContent(installed.id, installed.content);
+        db.saveSkillFiles(installed.id, installed.files);
       } else {
         db.addNodeExtension('local', installed.id);
-        db.saveExtensionContent(installed.id, installed.content);
+        db.saveExtensionFiles(installed.id, installed.files);
       }
       void ctx.refreshDurablePersonas?.();
       return c.json({ kind: installed.kind, id: installed.id });

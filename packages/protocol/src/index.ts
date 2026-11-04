@@ -604,6 +604,74 @@ export type ExtensionUiStreamPayload =
       mode?: 'set' | 'paste';
     };
 
+/** 资源包内单个文件：文本以 utf8 存内容，二进制以 base64 存载荷（保真传输）。 */
+export interface ResourcePackageFile {
+  /** 包内 POSIX 相对路径（不得逃逸包根） */
+  path: string;
+  /** 文件内容（utf8 文本） */
+  content?: string;
+  /** 二进制内容（base64；与 content 二选一） */
+  contentBase64?: string;
+  /** 是否可执行位 */
+  executable?: boolean;
+}
+
+/** 资源包：Skill / Extension 的完整多文件目录快照（安装产物与远端传输的统一形态）。 */
+export interface ResourcePackage {
+  kind: 'skill' | 'extension';
+  id: string;
+  /** 包内全部文件（排除 .git；扩展包可含自有 node_modules 依赖） */
+  files: ResourcePackageFile[];
+  /** 包根 package.json 的 name（依赖安装与入口解析用；可缺省） */
+  packageName?: string;
+  /** 入口文件相对路径（Skill 为 SKILL.md，Extension 为入口 ts/js） */
+  entry?: string;
+}
+
+/** 解码后的包文件（Hub 侧落盘用）。 */
+export interface DecodedPackageFile {
+  path: string;
+  data: Buffer;
+  executable: boolean;
+}
+
+/** 判断包文件是否按二进制传输：非文本扩展名或显式标记二进制的内容走 base64。 */
+const BINARY_PATH_PATTERN = /\.(png|jpe?g|gif|webp|bmp|ico|svgz|pdf|zip|gz|tgz|tar|bz2|7z|rar|woff2?|ttf|otf|eot|mp3|mp4|mov|avi|webm|wav|ogg|wasm|node|exe|dll|so|dylib|class|jar|sqlite3?|db)$/i;
+const TEXTUAL_PATH_PATTERN = /\.(md|markdown|txt|json|jsonc|ya?ml|toml|ini|cfg|conf|env|ts|tsx|mts|cts|js|mjs|cjs|jsx|css|scss|less|html?|xml|svg|csv|tsv|sh|bash|zsh|fish|ps1?|py|rb|go|rs|java|kt|c|h|cpp|hpp|cs|php|sql|graphql|gql|proto|lock|gitignore|npmignore|editorconfig|prettieri(?:gn)?rc|babelrc|eslintrc?)$/i;
+
+export function isBinaryPackageFilePath(filePath: string): boolean {
+  if (BINARY_PATH_PATTERN.test(filePath)) return true;
+  if (TEXTUAL_PATH_PATTERN.test(filePath)) return false;
+  // 无扩展名或未知扩展名（LICENSE / CHANGELOG / Makefile 等）按文本处理
+  return false;
+}
+
+/** 把包文件编码为传输形态：文本保内容，二进制保 base64（载荷损坏时抛错，不静默吞错）。 */
+export function encodePackageFile(path: string, data: Buffer, executable = false): ResourcePackageFile {
+  if (isBinaryPackageFilePath(path)) {
+    return { path, contentBase64: data.toString('base64'), ...(executable ? { executable: true } : {}) };
+  }
+  const text = data.toString('utf8');
+  // utf8 往返校验：含非法序列的“文本”必须走 base64，否则落盘即损坏
+  if (Buffer.byteLength(text, 'utf8') !== data.length || Buffer.from(text, 'utf8').equals(data) === false) {
+    return { path, contentBase64: data.toString('base64'), ...(executable ? { executable: true } : {}) };
+  }
+  return { path, content, ...(executable ? { executable: true } : {}) };
+}
+
+/** 解码包文件为原始字节；既无 content 又无 contentBase64 视为损坏载荷并抛错。 */
+export function decodePackageFile(file: ResourcePackageFile): DecodedPackageFile {
+  const data = file.content !== undefined
+    ? Buffer.from(file.content, 'utf8')
+    : file.contentBase64 !== undefined
+      ? Buffer.from(file.contentBase64, 'base64')
+      : undefined;
+  if (data === undefined) {
+    throw new Error(`Resource package file "${file.path}" has neither content nor contentBase64`);
+  }
+  return { path: file.path, data, executable: file.executable === true };
+}
+
 export interface HubSessionRpcFunctions {
   registerNode(info: {
     nodeId: string;
@@ -711,6 +779,11 @@ export interface NodeSessionRpcFunctions {
     kind: 'skill' | 'extension';
     id: string;
   }>;
+  /** 读取节点本地资源包完整目录（多文件 + 二进制保真），供 Hub 落盘为权威存储。 */
+  readResourcePackage(target: {
+    kind: 'skill' | 'extension';
+    id: string;
+  }): Promise<ResourcePackage>;
   deleteResource(target: {
     kind: 'skill' | 'extension';
     id: string;
