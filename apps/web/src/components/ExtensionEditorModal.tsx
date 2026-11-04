@@ -27,32 +27,47 @@ interface ExtensionEditorModalProps {
   onSaved: () => void;
 }
 
-const STARTER_EXTENSION_TS = `import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { Type } from 'typebox';
+const STARTER_EXTENSION_TS = `import { defineExtension, defineTool } from '@earendil-works/pi-durable';
 
-export default function (pi: ExtensionAPI) {
-  // 1. 拦截高危工具调用并在网页弹出确认卡 (ctx.ui.confirm)
-  pi.on('tool_call', async (event, ctx) => {
-    if (event.toolName === 'bash') {
-      const cmd = String((event.input as { command?: string })?.command || '');
-      if (cmd.includes('rm -rf')) {
-        const ok = await ctx.ui.confirm('高危指令拦截', \`是否允许执行: \${cmd} ?\`);
-        if (!ok) return { block: true, reason: '用户已拒绝执行该高危指令' };
-      }
-    }
-  });
-
-  // 2. 注册斜杠命令 /hello (支持 notify / setStatus / setWidget / custom 表单)
-  pi.registerCommand('hello', {
-    description: '发送扩展通知并挂载状态卡片',
-    handler: async (args, ctx) => {
-      ctx.ui.notify(\`你好 \${args || 'botd'}！扩展运行正常\`, 'info');
-    },
-  });
-
-  // 3. 注册自定义工具：在 details.ui 中返回 BotdUiSpec 即可在聊天流渲染富视图
-  // pi.registerTool({ name: 'my_tool', parameters: Type.Object({}), async execute() { ... } });
-}
+export default defineExtension({
+  name: 'my-extension',
+  tools: [
+    defineTool({
+      name: 'render_status_card',
+      description: '在 Web 聊天流中渲染交互式状态卡片 (botd.v1 Generative UI)',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string' },
+          value: { type: 'string' },
+        },
+        required: ['title', 'value'],
+      },
+      async execute(input) {
+        const uiSpec = {
+          root: 'card',
+          elements: {
+            card: {
+              type: 'MetricCard',
+              props: { label: input.title, value: input.value, status: 'ok', icon: 'sparkles' },
+            },
+          },
+        };
+        return {
+          output: [
+            {
+              type: 'text',
+              text:
+                '\`\`\`ui\\n' +
+                JSON.stringify(uiSpec, null, 2) +
+                '\\n\`\`\`',
+            },
+          ],
+        };
+      },
+    }),
+  ],
+});
 `;
 
 /** 「启用到本节点智能体」多选胶囊区：保存/安装扩展后自动完成挂载或解绑 */
@@ -438,7 +453,7 @@ export const ExtensionEditorModal: React.FC<ExtensionEditorModalProps> = ({
                       <span>TypeScript 扩展代码 (index.ts)</span>
                     </label>
                     <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
-                      导出 default function(pi: ExtensionAPI)
+                      导出 default defineExtension({'{ ... }'})
                     </span>
                   </div>
                   <textarea

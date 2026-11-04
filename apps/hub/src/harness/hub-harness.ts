@@ -31,6 +31,7 @@ import {
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { createPersonaSkillsExtension, PERSONA_SKILLS_EXTENSION, type PersonaSkillsOptions } from "./persona-skills-extension.js";
 import { createRouterExtension, type PersonaResolver, ROUTER_EXTENSION, type WorkerAgentFactory, WORKER_EXTENSION } from "./router-extension.js";
 import { createWorkerExtension, WORKER_EXTENSION_NAME } from "./worker-extension.js";
 import { createWorkflowExtension } from "./workflow-extension.js";
@@ -46,6 +47,10 @@ export interface BotPersonaConfig {
 	instructions: string;
 	/** Memory notes (MEMORY.md contents), folded into the persona prompt. */
 	memory?: string;
+	/** Hub skill ids enabled for this persona (loaded via `load_skill`). */
+	enabledSkills?: string[];
+	/** Dynamic extension names enabled for this persona (mounted on Router and Worker). */
+	enabledExtensions?: string[];
 	nodeId: string;
 	cwd: string;
 }
@@ -63,6 +68,8 @@ export interface HubRuntimeOptions {
 	workerAgent?: WorkerAgentFactory;
 	/** Builds a conversation's execution env; defaults to a NodeExecutionEnv on the target cwd. */
 	env?: HarnessOptions["env"];
+	/** Hub-backed skills & memory callbacks for the persona-skills extension. */
+	skills?: PersonaSkillsOptions;
 	onReport?: (report: unknown) => void;
 }
 
@@ -99,6 +106,8 @@ export class HubDurableRuntime {
 	private readonly mainSessions = new Map<string, Conversation>();
 	private readonly routerExtension: Extension;
 	private readonly workerExtension: Extension;
+	private readonly personaSkillsExtension: Extension | undefined;
+	private readonly dynamicExtensions = new Map<string, Extension>();
 
 	private constructor(
 		harness: import("@earendil-works/pi-durable").Harness,
@@ -106,12 +115,14 @@ export class HubDurableRuntime {
 		models: Models,
 		routerExtension: Extension,
 		workerExtension: Extension,
+		personaSkillsExtension: Extension | undefined,
 	) {
 		this.harness = harness;
 		this.registry = registry;
 		this.models = models;
 		this.routerExtension = routerExtension;
 		this.workerExtension = workerExtension;
+		this.personaSkillsExtension = personaSkillsExtension;
 	}
 
 	static async open(options: HubRuntimeOptions = {}, context: Context = BACKGROUND_CONTEXT): Promise<HubDurableRuntime> {
@@ -144,6 +155,11 @@ export class HubDurableRuntime {
 			workerAgent: options.workerAgent,
 		});
 		registry.install(routerExtension);
+		// Persona skills & memory: every Router and Worker conversation can call
+		// `load_skill` and `update_memory` against Hub SQLite, and the persona's
+		// enabled skills are advertised as a prompt section.
+		const personaSkillsExtension = options.skills === undefined ? undefined : createPersonaSkillsExtension(options.skills);
+		if (personaSkillsExtension !== undefined) registry.install(personaSkillsExtension);
 		for (const extension of options.extensions ?? []) registry.install(extension);
 
 		const harnessOptions: HarnessOptions = {
@@ -156,7 +172,7 @@ export class HubDurableRuntime {
 			...(options.onReport === undefined ? {} : { onReport: options.onReport as never }),
 		};
 		const harness = await Harness.open(storage, harnessOptions, context);
-		const runtime = new HubDurableRuntime(harness, registry, models, routerExtension, workerExtension);
+		const runtime = new HubDurableRuntime(harness, registry, models, routerExtension, workerExtension, personaSkillsExtension);
 		// Persona lookups from tools run through this map (set via registerPersona).
 		(runtime as unknown as { personas: Map<string, BotPersonaConfig> }).personas === personas; // keep reference alive
 		runtime.#personaSource = personas;
@@ -169,8 +185,8 @@ export class HubDurableRuntime {
 	registerPersona(persona: BotPersonaConfig): void {
 		this.personas.set(persona.botId, persona);
 		// The router extension resolves personas through the map captured at open;
-		// sync it so late registrations are visible to tools.
-		if (this.#personaSource !== undefined && !this.#personaSource.has(persona.botId)) {
+		// sync it so late registrations AND persona updates propagate.
+		if (this.#personaSource !== undefined) {
 			this.#personaSource.set(persona.botId, persona);
 		}
 	}
@@ -181,6 +197,32 @@ export class HubDurableRuntime {
 
 	listPersonas(): BotPersonaConfig[] {
 		return [...this.personas.values()];
+	}
+
+	/** Extensions mounted on a persona's Router and Worker conversations. */
+	private personaExtensions(persona: BotPersonaConfig): Extension[] {
+		const extensions: Extension[] = [];
+		if (this.personaSkillsExtension !== undefined) extensions.push(this.personaSkillsExtension);
+		for (const name of persona.enabledExtensions ?? []) {
+			const ext = this.dynamicExtensions.get(name);
+			if (ext !== undefined) extensions.push(ext);
+		}
+		return extensions;
+	}
+
+	/**
+	 * Install a dynamic (user-authored) extension into the registry and track it
+	 * by name, so personas listing it in `enabledExtensions` mount it on their
+	 * Router and Worker conversations.
+	 */
+	installDynamicExtension(ext: Extension): void {
+		this.registry.install(ext);
+		this.dynamicExtensions.set(ext.name, ext);
+	}
+
+	/** A dynamically-installed extension by name, if any. */
+	getDynamicExtension(name: string): Extension | undefined {
+		return this.dynamicExtensions.get(name);
 	}
 
 	/**
@@ -194,7 +236,7 @@ export class HubDurableRuntime {
 			model: persona.model,
 			instructions: personaInstructions(persona),
 			cwd: persona.cwd,
-			extensions: { add: [this.routerExtension] },
+			extensions: { add: [this.routerExtension, ...this.personaExtensions(persona)] },
 			modelTools: { remove: [...(CodingTools.tools ?? [])] },
 		};
 	}
@@ -360,7 +402,7 @@ export class HubDurableRuntime {
 			model: persona.model,
 			instructions: personaInstructions(persona),
 			cwd: persona.cwd,
-			extensions: { add: [this.workerExtension] },
+			extensions: { add: [this.workerExtension, ...this.personaExtensions(persona)] },
 			modelTools: null,
 		};
 	}
@@ -526,5 +568,5 @@ export class HubDurableRuntime {
 	}
 }
 
-export { ROUTER_EXTENSION, WORKER_EXTENSION, WORKER_EXTENSION_NAME };
+export { ROUTER_EXTENSION, WORKER_EXTENSION, WORKER_EXTENSION_NAME, PERSONA_SKILLS_EXTENSION };
 export type { PersonaResolver, WorkerAgentFactory, ToolRegistration, Registry, Storage };
