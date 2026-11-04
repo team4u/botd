@@ -103,7 +103,7 @@ pnpm dev:web
 开发者调试真实任务时，在独立终端启动 Node 守护进程：
 
 ```bash
-pnpm node start
+botd start
 ```
 
 ### 代码热更新机制

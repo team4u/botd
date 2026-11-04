@@ -1,6 +1,6 @@
 # 快速起步指南
 
-本指南指导用户从零启动 botd 系统，完成节点配对，并体验首次对话与派生后台 Worker。[返回文档目录](README.md)
+本指南指导用户从零启动 botd 系统，配置模型凭据，连接执行节点，并体验全双工对话与派生后台 Worker。[返回文档目录](README.md)
 
 ## 前置环境要求
 
@@ -43,9 +43,12 @@ git clone https://github.com/team4u/botd.git
 cd botd
 pnpm install
 pnpm build
+
+# 链接 botd 命令行工具至全局 PATH
+npm link apps/node
 ```
 
-项目通过源码工作区编译。用户无需全局安装 npm 包。
+链接完成后，用户在任意终端中均可直接执行 `botd` 命令。
 
 ## 2. 首次启动 Web 与 Hub
 
@@ -59,57 +62,61 @@ BOTD_PORT=3002 BOTD_ADMIN_PASSWORD='my-strong-password' pnpm dev
 
 打开浏览器访问 `http://localhost:3001`。使用用户名 `admin` 与刚才配置的密码登录。
 
-`pnpm dev` 仅启动管理控制台与服务端，不包含任务执行节点。
+`pnpm dev` 启动管理控制台与 Hub 服务端。Hub 作为系统大脑，执行持久化运行时与模型推理。
 
-## 3. 创建节点配对码
+## 3. 配置模型凭据
+
+Hub 集中管理全部模型供应商凭据。用户无需连接节点，即可直接在 Hub 配置全局凭据。
+
+### 方式一：Web 界面配置
+
+1. 打开 Web 控制台左下角「模型与服务商配置」。
+2. 选择模型供应商（如 Anthropic、OpenAI、DeepSeek 或 Gemini）。
+3. 填入 API Key 并保存。凭据安全保存在 Hub 的 `provider_credentials` 表中。
+
+### 方式二：CLI 命令行配置
+
+开启新终端执行登录命令：
+
+```bash
+botd providers login anthropic
+```
+
+按终端提示输入 API Key。凭据随即写入 Hub 数据库。
+
+## 4. 节点配对与启动
+
+Node 守护进程作为无状态远端执行环境。守护进程负责文件系统读写、Shell 执行与 Git Worktree 隔离。
 
 在网页端创建配对凭据：
 
 1. 点击左下角「节点与智能体」。
 2. 点击右上角「配对节点」按钮。
-3. 查看弹窗中的 6 位数字配对码。
+3. 查看弹窗中的 6 位数字配对码。配对码有效期为 10 分钟。
 
-配对码有效期为 10 分钟。配对完成后配对码自动失效。
-
-## 4. 节点配对与启动
-
-开启第二个终端窗口，进入项目根目录。将 `123456` 替换为网页显示的配对码：
+开启第二个终端窗口，执行配对与启动命令：
 
 ```bash
 # 节点配对
-pnpm node join http://localhost:3001 --code 123456 --name my-workstation
+botd join http://localhost:3001 --code 123456 --name my-workstation
 
 # 启动节点守护进程
-pnpm node start
+botd start
 ```
 
 终端输出 `Node successfully paired!` 表示配对成功。配对凭据保存在 `~/.botd/node.json`。
 
-`pnpm node start` 在前台启动守护进程。守护进程负责执行具体的模型工具与 Shell 指令。
+`botd start` 在前台启动守护进程。守护进程连接 Hub 并提供远程执行能力。
 
 开启第三个终端验证节点状态：
 
 ```bash
-pnpm node status
+botd status
 ```
 
 输出显示守护进程 PID、节点名称与 Hub 连接状态。回到网页端，刷新可确认 `my-workstation` 节点处于在线状态。
 
-## 5. 配置模型凭据
-
-首次启动空节点时，系统创建内置 Bot「默认助手」。
-
-用户按以下步骤配置模型：
-
-1. 打开 Web 控制台左下角「模型与凭据配置」。
-2. 选择已连接的 `my-workstation` 节点。
-3. 选择模型供应商（如 Anthropic 或 OpenAI），填入 API Key 并保存。
-4. 打开「节点与智能体」页面，编辑「默认助手」。
-5. 选择刚配置的模型供应商与具体模型 ID，保存配置。
-
-凭据安全保存在节点的 `~/.botd/.agent/auth.json` 文件中。
-
-## 6. 首次对话体验
+## 5. 首次对话体验
 
 在 Web 控制台左侧列表点击「默认助手」，进入会话界面。
 
@@ -117,20 +124,20 @@ pnpm node status
 
 > 检查当前工作目录，并输出当前操作系统与 Node.js 版本。
 
-Bot 会调用系统工具，并在会话中返回执行结果。
+前台 Router 会话解析指令，调用远端节点的系统工具，返回执行结果。
 
 用户也可通过 CLI 发送测试消息：
 
 ```bash
 # 获取默认助手所在会话并发送指令
-pnpm node chat send sess_1 "你好，请汇报当前状态" --wait 60
+botd chat send sess_1 "你好，请汇报当前状态" --wait 60
 ```
 
 CLI 订阅事件流，等待回复完成后输出内容。
 
-## 7. 派生 Worker 体验（Super-agent）
+## 6. 派生 Worker 体验（Super-agent）
 
-botd 支持通过派生后台 Worker 执行多步长耗时任务。Worker 享有独立 Git Worktree 隔离与异步事件通知。
+botd 支持通过派生后台 Worker 执行多步长耗时任务。Worker 享有独立 Git Worktree 隔离与异步事件通知。前台 Router 会话永不阻塞。
 
 ### 方式一：在对话中通过自然语言派生
 
@@ -138,7 +145,7 @@ botd 支持通过派生后台 Worker 执行多步长耗时任务。Worker 享有
 
 > 请派生一个后台 Worker，在独立分支上重构项目 README 文档。
 
-主控 Bot 会调用派生工具，在后台启动新 Worker。
+前台 Router 调用 `spawn_worker` 工具，在后台启动新 Worker。顶部 `ActiveWorkersBar` 即刻显示任务胶囊。
 
 ### 方式二：通过 CLI 显式派生 Worker
 
@@ -146,7 +153,7 @@ botd 支持通过派生后台 Worker 执行多步长耗时任务。Worker 享有
 
 ```bash
 # 为指定会话派生带 Worktree 隔离的 Worker
-pnpm node workers spawn sess_1 \
+botd workers spawn sess_1 \
   --title "文档优化任务" \
   --task "梳理 docs 目录结构，并补齐快速起步文档" \
   --worktree
@@ -160,13 +167,13 @@ pnpm node workers spawn sess_1 \
 
 ```bash
 # 查看会话下的 Worker 列表与状态
-pnpm node workers list sess_1
+botd workers list sess_1
 
 # 向执行中的 Worker 追加指令（插话引导）
-pnpm node workers steer sess_1 wrk_a1b2c3 "优先整理 API 文档" --mode steer
+botd workers steer sess_1 wrk_a1b2c3 "优先整理 API 文档"
 
 # 检视 Worker 的执行历史与记忆回忆链
-pnpm node workers recall sess_1 wrk_a1b2c3
+botd workers recall sess_1 wrk_a1b2c3
 ```
 
 任务完成后，Worker 状态自动变为 `completed`。系统将结果摘要写入回忆链，主控 Bot 可随时检索。
@@ -176,7 +183,7 @@ pnpm node workers recall sess_1 wrk_a1b2c3
 停止服务：
 
 - 在前台终端按 `Ctrl+C` 停止开发服务。
-- 执行 `pnpm node stop` 停止后台守护进程。
+- 执行 `botd stop` 停止后台守护进程。
 
 再次启动服务：
 
@@ -185,7 +192,7 @@ pnpm node workers recall sess_1 wrk_a1b2c3
 BOTD_PORT=3002 pnpm dev
 
 # 在另一个终端启动 Node 守护进程
-pnpm node start -d
+botd start -d
 ```
 
 `-d` 选项指示守护进程在后台执行。日志默认输出至 `~/.botd/daemon.log`。

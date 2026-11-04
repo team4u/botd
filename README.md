@@ -137,8 +137,8 @@ BOTD_PORT=3002 pnpm dev
 打开另一个终端，接入本机节点：
 
 ```bash
-pnpm node join http://localhost:3001 --code 123456 --name my-worker
-pnpm node start
+botd join http://localhost:3001 --code 123456 --name my-worker
+botd start
 ```
 
 Web 界面会显示节点在线状态。

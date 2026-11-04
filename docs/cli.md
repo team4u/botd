@@ -4,13 +4,13 @@ botd CLI 提供命令行管理入口。用户可通过 CLI 管理本机 Node 守
 
 ## 命令入口
 
-用户可通过三种入口执行 CLI 命令：
+用户可通过以下入口执行 CLI 命令：
 
 | 入口 | 说明 |
 | --- | --- |
-| `pnpm node` | 源码仓库开发命令。映射到 `pnpm --filter @botd/node cli`。 |
-| `node apps/node/dist/cli.js` | 编译产物入口。输出内容纯净，适合脚本解析。 |
-| `botd` | 全局安装命令。包入口指向 `dist/cli.js`。 |
+| `botd` | 官方标准 CLI 命令。全局安装或通过 `npm link` 接入系统 PATH。 |
+| `pnpm botd` | 源码仓库开发命令。映射至 `pnpm --filter @botd/node cli`。 |
+| `node apps/node/dist/cli.js` | 编译产物入口。输出内容纯净，适合脚本调用。 |
 
 查看全局帮助信息：
 

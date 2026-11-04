@@ -13,6 +13,7 @@
     "dev:hub": "pnpm --filter @botd/hub dev",
     "dev:web": "pnpm --filter @botd/web dev",
     "node": "pnpm --filter @botd/node cli",
+    "botd": "pnpm --filter @botd/node cli",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck && tsc -p tsconfig.tests.json",
     "test": "tsx --test tests/*.test.ts",

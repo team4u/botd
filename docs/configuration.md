@@ -167,18 +167,18 @@ Hub 使用 SQLite 记录全部核心元数据。
 
 ## 模型凭据管理机制
 
-botd 采用双层凭据管理体系：
+botd 采用 Hub 集中凭据管理机制：
 
-### 1. Hub 全局凭据（provider_credentials 表）
+### 1. Hub 全局凭据（推荐与默认）
 
 - 保存位置：`hub.sqlite` 中的 `provider_credentials` 表。
-- 适用场景：Hub Durable Runtime 内部推理、Router 会话调度与全局离线直管。
+- 架构定位：Hub 作为系统大脑统一执行模型推理，Node 执行端不接触密钥明文。
 - 鉴权支持：支持 API Key 与 OAuth 认证。
-- 直管接口：CLI `botd providers login <providerId>`（免指定 nodeId）。
+- 直管接口：CLI `botd providers login <providerId>`（免指定 nodeId）或 Web 控制台配置。
+- 环境变量：支持通过 `BOTD_API_KEY_<PROVIDER>` 预置密钥。
 
-### 2. Node 本地凭据（.agent/auth.json）
+### 2. 节点专属凭据（可选覆盖）
 
 - 保存位置：Node 节点 `<数据目录>/.agent/auth.json`。
-- 适用场景：Node 守护进程执行本地回合推理。
-- 格式规范：与 Pi SDK 原生 AuthStorage 规范保持一致。
+- 适用场景：特定节点的专属模型覆盖。
 - 直管接口：CLI `botd providers login <nodeId> <providerId>`。
