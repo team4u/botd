@@ -867,9 +867,15 @@ export class HubDatabase {
 
 
   // --- Users ---
-  /** 若 users 表为空，插入自举管理员（固定 id: user_admin / username: admin / role: admin） */
-  ensureBootstrapAdmin(passwordHash: string): void {
-    if (this.countUsers() > 0) return;
+  /** 若 users 表为空，插入自举管理员（固定 id: user_admin / username: admin / role: admin）；若已存在且传入 override，更新管理员密码 */
+  ensureBootstrapAdmin(passwordHash: string, override = false): void {
+    if (this.countUsers() > 0) {
+      if (override) {
+        const stmt = this.db.prepare(`UPDATE users SET password_hash = ? WHERE id = 'user_admin' OR username = 'admin'`);
+        stmt.run(passwordHash);
+      }
+      return;
+    }
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
       INSERT INTO users (id, username, password_hash, role, created_at)

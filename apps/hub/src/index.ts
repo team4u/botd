@@ -87,9 +87,9 @@ export function createHub(options?: HubOptions): HubInstance {
   }
   const adminPassword = options?.adminPassword || process.env.BOTD_ADMIN_PASSWORD;
   if (adminPassword) {
-    db.ensureBootstrapAdmin(auth.hashPassword(adminPassword));
-  } else {
-    // 未配置管理员密码时生成一次性随机密码：绝不允许可预测的默认凭据自举
+    db.ensureBootstrapAdmin(auth.hashPassword(adminPassword), true);
+  } else if (db.countUsers() === 0) {
+    // 仅在初始 users 表为空且未配置管理员密码时生成一次性随机密码
     const generated = randomBytes(12).toString('base64url');
     db.ensureBootstrapAdmin(auth.hashPassword(generated));
     console.warn('==============================================================');
