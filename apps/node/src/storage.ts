@@ -497,8 +497,7 @@ async function collectPackageFiles(
       if (entry.isDirectory()) await walk(full, rel);
       else if (entry.isFile()) {
         const data = await fs.readFile(full);
-        const executable =
-          (entry.name === '.sh' || full.endsWith('.sh')) && ((await fs.stat(full)).mode & 0o111) !== 0;
+        const executable = ((await fs.stat(full)).mode & 0o111) !== 0;
         files.push(encodePackageFile(rel, data, executable));
       }
     }
