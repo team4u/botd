@@ -1,9 +1,11 @@
 import { Command } from 'commander';
 import pkg from '../../package.json' with { type: 'json' };
-import { registerAuthCommands } from './commands/auth.js';
 import { registerArtifactsCommands } from './commands/artifacts.js';
+import { registerAsksCommands } from './commands/asks.js';
+import { registerAuthCommands } from './commands/auth.js';
 import { registerBotsCommands } from './commands/bots.js';
 import { registerChatCommands } from './commands/chat.js';
+import { registerEventsCommands } from './commands/events.js';
 import { registerExtensionsCommands } from './commands/extensions.js';
 import { registerModelsCommands } from './commands/models.js';
 import { registerNodeCommands } from './commands/node.js';
@@ -12,6 +14,8 @@ import { registerProvidersCommands } from './commands/providers.js';
 import { registerSessionsCommands } from './commands/sessions.js';
 import { registerSkillsCommands } from './commands/skills.js';
 import { registerTriggersCommands } from './commands/triggers.js';
+import { registerWatchdogCommands } from './commands/watchdog.js';
+import { registerWorkersCommands } from './commands/workers.js';
 
 export function buildProgram(): Command {
   const program = new Command();
@@ -35,6 +39,10 @@ export function buildProgram(): Command {
   registerNodesCommands(program);     // nodes list/pair/install
   registerBotsCommands(program);      // bots create/update/delete/system/memory
   registerSessionsCommands(program);  // sessions list/create/update/messages/cancel
+  registerWorkersCommands(program);   // workers list/spawn/steer/stop/recall (super-agent)
+  registerAsksCommands(program);      // asks list/respond (human-in-the-loop)
+  registerEventsCommands(program);    // events ingest (EventRouter pipeline)
+  registerWatchdogCommands(program);  // watchdog health diagnostics
   registerTriggersCommands(program);   // triggers list/create/delete
   registerChatCommands(program);      // chat send/watch (SSE)
   registerSkillsCommands(program);    // skills get/put/delete

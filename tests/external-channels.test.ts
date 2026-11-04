@@ -7,7 +7,49 @@ import path from 'node:path';
 import test from 'node:test';
 import { createHub } from '../apps/hub/src/index.js';
 import { buildEventPayload, extractAskUiSummary } from '../apps/hub/src/channel-payloads.js';
-import { buildApprovalCardSpec } from '../apps/node/src/cli/commands/node/approval-card.js';
+import type { BotdUiSpec } from '../packages/protocol/src/index.js';
+
+/** 与旧 botd ask --risk 生成的审批卡同构的纯按钮风险卡（Callout + KeyValueList + Buttons）。 */
+function buildApprovalCardSpec(input: {
+  prompt: string;
+  reason: string;
+  resource: string;
+  optionList: string[];
+}): BotdUiSpec {
+  return {
+    root: 'approval_card',
+    elements: {
+      approval_card: {
+        type: 'Card',
+        props: { title: input.prompt, badge: 'HIGH', icon: 'shield' },
+        children: ['approval_callout', 'approval_details', 'approval_actions'],
+      },
+      approval_callout: {
+        type: 'Callout',
+        props: { title: '高风险操作确认', content: input.reason, variant: 'error' },
+      },
+      approval_details: {
+        type: 'KeyValueList',
+        props: { items: [{ key: '目标资源', value: input.resource, mono: true }] },
+      },
+      approval_actions: {
+        type: 'ActionBar',
+        props: { align: 'right' },
+        children: input.optionList.map((_, idx) => `approval_btn_${idx}`),
+      },
+      ...Object.fromEntries(
+        input.optionList.map((opt, idx) => [
+          `approval_btn_${idx}`,
+          {
+            type: 'Button',
+            props: { label: opt, variant: idx === 0 ? 'primary' : 'danger' },
+            on: { press: { action: 'submit', params: { decision: opt } } },
+          },
+        ]),
+      ),
+    },
+  } as BotdUiSpec;
+}
 
 interface ReceivedRequest {
   method: string;
@@ -603,7 +645,6 @@ function uiInteractionRequest(ask: Record<string, unknown>) {
 test('跨端 UI 降级：纯按钮风险审批卡（previewType=ui）生成摘要与免登录一键确认链接', () => {
   const approvalSpec = buildApprovalCardSpec({
     prompt: '是否将本次变更发布到生产环境？',
-    risk: 'high',
     reason: '生产数据库 schema 迁移，失败需回滚',
     resource: 'prod-db/orders',
     optionList: ['批准', '拒绝'],

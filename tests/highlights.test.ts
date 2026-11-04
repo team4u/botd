@@ -463,28 +463,29 @@ test('skills live in Hub storage shared across nodes without any sync endpoint',
 
 // --- 7. Builtin skill creator meta-skill ---
 
-test('builtin skill documents the skill creator and botd reload', () => {
-  // v14：主文件精简为轻索引，重度内容拆入 references/（渐进式披露）
-  assert.equal(BUILTIN_SKILL_VERSION, 14, 'version marker bumped to v14');
-  assert.match(BUILTIN_SKILL_MD, /## Subagents/);
-  assert.match(BUILTIN_SKILL_MD, /botd bots create/);
-  assert.match(BUILTIN_SKILL_MD, /subagent_type/);
-  assert.match(
-    BUILTIN_SKILL_MD.match(/isolation: "worktree"/)
-      ? BUILTIN_SKILL_MD
-      : BUILTIN_SKILL_REFERENCES['subagents-and-workflows.md'],
-    /isolation: "worktree"/,
-  );
-  // v9：主会话内子代理控制（stop_subagent / steer_subagent / Agent resume）
-  assert.match(BUILTIN_SKILL_MD, /Control/);
-  assert.match(BUILTIN_SKILL_MD, /stop_subagent/);
-  assert.match(BUILTIN_SKILL_MD, /steer_subagent/);
-  assert.match(BUILTIN_SKILL_MD, /resume: "<agent_id>"/);
+test('builtin skill documents the Super-agent architecture and CLI at v15', () => {
+  // v15：Super-agent 工具面（Brain in Hub, Hands on Node）
+  assert.equal(BUILTIN_SKILL_VERSION, 15, 'version marker bumped to v15');
+  assert.match(BUILTIN_SKILL_MD, /spawn_worker/);
+  assert.match(BUILTIN_SKILL_MD, /delegate_to_bot/);
+  assert.match(BUILTIN_SKILL_MD, /steer_worker/);
+  assert.match(BUILTIN_SKILL_MD, /stop_worker/);
+  assert.match(BUILTIN_SKILL_MD, /recall/);
+  assert.match(BUILTIN_SKILL_MD, /SubagentWorkflow/);
+  assert.match(BUILTIN_SKILL_MD, /api\.memo/);
+  assert.match(BUILTIN_SKILL_MD, /botd workers list/);
+  assert.match(BUILTIN_SKILL_MD, /botd events ingest/);
+  assert.match(BUILTIN_SKILL_MD, /botd watchdog health/);
+  assert.match(BUILTIN_SKILL_MD, /botd asks respond/);
   assert.match(BUILTIN_SKILL_MD, /Skill Creator|## Skill creator|Self-Evolution/);
   assert.match(BUILTIN_SKILL_MD, /botd reload/);
-  assert.match(BUILTIN_SKILL_MD, /botd bg run/);
   assert.match(BUILTIN_SKILL_MD, /--no-turn/);
   assert.match(BUILTIN_SKILL_MD, /--delay/);
+  // 旧架构（bg / ask / install / delegate / pi-subagents）绝迹
+  assert.ok(!BUILTIN_SKILL_MD.includes('botd bg '), 'must not teach botd bg');
+  assert.ok(!/botd ask\b(?!s)/.test(BUILTIN_SKILL_MD), 'must not teach botd ask (asks is fine)');
+  assert.ok(!BUILTIN_SKILL_MD.includes('sessions delegate'), 'must not teach sessions delegate');
+  assert.ok(!BUILTIN_SKILL_MD.includes('subagent_type'), 'must not teach pi-subagents');
   // v14：skill 路径与结构指引保留在主文件，完整教程在 references/extension-and-skill-dev.md
   assert.match(
     BUILTIN_SKILL_MD.match(/~\/\.botd\/skills\/<skill-id>\/SKILL\.md/)
@@ -498,10 +499,7 @@ test('builtin skill documents the skill creator and botd reload', () => {
       : BUILTIN_SKILL_REFERENCES['extension-and-skill-dev.md'],
     /\*\*When to use\*\*.*\*\*Gotchas\*\*/s,
   );
-  // v9: one-shot risk approval card syntax
-  assert.match(BUILTIN_SKILL_MD, /--risk low\|medium\|high/);
-  assert.match(BUILTIN_SKILL_MD, /--resource/);
-  // v14：references/ 渐进式披露三分手册就位
+  // v15：references/ 渐进式披露三分手册就位
   for (const name of ['subagents-and-workflows.md', 'generative-ui.md', 'extension-and-skill-dev.md']) {
     assert.ok(BUILTIN_SKILL_REFERENCES[name], `reference ${name} exists`);
     assert.ok(BUILTIN_SKILL_REFERENCES[name].length > 500, `reference ${name} is substantial`);

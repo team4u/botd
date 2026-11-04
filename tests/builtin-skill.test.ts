@@ -49,19 +49,55 @@ test('ensureBuiltinSkill writes all three references/ files beside SKILL.md', as
   assert.equal(await readFile(referenceFile(dir, 'generative-ui.md'), 'utf8'), BUILTIN_SKILL_REFERENCES['generative-ui.md']);
 });
 
-test('builtin skill documents ephemeral tmp-* subagents at version 14', () => {
-  assert.equal(BUILTIN_SKILL_VERSION, 14);
-  assert.match(BUILTIN_SKILL_MD, /tmp-<role>\.md/);
-  assert.match(BUILTIN_SKILL_MD, /tmp-skeptic/);
-  assert.match(BUILTIN_SKILL_MD, /Ephemeral subagents/);
-  assert.match(BUILTIN_SKILL_MD, /Persistent subagents/);
-  // 临时子代理在回合结束时自动清理的说明
-  assert.match(BUILTIN_SKILL_MD, /自动删除所有 .tmp-\*\.md./);
+test('builtin skill documents the Super-agent toolset at version 15', () => {
+  assert.equal(BUILTIN_SKILL_VERSION, 15);
+  // Super-agent 工具面（Router 内置）
+  assert.match(BUILTIN_SKILL_MD, /spawn_worker/);
+  assert.match(BUILTIN_SKILL_MD, /delegate_to_bot/);
+  assert.match(BUILTIN_SKILL_MD, /steer_worker/);
+  assert.match(BUILTIN_SKILL_MD, /stop_worker/);
+  assert.match(BUILTIN_SKILL_MD, /recall/);
+  assert.match(BUILTIN_SKILL_MD, /SubagentWorkflow/);
+  // worktree 隔离与 crash-safe memo 检查点
+  assert.match(BUILTIN_SKILL_MD, /worktree/);
+  assert.match(BUILTIN_SKILL_MD, /api\.memo/);
+});
+
+test('builtin skill documents the first-class Super-agent CLI surface', () => {
+  for (const cmd of [
+    'botd workers list',
+    'botd workers spawn',
+    'botd workers steer',
+    'botd workers stop',
+    'botd workers recall',
+    'botd events ingest',
+    'botd watchdog health',
+    'botd asks list',
+    'botd asks respond',
+    'botd sessions list',
+    'botd chat send',
+    'botd bots create',
+    'botd triggers list',
+    'botd artifact put',
+    'botd wake',
+  ]) {
+    assert.ok(BUILTIN_SKILL_MD.includes(cmd), `main file must document: ${cmd}`);
+  }
+});
+
+test('builtin skill no longer teaches removed legacy commands', () => {
+  // 旧架构（pi-subagents / bg / delegate / ask / install CLI）必须绝迹
+  assert.ok(!/botd bg(?!\b)/.test(BUILTIN_SKILL_MD) && !BUILTIN_SKILL_MD.includes('botd bg '), 'must not teach botd bg');
+  assert.ok(!/botd ask\b(?!s)/.test(BUILTIN_SKILL_MD), 'must not teach botd ask (asks is fine)');
+  assert.ok(!BUILTIN_SKILL_MD.includes('botd install'), 'must not teach botd install');
+  assert.ok(!BUILTIN_SKILL_MD.includes('sessions delegate'), 'must not teach sessions delegate');
+  assert.ok(!BUILTIN_SKILL_MD.includes('subagent_type'), 'must not teach pi-subagents dispatch');
+  assert.ok(!BUILTIN_SKILL_MD.includes('stop_subagent'), 'must not teach pi-subagents control');
 });
 
 test('builtin skill main file is lean and points at references (progressive disclosure)', () => {
-  // 主文件控制在 80~95 行以内
-  assert.ok(BUILTIN_SKILL_MD.split('\n').length <= 95, `SKILL.md too long: ${BUILTIN_SKILL_MD.split('\n').length} lines`);
+  // 主文件控制在 ~100 行以内
+  assert.ok(BUILTIN_SKILL_MD.split('\n').length <= 100, `SKILL.md too long: ${BUILTIN_SKILL_MD.split('\n').length} lines`);
   // 正文必须指引按需 read 参考文档
   assert.match(BUILTIN_SKILL_MD, /references\/subagents-and-workflows\.md/);
   assert.match(BUILTIN_SKILL_MD, /references\/generative-ui\.md/);
@@ -98,13 +134,26 @@ test('generative-ui reference documents all 17 botd.v1 components with state bin
   assert.match(ui, /"root": "page"/);
 });
 
-test('subagent reference keeps the full tmp-* recipe and workflow pipeline', () => {
+test('worker reference documents spawn_worker lifecycle and the memoized workflow pipeline', () => {
   const sub = BUILTIN_SKILL_REFERENCES['subagents-and-workflows.md'];
-  assert.match(sub, /tmp-skeptic/);
-  assert.match(sub, /botd bots create reviewer --node "\$BOTD_NODE_ID" --parent "\$BOTD_BOT_ID"/);
-  assert.match(sub, /botd sessions delegate/);
-  assert.match(sub, /resumeFromRunId/);
-  assert.match(sub, /agentType: "@bot_builder"/);
+  // Super-agent 工具契约
+  assert.match(sub, /spawn_worker/);
+  assert.match(sub, /delegate_to_bot/);
+  assert.match(sub, /steer_worker/);
+  assert.match(sub, /stop_worker/);
+  assert.match(sub, /recall/);
+  assert.match(sub, /worktree: true/);
+  assert.match(sub, /botd workers list/);
+  // SubagentWorkflow 流水线：agent/pipeline/parallel + crash-safe memo
+  assert.match(sub, /api\.memo|memo/);
+  assert.match(sub, /pipeline\(/);
+  assert.match(sub, /parallel\(/);
+  assert.match(sub, /schema: \{ type: "object"/);
+  // 旧架构（pi-subagents、sessions delegate、--tool-scope、resumeFromRunId）绝迹
+  assert.ok(!sub.includes('subagent_type'), 'must not teach pi-subagents dispatch');
+  assert.ok(!sub.includes('sessions delegate'), 'must not teach sessions delegate');
+  assert.ok(!sub.includes('--tool-scope'), 'must not teach --tool-scope');
+  assert.ok(!sub.includes('resumeFromRunId'), 'must not teach journal-based resume');
 });
 
 test('cleanupEphemeralAgents removes tmp-*.md but keeps persistent agent files', async t => {
