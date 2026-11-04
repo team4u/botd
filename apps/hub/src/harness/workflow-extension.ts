@@ -383,9 +383,10 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 						if (modelRef !== null) change.model = modelRef;
 						if (opts?.effort !== undefined) change.thinkingLevel = opts.effort as AgentChange['thinkingLevel'];
 						if (opts?.agentType !== undefined) change.instructions = `You are a "${opts.agentType}" subagent.`;
-						// 步骤子代理是干活的全能子代理：清空父会话可能携带的模型工具过滤器
-						//（Router 剥掉了编码工具，子代理必须拿回来）。
-						await configure(tx, created.id, { ...change, modelTools: null });
+						// 步骤子代理是干活的全能子代理：清空父会话可能携带的模型工具过滤器与
+						// 精确扩展选择（Router 剥掉了编码工具与 botd-worker，子代理必须拿回来：
+						// extensions: null 重置回主机默认选择 = 全部已安装扩展）。
+						await configure(tx, created.id, { ...change, modelTools: null, extensions: null });
 
 						// 隔离：显式 worktree 建独立分支；否则继承父会话的 worktree（若有）。
 						const parentTarget = await tx.doc(TargetDoc, api.conversationId);

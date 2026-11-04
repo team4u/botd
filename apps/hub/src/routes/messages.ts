@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { MessageAttachment } from '@botd/protocol';
 import { extractMentions, parseSlashCommand } from '../group-router.js';
 import { resolveOwnedSession } from '../http-helpers.js';
-import type { ArtifactActor, ArtifactService } from '../artifact-service.js';
+import { ArtifactError, type ArtifactActor, type ArtifactService } from '../artifact-service.js';
 import type { HubDatabase } from '../db.js';
 import {
   rewindDurableSessionBeforeMessage,
@@ -43,16 +43,21 @@ function normalizeMessageAttachments(
     if (!raw || typeof raw !== 'object') continue;
     const att = raw as Partial<MessageAttachment> & { dataUrl?: unknown };
 
-    // 已落盘产物：以 Artifact 行为准重建指针（补齐缺失字段、剥离 dataUrl）
+    // 已落盘产物：以 Artifact 行为准重建指针（补齐缺失字段、剥离 dataUrl）。
+    // 归属校验：附件指向的产物必须属于当前会话（跨会话/跨用户引用直接拒收）。
     if (typeof att.id === 'string' && att.id) {
       const existing = input.db.getArtifact(att.id);
       if (existing) {
+        if (existing.sessionId !== input.sessionId) {
+          throw new ArtifactError('Forbidden: attachment belongs to another session', 403);
+        }
+        // 元数据以数据库权威字段优先，请求方仅能补齐缺失项，防止伪装/覆盖。
         normalized.push({
           id: existing.id,
-          filename: att.filename || existing.filename,
-          mimeType: att.mimeType || existing.mimeType,
-          sizeBytes: att.sizeBytes ?? existing.sizeBytes,
-          url: att.url || `/api/artifacts/${existing.id}/content`,
+          filename: existing.filename || att.filename || 'attachment',
+          mimeType: existing.mimeType || att.mimeType || 'application/octet-stream',
+          sizeBytes: existing.sizeBytes ?? att.sizeBytes ?? 0,
+          url: `/api/artifacts/${existing.id}/content`,
         });
         continue;
       }
@@ -104,7 +109,8 @@ export function registerMessageRoutes(
   },
 ): void {
   const { db, router, sseHub, artifacts } = ctx;
-  const durableMirror = ctx.durableMirror;
+  // 注意：不在此处固化 durableMirror —— 懒打开运行时在首条消息时才创建镜像器，
+  // 处理器内动态读 ctx.durableMirror 才能拿到实例（旧闭包捕获恒 undefined）。
   // 主线切流门槛：仅当 runtime 为显式注入，或 Hub 已配置任一 Provider 凭据时生效。
   // 否则（如无凭据的测试 Hub）直接走 GroupRouter，避免提交给无凭据的 Durable 运行时阻塞。
   const durableCtx = () => ({
@@ -254,7 +260,7 @@ export function registerMessageRoutes(
           id,
           targetBotId,
           content,
-          durableMirror,
+          ctx.durableMirror,
           {
             attachments,
             ...(cmdResult.isCommand && cmdResult.commandText ? { commandText: cmdResult.commandText } : {}),
@@ -360,8 +366,12 @@ export function registerMessageRoutes(
           id,
           targetBotId,
           body.content,
-          durableMirror,
-          cmdResult.isCommand && cmdResult.commandText ? { commandText: cmdResult.commandText } : undefined,
+          ctx.durableMirror,
+          {
+            // 编辑重提保留原消息附件：SQL 侧未动附件，Durable 侧同样要带上图片块/[Attached Files]。
+            ...(updated.attachments?.length ? { attachments: updated.attachments } : {}),
+            ...(cmdResult.isCommand && cmdResult.commandText ? { commandText: cmdResult.commandText } : {}),
+          },
         );
         if (submitted !== undefined) return c.json(updated, 200);
       } catch (err: any) {

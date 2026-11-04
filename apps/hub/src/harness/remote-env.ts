@@ -14,7 +14,7 @@
  * 由 tests/remote-env-worktree.test.ts 做结构一致性校验。
  */
 
-import type { Context } from '@earendil-works/chord/context';
+import { withoutAbortSignal, type Context } from '@earendil-works/chord/context';
 import { withSecretEnv } from './secret-stash.js';
 import {
   ExecutionError,
@@ -409,7 +409,8 @@ export class RemoteExecutionEnv implements ExecutionEnv {
   }
 
   async cleanup(context: Context): Promise<void> {
-    await (await this.#rpc(context)).envCleanup(this.cwd).catch(() => undefined);
+    // 清理不能被会话取消阻断：用剥离取消信号的 context 确保节点侧临时目录仍被回收。
+    await (await this.#rpc(withoutAbortSignal(context))).envCleanup(this.cwd).catch(() => undefined);
   }
 
   // ---- Shell ---------------------------------------------------------------
@@ -419,6 +420,9 @@ export class RemoteExecutionEnv implements ExecutionEnv {
     options: ShellExecOptions | undefined,
     context: Context,
   ): Promise<Result<ShellExecResult, ExecutionError>> {
+    if (context.abortSignal?.aborted) {
+      return { ok: false, error: new ExecutionError('aborted', 'Command aborted') };
+    }
     const rpc = await this.#rpc(context);
     const execId = `exec-${++execSeq}-${Math.random().toString(36).slice(2, 8)}`;
     const onOutput = options?.onOutput;
@@ -430,6 +434,12 @@ export class RemoteExecutionEnv implements ExecutionEnv {
         });
       });
     }
+    // 取消传播：会话 abort 时立刻通知 Node 侧杀掉子进程，而不是等命令自然结束。
+    const signal = context.abortSignal;
+    const onAbort = () => {
+      void rpc.envAbortExec(execId).catch(() => undefined);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
     try {
       // 会话 shellEnv 与逐调用 env 合并（逐调用优先），再叠加 SecretStash 机密注入。
       const mergedEnv =
@@ -447,6 +457,9 @@ export class RemoteExecutionEnv implements ExecutionEnv {
         ...(options?.spill === undefined ? {} : { spill: options.spill }),
         ...(options?.window === undefined ? {} : { window: options.window }),
       });
+      if (context.abortSignal?.aborted) {
+        return { ok: false, error: new ExecutionError('aborted', 'Command aborted') };
+      }
       if (result.ok) {
         return {
           ok: true,
@@ -454,7 +467,14 @@ export class RemoteExecutionEnv implements ExecutionEnv {
         };
       }
       return { ok: false, error: execError(result.error) };
+    } catch (err) {
+      // 取消导致的连接中断/拒收也归一为 aborted，而不是上抛网络错误。
+      if (context.abortSignal?.aborted) {
+        return { ok: false, error: new ExecutionError('aborted', 'Command aborted') };
+      }
+      throw err;
     } finally {
+      signal?.removeEventListener('abort', onAbort);
       this.#outputHub.unsubscribe(execId);
     }
   }

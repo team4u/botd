@@ -248,8 +248,14 @@ export function createRouterExtension(options: {
 				worktreePath = `${cwd}/.botd-worktrees/${workerId}`;
 
 				// 2. Worker agent: the worker extension (which brings CodingTools at the
-				//    host level) instead of the router extension.
-				await configure(tx, record.id, agent);
+				//    host level) instead of the router extension. A forked worker inherits
+				//    the router's EXACT extension list; an agent without an explicit
+				//    `extensions` selection resets to the host default (all installed),
+				//    so the worker keeps the coding tools and the report-back hook.
+				await configure(tx, record.id, {
+					...agent,
+					...(agent.extensions === undefined ? { extensions: null } : {}),
+				});
 
 				// 3. Target doc: role worker, parent = this router.
 				const workerTarget = await tx.doc(TargetDoc, record.id);

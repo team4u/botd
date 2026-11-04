@@ -22,15 +22,29 @@ export function registerCoreMiddleware(app: HubApp, ctx: HubContext): void {
     })
   );
 
-  // Global request body limits (anti-OOM on unauthenticated endpoints)
+  // Global request body limits (anti-OOM on unauthenticated endpoints)。
+  // 单条 /api/* 动态选择上限：Hono 多条匹配中间件串行执行，若同时注册
+  // `/api/sessions/:id/artifacts` 放宽版与 `/api/*` 默认版，后者仍会拦截大产物
+  // 上传（413）。故合并为一条，按路径分发：artifacts/messages（含 base64 附件）
+  // 走 ARTIFACT_BODY_LIMIT，webhooks 64KB，其余默认 1MB。
   const bodyLimited = (maxSize: number) =>
     bodyLimit({
       maxSize,
       onError: (c) => c.json({ error: 'Payload Too Large' }, 413),
     });
-  app.use('/api/sessions/:id/artifacts', bodyLimited(ARTIFACT_BODY_LIMIT));
-  app.use('/api/webhooks/*', bodyLimited(64 * 1024));
-  app.use('/api/*', bodyLimited(1024 * 1024));
+  const artifactBodyLimit = bodyLimited(ARTIFACT_BODY_LIMIT);
+  const webhookBodyLimit = bodyLimited(64 * 1024);
+  const defaultBodyLimit = bodyLimited(1024 * 1024);
+  app.use('/api/*', async (c, next) => {
+    const p = c.req.path;
+    if (/^\/api\/sessions\/[^/]+\/(artifacts|messages)$/.test(p)) {
+      return artifactBodyLimit(c, next);
+    }
+    if (p.startsWith('/api/webhooks/')) {
+      return webhookBodyLimit(c, next);
+    }
+    return defaultBodyLimit(c, next);
+  });
 
   // Cookie authentication middleware for /api/*
   app.use('/api/*', async (c, next) => {

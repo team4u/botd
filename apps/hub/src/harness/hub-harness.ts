@@ -48,6 +48,7 @@ import { createRouterExtension, type PersonaResolver, ROUTER_EXTENSION, type Wor
 import { createWorkerExtension, WORKER_EXTENSION_NAME } from "./worker-extension.js";
 import { createWorkflowExtension } from "./workflow-extension.js";
 import { RecallIndexDoc, SessionIndexDoc, TargetDoc, WorkerRegistryDoc, type WorkerEntry } from "./docs.js";
+import type { Cursor } from "@earendil-works/pi-durable";
 
 /** Configuration of one Bot persona. */
 export interface BotPersonaConfig {
@@ -69,6 +70,10 @@ export interface BotPersonaConfig {
 	env?: Record<string, string>;
 	nodeId: string;
 	cwd: string;
+	/** 工具权限范围：all（默认全部工具）、readonly（禁用 write/edit/bash）、custom（仅启用 customTools 列表中的工具）。 */
+	toolScope?: "all" | "readonly" | "custom";
+	/** 当 toolScope === "custom" 时允许的工具名列表。 */
+	customTools?: string[];
 }
 
 export interface HubRuntimeOptions {
@@ -182,6 +187,10 @@ export class HubDurableRuntime {
 	private readonly codemodeSandbox: CodemodeSandbox | undefined;
 	/** The installed `codemode` extension, added to every worker agent. */
 	private readonly codemodeExtension: Extension | undefined;
+	/** The shared workflow extension (SubagentWorkflow), added to every worker agent. */
+	private readonly workflowExtension: Extension;
+	/** Host-level extensions from `options.extensions`, appended after the builtin ones. */
+	private readonly hostExtensions: readonly Extension[];
 
 	private constructor(
 		harness: import("@earendil-works/pi-durable").Harness,
@@ -192,6 +201,8 @@ export class HubDurableRuntime {
 		personaSkillsExtension: Extension | undefined,
 		codemodeSandbox?: CodemodeSandbox,
 		codemodeExtension?: Extension,
+		workflowExtension?: Extension,
+		hostExtensions?: readonly Extension[],
 	) {
 		this.harness = harness;
 		this.registry = registry;
@@ -201,6 +212,8 @@ export class HubDurableRuntime {
 		this.personaSkillsExtension = personaSkillsExtension;
 		this.codemodeSandbox = codemodeSandbox;
 		this.codemodeExtension = codemodeExtension;
+		this.workflowExtension = workflowExtension ?? createWorkflowExtension();
+		this.hostExtensions = hostExtensions ?? [];
 	}
 
 	static async open(options: HubRuntimeOptions = {}, context: Context = BACKGROUND_CONTEXT): Promise<HubDurableRuntime> {
@@ -218,7 +231,8 @@ export class HubDurableRuntime {
 		registry.install(workerExtension);
 		// SubagentWorkflow is a session-wide capability: every Router and Worker
 		// conversation can run deterministic crash-resumable multi-step workflows.
-		registry.install(createWorkflowExtension());
+		const workflowExtension = createWorkflowExtension();
+		registry.install(workflowExtension);
 		const personas = new Map<string, BotPersonaConfig>();
 		let runtime: HubDurableRuntime | undefined;
 		const routerExtension = createRouterExtension({
@@ -309,6 +323,8 @@ export class HubDurableRuntime {
 			personaSkillsExtension,
 			codemodeSandbox,
 			codemodeExtension,
+			workflowExtension,
+			options.extensions ?? [],
 		);
 		// Persona lookups from tools run through this map (set via registerPersona).
 		(runtime as unknown as { personas: Map<string, BotPersonaConfig> }).personas === personas; // keep reference alive
@@ -330,6 +346,35 @@ export class HubDurableRuntime {
 
 	getPersona(botId: string): BotPersonaConfig | undefined {
 		return this.personas.get(botId);
+	}
+
+	/**
+	 * Re-apply the current persona set to every existing conversation: after a
+	 * config change (model, thinking, SYSTEM/MEMORY, toolScope, extensions),
+	 * already-created Router and Worker conversations pick the new agent up on
+	 * their next submission — no restart, no new conversation required.
+	 */
+	async syncPersonas(personas: readonly BotPersonaConfig[], context: Context = BACKGROUND_CONTEXT): Promise<void> {
+		for (const persona of personas) this.registerPersona(persona);
+		await this.harness.commit(async (tx) => {
+			let next: Cursor | undefined;
+			for (;;) {
+				const page = await tx.scanConversations({}, 256, next);
+				for (const record of page.items) {
+					const target = await tx.doc(TargetDoc, record.id);
+					const persona = target.botId === undefined ? undefined : this.personas.get(target.botId);
+					if (persona === undefined) continue;
+					const effectiveCwd = target.cwd || persona.cwd;
+					if (target.role === "router") {
+						await configure(tx, record.id, { ...this.routerAgent(persona), cwd: effectiveCwd });
+					} else if (target.role === "worker") {
+						await configure(tx, record.id, { ...this.workerAgentFor(persona), cwd: effectiveCwd });
+					}
+				}
+				if (page.next === undefined) break;
+				next = page.next;
+			}
+		}, context);
 	}
 
 	listPersonas(): BotPersonaConfig[] {
@@ -372,17 +417,52 @@ export class HubDurableRuntime {
 	 * `botd-router` extension, with the raw coding tools (`read`/`write`/`edit`/
 	 * `bash`) stripped from the model's tool surface — the foreground Router only
 	 * answers, recalls, and dispatches; any hands-on work belongs to a worker.
+	 *
+	 * `extensions` is an EXACT array (not `{add}`): pi-durable treats an array as
+	 * the whole selection, so no uninstalled-for-this-persona extension (other
+	 * bots' dynamic extensions, CodingTools on the registry) can leak onto the
+	 * Router's tool surface.
 	 */
 	routerAgent(persona: BotPersonaConfig): AgentChange {
 		const thinkingLevel = thinkingLevelFor(persona);
+		const extensions: Extension[] = [
+			this.routerExtension,
+			// SubagentWorkflow 是会话级能力：Router 也能直接跑确定性多步工作流
+			//（历史上由 host 默认选择隐式携带，精确选择后必须显式列出）。
+			this.workflowExtension,
+			...this.personaExtensions(persona),
+			...this.hostExtensions,
+		];
 		return {
 			model: persona.model,
 			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
 			instructions: personaInstructions(persona),
 			cwd: persona.cwd,
-			extensions: { add: [this.routerExtension, ...this.personaExtensions(persona)] },
-			modelTools: { remove: [...(CodingTools.tools ?? [])] },
+			extensions,
+			...(persona.toolScope === "custom"
+				? { ...this.toolFilterFor(persona, extensions) }
+				: { modelTools: { remove: [...(CodingTools.tools ?? [])] }, tools: null }),
 		};
+	}
+
+	/** Persona `toolScope` as a `tools`+`modelTools` pair, limiting BOTH the
+	 * model-visible tool list and the caller (tools/codemode) layer. */
+	private toolFilterFor(
+		persona: BotPersonaConfig,
+		extensions: readonly Extension[],
+	): { tools: AgentChange["tools"]; modelTools: AgentChange["modelTools"] } {
+		if (persona.toolScope === "readonly") {
+			const writeTools = (CodingTools.tools ?? []).filter((tool) =>
+				["write", "edit", "bash"].includes(tool.name),
+			);
+			return { tools: { remove: writeTools }, modelTools: { remove: writeTools } };
+		}
+		if (persona.toolScope === "custom") {
+			const allowed = new Set(persona.customTools ?? []);
+			const allowedTools = extensions.flatMap((ext) => (ext.tools ?? []).filter((tool) => allowed.has(tool.name)));
+			return { tools: allowedTools, modelTools: allowedTools };
+		}
+		return { tools: null, modelTools: null };
 	}
 
 	/** Each persona's 24/7 main session: one durable Router conversation per bot. */
@@ -497,7 +577,14 @@ export class HubDurableRuntime {
 					? await tx.forkConversation(stringToConversationId(sessionId), latest, { ownership: { kind: "ownerless" } })
 					: await tx.createConversation({ ownership: { kind: "ownerless" } });
 			conversationId = conversationIdToString(record.id);
-			await configure(tx, record.id, { ...this.workerAgentFor(persona), cwd: effectiveCwd });
+			const workerAgent = this.workerAgentFor(persona);
+			// 分叉 worker 继承 Router 的精确扩展清单：未显式指定 extensions 的 agent
+			// 重置为主机默认选择（全部已安装），保住编码工具与回报钩子。
+			await configure(tx, record.id, {
+				...workerAgent,
+				cwd: effectiveCwd,
+				...(workerAgent.extensions === undefined ? { extensions: null } : {}),
+			});
 			const registry = await tx.doc(WorkerRegistryDoc, stringToConversationId(sessionId));
 			workerId = `w-${Object.keys(registry.workers).length + 1}-${record.id}`;
 			const branchName = `botd/${workerId}`;
@@ -556,26 +643,30 @@ export class HubDurableRuntime {
 	}
 
 	/**
-	 * Worker agent: persona model + the `botd-worker` extension. CodingTools and
-	 * SubagentWorkflow are installed host-wide, so the worker's default selection
-	 * (all installed extensions) already carries them. `modelTools: null` clears
-	 * any filter a forked parent carried: a worker always gets the coding tools back.
+	 * Worker agent: persona model + the `botd-worker` extension + coding tools.
+	 * `extensions` is an EXACT array (not `{add}`), so only CodingTools,
+	 * SubagentWorkflow, botd-worker, codemode, the persona's own dynamic
+	 * extensions and host extensions are mounted — nothing else from the
+	 * registry leaks in. `modelTools`/`tools` enforce the persona's toolScope
+	 * on both the model-visible and the caller layer.
 	 */
 	workerAgentFor(persona: BotPersonaConfig): AgentChange {
 		const thinkingLevel = thinkingLevelFor(persona);
+		const extensions: Extension[] = [
+			CodingTools,
+			this.workflowExtension,
+			this.workerExtension,
+			...(this.codemodeExtension === undefined ? [] : [this.codemodeExtension]),
+			...this.personaExtensions(persona),
+			...this.hostExtensions,
+		];
 		return {
 			model: persona.model,
 			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
 			instructions: personaInstructions(persona),
 			cwd: persona.cwd,
-			extensions: {
-				add: [
-					this.workerExtension,
-					...(this.codemodeExtension === undefined ? [] : [this.codemodeExtension]),
-					...this.personaExtensions(persona),
-				],
-			},
-			modelTools: null,
+			extensions,
+			...this.toolFilterFor(persona, extensions),
 		};
 	}
 

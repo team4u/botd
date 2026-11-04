@@ -37,10 +37,11 @@ import type { Extension } from '@earendil-works/pi-durable';
 import { HubDatabase } from '../apps/hub/src/db.js';
 import { createHub } from '../apps/hub/src/index.js';
 
-/** The extensions an AgentChange adds: the object form's `add` list. */
+/** The extensions an AgentChange selects: exact array, or the object form's `add` list. */
 const addedExtensions = (change: import('@earendil-works/pi-durable').AgentChange): Extension[] => {
   const extensions: unknown = change.extensions;
-  if (typeof extensions !== 'object' || extensions === null || Array.isArray(extensions)) return [];
+  if (Array.isArray(extensions)) return [...extensions];
+  if (typeof extensions !== 'object' || extensions === null) return [];
   return [...(((extensions as { add?: readonly Extension[] }).add ?? []))];
 };
 

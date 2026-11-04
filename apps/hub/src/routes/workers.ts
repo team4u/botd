@@ -10,7 +10,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { configure, defineDocFamily } from '@earendil-works/pi-durable';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
-import { resolveOwnedSession } from '../http-helpers.js';
+import { requireAdmin, resolveOwnedSession } from '../http-helpers.js';
 import type { MessageAttachment, PendingAskRecord, ToolCallRecord, TurnUsage } from '@botd/protocol';
 import { stringToConversationId, type HubDurableRuntime } from '../harness/hub-harness.js';
 import { AskDoc, type AskEntry } from '../harness/docs.js';
@@ -195,6 +195,8 @@ interface EventIngestBody {
   threadId?: string;
   botId?: string;
   sessionId?: string;
+  /** 事件唯一 ID（如 webhook delivery id）：透传为 IncomingEvent.id，幂等去重的优先键。 */
+  eventId?: string | number;
   adjacentMessages?: string[];
   policy?: Partial<EventFilterPolicy>;
 }
@@ -220,6 +222,7 @@ function toIncomingEvent(body: EventIngestBody): IncomingEvent {
     sender: body.sender ?? 'anonymous',
     ...(Object.keys(target).length > 0 ? { target } : {}),
     summary,
+    ...(body.eventId !== undefined ? { id: String(body.eventId) } : {}),
     ...(typeof body.content === 'string' && body.content !== summary ? { payload: body.content } : {}),
     ...(Array.isArray(body.adjacentMessages) ? { adjacent: body.adjacentMessages } : {}),
   };
@@ -661,8 +664,32 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
     const rt = await runtime();
     if (rt === undefined) return c.json({ error: 'Durable runtime unavailable' }, 503);
 
+    // 归属校验：workerId 必须属于本会话 —— 先查本会话 Router 的 WorkerRegistry，
+    // 再验证 RecallIndex 命中节点的会话链（TargetDoc.sessionId / 父会话）指向本会话，
+    // 防止拿别人的 workerId 经自己的会话路径读取他人 Worker 对话。
+    const routerId = await findRouterConversationId(rt, id);
+    let belongsToSession = false;
+    if (routerId !== undefined) {
+      belongsToSession = (await rt.getActiveWorkers(routerId)).some((w) => w.workerId === workerId);
+    }
     const node = await rt.recall(workerId);
     if (node === undefined) return c.json({ error: 'No recall node' }, 404);
+    if (!belongsToSession) {
+      const conversationId = (node as { conversationId?: string }).conversationId;
+      if (typeof conversationId === 'string' && conversationId !== '') {
+        const target = await rt.harness.snapshot(
+          TargetDoc,
+          stringToConversationId(conversationId),
+          BACKGROUND_CONTEXT,
+        );
+        belongsToSession =
+          target?.sessionId === id ||
+          (routerId !== undefined && target?.parentConversationId === routerId);
+      }
+    }
+    if (!belongsToSession) {
+      return c.json({ error: 'Worker not found in this session' }, 404);
+    }
 
     // Chain of Recall：节点之外附最近 Transcript 摘录（供检视抽屉展示）。
     const conversationId = (node as { conversationId?: string }).conversationId;
@@ -685,6 +712,23 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
     const body = await c.req.json<EventIngestBody>().catch(() => null);
     if (!body || typeof body.source !== 'string' || typeof body.type !== 'string') {
       return c.json({ error: 'source and type are required' }, 400);
+    }
+
+    // 目标会话归属校验：指定 sessionId 时必须是当前用户自己的会话，
+    // 否则任何人都能把事件直通注入他人正在运行的 Worker（steer 注入）。
+    if (typeof body.sessionId === 'string' && body.sessionId) {
+      const sRes = resolveOwnedSession(c, db, body.sessionId);
+      if (!sRes.ok) return sRes.response;
+    } else {
+      const user = c.get('user');
+      if (user.role !== 'admin' && typeof body.botId === 'string' && body.botId) {
+        // 指定 botId 且非 admin：Bot 必须对当前用户可见（自己的或 team 的），
+        // 否则同样构成向他人分身注入事件。
+        const bot = db.getBot(body.botId);
+        if (!bot || (bot.ownerId !== user.id && bot.visibility !== 'team')) {
+          return c.json({ error: 'Forbidden' }, 403);
+        }
+      }
     }
 
     const event = toIncomingEvent(body);
@@ -740,7 +784,10 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
     const rt = await runtime();
     if (rt === undefined) return c.json({ error: 'Durable runtime unavailable' }, 503);
 
+    // runPass=1 会真实触发一次巡检（含自动干预）：仅限管理员。
     if (c.req.query('runPass') === '1') {
+      const adminErr = requireAdmin(c);
+      if (adminErr) return adminErr;
       await runWatchdogPass(rt.harness, undefined, BACKGROUND_CONTEXT);
     }
     const report = await diagnoseSystemHealth(rt.harness, BACKGROUND_CONTEXT);
@@ -1189,6 +1236,23 @@ export async function submitSessionMessageToDurable(
 }
 
 /**
+ * Durable 侧用户消息文本与 SQL 侧原始文本的匹配：提交给 Durable 的正文可能被
+ * 改写（追加 `[Attached Files]:` 块、`/skill` 斜杠改写为 `[Slash Command /x]: ...`），
+ * 精确相等之外按这些已知形态做前缀匹配，保证 Fork/编辑回滚能定位到锚点。
+ */
+function matchesDurableMessageText(durableText: string, sqlContent: string): boolean {
+  if (durableText === sqlContent) return true;
+  // 带正文附件：`<原文>\n\n[Attached Files]:…`
+  if (sqlContent.trim() !== '' && durableText.startsWith(`${sqlContent}\n\n[Attached Files]:`)) return true;
+  // 纯附件空文本消息：整条就是 `[Attached Files]:…`
+  if (sqlContent.trim() === '' && durableText.startsWith('[Attached Files]:')) return true;
+  // 斜杠技能命令：`/x args` → `[Slash Command /x]: …`
+  const slash = /^\/([a-zA-Z0-9_-]+)/.exec(sqlContent.trim());
+  if (slash && durableText.startsWith(`[Slash Command /${slash[1]}]:`)) return true;
+  return false;
+}
+
+/**
  * 在 Durable Router 会话的 Entry 历史中定位某条 botd 消息对应的 EntryId：
  * 1. 若消息 id 为镜像生成的 `msg_dur_<sessionId>_<entryId>`，直接提取 `<entryId>`；
  * 2. 否则按升序遍历会话 Entry，按角色与文本序号匹配对应的 `pi.user` / `pi.assistant` 条目。
@@ -1212,7 +1276,7 @@ async function resolveDurableEntryIdForMessage(
     ? Math.max(
         1,
         messagesUpToAnchor.filter(
-          (m) => (m.role === 'assistant' ? 'assistant' : 'user') === targetRole && m.content === anchorMessage.content,
+          (m) => (m.role === 'assistant' ? 'assistant' : 'user') === targetRole && matchesDurableMessageText(m.content, anchorMessage.content),
         ).length,
       )
     : 1;
@@ -1222,7 +1286,7 @@ async function resolveDurableEntryIdForMessage(
     const first = entry.model?.[0] as { role?: string; content?: unknown } | undefined;
     if (!first || first.role !== targetRole) continue;
     const text = (entry.model ?? []).map(messageText).filter(Boolean).join('\n');
-    if (text === anchorMessage.content) {
+    if (matchesDurableMessageText(text, anchorMessage.content)) {
       lastMatchedId = entry.id;
       seenSameContent++;
       if (seenSameContent === desiredOccurrence) return entry.id;

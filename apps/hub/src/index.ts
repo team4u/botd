@@ -137,6 +137,15 @@ export function createHub(options?: HubOptions): HubInstance {
     ...(durableRuntime ? { durableRuntime } : {}),
   };
   let durableRuntimeOpening: Promise<HubDurableRuntime> | undefined;
+  /** Bot 的生效技能清单：inheritSkills 时继承父 Bot，内置 botd-cli 始终前置（两处消费必须一致，否则系统提示词与分身配置脱节）。 */
+  const resolveEffectiveBotSkillIds = (bot: import('@botd/protocol').BotConfig): string[] => {
+    const parent = bot.parentBotId ? db.getBot(bot.parentBotId) : undefined;
+    const base =
+      bot.inheritSkills && parent
+        ? (parent.enabledSkills ?? bot.enabledSkills ?? [])
+        : (bot.enabledSkills ?? []);
+    return Array.from(new Set(['botd-cli', ...base]));
+  };
   const ensureDurableRuntime = async (): Promise<HubDurableRuntime> => {
     if (durableRuntime !== undefined) {
       // Bot 配置可能已更新（新建/改模型/改工作目录）：每次取用都重新同步分身。
@@ -160,7 +169,7 @@ export function createHub(options?: HubOptions): HubInstance {
                 const extraDirs = bot.workspaceDir ? [bot.workspaceDir] : [];
                 const seen = new Set<string>();
                 const skills: Array<{ id: string; content: string }> = [];
-                for (const skillId of bot.enabledSkills ?? []) {
+                for (const skillId of resolveEffectiveBotSkillIds(bot)) {
                   if (seen.has(skillId)) continue;
                   const content = db.getSkillContent(skillId, 'SKILL.md', extraDirs);
                   if (content !== '') {
@@ -193,14 +202,16 @@ export function createHub(options?: HubOptions): HubInstance {
               getBotMemory: (botId) => db.getBotFile(botId, 'memory'),
               setBotMemory: (botId, content) => db.setBotFile(botId, 'memory', content),
             },
-            // Brain in Hub, Hands on Node：会话的目标节点在线时，工具执行走远端
-            // RemoteExecutionEnv；否则退回本地 NodeExecutionEnv（自动合并分身 env）。
+            // Brain in Hub, Hands on Node：目标节点是远端时一律走 RemoteExecutionEnv
+            //（离线等待重连由其 waitForNodeOnline 承担，绝不退回 Hub 本机执行）；
+            // 仅本地（无 nodeId 或 'local'）才用 SecretInjectingEnv。
             env: async ({ conversationId, cwd }) => {
               const targetInfo = await remoteTargetFor(String(conversationId), cwd);
               const finalCwd = targetInfo.effectiveCwd ?? cwd ?? process.cwd();
-              if (targetInfo.nodeId !== undefined && connections.getNodeEnvRpc(targetInfo.nodeId) !== undefined) {
+              const isRemoteNodeId = Boolean(targetInfo.nodeId && targetInfo.nodeId !== 'local');
+              if (isRemoteNodeId) {
                 return connections.createRemoteEnv({
-                  nodeId: targetInfo.nodeId,
+                  nodeId: targetInfo.nodeId!,
                   cwd: finalCwd,
                   ...(targetInfo.shellEnv ? { shellEnv: targetInfo.shellEnv } : {}),
                 });
@@ -218,6 +229,7 @@ export function createHub(options?: HubOptions): HubInstance {
         // 运行时就绪后补齐镜像与路由上下文：懒创建路径下 messages/sessions
         // 也要看到活跃的 durableRuntime 与 durableMirror。
         durableMirror ??= createDurableSessionMirror({ db, sseHub, durableRuntime: runtime });
+        void attachMirrorToExistingSessions(durableMirror);
         ctx.durableRuntime = runtime;
         messageCtx.durableRuntime = runtime;
         messageCtx.durableMirror = durableMirror;
@@ -297,7 +309,12 @@ export function createHub(options?: HubOptions): HubInstance {
                 effectiveCwd = cached;
               } else {
                 const workerId = path.basename(target.worktreePath) || `w-${conversationId}`;
-                const envRpc = target.nodeId ? connections.getNodeEnvRpc(target.nodeId) : undefined;
+                const isRemoteTarget = Boolean(target.nodeId && target.nodeId !== 'local');
+                // 远端节点：离线时等待重连后由节点侧创建 worktree，绝不在 Hub 本机建。
+                const envRpc = isRemoteTarget
+                  ? (connections.getNodeEnvRpc(target.nodeId!) ??
+                    (await connections.waitForNodeOnline(target.nodeId!, BACKGROUND_CONTEXT).catch(() => undefined)))
+                  : connections.getNodeEnvRpc(target.nodeId ?? '');
                 if (envRpc?.envAcquireWorktree) {
                   const res = await envRpc.envAcquireWorktree({ repoDir: effectiveCwd, workerId });
                   effectiveCwd = res.worktreePath || effectiveCwd;
@@ -323,18 +340,13 @@ export function createHub(options?: HubOptions): HubInstance {
   };
   /** Hub 数据库 Bot → 持久分身（SYSTEM/MEMORY、模型、思考档位、Skills、Extensions、环境变量全部来自 Hub 权威存储）。 */
   const syncBotPersonas = async (runtime: HubDurableRuntime): Promise<void> => {
+    const personas: BotPersonaConfig[] = [];
     for (const bot of db.getAllBots()) {
       const parent = bot.parentBotId ? db.getBot(bot.parentBotId) : undefined;
       const effectiveModel =
         bot.inheritModel && parent
           ? { provider: parent.modelProvider, modelId: parent.modelId }
           : { provider: bot.modelProvider, modelId: bot.modelId };
-      const effectiveSkills =
-        bot.inheritSkills && parent
-          ? (parent.enabledSkills ?? bot.enabledSkills ?? [])
-          : (bot.enabledSkills ?? []);
-      // 内置技能 botd-cli 始终可用（Hub SQLite 已种子化），不受 Bot 配置影响
-      const effectiveSkillsWithBuiltin = Array.from(new Set(['botd-cli', ...effectiveSkills]));
       const systemMd = db.getBotFile(bot.id, 'system').trim();
       const memoryMd = db.getBotFile(bot.id, 'memory').trim();
       const botEnv = readBotEnvMap(bot.id);
@@ -347,11 +359,13 @@ export function createHub(options?: HubOptions): HubInstance {
           systemMd ||
           `You are "${bot.name}", the lead bot of this hub.${bot.description ? ` ${bot.description}` : ''}`,
         ...(memoryMd ? { memory: memoryMd } : {}),
-        enabledSkills: effectiveSkillsWithBuiltin,
+        enabledSkills: resolveEffectiveBotSkillIds(bot),
         enabledExtensions: bot.enabledExtensions,
         ...(botEnv ? { env: botEnv } : {}),
         nodeId: bot.nodeId,
         cwd: bot.workspaceDir?.trim() || process.cwd(),
+        ...(bot.toolScope ? { toolScope: bot.toolScope } : {}),
+        ...(bot.customTools ? { customTools: bot.customTools } : {}),
       };
       // 动态挂载 Hub 托管的用户扩展：从 <dataDir>/extensions/<extId>/ 目录包
       // 加载；目录内容变更（HTTP 保存）时重载热替换
@@ -366,6 +380,12 @@ export function createHub(options?: HubOptions): HubInstance {
         }
       }
       runtime.registerPersona(persona);
+      personas.push(persona);
+    }
+    // 存量会话热同步：已创建的 Router/Worker 会话立即应用最新分身配置
+    //（模型/思考档位/SYSTEM/MEMORY/toolScope/扩展选择），无需重启或新建会话。
+    if (typeof runtime.syncPersonas === 'function') {
+      await runtime.syncPersonas(personas);
     }
   };
 
@@ -374,6 +394,17 @@ export function createHub(options?: HubOptions): HubInstance {
   let durableMirror: DurableSessionMirror | undefined = durableRuntime !== undefined
     ? createDurableSessionMirror({ db, sseHub, durableRuntime })
     : undefined;
+  /** 重启/懒打开后补挂存量会话的镜像：未发新消息的会话也能继续接收回复回写。 */
+  const attachMirrorToExistingSessions = async (mirror: DurableSessionMirror): Promise<void> => {
+    for (const user of db.listUsers()) {
+      for (const session of db.getAllSessions(user.id)) {
+        await mirror.ensure(session.id).catch(() => undefined);
+      }
+    }
+  };
+  if (durableMirror !== undefined) {
+    void attachMirrorToExistingSessions(durableMirror);
+  }
 
   registerCoreMiddleware(app, ctx); // health/bodyLimit/auth，注册顺序即执行顺序
   registerAuthRoutes(app, ctx);
@@ -472,7 +503,10 @@ export function createHub(options?: HubOptions): HubInstance {
     connections,
     router,
     sseHub,
-    ...(durableRuntime ? { durableRuntime } : {}),
+    // 动态 getter：懒打开后 hub.durableRuntime 也能拿到实例（旧快照展开恒 undefined）。
+    get durableRuntime() {
+      return durableRuntime;
+    },
     ensureDurableRuntime,
     drain,
     close,
@@ -520,16 +554,15 @@ export async function startHub(options?: StartHubOptions): Promise<StartHubResul
   await hub.ensureDurableRuntime().catch((err) => {
     console.warn('[hub] durable runtime init warning:', err);
   });
-  let watchdogTimer: NodeJS.Timeout | undefined;
-  if (hub.durableRuntime !== undefined) {
+  // 定时器始终创建（懒打开在启动后任意时刻完成）：回调内动态读取当前实例。
+  const watchdogTimer: NodeJS.Timeout = setInterval(() => {
     const runtime = hub.durableRuntime;
-    watchdogTimer = setInterval(() => {
-      void runWatchdogPass(runtime.harness, undefined, BACKGROUND_CONTEXT).catch((err) => {
-        console.warn('[hub] watchdog pass failed:', err instanceof Error ? err.message : err);
-      });
-    }, options?.watchdogIntervalMs ?? 30_000);
-    watchdogTimer.unref();
-  }
+    if (runtime === undefined) return;
+    void runWatchdogPass(runtime.harness, undefined, BACKGROUND_CONTEXT).catch((err) => {
+      console.warn('[hub] watchdog pass failed:', err instanceof Error ? err.message : err);
+    });
+  }, options?.watchdogIntervalMs ?? 30_000);
+  watchdogTimer.unref();
 
   const addr = server.address();
   const resolvedPort = typeof addr === 'object' && addr ? addr.port : requestedPort;
@@ -537,7 +570,7 @@ export async function startHub(options?: StartHubOptions): Promise<StartHubResul
   const originalClose = hub.close;
   hub.close = async (): Promise<void> => {
     // 0. Stop the background watchdog first
-    if (watchdogTimer !== undefined) clearInterval(watchdogTimer);
+    clearInterval(watchdogTimer);
     // 1. Close application resources, WebSockets and DB first
     await originalClose();
 
