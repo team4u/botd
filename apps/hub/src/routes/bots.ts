@@ -1,14 +1,47 @@
 import { isBotConfig, isValidBotEnvKey } from '@botd/protocol';
 import type { BotConfig, SaveBotInput } from '@botd/protocol';
-import { resolveOwnedBotRpc, resolveOwnedNodeRpc, type NodeRpc } from '../http-helpers.js';
+import { resolveOwnedBot } from '../http-helpers.js';
+import type { BotFileKind, HubDatabase } from '../db.js';
 import type { HubApp, HubContext } from './context.js';
 
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 
+/** 确保 nodeId 存在节点行（虚拟节点按首位声明者归属）；存在但不属于该用户时返回 false */
+function ensureNodeOwned(db: HubDatabase, nodeId: string, userId: string): boolean {
+  if (db.getNode(nodeId)) {
+    return db.getNodeOwner(nodeId) === userId;
+  }
+  db.createNode({
+    id: nodeId,
+    name: nodeId === 'local' ? 'Local' : nodeId,
+    platform: process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : 'linux',
+    tokenHash: 'virtual:' + '0'.repeat(64),
+    ownerId: userId,
+  });
+  return true;
+}
+
 export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
   const { db, connections } = ctx;
 
-  // Bot management (Node is authoritative)
+  const readBotEnv = (botId: string): Record<string, string> => {
+    const raw = db.getBotFile(botId, 'env');
+    if (!raw.trim()) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      return isObject(parsed) ? (parsed as Record<string, string>) : {};
+    } catch {
+      return {};
+    }
+  };
+
+  const writeBotEnv = (botId: string, env: Record<string, string>): Record<string, string> => {
+    db.setBotFile(botId, 'env', JSON.stringify(env, null, 2));
+    return env;
+  };
+
+  // --- Bot CRUD：Hub SQLite 权威存储，节点离线也能创建/编辑/删除 ---
+
   app.get('/api/bots', (c) => {
     return c.json(db.getAccessibleBots(c.get('user').id));
   });
@@ -18,9 +51,9 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
     if (!isBotConfig(body) || typeof body.systemMd !== 'string') {
       return c.json({ error: 'Invalid BOT configuration' }, 400);
     }
-
-    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, body.nodeId);
-    if (!nodeRpc.ok) return nodeRpc.response;
+    if (!ensureNodeOwned(db, body.nodeId, c.get('user').id)) {
+      return c.json({ error: 'Forbidden' }, 403);
+    }
 
     const existing = db.getBot(body.id);
     if (existing && existing.nodeId !== body.nodeId) {
@@ -53,21 +86,16 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
       updatedAt: new Date().toISOString(),
     };
 
-    try {
-      await nodeRpc.rpc.saveBot(botConfig, body.systemMd || '');
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to save bot on node' }, 500);
-    }
-
     db.saveBot(botConfig);
+    db.setBotFile(botConfig.id, 'system', body.systemMd || '');
     return c.json(botConfig);
   });
 
   app.put('/api/bots/:botId', async (c) => {
     const botId = c.req.param('botId');
-    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
-    if (!botRpc.ok) return botRpc.response;
-    const { bot: existing, rpc } = botRpc;
+    const botRes = resolveOwnedBot(c, db, botId);
+    if (!botRes.ok) return botRes.response;
+    const existing = botRes.bot;
 
     const body = await c.req.json<Partial<BotConfig> & { systemMd?: string }>().catch(() => null);
     if (!isObject(body) || !isBotConfig({ ...existing, ...body, id: botId })
@@ -107,125 +135,92 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
       else delete botConfig.workspaceDir;
     }
 
-    try {
-      const systemMd = requestedSystem ?? await rpc.readFile({ kind: 'system', botId, id: 'SYSTEM.md' });
-      await rpc.saveBot(botConfig, systemMd);
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to save bot on node' }, 500);
-    }
-
     db.saveBot(botConfig);
+    if (requestedSystem !== undefined) {
+      db.setBotFile(botId, 'system', requestedSystem);
+    }
     return c.json(botConfig);
   });
 
-  app.delete('/api/bots/:botId', async (c) => {
+  app.delete('/api/bots/:botId', (c) => {
     const botId = c.req.param('botId');
-    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
-    if (!botRpc.ok) return botRpc.response;
-
-    try {
-      await botRpc.rpc.deleteBot(botId);
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to delete bot on node' }, 500);
-    }
+    const botRes = resolveOwnedBot(c, db, botId);
+    if (!botRes.ok) return botRes.response;
 
     db.deleteBot(botId);
     return c.json({ ok: true });
   });
 
-  app.get('/api/bots/:botId/commands', async (c) => {
-    const botId = c.req.param('botId');
-    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
-    if (!botRpc.ok) return botRpc.response;
-
-    try {
-      const commands = await botRpc.rpc.getCommands(botId);
-      return c.json(commands);
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to fetch bot commands' }, 500);
-    }
-  });
+  // --- Bot Markdown 文件（SYSTEM.md / MEMORY.md）：Hub 权威存储 ---
 
   const botMarkdownRoutes: Array<{
     subpath: 'system' | 'memory';
     kind: 'system' | 'memory';
-    filename: 'SYSTEM.md' | 'MEMORY.md';
-    label: string;
   }> = [
-    { subpath: 'system', kind: 'system', filename: 'SYSTEM.md', label: 'system prompt' },
-    { subpath: 'memory', kind: 'memory', filename: 'MEMORY.md', label: 'memory' },
+    { subpath: 'system', kind: 'system' },
+    { subpath: 'memory', kind: 'memory' },
   ];
 
-  for (const { subpath, kind, filename, label } of botMarkdownRoutes) {
-    app.get(`/api/bots/:botId/${subpath}`, async (c) => {
+  for (const { subpath, kind } of botMarkdownRoutes) {
+    app.get(`/api/bots/:botId/${subpath}`, (c) => {
       const botId = c.req.param('botId');
-      const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
-      if (!botRpc.ok) return botRpc.response;
-
-      try {
-        const content = await botRpc.rpc.readFile({ kind, botId, id: filename });
-        return c.json({ content });
-      } catch (err: any) {
-        return c.json({ error: err?.message || `Failed to read ${label}` }, 500);
-      }
+      const botRes = resolveOwnedBot(c, db, botId);
+      if (!botRes.ok) return botRes.response;
+      return c.json({ content: db.getBotFile(botId, kind) });
     });
 
     app.put(`/api/bots/:botId/${subpath}`, async (c) => {
       const botId = c.req.param('botId');
-      const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
-      if (!botRpc.ok) return botRpc.response;
+      const botRes = resolveOwnedBot(c, db, botId);
+      if (!botRes.ok) return botRes.response;
 
       const body = await c.req.json<{ content?: string }>().catch(() => null);
       if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
-      try {
-        await botRpc.rpc.writeFile({ kind, botId, id: filename }, body.content);
-        return c.json({ ok: true });
-      } catch (err: any) {
-        return c.json({ error: err?.message || `Failed to write ${label}` }, 500);
-      }
+      db.setBotFile(botId, kind, body.content);
+      return c.json({ ok: true });
     });
   }
 
-  const readNodeBotEnv = async (
-    rpc: NodeRpc,
-    botId: string,
-  ): Promise<Record<string, string>> => {
-    try {
-      const raw = await rpc.readFile({ kind: 'env', botId, id: 'env.json' });
-      if (!raw || !raw.trim()) return {};
-      const parsed = JSON.parse(raw);
-      return isObject(parsed) ? (parsed as Record<string, string>) : {};
-    } catch {
-      return {};
+  // 节点维度别名（既有调用方兼容）：与 /api/bots/:botId/files/:kind 同一 Hub 存储
+  app.get('/api/nodes/:nodeId/bots/:botId/files/:kind', (c) => {
+    const { botId, kind } = c.req.param();
+    if (kind !== 'system' && kind !== 'memory') {
+      return c.json({ error: 'Invalid file kind' }, 400);
     }
-  };
+    const botRes = resolveOwnedBot(c, db, botId);
+    if (!botRes.ok) return botRes.response;
+    return c.json({ content: db.getBotFile(botId, kind as 'system' | 'memory') });
+  });
 
-  const writeNodeBotEnv = async (
-    rpc: NodeRpc,
-    botId: string,
-    env: Record<string, string>,
-  ): Promise<Record<string, string>> => {
-    await rpc.writeFile({ kind: 'env', botId, id: 'env.json' }, JSON.stringify(env, null, 2));
-    return env;
-  };
+  app.put('/api/nodes/:nodeId/bots/:botId/files/:kind', async (c) => {
+    const { botId, kind } = c.req.param();
+    if (kind !== 'system' && kind !== 'memory') {
+      return c.json({ error: 'Invalid file kind' }, 400);
+    }
+    const botRes = resolveOwnedBot(c, db, botId);
+    if (!botRes.ok) return botRes.response;
 
-  app.get('/api/bots/:botId/env', async (c) => {
+    const body = await c.req.json<{ content?: string }>().catch(() => null);
+    if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
+    db.setBotFile(botId, kind as BotFileKind, body.content);
+    return c.json({ ok: true });
+  });
+
+  // --- Bot 环境变量：Hub 权威存储 ---
+
+  app.get('/api/bots/:botId/env', (c) => {
     const botId = c.req.param('botId');
-    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
-    if (!botRpc.ok) return botRpc.response;
+    const botRes = resolveOwnedBot(c, db, botId);
+    if (!botRes.ok) return botRes.response;
 
-    try {
-      const env = await readNodeBotEnv(botRpc.rpc, botId);
-      return c.json({ keys: Object.keys(env), env });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to read bot env' }, 500);
-    }
+    const env = readBotEnv(botId);
+    return c.json({ keys: Object.keys(env), env });
   });
 
   app.put('/api/bots/:botId/env', async (c) => {
     const botId = c.req.param('botId');
-    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
-    if (!botRpc.ok) return botRpc.response;
+    const botRes = resolveOwnedBot(c, db, botId);
+    if (!botRes.ok) return botRes.response;
 
     const body = await c.req.json<{ env?: Record<string, unknown>; merge?: boolean }>().catch(() => null);
     if (!body || !isObject(body.env)) {
@@ -241,29 +236,35 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
       }
       sanitized[k] = v;
     }
-    try {
-      const base = body.merge ? await readNodeBotEnv(botRpc.rpc, botId) : {};
-      const nextEnv = { ...base, ...sanitized };
-      const saved = await writeNodeBotEnv(botRpc.rpc, botId, nextEnv);
-      return c.json({ ok: true, keys: Object.keys(saved), env: saved });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to write bot env' }, 500);
-    }
+    const base = body.merge ? readBotEnv(botId) : {};
+    const saved = writeBotEnv(botId, { ...base, ...sanitized });
+    return c.json({ ok: true, keys: Object.keys(saved), env: saved });
   });
 
-  app.delete('/api/bots/:botId/env/:key', async (c) => {
+  app.delete('/api/bots/:botId/env/:key', (c) => {
     const botId = c.req.param('botId');
     const key = c.req.param('key');
-    const botRpc = resolveOwnedBotRpc(c, db, connections, botId);
-    if (!botRpc.ok) return botRpc.response;
+    const botRes = resolveOwnedBot(c, db, botId);
+    if (!botRes.ok) return botRes.response;
 
+    const current = readBotEnv(botId);
+    delete current[key];
+    const saved = writeBotEnv(botId, current);
+    return c.json({ ok: true, keys: Object.keys(saved), env: saved });
+  });
+
+  // --- Bot 命令列表：节点在线时透传，离线时返回空列表（不再失败） ---
+  app.get('/api/bots/:botId/commands', async (c) => {
+    const botId = c.req.param('botId');
+    const botRes = resolveOwnedBot(c, db, botId);
+    if (!botRes.ok) return botRes.response;
+
+    const rpc = connections.getNodeRpc(botRes.bot.nodeId);
+    if (!rpc) return c.json([]);
     try {
-      const current = await readNodeBotEnv(botRpc.rpc, botId);
-      delete current[key];
-      const saved = await writeNodeBotEnv(botRpc.rpc, botId, current);
-      return c.json({ ok: true, keys: Object.keys(saved), env: saved });
-    } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to delete bot env key' }, 500);
+      return c.json(await rpc.getCommands(botId));
+    } catch {
+      return c.json([]);
     }
   });
 }

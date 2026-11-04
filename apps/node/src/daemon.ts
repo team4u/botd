@@ -121,14 +121,14 @@ export interface ControlDeps {
   socketPath: string;
   startedAt: number;
   identity: { nodeId: string; name: string; hubUrl: string; token?: string };
-  ipcToken: string | null;
+  ipcToken?: string | null;
   isHubConnected: () => boolean;
   getHubRpc: () => BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null;
   syncRegistrationWithHub: () => Promise<void>;
   handleShutdown: () => void;
 }
 
-function isValidIpcToken(presented: string | undefined, expected: string | null): boolean {
+function isValidIpcToken(presented: string | undefined, expected: string | null | undefined): boolean {
   if (!expected) return false;
   if (typeof presented !== 'string' || presented.length === 0) return false;
   const a = Buffer.from(presented, 'utf8');

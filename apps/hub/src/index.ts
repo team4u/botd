@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import type { Models } from '@earendil-works/pi-ai';
+import { createModels, type Models } from '@earendil-works/pi-ai';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import type { UserRecord } from '@botd/protocol';
 import { HubDatabase } from './db.js';
@@ -16,14 +16,12 @@ import { GroupRouter } from './group-router.js';
 import { createStaticMiddleware } from './static.js';
 import { ArtifactService } from './artifact-service.js';
 import { HubDurableRuntime, type BotPersonaConfig } from './harness/hub-harness.js';
+import { createHubCredentialStore } from './credential-store.js';
 import { TargetDoc } from './harness/docs.js';
 import { registerProviderRoutes } from './providers.js';
 import { registerArtifactRoutes } from './artifacts.js';
 import { registerShareRoutes } from './share.js';
 import { registerTriggerRoutes } from './triggers.js';
-import { registerBgJobRoutes } from './bg-jobs.js';
-import { registerSkillSyncAndAskRoutes } from './skill-sync.js';
-import { registerDelegationRoutes } from './delegation.js';
 import { registerChannelRoutes } from './channels.js';
 import { registerCoreMiddleware } from './routes/middleware.js';
 import { registerAuthRoutes } from './routes/auth.js';
@@ -133,7 +131,8 @@ export function createHub(options?: HubOptions): HubInstance {
         const runtime = await HubDurableRuntime.open(
           {
             ...(options?.dbPath ? { dbPath: `${options.dbPath}.durable.sqlite` } : {}),
-            ...(options?.durableModels ? { models: options.durableModels } : {}),
+            // 凭据来自 Hub SQLite（provider_credentials）：Hub 侧 LLM 请求直接解析认证
+            models: options?.durableModels ?? createModels({ credentials: createHubCredentialStore(db) }),
             // Brain in Hub, Hands on Node：会话的目标节点在线时，工具执行走远端
             // RemoteExecutionEnv；否则退回本地 NodeExecutionEnv。
             env: async ({ conversationId, cwd }) => {
@@ -209,13 +208,10 @@ export function createHub(options?: HubOptions): HubInstance {
   };
   registerMessageRoutes(app, messageCtx);
   registerEventRoutes(app, ctx);
-  registerProviderRoutes(app, db, connections);
+  registerProviderRoutes(app, db);
   registerArtifactRoutes(app, artifacts);
   registerShareRoutes(app, db, getSessionOwnerId);
   const triggerScheduler = registerTriggerRoutes(app, db, router, getSessionOwnerId, { sseHub, artifacts });
-  registerBgJobRoutes(app, db, connections);
-  registerSkillSyncAndAskRoutes(app, db, connections, router);
-  registerDelegationRoutes(app, db, router, sseHub);
   const unsubscribeChannels = registerChannelRoutes(app, db, router, sseHub);
   registerWorkerRoutes(app, { ...ctx, getDurableRuntime: ensureDurableRuntime, ...(durableRuntime ? { durableRuntime } : {}) });
 

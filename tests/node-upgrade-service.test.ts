@@ -679,7 +679,6 @@ describe('Local IPC Integration', () => {
       startedAt: Date.now(),
       isHubConnected: () => true,
       getHubRpc: () => null,
-      bgManager: {} as any,
       syncRegistrationWithHub: async () => {},
       handleShutdown: async () => {
         shutdownCalled = true;

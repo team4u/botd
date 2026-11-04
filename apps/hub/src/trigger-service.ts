@@ -7,7 +7,7 @@ import type { HubDatabase } from './db.js';
 import type { GroupRouter } from './group-router.js';
 import type { SseHub } from './sse.js';
 import type { ArtifactService } from './artifact-service.js';
-import { watchSubSessionCompletion } from './delegation.js';
+import { watchSubSessionCompletion } from './subsession.js';
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);

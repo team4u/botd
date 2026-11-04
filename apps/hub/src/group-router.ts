@@ -15,8 +15,8 @@ import {
 import type { HubDatabase } from './db.js';
 import type { NodeConnectionManager } from './ws-hub.js';
 import type { SseHub } from './sse.js';
-import { AskCoordinator } from './ask-coordinator.js';
-import { isSilentSkipReply } from './delegation.js';
+import { AskCoordinator } from './asks.js';
+import { isSilentSkipReply } from './subsession.js';
 
 const MENTION_REGEX = /(?:^|\s)@([a-zA-Z0-9_-]+)/g;
 

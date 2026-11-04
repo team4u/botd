@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto';
 import type { NotificationChannelKind, NotificationEventKind, SessionSseEvent } from '@botd/protocol';
 import { validateUiSpec } from '@botd/protocol';
-import { signAskToken } from './ask-callback.js';
+import { signAskToken } from './ask-token.js';
 
 /** 声明式 UI ask 的降级摘要：从 BotdUiSpec 提取文本渠道可消费的摘要与按钮 */
 export interface AskUiSummary {

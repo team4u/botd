@@ -19,7 +19,7 @@ import test, { type TestContext } from 'node:test';
 import { createHub } from '../apps/hub/src/index.js';
 import { HubDatabase } from '../apps/hub/src/db.js';
 import { extractWebhookEventMeta, matchesEventFilter } from '../apps/hub/src/triggers.js';
-import { isSilentSkipReply } from '../apps/hub/src/delegation.js';
+import { isSilentSkipReply } from '../apps/hub/src/subsession.js';
 import type { AutomationEventRecord, TriggerRecord } from '../packages/protocol/src/index.js';
 
 const ADMIN_PASSWORD = 'admin-pass-event-inbox';

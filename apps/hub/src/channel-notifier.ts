@@ -3,7 +3,7 @@ import type { HubDatabase } from './db.js';
 import type { SseHub } from './sse.js';
 import { buildEventPayload } from './channel-payloads.js';
 import { mapChannelRow, VALID_TELL_POLICIES, type ChannelRow } from './channel-schema.js';
-import { isSilentSkipReply } from './delegation.js';
+import { isSilentSkipReply } from './subsession.js';
 
 /** needed 策略下判定 wakeup（callback 消息）是否属于失败/错误回调 */
 function isFailureCallbackMessage(content: string): boolean {

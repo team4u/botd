@@ -4,7 +4,7 @@ import type { HubDatabase } from './db.js';
 import type { GroupRouter } from './group-router.js';
 import type { SseHub } from './sse.js';
 import { ensureChannelTables } from './channel-schema.js';
-import { createAskRespondHandler, resolveAskSecret } from './ask-callback.js';
+import { createAskRespondHandler, resolveAskSecret } from './ask-token.js';
 import { createOutboxDeliverer } from './channel-outbox.js';
 import { registerChannelNotifier } from './channel-notifier.js';
 import {
