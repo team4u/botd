@@ -48,6 +48,7 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
     const body = await c.req.json<{ content?: string }>().catch(() => null);
     if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
     db.saveSkillContent(skillId, body.content);
+    void ctx.refreshDurablePersonas?.();
     return c.json({ ok: true });
   });
 
@@ -55,6 +56,7 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
     const skillId = c.req.param('skillId');
     if (!isSafeId(skillId)) return c.json({ error: 'Invalid skill id format' }, 400);
     db.deleteSkillContent(skillId);
+    void ctx.refreshDurablePersonas?.();
     return c.json({ ok: true });
   });
 
@@ -72,6 +74,7 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
     const body = await c.req.json<{ content?: string }>().catch(() => null);
     if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
     db.saveExtensionContent(extId, body.content);
+    void ctx.refreshDurablePersonas?.();
     return c.json({ ok: true });
   });
 
@@ -79,6 +82,7 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
     const extId = c.req.param('extId');
     if (!isSafeId(extId)) return c.json({ error: 'Invalid extension id format' }, 400);
     db.deleteExtensionContent(extId);
+    void ctx.refreshDurablePersonas?.();
     return c.json({ ok: true });
   });
 
@@ -127,6 +131,7 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
       if (kind === 'skill') db.saveSkillContent(id, body.content);
       else db.saveExtensionContent(id, body.content);
       onAdd(nodeId, id);
+      void ctx.refreshDurablePersonas?.();
       return c.json({ ok: true });
     });
 
@@ -141,6 +146,7 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
       if (kind === 'skill') db.deleteSkillContent(id);
       else db.deleteExtensionContent(id);
       onRemove(nodeId, id);
+      void ctx.refreshDurablePersonas?.();
       return c.json({ ok: true });
     });
   }
@@ -170,13 +176,18 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
         kind: body.kind,
         customId: body.customId?.trim() || undefined,
       });
+      // 安装内容回读：从节点读回真实文件内容（而非空串占位），Hub 侧才是权威存储。
+      const content = await nodeRpc.rpc
+        .readFile({ kind: installed.kind, id: installed.id })
+        .catch(() => '');
       if (installed.kind === 'skill') {
         db.addNodeSkill(nodeId, installed.id);
-        db.saveSkillContent(installed.id, '');
+        db.saveSkillContent(installed.id, content);
       } else {
         db.addNodeExtension(nodeId, installed.id);
-        db.saveExtensionContent(installed.id, '');
+        db.saveExtensionContent(installed.id, content);
       }
+      void ctx.refreshDurablePersonas?.();
       return c.json(installed);
     } catch (err: any) {
       return c.json({ error: err?.message || 'Failed to install resource' }, 500);

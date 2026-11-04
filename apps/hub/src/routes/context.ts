@@ -25,4 +25,9 @@ export interface HubContext {
    * 运行时懒加载：首次调用 `getDurableRuntime()` 时打开并同步 Bot 分身。
    */
   getDurableRuntime?: () => Promise<HubDurableRuntime>;
+  /**
+   * 热同步分身：Bot/Skill/Extension/Provider 凭据变更后触发，把 Hub SQLite
+   * 权威存储的最新配置推送到已打开的持久运行时（未打开时为空操作）。
+   */
+  refreshDurablePersonas?: () => Promise<void>;
 }

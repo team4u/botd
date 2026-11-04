@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isSafeId } from '@botd/protocol';
 import type { CreateSessionInput } from '@botd/protocol';
 import { resolveOwnedSession } from '../http-helpers.js';
+import { cancelDurableSession } from './workers.js';
 import type { HubApp, HubContext } from './context.js';
 
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -147,6 +148,8 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
     if (!sRes.ok) return sRes.response;
 
     await router.cancelSession(id);
+    // Durable 侧同步停止：running Worker 与 Router 会话自身的回合一并中止。
+    if (ctx.durableRuntime) await cancelDurableSession(ctx.durableRuntime, id);
     return c.json({ ok: true });
   });
 

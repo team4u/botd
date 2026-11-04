@@ -31,6 +31,8 @@ import {
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
+import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { createPersonaSkillsExtension, PERSONA_SKILLS_EXTENSION, type PersonaSkillsOptions } from "./persona-skills-extension.js";
 import { createRouterExtension, type PersonaResolver, ROUTER_EXTENSION, type WorkerAgentFactory, WORKER_EXTENSION } from "./router-extension.js";
 import { createWorkerExtension, WORKER_EXTENSION_NAME } from "./worker-extension.js";
@@ -68,6 +70,8 @@ export interface HubRuntimeOptions {
 	workerAgent?: WorkerAgentFactory;
 	/** Builds a conversation's execution env; defaults to a NodeExecutionEnv on the target cwd. */
 	env?: HarnessOptions["env"];
+	/** Disable the shared codemode sandbox (tests without QuickJS); default enabled. */
+	codemode?: boolean;
 	/** Hub-backed skills & memory callbacks for the persona-skills extension. */
 	skills?: PersonaSkillsOptions;
 	onReport?: (report: unknown) => void;
@@ -108,6 +112,10 @@ export class HubDurableRuntime {
 	private readonly workerExtension: Extension;
 	private readonly personaSkillsExtension: Extension | undefined;
 	private readonly dynamicExtensions = new Map<string, Extension>();
+	/** Shared QuickJS sandbox behind the durable `codemode` tool; closed with the runtime. */
+	private readonly codemodeSandbox: CodemodeSandbox | undefined;
+	/** The installed `codemode` extension, added to every worker agent. */
+	private readonly codemodeExtension: Extension | undefined;
 
 	private constructor(
 		harness: import("@earendil-works/pi-durable").Harness,
@@ -116,6 +124,8 @@ export class HubDurableRuntime {
 		routerExtension: Extension,
 		workerExtension: Extension,
 		personaSkillsExtension: Extension | undefined,
+		codemodeSandbox?: CodemodeSandbox,
+		codemodeExtension?: Extension,
 	) {
 		this.harness = harness;
 		this.registry = registry;
@@ -123,6 +133,8 @@ export class HubDurableRuntime {
 		this.routerExtension = routerExtension;
 		this.workerExtension = workerExtension;
 		this.personaSkillsExtension = personaSkillsExtension;
+		this.codemodeSandbox = codemodeSandbox;
+		this.codemodeExtension = codemodeExtension;
 	}
 
 	static async open(options: HubRuntimeOptions = {}, context: Context = BACKGROUND_CONTEXT): Promise<HubDurableRuntime> {
@@ -160,6 +172,20 @@ export class HubDurableRuntime {
 		// enabled skills are advertised as a prompt section.
 		const personaSkillsExtension = options.skills === undefined ? undefined : createPersonaSkillsExtension(options.skills);
 		if (personaSkillsExtension !== undefined) registry.install(personaSkillsExtension);
+		// Codemode: model-written JavaScript in a shared QuickJS sandbox, with
+		// deterministic replay across restarts. Installed registry-wide; worker
+		// agents add the extension explicitly (see workerAgentFor).
+		let codemodeSandbox: CodemodeSandbox | undefined;
+		let codemodeExtension: Extension | undefined;
+		if (options.codemode !== false) {
+			try {
+				codemodeSandbox = new CodemodeSandbox();
+				codemodeExtension = createCodemodeExtension({ sandbox: codemodeSandbox });
+				registry.install(codemodeExtension);
+			} catch (err) {
+				console.warn("[hub] codemode sandbox unavailable, continuing without:", err instanceof Error ? err.message : err);
+			}
+		}
 		for (const extension of options.extensions ?? []) registry.install(extension);
 
 		const harnessOptions: HarnessOptions = {
@@ -172,7 +198,16 @@ export class HubDurableRuntime {
 			...(options.onReport === undefined ? {} : { onReport: options.onReport as never }),
 		};
 		const harness = await Harness.open(storage, harnessOptions, context);
-		const runtime = new HubDurableRuntime(harness, registry, models, routerExtension, workerExtension, personaSkillsExtension);
+		const runtime = new HubDurableRuntime(
+			harness,
+			registry,
+			models,
+			routerExtension,
+			workerExtension,
+			personaSkillsExtension,
+			codemodeSandbox,
+			codemodeExtension,
+		);
 		// Persona lookups from tools run through this map (set via registerPersona).
 		(runtime as unknown as { personas: Map<string, BotPersonaConfig> }).personas === personas; // keep reference alive
 		runtime.#personaSource = personas;
@@ -223,6 +258,11 @@ export class HubDurableRuntime {
 	/** A dynamically-installed extension by name, if any. */
 	getDynamicExtension(name: string): Extension | undefined {
 		return this.dynamicExtensions.get(name);
+	}
+
+	/** The installed codemode extension, when the sandbox is available. */
+	getCodemodeExtension(): Extension | undefined {
+		return this.codemodeExtension;
 	}
 
 	/**
@@ -402,7 +442,13 @@ export class HubDurableRuntime {
 			model: persona.model,
 			instructions: personaInstructions(persona),
 			cwd: persona.cwd,
-			extensions: { add: [this.workerExtension, ...this.personaExtensions(persona)] },
+			extensions: {
+				add: [
+					this.workerExtension,
+					...(this.codemodeExtension === undefined ? [] : [this.codemodeExtension]),
+					...this.personaExtensions(persona),
+				],
+			},
 			modelTools: null,
 		};
 	}
@@ -565,6 +611,8 @@ export class HubDurableRuntime {
 
 	async close(context: Context = BACKGROUND_CONTEXT): Promise<void> {
 		await this.harness.close(context);
+		// The sandbox owns worker threads outside the Harness; free them explicitly.
+		await this.codemodeSandbox?.close().catch(() => undefined);
 	}
 }
 
