@@ -1,0 +1,420 @@
+/**
+ * HubDurableRuntime: the Hub's single durable harness.
+ *
+ * One `Harness` over one storage (MemoryStorage for tests, SQLite for
+ * production) hosts every Bot persona. Each persona gets a 24/7 main session
+ * (a Router conversation) plus any number of topic sessions; workers are
+ * forked/created off them by the router extension. All state — personas,
+ * sessions, workers, asks, recall — lives in durable documents, so a restart
+ * resumes exactly where the process left off.
+ */
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Context } from "@earendil-works/chord";
+import { createModels, type Models } from "@earendil-works/pi-ai";
+import {
+	configure,
+	createRegistry,
+	Harness,
+	MemoryStorage,
+	type AgentChange,
+	type Conversation,
+	type ConversationId,
+	type ConversationView,
+	type Extension,
+	type HarnessOptions,
+	type Registry,
+	type Storage,
+	type Submission,
+	type TaskGraph,
+	type ToolRegistration,
+} from "@earendil-works/pi-durable";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { createRouterExtension, type PersonaResolver, ROUTER_EXTENSION, type WorkerAgentFactory, WORKER_EXTENSION } from "./router-extension.js";
+import { createWorkerExtension, WORKER_EXTENSION_NAME } from "./worker-extension.js";
+import { RecallIndexDoc, SessionIndexDoc, TargetDoc, WorkerRegistryDoc, type WorkerEntry } from "./docs.js";
+
+/** Configuration of one Bot persona. */
+export interface BotPersonaConfig {
+	botId: string;
+	name: string;
+	/** Provider/model the persona runs with. */
+	model: { provider: string; modelId: string };
+	/** Persona instructions (SYSTEM.md contents). */
+	instructions: string;
+	/** Memory notes (MEMORY.md contents), folded into the persona prompt. */
+	memory?: string;
+	nodeId: string;
+	cwd: string;
+}
+
+export interface HubRuntimeOptions {
+	storage?: Storage;
+	/** SQLite database file; used when `storage` is omitted. */
+	dbPath?: string;
+	/** Table prefix for the SQLite storage (default "pi_"). */
+	tablePrefix?: string;
+	models?: Models;
+	registry?: Registry;
+	extensions?: Extension[];
+	/** Resolve worker agent overrides; default keeps the host default selection (CodingTools + botd-worker). */
+	workerAgent?: WorkerAgentFactory;
+	onReport?: (report: unknown) => void;
+}
+
+// ---------------------------------------------------------------------------
+// ConversationId <-> string helpers. The branded ids are numbers at run time;
+// the documents store plain strings, so these helpers convert at the edges.
+// ---------------------------------------------------------------------------
+
+export function conversationIdToString(id: ConversationId): string {
+	return String(id);
+}
+
+export function stringToConversationId(value: string): ConversationId {
+	const numeric = Number(value);
+	if (!Number.isInteger(numeric)) throw new Error(`invalid conversation id: ${value}`);
+	return numeric as ConversationId;
+}
+
+/** The persona prompt section body for a bot's router conversations. */
+function personaInstructions(persona: BotPersonaConfig): string {
+	const parts = [persona.instructions];
+	if (persona.memory !== undefined && persona.memory !== "") parts.push("", "## Memory", persona.memory);
+	return parts.join("\n");
+}
+
+/** Session index: one main-session conversation id per bot persona (keyed by botId). */
+const SessionIndex = SessionIndexDoc;
+
+export class HubDurableRuntime {
+	readonly harness: import("@earendil-works/pi-durable").Harness;
+	readonly registry: Registry;
+	readonly models: Models;
+	private readonly personas = new Map<string, BotPersonaConfig>();
+	private readonly mainSessions = new Map<string, Conversation>();
+
+	private constructor(
+		harness: import("@earendil-works/pi-durable").Harness,
+		registry: Registry,
+		models: Models,
+	) {
+		this.harness = harness;
+		this.registry = registry;
+		this.models = models;
+	}
+
+	static async open(options: HubRuntimeOptions = {}, context: Context = BACKGROUND_CONTEXT): Promise<HubDurableRuntime> {
+		const storage =
+			options.storage ??
+			(options.dbPath !== undefined
+				? await openNodeSqliteStorage(options.dbPath, { prefix: options.tablePrefix ?? "pi_" })
+				: new MemoryStorage());
+		const models = options.models ?? createModels();
+		const registry = options.registry ?? createRegistry();
+		registry.install(CodingTools);
+		const workerExtension = createWorkerExtension();
+		registry.install(workerExtension);
+		const personas = new Map<string, BotPersonaConfig>();
+		const routerExtension = createRouterExtension({
+			resolvePersona: (botId) => {
+				const persona = personas.get(botId);
+				if (persona === undefined) return undefined;
+				return {
+					botId: persona.botId,
+					model: persona.model,
+					instructions: personaInstructions(persona),
+					nodeId: persona.nodeId,
+					cwd: persona.cwd,
+				};
+			},
+			workerAgent: options.workerAgent,
+		});
+		registry.install(routerExtension);
+		for (const extension of options.extensions ?? []) registry.install(extension);
+
+		const harnessOptions: HarnessOptions = {
+			models,
+			registry,
+			env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? process.cwd() }),
+			...(options.onReport === undefined ? {} : { onReport: options.onReport as never }),
+		};
+		const harness = await Harness.open(storage, harnessOptions, context);
+		const runtime = new HubDurableRuntime(harness, registry, models);
+		// Persona lookups from tools run through this map (set via registerPersona).
+		(runtime as unknown as { personas: Map<string, BotPersonaConfig> }).personas === personas; // keep reference alive
+		runtime.#personaSource = personas;
+		return runtime;
+	}
+
+	#personaSource: Map<string, BotPersonaConfig> | undefined;
+
+	/** Register (or replace) a Bot persona available in this runtime. */
+	registerPersona(persona: BotPersonaConfig): void {
+		this.personas.set(persona.botId, persona);
+		// The router extension resolves personas through the map captured at open;
+		// sync it so late registrations are visible to tools.
+		if (this.#personaSource !== undefined && !this.#personaSource.has(persona.botId)) {
+			this.#personaSource.set(persona.botId, persona);
+		}
+	}
+
+	getPersona(botId: string): BotPersonaConfig | undefined {
+		return this.personas.get(botId);
+	}
+
+	listPersonas(): BotPersonaConfig[] {
+		return [...this.personas.values()];
+	}
+
+	/** The router agent for a bot: persona model + botd-router extension + coding tools. */
+	routerAgent(persona: BotPersonaConfig): AgentChange {
+		return {
+			model: persona.model,
+			instructions: personaInstructions(persona),
+			cwd: persona.cwd,
+		};
+	}
+
+	/** Each persona's 24/7 main session: one durable Router conversation per bot. */
+	async ensureBotMainSession(botId: string, context: Context = BACKGROUND_CONTEXT): Promise<Conversation> {
+		const persona = this.personas.get(botId);
+		if (persona === undefined) throw new Error(`unknown persona: ${botId}`);
+		const existing = this.mainSessions.get(botId);
+		if (existing !== undefined) return existing;
+
+		// Find a previously-created main session for this bot (restart recovery).
+		const remembered = await this.harness.snapshot(SessionIndex, botId, context);
+		if (remembered !== undefined) {
+			const conversation = await this.harness.conversation(stringToConversationId(remembered.conversationId), context);
+			if (conversation !== undefined) {
+				this.mainSessions.set(botId, conversation);
+				return conversation;
+			}
+		}
+
+		const conversation = await this.harness.createConversation(
+			{
+				ownership: { kind: "ownerless" },
+				agent: this.routerAgent(persona),
+				init: async (tx, id) => {
+					const target = await tx.doc(TargetDoc, id);
+					Object.assign(target, {
+						botId,
+						role: "router" as const,
+						nodeId: persona.nodeId,
+						cwd: persona.cwd,
+						threadKeys: [],
+						title: "main",
+					});
+					const index = await tx.doc(SessionIndex, botId, null);
+					index.conversationId = conversationIdToString(id);
+				},
+			},
+			context,
+		);
+		this.mainSessions.set(botId, conversation);
+		return conversation;
+	}
+
+	/** An additional topic session for a bot (shows in the session list). */
+	async createBotTopicSession(
+		botId: string,
+		title: string,
+		context: Context = BACKGROUND_CONTEXT,
+	): Promise<Conversation> {
+		const persona = this.personas.get(botId);
+		if (persona === undefined) throw new Error(`unknown persona: ${botId}`);
+		return this.harness.createConversation(
+			{
+				ownership: { kind: "ownerless" },
+				agent: this.routerAgent(persona),
+				init: async (tx, id) => {
+					const target = await tx.doc(TargetDoc, id);
+					Object.assign(target, {
+						botId,
+						role: "router" as const,
+						nodeId: persona.nodeId,
+						cwd: persona.cwd,
+						threadKeys: [],
+						title,
+					});
+				},
+			},
+			context,
+		);
+	}
+
+	/**
+	 * Fork a session into a background worker conversation. Used by hosts that
+	 * spawn workers directly (tests, triggers); the router tool goes through
+	 * `spawn_worker` instead, which also registers the worker.
+	 */
+	async forkSessionToWorker(
+		sessionId: string,
+		options: {
+			botId: string;
+			title: string;
+			task: string;
+			threadKey?: string;
+			forkContext?: boolean;
+		},
+		context: Context = BACKGROUND_CONTEXT,
+	): Promise<{ workerId: string; conversation: Conversation }> {
+		const persona = this.personas.get(options.botId);
+		if (persona === undefined) throw new Error(`unknown persona: ${options.botId}`);
+		const parent = await this.harness.conversation(stringToConversationId(sessionId), context);
+		if (parent === undefined) throw new Error(`unknown session: ${sessionId}`);
+
+		let workerId = "";
+		let conversationId = "";
+		await this.harness.commit(async (tx) => {
+			const fork = options.forkContext !== false;
+			const latest = await tx.latestEntryId(stringToConversationId(sessionId));
+			const record =
+				fork && latest !== undefined
+					? await tx.forkConversation(stringToConversationId(sessionId), latest, { ownership: { kind: "ownerless" } })
+					: await tx.createConversation({ ownership: { kind: "ownerless" } });
+			conversationId = conversationIdToString(record.id);
+			await configure(tx, record.id, this.workerAgentFor(persona));
+			const target = await tx.doc(TargetDoc, record.id);
+			Object.assign(target, {
+				botId: options.botId,
+				role: "worker" as const,
+				parentConversationId: sessionId,
+				nodeId: persona.nodeId,
+				cwd: persona.cwd,
+				threadKeys: options.threadKey === undefined ? [] : [options.threadKey],
+				title: options.title,
+			});
+			const registry = await tx.doc(WorkerRegistryDoc, stringToConversationId(sessionId));
+			workerId = `w-${Object.keys(registry.workers).length + 1}-${record.id}`;
+			registry.workers[workerId] = {
+				workerId,
+				conversationId,
+				botId: options.botId,
+				title: options.title,
+				status: "running",
+				threadKeys: options.threadKey === undefined ? [] : [options.threadKey],
+				nodeId: persona.nodeId,
+				cwd: persona.cwd,
+				startedAt: Date.now(),
+			};
+			const recall = await tx.doc(RecallIndexDoc);
+			recall.nodes[workerId] = {
+				id: workerId,
+				kind: "worker",
+				title: options.title,
+				summary: `Worker started: ${options.title}`,
+				contentPreview: options.task.slice(0, 240),
+				conversationId,
+				relatedIds: [],
+				createdAt: Date.now(),
+			};
+		}, context);
+
+		const conversation = (await this.harness.conversation(stringToConversationId(conversationId), context))!;
+		const submission = await conversation.submit(
+			{
+				type: "input",
+				content: options.task,
+				requestId: `worker-task:${workerId}`,
+				entry: { kind: "botd.worker-task", data: { workerId, title: options.title } },
+			},
+			context,
+		);
+		return { workerId, conversation, ...({ submission } as object) } as { workerId: string; conversation: Conversation };
+	}
+
+	/** Worker agent: persona model, worker extension, coding tools. */
+	workerAgentFor(persona: BotPersonaConfig): AgentChange {
+		return {
+			model: persona.model,
+			instructions: personaInstructions(persona),
+			cwd: persona.cwd,
+		};
+	}
+
+	/** Submit a user message to a conversation (optionally steer a busy one). */
+	async submitUserMessage(
+		conversationId: string,
+		content: string,
+		options?: { requestId?: string; whenBusy?: "steer" | "followUp" },
+		context: Context = BACKGROUND_CONTEXT,
+	): Promise<Submission> {
+		const conversation = await this.harness.conversation(stringToConversationId(conversationId), context);
+		if (conversation === undefined) throw new Error(`unknown conversation: ${conversationId}`);
+		return conversation.submit(
+			{
+				type: "input",
+				content,
+				...(options?.requestId === undefined ? {} : { requestId: options.requestId }),
+				...(options?.whenBusy === undefined ? {} : { whenBusy: options.whenBusy }),
+			},
+			context,
+		);
+	}
+
+	/** Active and recent workers of a Router conversation. */
+	async getActiveWorkers(
+		routerConversationId: string,
+		context: Context = BACKGROUND_CONTEXT,
+	): Promise<WorkerEntry[]> {
+		const registry = await this.harness.snapshot(
+			WorkerRegistryDoc,
+			stringToConversationId(routerConversationId),
+			context,
+		);
+		if (registry === undefined) return [];
+		return Object.values(registry.workers).sort((a, b) => b.startedAt - a.startedAt);
+	}
+
+	/** Watch one conversation's structural view. */
+	async watchConversationView(
+		conversationId: string,
+		onUpdate: (view: ConversationView) => void,
+		context: Context = BACKGROUND_CONTEXT,
+	): Promise<() => Promise<void>> {
+		const conversation = await this.harness.conversation(stringToConversationId(conversationId), context);
+		if (conversation === undefined) throw new Error(`unknown conversation: ${conversationId}`);
+		const watch = await conversation.watch(context);
+		onUpdate(watch.value);
+		await watch.start(async (call) => {
+			if (call.kind === "value") onUpdate(call.value);
+		});
+		return async () => {
+			await watch.stop();
+		};
+	}
+
+	/** Watch the live task graph of the session. */
+	async watchTasks(
+		onUpdate: (graph: TaskGraph) => void,
+		context: Context = BACKGROUND_CONTEXT,
+	): Promise<() => Promise<void>> {
+		const watch = await this.harness.watchTaskGraph(context);
+		onUpdate(watch.value);
+		await watch.start(async (call) => {
+			if (call.kind === "value") onUpdate(call.value);
+		});
+		return async () => {
+			await watch.stop();
+		};
+	}
+
+	/** Session-wide recall index. */
+	async recallIndex(context: Context = BACKGROUND_CONTEXT) {
+		return this.harness.snapshot(RecallIndexDoc, context);
+	}
+	async conversation(id: string, context: Context = BACKGROUND_CONTEXT): Promise<Conversation | undefined> {
+		return this.harness.conversation(stringToConversationId(id), context);
+	}
+
+	async close(context: Context = BACKGROUND_CONTEXT): Promise<void> {
+		await this.harness.close(context);
+	}
+}
+
+export { ROUTER_EXTENSION, WORKER_EXTENSION, WORKER_EXTENSION_NAME };
+export type { PersonaResolver, WorkerAgentFactory, ToolRegistration, Registry, Storage };
