@@ -718,25 +718,6 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
         if (!data || data.bot.nodeId !== identity.nodeId) throw new Error(`Bot "${botId}" not found on node`);
         return [];
       },
-      getModelCatalog: async () => {
-        // Phase 4A：模型目录已 100% 迁至 Hub SQLite；Node 不再维护目录。
-        throw new Error('Provider auth and model catalog moved to Hub');
-      },
-      startProviderLogin: async () => {
-        throw new Error('Provider auth and model catalog moved to Hub');
-      },
-      getProviderLogin: async () => {
-        throw new Error('Provider auth and model catalog moved to Hub');
-      },
-      respondProviderLogin: async () => {
-        throw new Error('Provider auth and model catalog moved to Hub');
-      },
-      cancelProviderLogin: async () => {
-        throw new Error('Provider auth and model catalog moved to Hub');
-      },
-      logoutProvider: async () => {
-        throw new Error('Provider auth and model catalog moved to Hub');
-      },
       saveBot: async (bot, systemMd) => {
         if (bot.nodeId !== identity.nodeId) {
           throw new Error(`Cannot save bot belonging to node "${bot.nodeId}" on node "${identity.nodeId}"`);
@@ -766,15 +747,6 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       cancelTurn: async () => {
         // 回合在 Hub 侧执行，取消由 Hub 直接处理；Node 无本地回合可取消。
       },
-      steerBotTurn: async () => ({ accepted: false }),
-      stopSubagent: async (_sessionId, _botId, runId) => ({
-        ok: false,
-        error: `subagent runs moved to the Hub durable runtime; cannot stop ${runId} on node`,
-      }),
-      interactSubagent: async (input) => ({
-        ok: false,
-        error: `subagent runs moved to the Hub durable runtime; cannot interact with ${input.runId} on node`,
-      }),
       resetSession: async () => {
         // 回合已迁至 Hub；Node 无本地会话文件可清理。
       },

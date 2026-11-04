@@ -292,7 +292,7 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
 
     // 向后兼容：节点在线时追加其自定义命令（按名称去重）。
     const rpc = connections.getNodeRpc(bot.nodeId);
-    if (rpc) {
+    if (rpc?.getCommands) {
       const seen = new Set(commands.map((command) => command.name));
       for (const command of await rpc.getCommands(botId).catch(() => [])) {
         if (!seen.has(command.name)) commands.push(command);
