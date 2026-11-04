@@ -2,6 +2,29 @@
 
 botd CLI 提供命令行管理入口。用户可通过 CLI 管理本机 Node 守护进程，也可管理 Hub 资源。[返回文档目录](README.md)
 
+## 命令目录
+
+| 命令类别 | 命令前缀 | 核心功能 |
+| :--- | :--- | :--- |
+| [命令入口与选项](#命令入口) | `botd` | 标准入口、全局参数与格式选项。 |
+| [登录与鉴权](#登录与鉴权) | `botd login / logout / health` | 登录 Hub、注销与连接健康检查。 |
+| [节点守护进程](#节点守护进程管理) | `botd start / stop / status / join` | 启动守护进程、配对与状态检视。 |
+| [产物管理](#产物管理artifacts) | `botd artifacts` | 上传、下载与清理任务产物文件。 |
+| [Hub 节点管理](#hub-节点管理) | `botd nodes` | 列出集群节点、创建配对码与删除节点。 |
+| [Bot 管理](#bot-管理) | `botd bots` | 创建 Bot、修改人设、绑定模型与技能。 |
+| [会话管理](#会话管理sessions) | `botd sessions` | 会话列表、详情、历史与 Fork/Reset 原语。 |
+| [后台 Worker](#后台-worker-管理super-agent) | `botd workers` | 查看后台 Worker、插话与终止任务。 |
+| [人机协同交互](#人机协同交互asks) | `botd asks` | 查询待确认卡片与提交用户响应。 |
+| [事件路由管线](#事件路由管线events) | `botd events` | 发送外部事件、查询订阅与调试直通流。 |
+| [系统健康诊断](#系统健康诊断watchdog) | `botd watchdog` | 执行 Watchdog 巡检任务与自动纠偏。 |
+| [触发器管理](#触发器管理triggers) | `botd triggers` | 管理 Webhook、Cron 与一次性计划任务。 |
+| [会话对话交互](#会话对话交互chat) | `botd chat` | 命令行直接发送消息与等待模型回复。 |
+| [Skills 技能管理](#全局与节点-skills-直管) | `botd skills` | 增删改查 Hub 与节点专属技能包。 |
+| [Extensions 扩展管理](#全局与节点-extensions-直管) | `botd extensions` | 增删改查 Hub 与节点专属扩展代码。 |
+| [模型供应商管理](#模型供应商与凭据管理providers) | `botd providers` | 供应商 OAuth 登录与 API 密钥配置。 |
+| [模型目录检视](#模型目录检视models) | `botd models` | 查询可用模型清单与节点上报模型。 |
+| [自动化脚本示例](#自动化脚本示例) | Shell 脚本 | 串联 CLI 编写自动化运维脚本。 |
+
 ## 命令入口
 
 用户可通过以下入口执行 CLI 命令：

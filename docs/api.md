@@ -2,6 +2,25 @@
 
 botd Hub 提供 HTTP REST 接口、SSE 实时事件流，以及 WebSocket Birpc 双向通信通道。[返回文档目录](README.md)
 
+## 接口目录
+
+| 模块 | 路径范围 | 核心功能 |
+| :--- | :--- | :--- |
+| [架构与通信协议](#架构与通信协议) | `/api/*`, `/ws/node` | 系统通信平面与端口规范。 |
+| [鉴权与安全](#鉴权与安全) | 全局 | Cookie、Node 令牌与限流规则。 |
+| [认证与用户管理](#认证与用户管理路由) | `/api/auth/*` | 登录、登出与用户信息。 |
+| [节点管理](#节点管理路由) | `/api/nodes/*` | 节点配对、状态与模型目录。 |
+| [Bot 管理](#bot-管理路由) | `/api/bots/*` | Bot 增删改查、指令与扩展绑定。 |
+| [会话管理](#会话管理路由) | `/api/sessions/*` | 会话列表、详情与原语操作。 |
+| [消息管理](#消息管理路由) | `/api/sessions/:id/messages` | 消息投递、撤回与多模态输入。 |
+| [Super-agent 运行时](#super-agent-运行时路由) | `/api/workers/*`, `/api/asks/*` | 后台 Worker 调度、人机确认与插话。 |
+| [全局与节点资产](#全局与节点资产直管路由) | `/api/skills/*`, `/api/extensions/*` | 技能包与扩展包多文件管理。 |
+| [模型与供应商](#模型目录与供应商认证路由) | `/api/models/*`, `/api/providers/*` | 集中凭据托管与模型目录检视。 |
+| [产物与触发器](#产物与触发器路由) | `/api/artifacts/*`, `/api/triggers/*` | 文件上传下载与自动化触发器。 |
+| [出站通知通道](#出站通知通道路由) | `/api/notification-channels/*` | Webhook 与 IM 渠道配置。 |
+| [SSE 实时事件流](#sse-实时事件流定义) | `/api/sessions/:id/events` | 增量消息、思考流与节点状态。 |
+| [WebSocket RPC 契约](#websocket-birpc-契约定义) | `/ws/node` | 文件操作、Shell 执行与 Worktree。 |
+
 ## 架构与通信协议
 
 系统通信分为三个平面：

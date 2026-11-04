@@ -66,7 +66,7 @@ BOTD_PORT=3002 BOTD_ADMIN_PASSWORD='my-strong-password' pnpm dev
 
 ## 3. 配置模型凭据
 
-Hub 集中管理全部模型供应商凭据。用户无需连接节点，即可直接在 Hub 配置全局凭据。
+Hub 集中管理全部模型供应商凭据。详细说明请参考[模型供应商指南](models.md)。用户无需连接节点，即可直接在 Hub 配置全局凭据。
 
 ### 方式一：Web 界面配置
 
@@ -199,6 +199,11 @@ botd start -d
 
 ## 下一步
 
-- [CLI 手册](cli.md)：学习全部命令行管理指令。
+- [用户协同指南](user-guide.md)：学习全双工交互、ActiveWorkersBar 与任务插话。
+- [系统架构说明](architecture.md)：理解脑手分离、Pi Durable 引擎与自愈设计。
+- [工作区指南](workspace.md)：深入掌握 Git Worktree 隔离机制。
+- [模型配置指南](models.md)：配置更多模型供应商与思考档位。
+- [CLI 命令参考](cli.md)：学习全部命令行管理指令。
 - [API 参考](api.md)：查阅 REST 路由与 WebSocket 契约。
 - [配置指南](configuration.md)：了解环境变量与数据目录布局。
+- [生产部署指南](deployment.md)：使用 Docker Compose 部署生产环境。

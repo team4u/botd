@@ -1,6 +1,6 @@
 # 自动化工作流与 Watchdog 自愈
 
-[文档目录](README.md)
+[返回文档目录](README.md)
 
 本文档说明基于 pi-durable 的 SubagentWorkflow 持久工作流机制与 Watchdog 自愈巡检体系。
 

@@ -1,6 +1,6 @@
 # 用户操作与协同指南
 
-[文档目录](file:///root/code/botd/docs/README.md)
+[返回文档目录](README.md)
 
 本指南说明 botd 的界面布局、全双工交互、后台任务协同与人机确认流程。
 
@@ -115,7 +115,7 @@ sequenceDiagram
 
 当前会话有正在执行或最近完成的后台任务时，聊天区顶部显示 `ActiveWorkersBar`。
 
-组件实现位于 [ActiveWorkersBar.tsx](file:///root/code/botd/apps/web/src/components/ActiveWorkersBar.tsx)。
+组件实现位于 [ActiveWorkersBar.tsx](../apps/web/src/components/ActiveWorkersBar.tsx)。
 
 ### 4.1 任务胶囊元素说明
 
@@ -140,7 +140,7 @@ sequenceDiagram
 
 点击任务胶囊会滑出 `WorkerInspectDrawer` 抽屉。
 
-组件实现位于 [WorkerInspectDrawer.tsx](file:///root/code/botd/apps/web/src/components/WorkerInspectDrawer.tsx)。
+组件实现位于 [WorkerInspectDrawer.tsx](../apps/web/src/components/WorkerInspectDrawer.tsx)。
 
 ```mermaid
 flowchart TD
@@ -181,7 +181,7 @@ flowchart TD
 
 当后台任务执行高危操作（如删除数据库或强制推送代码）时，智能体会发起确认请求。
 
-系统基于 [AskDoc](file:///root/code/botd/apps/hub/src/harness/docs.ts) 管理确认状态。
+系统基于 [AskDoc](../apps/hub/src/harness/docs.ts) 管理确认状态。
 
 ```mermaid
 sequenceDiagram
@@ -263,3 +263,11 @@ recall({ id: "spill-evt-102" })
 - `/new`：快速创建新话题。
 - `/help`：查看当前可用命令与技能列表。
 - 粘贴图片：直接在输入框粘贴或拖入图片，触发多模态视觉分析。
+
+## 9. 扩展阅读与参考文档
+
+- [系统架构说明](architecture.md)：查阅双层智能体与 Pi Durable 调度机制。
+- [工作区指南](workspace.md)：查阅 Git Worktree 隔离机制与文件操作。
+- [模型与供应商](models.md)：配置多模态模型与思考档位。
+- [CLI 命令参考](cli.md)：使用命令行检视 Worker 与执行插话。
+- [生成式 UI](generative-ui.md)：查阅 AskCard 与交互表单组件规范。

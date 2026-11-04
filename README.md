@@ -155,18 +155,22 @@ Web 界面会显示节点在线状态。
 
 ## 模块导览
 
-- [apps/hub](file:///root/code/botd/apps/hub)：Hub 服务端核心，包含 Pi Durable Harness、Router、Worker 与状态文档。
-- [apps/node](file:///root/code/botd/apps/node)：Node 守护进程，包含远程执行 RPC 服务与 Git Worktree 管理。
-- [apps/web](file:///root/code/botd/apps/web)：前端交互界面，提供全双工对话视图、ActiveWorkersBar 与 WorkerInspectDrawer。
-- [packages/protocol](file:///root/code/botd/packages/protocol)：共享协议契约，包含 `env-rpc.ts` 与模型类型定义。
+- [apps/hub](apps/hub)：Hub 服务端核心，包含 Pi Durable Harness、Router、Worker 与状态文档。
+- [apps/node](apps/node)：Node 守护进程，包含远程执行 RPC 服务与 Git Worktree 管理。
+- [apps/web](apps/web)：前端交互界面，提供全双工对话视图、ActiveWorkersBar 与 WorkerInspectDrawer。
+- [packages/protocol](packages/protocol)：共享协议契约，包含 `env-rpc.ts` 与模型类型定义。
 
 ## 文档索引
 
-- [系统架构全景](file:///root/code/botd/docs/architecture.md)：三层拓扑、状态文档、并发隔离与自愈机制。
-- [用户协同指南](file:///root/code/botd/docs/user-guide.md)：角色分身、全双工会话、任务看板与实时插话。
-- [快速入门指南](file:///root/code/botd/docs/getting-started.md)：环境搭建与首条指令执行。
-- [部署与运维](file:///root/code/botd/docs/deployment.md)：生产环境 Docker Compose 部署。
-- [文档主页](file:///root/code/botd/docs/README.md)：系统全部文档清单。
+查阅完整文档清单请访问 [文档导航](docs/README.md)。
+
+| 分类 | 核心文档 | 说明 |
+| :--- | :--- | :--- |
+| **起步与使用** | [快速入门指南](docs/getting-started.md) · [用户协同指南](docs/user-guide.md) | 环境搭建、节点接入与全双工协同操作。 |
+| **系统架构** | [系统架构说明](docs/architecture.md) · [工作区指南](docs/workspace.md) · [模型与供应商](docs/models.md) | 脑手分离拓扑、Pi Durable 引擎、Git Worktree 与模型配置。 |
+| **开发与参考** | [开发指南](docs/development.md) · [CLI 命令参考](docs/cli.md) · [HTTP API 参考](docs/api.md) · [测试指南](docs/testing.md) | 本地调试、命令行管理、REST/SSE 接口与测试套件。 |
+| **自动化与交互** | [自动化工作流](docs/automation.md) · [触发器与网关](docs/triggers.md) · [外部渠道](docs/channels.md) · [生成式 UI](docs/generative-ui.md) | SubagentWorkflow、事件触发器、多渠道接入与机密零泄漏。 |
+| **运维与安全** | [部署指南](docs/deployment.md) · [配置参考](docs/configuration.md) · [安全边界](docs/security.md) · [团队协作](docs/team.md) · [排障自愈](docs/troubleshooting.md) | 生产部署、配置字典、沙箱防护、团队协同与 Watchdog。 |
 
 ## 开源协议
 

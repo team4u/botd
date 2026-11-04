@@ -1,8 +1,22 @@
 # 系统架构说明
 
-[文档目录](file:///root/code/botd/docs/README.md)
+[返回文档目录](README.md)
 
 本文档说明 botd 的系统架构、组件交互、调度模型与可靠性设计。系统实现以代码库为准。
+
+## 架构目录
+
+| 章节 | 核心主题 | 说明 |
+| :--- | :--- | :--- |
+| [1. 架构总览与系统拓扑](#1-架构总览与系统拓扑) | 脑手分离 | 三层拓扑架构与数据流向。 |
+| [2. 算存分离与调度底座](#2-算存分离与-pi-durable-harness-引擎) | Pi Durable | Harness 调度器、任务树与检查点。 |
+| [3. 双层智能体架构](#3-双层智能体架构router-与-worker-分离) | Router / Worker | 前台轻量响应与后台并发编码。 |
+| [4. 事务型状态文档模型](#4-事务型状态文档模型transactional-docs) | 状态一致性 | TargetDoc、WorkerRegistryDoc 与 RecallIndexDoc。 |
+| [5. 脑手分离通信协议](#5-脑手分离协议与远程执行环境) | RemoteExecutionEnv | WebSocket Birpc 双向 RPC 与流式 Shell。 |
+| [6. Git Worktree 隔离机制](#6-git-worktree-并发隔离机制) | 无锁并发 | 动态工作树挂载与多 Worker 并行读写。 |
+| [7. 外部事件驱动流水线](#7-外部事件驱动流水线eventrouter) | EventRouter | 四步过滤、ThreadKey 直通与超长外溢。 |
+| [8. 巡检自愈控制循环](#8-watchdog-巡检与自愈控制循环) | Watchdog | 任务心跳、超时纠偏与错误恢复。 |
+| [9. 核心源码索引](#9-核心源码索引) | 源码导览 | Hub、Node 与 Protocol 关键文件定位。 |
 
 ## 1. 架构总览与系统拓扑
 
@@ -68,7 +82,7 @@ Hub 独占本地 `hub.sqlite` 数据库。系统使用 `pi_` 作为数据表前�
 
 Hub 统一管理所有会话记录、任务检查点与状态文档：
 
-- 核心实现位于 [hub-harness.ts](file:///root/code/botd/apps/hub/src/harness/hub-harness.ts)。
+- 核心实现位于 [hub-harness.ts](../apps/hub/src/harness/hub-harness.ts)。
 - 系统创建全局唯一的 `Harness` 实例。
 - 角色分身、后台 Worker 与子代理统一作为 Harness 内部的 `Conversation` 与 `Task` 执行。
 - 任务派发与跨角色委派转化为本地数据库事务。
@@ -123,7 +137,7 @@ sequenceDiagram
 
 Router 前台层负责即时沟通、意图识别与任务分发：
 
-- 核心实现位于 [router-extension.ts](file:///root/code/botd/apps/hub/src/harness/router-extension.ts)。
+- 核心实现位于 [router-extension.ts](../apps/hub/src/harness/router-extension.ts)。
 - 会话仅挂载 `botd-router` 扩展。
 - 系统物理移除 `CodingTools`（`read`、`write`、`edit`、`bash`）。
 - Router 遇到耗时编码任务必须调用 `spawn_worker`。
@@ -144,7 +158,7 @@ Router 专有工具列表：
 
 Worker 后台层负责执行复杂代码修改与长耗时任务：
 
-- 核心实现位于 [worker-extension.ts](file:///root/code/botd/apps/hub/src/harness/worker-extension.ts)。
+- 核心实现位于 [worker-extension.ts](../apps/hub/src/harness/worker-extension.ts)。
 - Worker 会话挂载 `botd-worker`、`CodingTools` 与 `SubagentWorkflow`。
 - 支持通过 `conversation.fork()` 零拷贝继承父会话的历史上下文。
 - Worker 拥有独立的 `ConversationId`，可以在后台并发执行。
@@ -166,7 +180,7 @@ Worker 执行结束时，`afterRun` 钩子自动处理汇报：
 
 Hub 通过 `defineDoc` 与 `defineDocFamily` 定义事务型状态文档。
 
-核心实现位于 [docs.ts](file:///root/code/botd/apps/hub/src/harness/docs.ts)。所有文档与对话记录在同一事务中提交。
+核心实现位于 [docs.ts](../apps/hub/src/harness/docs.ts)。所有文档与对话记录在同一事务中提交。
 
 ```mermaid
 classDiagram
@@ -228,9 +242,9 @@ classDiagram
 
 系统引入细粒度的环境调用接口：
 
-- 协议定义位于 [env-rpc.ts](file:///root/code/botd/packages/protocol/src/env-rpc.ts)。
-- 节点端实现位于 [env-rpc-server.ts](file:///root/code/botd/apps/node/src/env-rpc-server.ts)。
-- Hub 端实现位于 [remote-env.ts](file:///root/code/botd/apps/hub/src/harness/remote-env.ts)。
+- 协议定义位于 [env-rpc.ts](../packages/protocol/src/env-rpc.ts)。
+- 节点端实现位于 [env-rpc-server.ts](../apps/node/src/env-rpc-server.ts)。
+- Hub 端实现位于 [remote-env.ts](../apps/hub/src/harness/remote-env.ts)。
 
 核心 RPC 方法列表：
 
@@ -301,7 +315,7 @@ flowchart TD
 
 ## 7. 外部事件驱动流水线（EventRouter）
 
-核心实现位于 [event-router.ts](file:///root/code/botd/apps/hub/src/harness/event-router.ts)。
+核心实现位于 [event-router.ts](../apps/hub/src/harness/event-router.ts)。
 
 外部事件经由四步流水线处理：
 
@@ -355,7 +369,7 @@ flowchart LR
 
 ## 8. Watchdog 巡检与自愈控制循环
 
-核心实现位于 [watchdog.ts](file:///root/code/botd/apps/hub/src/harness/watchdog.ts)。
+核心实现位于 [watchdog.ts](../apps/hub/src/harness/watchdog.ts)。
 
 ```mermaid
 flowchart TD
@@ -388,13 +402,13 @@ flowchart TD
 
 | 架构分层 | 核心模块 | 代码路径 |
 | :--- | :--- | :--- |
-| Hub 调度底座 | Pi Durable Harness 门面 | [hub-harness.ts](file:///root/code/botd/apps/hub/src/harness/hub-harness.ts) |
-| Hub 状态文档 | 事务型状态文档模型 | [docs.ts](file:///root/code/botd/apps/hub/src/harness/docs.ts) |
-| Hub 智能体层 | 前台 Router 扩展与路由工具 | [router-extension.ts](file:///root/code/botd/apps/hub/src/harness/router-extension.ts) |
-| Hub 智能体层 | 后台 Worker 扩展与汇报钩子 | [worker-extension.ts](file:///root/code/botd/apps/hub/src/harness/worker-extension.ts) |
-| Hub 执行路由 | 远程执行环境适配器 | [remote-env.ts](file:///root/code/botd/apps/hub/src/harness/remote-env.ts) |
-| Hub 事件总线 | 事件驱动流水线与直通订阅 | [event-router.ts](file:///root/code/botd/apps/hub/src/harness/event-router.ts) |
-| Hub 可靠性 | Watchdog 巡检与自愈任务 | [watchdog.ts](file:///root/code/botd/apps/hub/src/harness/watchdog.ts) |
-| Hub 工作流 | 持久化 SubagentWorkflow | [workflow-extension.ts](file:///root/code/botd/apps/hub/src/harness/workflow-extension.ts) |
-| Node 执行层 | 节点环境 RPC 服务端 | [env-rpc-server.ts](file:///root/code/botd/apps/node/src/env-rpc-server.ts) |
-| 协议层 | 远程执行与流式推送协议契约 | [env-rpc.ts](file:///root/code/botd/packages/protocol/src/env-rpc.ts) |
+| Hub 调度底座 | Pi Durable Harness 门面 | [hub-harness.ts](../apps/hub/src/harness/hub-harness.ts) |
+| Hub 状态文档 | 事务型状态文档模型 | [docs.ts](../apps/hub/src/harness/docs.ts) |
+| Hub 智能体层 | 前台 Router 扩展与路由工具 | [router-extension.ts](../apps/hub/src/harness/router-extension.ts) |
+| Hub 智能体层 | 后台 Worker 扩展与汇报钩子 | [worker-extension.ts](../apps/hub/src/harness/worker-extension.ts) |
+| Hub 执行路由 | 远程执行环境适配器 | [remote-env.ts](../apps/hub/src/harness/remote-env.ts) |
+| Hub 事件总线 | 事件驱动流水线与直通订阅 | [event-router.ts](../apps/hub/src/harness/event-router.ts) |
+| Hub 可靠性 | Watchdog 巡检与自愈任务 | [watchdog.ts](../apps/hub/src/harness/watchdog.ts) |
+| Hub 工作流 | 持久化 SubagentWorkflow | [workflow-extension.ts](../apps/hub/src/harness/workflow-extension.ts) |
+| Node 执行层 | 节点环境 RPC 服务端 | [env-rpc-server.ts](../apps/node/src/env-rpc-server.ts) |
+| 协议层 | 远程执行与流式推送协议契约 | [env-rpc.ts](../packages/protocol/src/env-rpc.ts) |

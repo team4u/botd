@@ -1,3 +1,7 @@
+# botd 基于 pi-durable 的多角色 Super-agent 重构设计文档
+
+[返回文档目录](README.md)
+
 ## 背景
 
 ### 现状与问题
