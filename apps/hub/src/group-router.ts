@@ -7,6 +7,7 @@ import {
   type QueueStageSummary,
   type SessionRecord,
   type SubagentRunRecord,
+  type SubagentSteerRecord,
   type ToolCallRecord,
   type TurnBlock,
   type TurnUsage,
@@ -15,7 +16,6 @@ import type { HubDatabase } from './db.js';
 import type { NodeConnectionManager } from './ws-hub.js';
 import type { SseHub } from './sse.js';
 import { AskCoordinator } from './ask-coordinator.js';
-import { SubagentRunMirror, type SubagentStreamEvent } from './subagent-run-mirror.js';
 import { isSilentSkipReply } from './delegation.js';
 
 const MENTION_REGEX = /(?:^|\s)@([a-zA-Z0-9_-]+)/g;
@@ -216,13 +216,39 @@ export function buildGroupContextPrompt(
   return prompt;
 }
 
+/** 原生子代理流事件（Node 侧 onSessionStream 的 subagentEvent 载荷）。 */
+export interface SubagentStreamEvent {
+  id: string;
+  subagentId: string;
+  task: string;
+  status: 'running' | 'done' | 'error' | 'stopped';
+  result?: string;
+  error?: string;
+  durationMs?: number;
+  toolUses?: number;
+  currentTool?: string;
+  phase?: string;
+  childSessionId?: string;
+  startedAt?: string;
+  blocks?: TurnBlock[];
+  toolCalls?: ToolCallRecord[];
+  steers?: SubagentSteerRecord[];
+}
+
+/** hub 侧子代理 run 的内存镜像项：流事件驱动，回合结束时与节点返回的 native run 合并。 */
+interface MirroredRunEntry {
+  parentBotId?: string;
+  run: SubagentRunRecord;
+}
+
 export class GroupRouter {
   private db: HubDatabase;
   private connections: NodeConnectionManager;
   private sseHub: SseHub;
   private states = new Map<string, SessionRuntimeState>();
   private askCoordinator: AskCoordinator;
-  private runMirror: SubagentRunMirror;
+  /** hub 侧子代理 run 内存镜像（原 subagent-run-mirror，持久层由 WorkerRegistryDoc/RecallIndexDoc 承接）。 */
+  private mirroredRuns = new Map<string, MirroredRunEntry>();
   private closed = false;
   private draining = false;
 
@@ -231,7 +257,6 @@ export class GroupRouter {
     this.connections = connections;
     this.sseHub = sseHub;
     this.askCoordinator = new AskCoordinator(db, sseHub);
-    this.runMirror = new SubagentRunMirror(db, connections, sseHub, (sessionId) => this.getActiveBotId(sessionId));
   }
 
   isDraining(): boolean {
@@ -365,12 +390,131 @@ export class GroupRouter {
     parentBotId: string,
     subEvent: SubagentStreamEvent
   ): SubagentRunRecord | undefined {
-    return this.runMirror.handleNativeSubagentStreamEvent(sessionId, parentBotId, subEvent);
+    const subBot = this.db.getBot(subEvent.subagentId);
+
+    let entry = this.mirroredRuns.get(subEvent.id);
+    if (!entry) {
+      const run: SubagentRunRecord = {
+        id: subEvent.id,
+        subagentId: subEvent.subagentId,
+        subagentName: subBot?.name || subEvent.subagentId,
+        ...(subBot?.color ? { color: subBot.color } : {}),
+        task: subEvent.task,
+        status: subEvent.status,
+        ...(subEvent.phase ? { phase: subEvent.phase } : {}),
+        ...(subEvent.childSessionId ? { childSessionId: subEvent.childSessionId } : {}),
+      };
+      entry = { parentBotId: parentBotId || undefined, run };
+      this.mirroredRuns.set(subEvent.id, entry);
+    }
+    if (parentBotId) entry.parentBotId = parentBotId;
+    entry.run.status = subEvent.status;
+    if (typeof subEvent.durationMs === 'number') entry.run.durationMs = subEvent.durationMs;
+    if (typeof subEvent.toolUses === 'number') entry.run.toolCount = subEvent.toolUses;
+    if (subEvent.currentTool !== undefined) entry.run.currentTool = subEvent.currentTool;
+    if (subEvent.phase) entry.run.phase = subEvent.phase;
+    if (subEvent.childSessionId) entry.run.childSessionId = subEvent.childSessionId;
+    if (subEvent.startedAt) entry.run.startedAt = subEvent.startedAt;
+    if (subEvent.blocks) entry.run.blocks = subEvent.blocks;
+    if (subEvent.toolCalls) entry.run.toolCalls = subEvent.toolCalls;
+    if (subEvent.steers) {
+      const existing = entry.run.steers ?? [];
+      const seen = new Set(existing.map((s) => `${s.timestamp}|${s.message}`));
+      for (const steer of subEvent.steers) {
+        if (!seen.has(`${steer.timestamp}|${steer.message}`)) existing.push(steer);
+      }
+      entry.run.steers = existing;
+    }
+    if (subEvent.status !== 'running') {
+      const replyContent = subEvent.result || subEvent.error || '（已完成执行）';
+      entry.run.replyFull = replyContent;
+      entry.run.replyPreview = replyContent.slice(0, 500);
+      entry.run.currentTool = undefined;
+    }
+    this.sseHub.broadcast(sessionId, {
+      type: 'subagent_status',
+      sessionId,
+      botId: subEvent.subagentId,
+      run: { ...entry.run },
+    });
+    this.persistSubagentRunUpdate(sessionId, { ...entry.run });
+    return entry.run;
+  }
+
+  /** 回合结束时取回并移除镜像（与节点返回的 native run 合并用）。 */
+  takeMirroredRun(runId: string): SubagentRunRecord | undefined {
+    const run = this.mirroredRuns.get(runId)?.run;
+    this.mirroredRuns.delete(runId);
+    return run;
+  }
+
+  /** 查找会话最近包含该 runId 的消息并持久化更新其 subagentRuns。 */
+  private persistSubagentRunUpdate(sessionId: string, run: SubagentRunRecord): void {
+    try {
+      const page = this.db.getMessagesPage(sessionId, { limit: 30 });
+      for (let i = page.messages.length - 1; i >= 0; i--) {
+        const msg = page.messages[i];
+        if (!msg.subagentRuns || msg.subagentRuns.length === 0) continue;
+        const idx = msg.subagentRuns.findIndex((r) => r.id === run.id);
+        if (idx < 0) continue;
+        const updated = [...msg.subagentRuns];
+        updated[idx] = { ...updated[idx], ...run };
+        this.db.updateMessageSubagentRuns(msg.id, updated);
+        const refreshed = this.db.getMessageById(msg.id);
+        if (refreshed) {
+          this.sseHub.broadcast(sessionId, { type: 'message_created', message: refreshed.message });
+        }
+        return;
+      }
+    } catch {
+      // 持久化失败不影响流事件
+    }
+  }
+
+  /** 定位 runId 归属的主 BOT：活跃回合 activeBotId → 镜像 parentBotId → 最近包含该 runId 的消息 sender。 */
+  private resolveSubagentParentBotId(sessionId: string, runId: string): string | undefined {
+    let parentBotId = this.getActiveBotId(sessionId);
+    if (!parentBotId) parentBotId = this.mirroredRuns.get(runId)?.parentBotId;
+    if (!parentBotId) {
+      const page = this.db.getMessagesPage(sessionId, { limit: 30 });
+      for (let i = page.messages.length - 1; i >= 0; i--) {
+        const msg = page.messages[i];
+        if (msg.subagentRuns?.some((r) => r.id === runId) && msg.senderBotId) {
+          parentBotId = msg.senderBotId;
+          break;
+        }
+      }
+    }
+    return parentBotId;
   }
 
   /** 单独停掉某个运行中的子代理（转发到对应节点，含已落库消息的状态同步） */
   async stopSubagent(sessionId: string, runId: string): Promise<{ ok: boolean; error?: string }> {
-    return this.runMirror.stopSubagent(sessionId, runId);
+    const parentBotId = this.resolveSubagentParentBotId(sessionId, runId);
+    if (!parentBotId) return { ok: false, error: `Cannot determine the parent bot of subagent run ${runId}.` };
+
+    const bot = this.db.getBot(parentBotId);
+    if (!bot) return { ok: false, error: `Bot @${parentBotId} not found.` };
+    const rpc = this.connections.getNodeRpc(bot.nodeId);
+    if (!rpc?.stopSubagent) {
+      return { ok: false, error: 'Node is offline or does not support stopping subagents.' };
+    }
+    const result = await rpc.stopSubagent(sessionId, parentBotId, runId);
+    if (result.ok) {
+      const entry = this.mirroredRuns.get(runId);
+      if (entry) {
+        entry.run.status = 'stopped';
+        entry.run.currentTool = undefined;
+        this.sseHub.broadcast(sessionId, {
+          type: 'subagent_status',
+          sessionId,
+          botId: entry.run.subagentId,
+          run: { ...entry.run },
+        });
+        this.persistSubagentRunUpdate(sessionId, { ...entry.run });
+      }
+    }
+    return result;
   }
 
   /** 向某个子代理发送 steer（运行中插话）或 resume（结束后追问） */
@@ -381,7 +525,39 @@ export class GroupRouter {
     mode: 'steer' | 'resume',
     subagentId?: string,
   ): Promise<{ ok: boolean; run?: SubagentRunRecord; error?: string }> {
-    return this.runMirror.interactSubagent(sessionId, runId, message, mode, subagentId);
+    const parentBotId = this.resolveSubagentParentBotId(sessionId, runId);
+    if (!parentBotId) return { ok: false, error: `Cannot determine the parent bot of subagent run ${runId}.` };
+
+    const bot = this.db.getBot(parentBotId);
+    if (!bot) return { ok: false, error: `Bot @${parentBotId} not found.` };
+    const rpc = this.connections.getNodeRpc(bot.nodeId);
+    if (!rpc?.interactSubagent) {
+      return { ok: false, error: 'Node is offline or does not support subagent interaction.' };
+    }
+    const result = await rpc.interactSubagent({
+      sessionId,
+      botId: parentBotId,
+      runId,
+      ...(subagentId ? { subagentId } : {}),
+      message,
+      mode,
+    });
+    if (result.ok && result.run) {
+      const entry = this.mirroredRuns.get(runId);
+      if (entry) {
+        Object.assign(entry.run, result.run);
+        this.sseHub.broadcast(sessionId, {
+          type: 'subagent_status',
+          sessionId,
+          botId: entry.run.subagentId,
+          run: { ...entry.run },
+        });
+        this.persistSubagentRunUpdate(sessionId, { ...entry.run });
+      } else {
+        this.persistSubagentRunUpdate(sessionId, result.run);
+      }
+    }
+    return result;
   }
 
   onNodeOnline(nodeId: string): void {
@@ -917,7 +1093,7 @@ export class GroupRouter {
     const maxRowidBeforeInsert = this.db.getMaxMessageRowid(sessionId);
 
     const nativeRuns: SubagentRunRecord[] = (turnResult.subagentRuns || []).map((r) => {
-      const mirrored = this.runMirror.takeMirroredRun(r.id);
+      const mirrored = this.takeMirroredRun(r.id);
       return mirrored ? { ...r, ...mirrored, status: r.status } : r;
     });
     const allSubagentRuns: SubagentRunRecord[] = nativeRuns;

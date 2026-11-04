@@ -4,7 +4,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { Models } from '@earendil-works/pi-ai';
+import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import type { UserRecord } from '@botd/protocol';
 import { HubDatabase } from './db.js';
 import { AuthManager } from './auth.js';
@@ -14,6 +16,7 @@ import { GroupRouter } from './group-router.js';
 import { createStaticMiddleware } from './static.js';
 import { ArtifactService } from './artifact-service.js';
 import { HubDurableRuntime, type BotPersonaConfig } from './harness/hub-harness.js';
+import { TargetDoc } from './harness/docs.js';
 import { registerProviderRoutes } from './providers.js';
 import { registerArtifactRoutes } from './artifacts.js';
 import { registerShareRoutes } from './share.js';
@@ -29,8 +32,8 @@ import { registerBotRoutes } from './routes/bots.js';
 import { registerSessionRoutes } from './routes/sessions.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { registerEventRoutes } from './routes/events.js';
-import { registerWorkerRoutes } from './routes/workers.js';
-import type { HubApp } from './routes/context.js';
+import { registerWorkerRoutes, createDurableSessionMirror, type DurableSessionMirror } from './routes/workers.js';
+import type { HubApp, HubContext } from './routes/context.js';
 
 export interface HubOptions {
   dbPath?: string;
@@ -120,13 +123,27 @@ export function createHub(options?: HubOptions): HubInstance {
   let durableRuntime: HubDurableRuntime | undefined = options?.durableRuntime;
   let durableRuntimeOpening: Promise<HubDurableRuntime> | undefined;
   const ensureDurableRuntime = async (): Promise<HubDurableRuntime> => {
-    if (durableRuntime !== undefined) return durableRuntime;
+    if (durableRuntime !== undefined) {
+      // Bot 配置可能已更新（新建/改模型/改工作目录）：每次取用都重新同步分身。
+      syncBotPersonas(durableRuntime);
+      return durableRuntime;
+    }
     if (durableRuntimeOpening === undefined) {
       durableRuntimeOpening = (async () => {
         const runtime = await HubDurableRuntime.open(
-          options?.dbPath
-            ? { dbPath: `${options.dbPath}.durable.sqlite`, ...(options?.durableModels ? { models: options.durableModels } : {}) }
-            : { ...(options?.durableModels ? { models: options.durableModels } : {}) },
+          {
+            ...(options?.dbPath ? { dbPath: `${options.dbPath}.durable.sqlite` } : {}),
+            ...(options?.durableModels ? { models: options.durableModels } : {}),
+            // Brain in Hub, Hands on Node：会话的目标节点在线时，工具执行走远端
+            // RemoteExecutionEnv；否则退回本地 NodeExecutionEnv。
+            env: async ({ conversationId, cwd }) => {
+              const nodeId = await remoteNodeIdFor(String(conversationId), cwd);
+              if (nodeId !== undefined && connections.getNodeEnvRpc(nodeId) !== undefined) {
+                return connections.createRemoteEnv({ nodeId, cwd: cwd ?? process.cwd() });
+              }
+              return new NodeExecutionEnv({ cwd: cwd ?? process.cwd() });
+            },
+          },
         );
         runtime.harness.resume();
         syncBotPersonas(runtime);
@@ -135,6 +152,28 @@ export function createHub(options?: HubOptions): HubInstance {
       })();
     }
     return durableRuntimeOpening;
+  };
+  /**
+   * 解析会话应使用的目标节点：优先读 durable 侧 `botd.target` 文档（Router/
+   * Worker 会话记录了 nodeId），否则按 Bot 的 workspaceDir 匹配 cwd。
+   */
+  const remoteNodeIdFor = async (conversationId: string, cwd?: string): Promise<string | undefined> => {
+    if (durableRuntime === undefined) return undefined;
+    try {
+      const numeric = Number(conversationId);
+      if (Number.isInteger(numeric)) {
+        const target = await durableRuntime.harness.snapshot(
+          TargetDoc,
+          numeric as import('@earendil-works/pi-durable').ConversationId,
+          BACKGROUND_CONTEXT,
+        );
+        if (target !== undefined && target.nodeId !== '') return target.nodeId;
+      }
+    } catch {
+      // 快照失败退回 Bot 配置匹配
+    }
+    if (cwd === undefined || cwd === '') return undefined;
+    return db.getAllBots().find((bot) => bot.workspaceDir && bot.workspaceDir === cwd)?.nodeId;
   };
   /** Hub 数据库 Bot → 持久分身（模型/工作目录来自 Bot 配置）。 */
   const syncBotPersonas = (runtime: HubDurableRuntime): void => {
@@ -151,12 +190,24 @@ export function createHub(options?: HubOptions): HubInstance {
     }
   };
 
+  // Durable Router 会话 → botd 会话消息镜像（SSE 桥）：注入的 runtime 直接建，
+  // 懒创建路径在 runtime 打开后建（mirror 持有当时的 runtime 引用）。
+  let durableMirror: DurableSessionMirror | undefined = durableRuntime !== undefined
+    ? createDurableSessionMirror({ db, sseHub, durableRuntime })
+    : undefined;
+
   registerCoreMiddleware(app, ctx); // health/bodyLimit/auth，注册顺序即执行顺序
   registerAuthRoutes(app, ctx);
   registerNodeRoutes(app, ctx);
   registerBotRoutes(app, ctx);
   registerSessionRoutes(app, ctx);
-  registerMessageRoutes(app, ctx);
+  // 主线切流仅在外部注入 durableRuntime 时生效（显式启用）；懒创建路径仍走 GroupRouter，
+  // 避免无模型配置的 Hub 因首次消息误开持久运行时而阻塞。
+  const messageCtx: HubContext & { durableMirror?: DurableSessionMirror } = {
+    ...ctx,
+    ...(durableRuntime ? { durableRuntime, ...(durableMirror ? { durableMirror } : {}) } : {}),
+  };
+  registerMessageRoutes(app, messageCtx);
   registerEventRoutes(app, ctx);
   registerProviderRoutes(app, db, connections);
   registerArtifactRoutes(app, artifacts);
@@ -180,6 +231,7 @@ export function createHub(options?: HubOptions): HubInstance {
     isClosed = true;
     unsubscribeChannels();
     triggerScheduler.stop();
+    durableMirror?.close();
     router.close();
     connections.close();
     sseHub.close();

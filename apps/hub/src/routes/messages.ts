@@ -2,10 +2,13 @@ import { randomUUID } from 'node:crypto';
 import type { MessageAttachment } from '@botd/protocol';
 import { extractMentions, parseSlashCommand } from '../group-router.js';
 import { resolveOwnedSession } from '../http-helpers.js';
+import { submitSessionMessageToDurable, type DurableSessionMirror } from './workers.js';
 import type { HubApp, HubContext } from './context.js';
 
-export function registerMessageRoutes(app: HubApp, ctx: HubContext): void {
+export function registerMessageRoutes(app: HubApp, ctx: HubContext & { durableMirror?: DurableSessionMirror }): void {
   const { db, router, sseHub } = ctx;
+  const durableMirror = ctx.durableMirror;
+  const durableCtx = () => ({ ...ctx, durableRuntime: ctx.durableRuntime });
 
   app.get('/api/messages/search', (c) => {
     const q = (c.req.query('q') ?? '').trim();
@@ -111,6 +114,24 @@ export function registerMessageRoutes(app: HubApp, ctx: HubContext): void {
       type: 'message_created',
       message: msgResult.message,
     });
+
+    // 主线切流：durable runtime 显式注入时，用户消息直接提交给会话的 Router 会话
+    //（全双工 whenBusy: "steer"），assistant 回复经镜像回写时间线；未注入或提交失败时
+    // 退回原 GroupRouter 路径。
+    if (ctx.durableRuntime !== undefined) {
+      try {
+        const submitted = await submitSessionMessageToDurable(
+          durableCtx(),
+          id,
+          session.leadBotId,
+          content,
+          durableMirror,
+        );
+        if (submitted !== undefined) return c.json(msgResult.message, 202);
+      } catch (err: any) {
+        console.warn('[messages] durable submit failed, falling back to GroupRouter:', err?.message || err);
+      }
+    }
 
     // TODO(后续在 formatIncrementalMessages 中消费 senderUsername)
     router.handleUserMessage(id, msgResult.message.id, content, cmdResult.isCommand ? {
