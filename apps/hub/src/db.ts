@@ -34,6 +34,35 @@ import type {
   UserRecord,
   UserRole,
 } from '@botd/protocol';
+import { decodePackageFile } from '@botd/protocol';
+
+/** Hub 包文件写入载荷：文本直传，二进制/带可执行位的文件走保真形态。 */
+export type HubPackageFileInput =
+  | string
+  | Buffer
+  | { data: Buffer; executable?: boolean }
+  | { content?: string; contentBase64?: string; executable?: boolean };
+
+/** 写入单个包文件：string 按 utf8，Buffer 直写，对象形态解码后按需补可执行位。 */
+function writePackageFile(target: string, relativePath: string, value: HubPackageFileInput): void {
+  if (typeof value === 'string') {
+    fs.writeFileSync(target, value, 'utf8');
+    return;
+  }
+  if (Buffer.isBuffer(value)) {
+    fs.writeFileSync(target, value);
+    return;
+  }
+  if (Buffer.isBuffer((value as { data?: unknown }).data)) {
+    const { data, executable } = value as { data: Buffer; executable?: boolean };
+    fs.writeFileSync(target, data);
+    if (executable === true) fs.chmodSync(target, 0o755);
+    return;
+  }
+  const decoded = decodePackageFile({ path: relativePath, ...value });
+  fs.writeFileSync(target, decoded.data);
+  if (decoded.executable) fs.chmodSync(target, 0o755);
+}
 
 export interface HubDatabaseOptions {
   dbPath?: string;
@@ -1447,13 +1476,13 @@ export class HubDatabase {
     this.saveSkillFiles(id, { [relativePath]: content });
   }
 
-  /** 写入 Hub 托管技能的全部文件（相对路径 → 内容）。 */
-  saveSkillFiles(id: string, files: Record<string, string>): void {
+  /** 写入 Hub 托管技能的全部文件（相对路径 → 内容；支持二进制与可执行位保真）。 */
+  saveSkillFiles(id: string, files: Record<string, HubPackageFileInput>): void {
     const dir = this.getSkillDir(id);
-    for (const [relativePath, content] of Object.entries(files)) {
+    for (const [relativePath, value] of Object.entries(files)) {
       const target = this.safeJoin(dir, relativePath);
       fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.writeFileSync(target, content, 'utf8');
+      writePackageFile(target, relativePath, value);
     }
   }
 
@@ -1497,13 +1526,13 @@ export class HubDatabase {
     this.saveExtensionFiles(id, { [relativePath]: content });
   }
 
-  /** 写入 Hub 托管扩展的全部文件（相对路径 → 内容）。 */
-  saveExtensionFiles(id: string, files: Record<string, string>): void {
+  /** 写入 Hub 托管扩展的全部文件（相对路径 → 内容；支持二进制与可执行位保真）。 */
+  saveExtensionFiles(id: string, files: Record<string, HubPackageFileInput>): void {
     const dir = this.getExtensionDir(id);
-    for (const [relativePath, content] of Object.entries(files)) {
+    for (const [relativePath, value] of Object.entries(files)) {
       const target = this.safeJoin(dir, relativePath);
       fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.writeFileSync(target, content, 'utf8');
+      writePackageFile(target, relativePath, value);
     }
   }
 

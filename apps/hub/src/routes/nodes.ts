@@ -1,5 +1,5 @@
-import { isSafeId } from '@botd/protocol';
-import { resolveOwnedNode, resolveOwnedNodeRpc } from '../http-helpers.js';
+import { decodePackageFile, isSafeId } from '@botd/protocol';
+import { requireAdmin, resolveOwnedNode, resolveOwnedNodeRpc } from '../http-helpers.js';
 import { installResourceLocally } from '../local-installer.js';
 import type { HubApp, HubContext } from './context.js';
 
@@ -84,6 +84,8 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
   });
 
   app.put('/api/skills/:skillId', async (c) => {
+    const adminErr = requireAdmin(c);
+    if (adminErr) return adminErr;
     const skillId = c.req.param('skillId');
     if (!isSafeId(skillId)) return c.json({ error: 'Invalid skill id format' }, 400);
     const body = parseResourceBody(await c.req.json().catch(() => null));
@@ -95,6 +97,8 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
   });
 
   app.delete('/api/skills/:skillId', (c) => {
+    const adminErr = requireAdmin(c);
+    if (adminErr) return adminErr;
     const skillId = c.req.param('skillId');
     if (!isSafeId(skillId)) return c.json({ error: 'Invalid skill id format' }, 400);
     db.deleteSkillContent(skillId);
@@ -118,6 +122,8 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
   });
 
   app.put('/api/extensions/:extId', async (c) => {
+    const adminErr = requireAdmin(c);
+    if (adminErr) return adminErr;
     const extId = c.req.param('extId');
     if (!isSafeId(extId)) return c.json({ error: 'Invalid extension id format' }, 400);
     const body = parseResourceBody(await c.req.json().catch(() => null));
@@ -129,6 +135,8 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
   });
 
   app.delete('/api/extensions/:extId', (c) => {
+    const adminErr = requireAdmin(c);
+    if (adminErr) return adminErr;
     const extId = c.req.param('extId');
     if (!isSafeId(extId)) return c.json({ error: 'Invalid extension id format' }, 400);
     db.deleteExtensionContent(extId);
@@ -241,14 +249,19 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
       ...(body.customId?.trim() ? { customId: body.customId.trim() } : {}),
     };
 
-    /** 入库 + 刷新分身：Hub 文件系统包目录是权威存储，节点清单同步登记。 */
-    const persist = (installed: { kind: 'skill' | 'extension'; id: string; files: Record<string, string> }) => {
+    /** 入库 + 刷新分身：Hub 文件系统包目录是权威存储，节点清单同步登记；落盘优先走保真 packageFiles。 */
+    const persist = (installed: {
+      kind: 'skill' | 'extension';
+      id: string;
+      files: Record<string, import('../db.js').HubPackageFileInput>;
+      packageFiles?: Record<string, { data: Buffer; executable: boolean }>;
+    }) => {
       if (installed.kind === 'skill') {
         db.addNodeSkill(nodeId, installed.id);
-        db.saveSkillFiles(installed.id, installed.files);
+        db.saveSkillFiles(installed.id, installed.packageFiles ?? installed.files);
       } else {
         db.addNodeExtension(nodeId, installed.id);
-        db.saveExtensionFiles(installed.id, installed.files);
+        db.saveExtensionFiles(installed.id, installed.packageFiles ?? installed.files);
       }
       void ctx.refreshDurablePersonas?.();
     };
@@ -275,11 +288,12 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
         // 存储；旧节点不支持 readResourcePackage 时退回 Hub 本地解析。
         const bundle = await nodeRpc.rpc.readResourcePackage(installed).catch(() => undefined);
         if (bundle && bundle.files.length > 0) {
-          const files: Record<string, string> = {};
+          const packageFiles: Record<string, { data: Buffer; executable: boolean }> = {};
           for (const file of bundle.files) {
-            files[file.path] = file.content ?? '';
+            const decoded = decodePackageFile(file);
+            packageFiles[decoded.path] = { data: decoded.data, executable: decoded.executable };
           }
-          persist({ kind: bundle.kind, id: bundle.id, files });
+          persist({ kind: bundle.kind, id: bundle.id, files: {}, packageFiles });
           return c.json({ kind: installed.kind, id: installed.id });
         }
         const local = await installResourceLocally(input).catch(() => undefined);
@@ -340,10 +354,10 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
       });
       if (installed.kind === 'skill') {
         db.addNodeSkill('local', installed.id);
-        db.saveSkillFiles(installed.id, installed.files);
+        db.saveSkillFiles(installed.id, installed.packageFiles ?? installed.files);
       } else {
         db.addNodeExtension('local', installed.id);
-        db.saveExtensionFiles(installed.id, installed.files);
+        db.saveExtensionFiles(installed.id, installed.packageFiles ?? installed.files);
       }
       void ctx.refreshDurablePersonas?.();
       return c.json({ kind: installed.kind, id: installed.id });

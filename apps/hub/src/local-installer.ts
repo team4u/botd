@@ -18,6 +18,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { encodePackageFile, type ResourcePackageFile } from '@botd/protocol';
 import { parseGitSource } from './git-source.js';
 
 const execFileAsync = promisify(execFile);
@@ -33,6 +34,8 @@ export interface LocalInstallResult {
   id: string;
   /** 包内全部文件（POSIX 相对路径 → 内容）；npm 依赖经 `npm/` 前缀随包。 */
   files: Record<string, string>;
+  /** 完整保真文件表（含二进制 Buffer 与可执行位），供 Hub 落盘时逐字节还原。 */
+  packageFiles?: Record<string, { data: Buffer; executable: boolean }>;
   /** 入口文件相对路径。 */
   entry: string;
 }
@@ -78,9 +81,13 @@ function parseNpmSpec(pkgSpec: string): { name: string; version?: string } {
   return { name: match[1], ...(match[2] ? { version: match[2] } : {}) };
 }
 
-/** 目录 → `files` 映射（排除 .git / node_modules）。 */
-async function collectDirFiles(dir: string): Promise<Record<string, string>> {
+/** 目录 → `files` 文本映射 + `packageFiles` 保真映射（排除 .git / node_modules）。 */
+async function collectDirFiles(dir: string): Promise<{
+  files: Record<string, string>;
+  packageFiles: Record<string, { data: Buffer; executable: boolean }>;
+}> {
   const files: Record<string, string> = {};
+  const packageFiles: Record<string, { data: Buffer; executable: boolean }> = {};
   const walk = async (current: string, prefix: string): Promise<void> => {
     const entries = await fs.readdir(current, { withFileTypes: true });
     for (const entry of entries) {
@@ -88,11 +95,19 @@ async function collectDirFiles(dir: string): Promise<Record<string, string>> {
       const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) await walk(full, rel);
-      else if (entry.isFile()) files[rel] = await fs.readFile(full, 'utf8');
+      else if (entry.isFile()) {
+        const data = await fs.readFile(full);
+        const stat = await fs.stat(full);
+        const executable = (stat.mode & 0o111) !== 0;
+        packageFiles[rel] = { data, executable };
+        const encoded: ResourcePackageFile = encodePackageFile(rel, data, executable);
+        if (encoded.content !== undefined) files[rel] = encoded.content;
+        // 二进制文件（仅 contentBase64）不进 files；Hub 落盘优先走 packageFiles。
+      }
     }
   };
   await walk(dir, '');
-  return files;
+  return { files, packageFiles };
 }
 
 /** Extension 入口文件相对路径（package.json pi/module/main 优先，其次约定名）。 */
@@ -130,7 +145,7 @@ async function resolveFromDir(
   const kind: 'skill' | 'extension' =
     input.kind && input.kind !== 'auto' ? input.kind : hasSkillMd ? 'skill' : 'extension';
   const id = sanitizeInstallId(input.customId || nameHint || path.basename(dir));
-  const files = await collectDirFiles(dir);
+  const { files, packageFiles } = await collectDirFiles(dir);
   if (Object.keys(files).length === 0) {
     throw new Error(`No usable files found in "${input.source}"`);
   }
@@ -138,13 +153,14 @@ async function resolveFromDir(
     if (files['SKILL.md'] === undefined || !files['SKILL.md'].trim()) {
       throw new Error(`No usable SKILL.md found in "${input.source}"`);
     }
-    return { kind, id, files, entry: 'SKILL.md' };
+    return { kind, id, files, packageFiles, entry: 'SKILL.md' };
   }
   const entry = extensionEntryOf(files);
   if (entry === undefined || !files[entry].trim()) {
     throw new Error(`No usable entry file (.ts/index.ts) found in "${input.source}"`);
   }
-  return { kind, id, files: withNormalizedEntry(files, entry), entry: 'index.ts' };
+  const normalized = withNormalizedEntry(files, packageFiles, entry);
+  return { kind, id, files: normalized.files, packageFiles: normalized.packageFiles, entry: 'index.ts' };
 }
 
 /**
@@ -169,7 +185,7 @@ async function installNpm(pkgSpec: string, input: LocalInstallInput): Promise<Lo
     if (!(await fileExists(installedDir))) {
       throw new Error(`npm package "${pkgName}" not found after install`);
     }
-    const files = await collectDirFiles(installedDir);
+    const { files, packageFiles } = await collectDirFiles(installedDir);
     if (Object.keys(files).length === 0) {
       throw new Error(`npm package "${pkgName}" contains no files`);
     }
@@ -193,14 +209,18 @@ async function installNpm(pkgSpec: string, input: LocalInstallInput): Promise<Lo
     }
     // 运行依赖随包复制（<depsPrefix>/…），包根 package.json 重写依赖入口路径。
     const bundled: Record<string, string> = {};
+    const bundledPackageFiles: Record<string, { data: Buffer; executable: boolean }> = {};
     const depsDir = path.join(staging, 'node_modules');
     const depRoots = (await fs.readdir(depsDir).catch(() => [])).filter(
       (name) => name !== pkgName && name !== '.package-lock.json',
     );
     for (const depRoot of depRoots) {
       const depFiles = await collectDirFiles(path.join(depsDir, depRoot));
-      for (const [rel, content] of Object.entries(depFiles)) {
+      for (const [rel, content] of Object.entries(depFiles.files)) {
         bundled[`${BUNDLED_DEPS_PREFIX}/${depRoot}/${rel}`] = content;
+      }
+      for (const [rel, file] of Object.entries(depFiles.packageFiles)) {
+        bundledPackageFiles[`${BUNDLED_DEPS_PREFIX}/${depRoot}/${rel}`] = file;
       }
     }
     // 入口相对依赖重写：入口文件位于包根时，相对导入 ./dep 需指向 npm/node_modules/dep。
@@ -224,10 +244,17 @@ async function installNpm(pkgSpec: string, input: LocalInstallInput): Promise<Lo
       'export default ext;',
       '',
     ].join('\n');
+    const manifestJson = JSON.stringify(manifest, null, 2);
     return {
       kind: 'extension',
       id,
-      files: { ...bundled, ...files, 'package.json': JSON.stringify(manifest, null, 2), 'index.ts': shim },
+      files: { ...bundled, ...files, 'package.json': manifestJson, 'index.ts': shim },
+      packageFiles: {
+        ...bundledPackageFiles,
+        ...packageFiles,
+        'package.json': { data: Buffer.from(manifestJson, 'utf8'), executable: false },
+        'index.ts': { data: Buffer.from(shim, 'utf8'), executable: false },
+      },
       entry: 'index.ts',
     };
   } finally {
@@ -239,9 +266,20 @@ async function installNpm(pkgSpec: string, input: LocalInstallInput): Promise<Lo
  * 入口归一：单文件 / 自定义入口的扩展包落盘后必须存在 `index.ts`，
  * 否则 getExtensionContent 默认入口 / 动态加载器都解析不到。
  */
-function withNormalizedEntry(files: Record<string, string>, entry: string): Record<string, string> {
-  if (entry === 'index.ts' || files['index.ts'] !== undefined) return files;
-  return { ...files, 'index.ts': files[entry] };
+function withNormalizedEntry(
+  files: Record<string, string>,
+  packageFiles: Record<string, { data: Buffer; executable: boolean }>,
+  entry: string,
+): { files: Record<string, string>; packageFiles: Record<string, { data: Buffer; executable: boolean }> } {
+  if (entry === 'index.ts' || files['index.ts'] !== undefined) return { files, packageFiles };
+  const entryFile = packageFiles[entry] ?? {
+    data: Buffer.from(files[entry] ?? '', 'utf8'),
+    executable: false,
+  };
+  return {
+    files: { ...files, 'index.ts': files[entry] },
+    packageFiles: { ...packageFiles, 'index.ts': { data: entryFile.data, executable: false } },
+  };
 }
 
 /** 标准嵌套技能根（Agent Skills 规范布局）。 */
@@ -287,14 +325,26 @@ export async function installResourceLocally(input: LocalInstallInput): Promise<
       const content = await fs.readFile(localPath, 'utf8');
       if (!content.trim()) throw new Error(`"${source}" is empty`);
       const fileName = path.basename(localPath);
+      const raw = await fs.readFile(localPath);
+      const executable = (stat.mode & 0o111) !== 0;
+      const packageFiles: Record<string, { data: Buffer; executable: boolean }> = {};
+      if (kind === 'skill') {
+        return {
+          kind,
+          id: baseId,
+          files: { 'SKILL.md': content },
+          packageFiles: { 'SKILL.md': { data: raw, executable } },
+          entry: 'SKILL.md',
+        };
+      }
+      packageFiles[fileName] = { data: raw, executable };
+      const normalized = withNormalizedEntry({ [fileName]: content }, packageFiles, fileName);
       return {
         kind,
         id: baseId,
-        files:
-          kind === 'skill'
-            ? { 'SKILL.md': content }
-            : withNormalizedEntry({ [fileName]: content }, fileName),
-        entry: kind === 'skill' ? 'SKILL.md' : 'index.ts',
+        files: normalized.files,
+        packageFiles: normalized.packageFiles,
+        entry: 'index.ts',
       };
     }
     if (stat?.isDirectory()) {
