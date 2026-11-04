@@ -8,7 +8,6 @@ import { createBirpc } from 'birpc';
 import { WebSocket } from 'ws';
 import { startHub } from '../apps/hub/src/index.js';
 import { BUILTIN_SKILL_MD, BUILTIN_SKILL_REFERENCES, BUILTIN_SKILL_VERSION } from '../apps/node/src/builtin-skill.js';
-import { BgJobManager } from '../apps/node/src/bg-jobs.js';
 import { HubClient } from '../apps/node/src/cli/hub-client.js';
 import { isValidBotEnvKey, readBotEnv, saveBot as saveLocalBot, writeBotEnv, writeNodeIdentity } from '../apps/node/src/storage.js';
 import { cronMatches, describeCronExpr, isValidCronExpr, parseDelayDuration, serializeRpcMessage } from '../packages/protocol/src/index.js';
@@ -626,56 +625,6 @@ test('bot env secrets CRUD, reserved key guard, and local storage isolation', as
   t.after(() => rm(tmpData, { recursive: true, force: true }));
   await writeBotEnv(tmpData, 'coder', { DB_PASS: 's3cr3t' });
   assert.deepEqual(await readBotEnv(tmpData, 'coder'), { DB_PASS: 's3cr3t' });
-});
-
-test('BgJobManager runs background jobs, captures logs, wakes on exit, and supports kill', async t => {
-  const tmpData = await mkdtemp(path.join(tmpdir(), 'botd-bg-test-'));
-  t.after(() => rm(tmpData, { recursive: true, force: true }));
-
-  await saveLocalBot(tmpData, {
-    id: 'worker',
-    nodeId: 'node_1',
-    name: 'Worker',
-    description: '',
-    modelProvider: 'openai',
-    modelId: 'gpt-4o',
-    enabledSkills: [],
-    updatedAt: new Date().toISOString(),
-  }, '');
-  await writeBotEnv(tmpData, 'worker', { CUSTOM_GREETING: 'HELLO_FROM_ENV' });
-
-  const wakes: any[] = [];
-  const bg = new BgJobManager(tmpData, async input => {
-    wakes.push(input);
-  });
-  t.after(() => bg.closeAll());
-
-  const job = await bg.startJob({
-    sessionId: 'sess_test1',
-    botId: 'worker',
-    command: 'echo "$CUSTOM_GREETING:$BOTD_SESSION_ID"',
-    replyToBotId: 'lead',
-  });
-  assert.equal(job.sessionId, 'sess_test1');
-
-  await waitFor(() => wakes.length, len => len === 1, 5_000);
-  assert.equal(wakes[0].sessionId, 'sess_test1');
-  assert.equal(wakes[0].botId, 'worker');
-  assert.equal(wakes[0].replyToBotId, 'lead');
-  assert.match(wakes[0].wakeupMessage, /HELLO_FROM_ENV:sess_test1/);
-
-  const { logs } = await bg.getJobLogs(job.id, 10);
-  assert.match(logs, /HELLO_FROM_ENV:sess_test1/);
-
-  // Long running job can be killed without firing a completion wake
-  const longJob = await bg.startJob({
-    sessionId: 'sess_test1',
-    botId: 'worker',
-    command: 'sleep 30',
-  });
-  const killed = await bg.killJob(longJob.id);
-  assert.equal(killed.status, 'killed');
-  assert.equal(wakes.length, 1, 'killed job must not fire completion wake');
 });
 
 test('global message search and passwordless node-credential HubClient proxy', async t => {

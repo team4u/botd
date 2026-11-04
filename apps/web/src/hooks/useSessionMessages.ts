@@ -96,8 +96,6 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
   const [streamingStatesMap, setStreamingStatesMap] = useState<Record<string, StreamingAssistantState>>({});
   // 活跃子代理执行轨迹（按主 BOT ID 隔离索引，供 ChatView 展示实时子代理协同）
   const [subagentRunsMap, setSubagentRunsMap] = useState<Record<string, SubagentRunRecord[]>>({});
-  // 子代理运行详情抽屉：当前查看的子代理运行 ID
-  const [inspectingRunId, setInspectingRunId] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
 
   // 当前会话待处理的人机协同交互请求（botd ask）
@@ -550,7 +548,7 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
           return { ...prev, [event.botId]: nextList };
         });
         // 同步更新已落库消息中的 subagentRuns 对应项：后台完成 / resume / stop 更新时，
-        // 已落库消息卡片与打开的 SubagentRunDrawer 都能实时热更新
+        // 已落库消息卡片与打开的 Worker 检视抽屉都能实时热更新
         setMessages((prev) => {
           let changed = false;
           const next = prev.map((msg) => {
@@ -576,7 +574,6 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
   useEffect(() => {
     // 切换会话即复位取消状态：取消动作只针对原会话，切走后停止按钮不得永久卡在「正在停止...」
     setCancelling(false);
-    setInspectingRunId(null);
     setExtensionUiState(EMPTY_EXTENSION_UI_STATE);
     if (!authenticated || !activeSessionId) {
       setStreamingStatesMap(clearStreamingMap());
@@ -781,7 +778,6 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
     loadError,
     streamingStatesMap,
     subagentRunsMap,
-    inspectingRunId,
     cancelling,
     pendingAsks,
     extensionUiState,
@@ -798,7 +794,6 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
     handleCancelSession,
     handleClearMessages,
     applyLiveSessionEvent,
-    setInspectingRunId,
     invalidateForLogout,
     resetForLogout,
     resetCancelling,

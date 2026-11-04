@@ -6,8 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { register } from 'node:module';
 import { registerNodeCommands } from '../apps/node/src/cli/commands/node.js';
-import { createLocalIpcServer, MAX_ASK_BODY_BYTES } from '../apps/node/src/local-ipc.js';
-import type { BgJobManager } from '../apps/node/src/bg-jobs.js';
+import { createDaemonControlServer } from '../apps/node/src/daemon.js';
+
+const MAX_ASK_BODY_BYTES = 512 * 1024;
 import type { SessionRecord } from '../packages/protocol/src/index.js';
 import type { BotConfig } from '../packages/protocol/src/index.js';
 
@@ -93,15 +94,15 @@ function post(port: number, url: string, body: unknown): Promise<{ status: numbe
 }
 
 const askCalls: any[] = [];
-const fakeBgManager = { listJobs: async () => [], getLogs: async () => '', kill: async () => { throw new Error('noop'); } } as unknown as BgJobManager;
 
 function makeIpcServer() {
-  return createLocalIpcServer({
+  return createDaemonControlServer({
     identity: { nodeId: 'node_test', name: 'test', hubUrl: 'http://127.0.0.1:1' },
     dataDir: '/tmp/botd-test-data',
     socketPath: '/tmp/botd-test.sock',
     startedAt: Date.now(),
     isHubConnected: () => true,
+    ipcToken: null,
     getHubRpc: () => ({
       requestHumanInput: async (input: any) => {
         askCalls.push(input);
@@ -115,7 +116,6 @@ function makeIpcServer() {
       registerNode: async () => {},
       heartbeat: async () => {},
     }) as any,
-    bgManager: fakeBgManager,
     syncRegistrationWithHub: async () => {},
     handleShutdown: () => {},
   } as any);

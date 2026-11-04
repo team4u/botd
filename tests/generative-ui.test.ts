@@ -13,7 +13,7 @@ import {
   validateUiSpec,
   type BotdUiSpec,
 } from '../packages/protocol/src/index.js';
-import { createLocalIpcServer } from '../apps/node/src/local-ipc.js';
+import { createDaemonControlServer } from '../apps/node/src/daemon.js';
 import { registerNodeCommands } from '../apps/node/src/cli/commands/node.js';
 import { BUILTIN_SKILL_MD, BUILTIN_SKILL_VERSION } from '../apps/node/src/builtin-skill.js';
 import { GroupRouter } from '../apps/hub/src/group-router.js';
@@ -21,7 +21,6 @@ import { HubDatabase } from '../apps/hub/src/db.js';
 import { AuthManager } from '../apps/hub/src/auth.js';
 import { NodeConnectionManager } from '../apps/hub/src/ws-hub.js';
 import { SseHub } from '../apps/hub/src/sse.js';
-import type { BgJobManager } from '../apps/node/src/bg-jobs.js';
 
 // ---------------------------------------------------------------------------
 // 1. validateUiSpec: Valid Spec with all 15 components, $state, submit action
@@ -521,16 +520,9 @@ function postJson(port: number, url: string, body: unknown): Promise<{ status: n
 }
 
 const mockAskCalls: any[] = [];
-const mockBgManager = {
-  listJobs: async () => [],
-  getLogs: async () => '',
-  kill: async () => {
-    throw new Error('noop');
-  },
-} as unknown as BgJobManager;
 
 function makeTestIpcServer() {
-  return createLocalIpcServer({
+  return createDaemonControlServer({
     identity: { nodeId: 'node_test', name: 'test', hubUrl: 'http://127.0.0.1:1' },
     dataDir: '/tmp/botd-test-data',
     socketPath: '/tmp/botd-test.sock',
@@ -554,7 +546,7 @@ function makeTestIpcServer() {
         registerNode: async () => {},
         heartbeat: async () => {},
       }) as any,
-    bgManager: mockBgManager,
+    ipcToken: null,
     syncRegistrationWithHub: async () => {},
     handleShutdown: () => {},
   } as any);

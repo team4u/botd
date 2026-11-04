@@ -10,7 +10,7 @@ import test, { type TestContext } from 'node:test';
 import { startHub } from '../apps/hub/src/index.js';
 import { AuthManager } from '../apps/hub/src/auth.js';
 import { MAX_ARTIFACT_BYTES } from '../apps/hub/src/artifact-service.js';
-import { createLocalIpcServer, type LocalIpcDeps } from '../apps/node/src/local-ipc.js';
+import { createDaemonControlServer, type ControlDeps } from '../apps/node/src/daemon.js';
 import { getDaemonSocketPath } from '../apps/node/src/storage.js';
 
 interface TestContextBundle {
@@ -510,7 +510,7 @@ test('Node Local IPC binary stream upload (/artifact/put) & download (/artifact/
     },
   };
 
-  const ipcDeps: LocalIpcDeps = {
+  const ipcDeps: ControlDeps = {
     identity: {
       nodeId: ctx.node.id,
       name: 'node-test',
@@ -522,12 +522,12 @@ test('Node Local IPC binary stream upload (/artifact/put) & download (/artifact/
     startedAt: Date.now(),
     isHubConnected: () => true,
     getHubRpc: () => mockHubRpc,
-    bgManager: {} as any,
+    ipcToken: null,
     syncRegistrationWithHub: async () => {},
     handleShutdown: async () => {},
   };
 
-  const ipcServer = createLocalIpcServer(ipcDeps);
+  const ipcServer = createDaemonControlServer(ipcDeps);
   await new Promise<void>((resolve) => ipcServer.listen(socketPath, resolve));
   t.after(async () => {
     await new Promise<void>((resolve) => ipcServer.close(() => resolve()));
@@ -584,7 +584,7 @@ test('Node Local IPC binary stream upload (/artifact/put) & download (/artifact/
   assert.equal(pullBase64Res.json.contentBase64, originalFilePayload.toString('base64'));
 
   // 4. Test fallback to RPC when HTTP fails
-  const failingIpcDeps: LocalIpcDeps = {
+  const failingIpcDeps: ControlDeps = {
     ...ipcDeps,
     identity: {
       ...ipcDeps.identity,
@@ -592,7 +592,7 @@ test('Node Local IPC binary stream upload (/artifact/put) & download (/artifact/
     },
   };
   const failingSocketPath = path.join(ctx.dir, 'failing-agent.sock');
-  const failingServer = createLocalIpcServer(failingIpcDeps);
+  const failingServer = createDaemonControlServer(failingIpcDeps);
   await new Promise<void>((resolve) => failingServer.listen(failingSocketPath, resolve));
   t.after(async () => {
     await new Promise<void>((resolve) => failingServer.close(() => resolve()));
