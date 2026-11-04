@@ -92,14 +92,24 @@ const WorkerCapsule: React.FC<{
         </span>
       )}
 
-      {/* 订阅线程键（Pass-through 直通）徽标 */}
-      {worker.threadKeys && worker.threadKeys.length > 0 && (
+      {/* 订阅线程键（Pass-through 直通）徽标：全部线程键均展示，超出胶囊宽度折叠为 +N */}
+      {(worker.threadKeys ?? []).slice(0, 1).map((key) => (
         <span
-          title={`Pass-through 直通订阅：${worker.threadKeys.join('、')}`}
+          key={key}
+          title={`Pass-through 直通订阅：${(worker.threadKeys ?? []).join('、')}`}
           className="inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-blue-50 dark:bg-blue-950/50 border border-blue-200/60 dark:border-blue-800/60 text-[10px] font-medium text-blue-600 dark:text-blue-300 max-w-[140px] shrink-0"
         >
           <Link2 className="w-2.5 h-2.5 shrink-0" />
-          <span className="truncate">{worker.threadKeys[0]}</span>
+          <span className="truncate font-mono">{key}</span>
+        </span>
+      ))}
+      {(worker.threadKeys ?? []).length > 1 && (
+        <span
+          title={`其余 Pass-through 直通订阅：${(worker.threadKeys ?? []).slice(1).join('、')}`}
+          className="inline-flex items-center px-1 py-px rounded bg-blue-50 dark:bg-blue-950/50 border border-blue-200/60 dark:border-blue-800/60 text-[10px] font-medium text-blue-600 dark:text-blue-300 shrink-0"
+        >
+          <Link2 className="w-2.5 h-2.5 shrink-0" />
+          +{(worker.threadKeys ?? []).length - 1}
         </span>
       )}
 

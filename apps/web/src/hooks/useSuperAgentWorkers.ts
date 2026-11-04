@@ -43,6 +43,12 @@ export interface SuperAgentWorkerItem {
   cwd?: string;
   /** Git worktree 隔离目录（独立分支执行） */
   worktreePath?: string;
+  /** worktree 隔离执行所在的 Git 分支名（recall 水合补充） */
+  branchName?: string;
+  /** 累计回合数（recall 水合补充） */
+  turns?: number;
+  /** 累计 Token 消耗（recall 水合补充） */
+  tokens?: number;
   /** 订阅的直通线程键（Pass-through 路由，如 github:pr#42） */
   threadKeys?: string[];
   /** 工作流当前阶段（如 Verify） */
@@ -91,8 +97,31 @@ export interface WorkerTranscriptEntry {
 
 /** /workers/:workerId/recall 响应：Chain of Recall 节点 + 最近 transcript 摘录 */
 interface WorkerRecallPayload {
-  node?: { summary?: unknown } | null;
+  node?:
+    | ({ summary?: unknown } & Partial<Record<'turns' | 'tokens' | 'branchName' | 'worktreePath', unknown>>)
+    | null;
   transcript?: unknown;
+}
+
+/** 从 recall 节点提取有限遥测字段：仅接受合法数值 / 非空字符串 */
+export function telemetryOf(node: NonNullable<WorkerRecallPayload['node']>): {
+  turns?: number;
+  tokens?: number;
+  branchName?: string;
+  worktreePath?: string;
+} {
+  return {
+    ...(typeof node.turns === 'number' && Number.isFinite(node.turns)
+      ? { turns: node.turns }
+      : {}),
+    ...(typeof node.tokens === 'number' && Number.isFinite(node.tokens)
+      ? { tokens: node.tokens }
+      : {}),
+    ...(typeof node.branchName === 'string' && node.branchName ? { branchName: node.branchName } : {}),
+    ...(typeof node.worktreePath === 'string' && node.worktreePath
+      ? { worktreePath: node.worktreePath }
+      : {}),
+  };
 }
 
 /**
@@ -228,6 +257,7 @@ function normalizeWorker(raw: unknown, parentSessionId: string): SuperAgentWorke
     nodeId: str(record.nodeId),
     cwd: str(record.cwd),
     worktreePath: str(record.worktreePath),
+    branchName: str(record.branchName),
     threadKeys: threadKeys && threadKeys.length > 0 ? threadKeys : undefined,
     phase: str(record.phase),
     currentTool: str(record.currentTool),
@@ -406,8 +436,10 @@ export function useSuperAgentWorkers(sessionId: string | null): UseSuperAgentWor
         payload.node && typeof (payload.node as { summary?: unknown }).summary === 'string'
           ? (payload.node as { summary?: string }).summary || undefined
           : undefined;
+      const telemetry = payload.node ? telemetryOf(payload.node) : {};
+      const hasTelemetry = Object.keys(telemetry).length > 0;
       const blocks = transcriptToTurnBlocks(transcript);
-      if (blocks.length === 0 && nodeSummary === undefined) return;
+      if (blocks.length === 0 && nodeSummary === undefined && !hasTelemetry) return;
 
       setWorkersMap((prev) => {
         const existing = prev.get(selectedWorkerId);
@@ -417,6 +449,7 @@ export function useSuperAgentWorkers(sessionId: string | null): UseSuperAgentWor
           ...existing,
           ...(nodeSummary !== undefined ? { summary: nodeSummary } : {}),
           ...(blocks.length > 0 ? { blocks } : {}),
+          ...telemetry,
         });
         return next;
       });

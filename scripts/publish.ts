@@ -3,10 +3,11 @@
  *
  * pack-then-publish 模式：逐包 `pnpm pack --json` 产出 tarball（workspace:*
  * 依赖自动替换为实际版本号），以 shasum 对 npm 远端做幂等校验后按拓扑序发布。
- * 发布顺序：@botd/protocol -> @botd/models -> @botd/node。
- * hub 与 web 保持 private，不在发布清单，绝不发布。
+ * 发布顺序：@botd/protocol -> @botd/node。
+ * Model Catalog 与 Provider Auth 已全部内聚在 Hub（Docker 镜像交付），
+ * @botd/models 不再发布 npm，与 hub、web 一同保持 private，绝不在发布清单。
  */
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { extractPrereleaseTag } from "./lib/semver.ts";
@@ -16,17 +17,18 @@ import { createCommandRunner } from "./lib/run-command.ts";
 const rootDir = resolve(import.meta.dirname, "..");
 const runCmd = createCommandRunner(rootDir);
 
-/** 发布顺序按依赖拓扑排列：protocol -> models -> node */
-const PUBLISH_ORDER = ["protocol", "models", "node"];
+/** 发布顺序按依赖拓扑排列：protocol -> node */
+export const PUBLISH_ORDER = ["protocol", "node"];
 
-interface PackageInfo {
+export interface PublishTarget {
   name: string;
   dir: string;
 }
 
-const PUBLISH_PACKAGES: PackageInfo[] = discoverWorkspacePackages(rootDir)
-  .filter((pkg) => PUBLISH_ORDER.includes(pkg.shortName))
-  .sort((a, b) => PUBLISH_ORDER.indexOf(a.shortName) - PUBLISH_ORDER.indexOf(b.shortName));
+export const PUBLISH_PACKAGES: PublishTarget[] = [
+  { name: '@botd/protocol', dir: 'packages/protocol' },
+  { name: '@botd/node', dir: 'apps/node' },
+];
 
 function resolveTargetVersion(): string {
   // 目标版本以 @botd/protocol 的 package.json 为准（CI 已先经 bump-version 同步全仓）
@@ -161,8 +163,9 @@ async function main() {
     const localTarballs: Record<string, { path: string; shasum: string }> = {};
 
     for (const pkg of PUBLISH_PACKAGES) {
+      const pkgDir = resolve(rootDir, pkg.dir);
       console.log(`- 打包并校验 ${pkg.name}...`);
-      const { tarballPath, shasum } = computeLocalTarballShasum(pkg.dir);
+      const { tarballPath, shasum } = computeLocalTarballShasum(pkgDir);
       localTarballs[pkg.name] = { path: tarballPath, shasum };
 
       if (!dryRun) {
@@ -198,7 +201,7 @@ async function main() {
           for (let pAttempt = 1; pAttempt <= maxPublishRetries; pAttempt++) {
             try {
               runCmd("npm", publishArgs, {
-                cwd: pkg.dir,
+                cwd: resolve(rootDir, pkg.dir),
               });
               break;
             } catch (publishErr) {
@@ -222,11 +225,12 @@ async function main() {
     // 清理可能遗留在子包目录下的 *.tgz 压缩文件
     for (const pkg of PUBLISH_PACKAGES) {
       try {
-        if (existsSync(pkg.dir)) {
-          const files = readdirSync(pkg.dir);
+        const pkgDir = resolve(rootDir, pkg.dir);
+        if (existsSync(pkgDir)) {
+          const files = readdirSync(pkgDir);
           for (const file of files) {
             if (file.endsWith(".tgz")) {
-              rmSync(join(pkg.dir, file), { force: true });
+              rmSync(join(pkgDir, file), { force: true });
             }
           }
         }
@@ -237,7 +241,18 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error("\n发布流程终止:", err);
-  process.exit(1);
-});
+// 仅在直接执行（node scripts/publish.ts）时启动发布流程；被测试导入时只暴露发布清单
+const isDirectRun = (() => {
+  try {
+    return process.argv[1] !== undefined && realpathSync(process.argv[1]) === import.meta.filename;
+  } catch {
+    return false;
+  }
+})();
+
+if (isDirectRun) {
+  main().catch((err) => {
+    console.error("\n发布流程终止:", err);
+    process.exit(1);
+  });
+}
