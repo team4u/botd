@@ -9,6 +9,7 @@
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { defineDocFamily } from '@earendil-works/pi-durable';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import { resolveOwnedSession } from '../http-helpers.js';
 import type { MessageAttachment, PendingAskRecord, ToolCallRecord, TurnUsage } from '@botd/protocol';
 import { stringToConversationId, type HubDurableRuntime } from '../harness/hub-harness.js';
@@ -875,19 +876,58 @@ export function createDurableSessionMirror(
   };
 }
 
+const DATA_URL_PATTERN = /^data:([^;]+);base64,([\s\S]+)$/;
+
+/** 磁盘产物指针：附件 id 在 Artifact 表中可解析且物理文件存在。 */
+interface DiskArtifact {
+  storagePath: string;
+  sizeBytes: number;
+  mimeType: string;
+  filename: string;
+}
+
+/** 按附件 id 解析磁盘产物（文件存在才算数）。 */
+function resolveDiskArtifact(
+  att: MessageAttachment,
+  db?: Pick<HubContext['db'], 'getArtifactWithStoragePath'>,
+): DiskArtifact | undefined {
+  if (!db || typeof att.id !== 'string' || !att.id) return undefined;
+  const art = db.getArtifactWithStoragePath(att.id);
+  if (!art || !fs.existsSync(art.storagePath)) return undefined;
+  return {
+    storagePath: art.storagePath,
+    sizeBytes: art.sizeBytes,
+    mimeType: att.mimeType || art.mimeType,
+    filename: att.filename || art.filename,
+  };
+}
+
 /**
  * 从 MessageAttachment[] 提取可供 pi-ai 多模态消费的 base64 图片列表。
+ * 优先读磁盘产物（WebUI 上传链路：附件只带产物指针，不带内联字节），
+ * 回退解析内联 dataUrl（如直连 submitSessionMessageToDurable 的调用方）。
  */
 function extractImageAttachments(
-  attachments?: readonly MessageAttachment[],
+  attachments: readonly MessageAttachment[] | undefined,
+  db?: Pick<HubContext['db'], 'getArtifactWithStoragePath'>,
 ): Array<{ mimeType: string; data: string }> {
   if (!Array.isArray(attachments) || attachments.length === 0) return [];
   const images: Array<{ mimeType: string; data: string }> = [];
   for (const att of attachments) {
-    if (!att || typeof att.dataUrl !== 'string' || !att.dataUrl) continue;
-    const match = /^data:([^;]+);base64,([\s\S]+)$/.exec(att.dataUrl);
+    if (!att) continue;
+    // 1) 磁盘产物：直接读文件字节（多 MB 图片也不进 SQLite，只在提交时读盘）
+    const disk = resolveDiskArtifact(att, db);
+    if (disk && disk.mimeType.startsWith('image/')) {
+      const data = fs.readFileSync(disk.storagePath).toString('base64');
+      if (data) images.push({ mimeType: disk.mimeType, data });
+      continue;
+    }
+    // 2) 内联 dataUrl 回退
+    const dataUrl = (att as { dataUrl?: unknown }).dataUrl;
+    if (typeof dataUrl !== 'string' || !dataUrl) continue;
+    const match = DATA_URL_PATTERN.exec(dataUrl);
     const mimeType = att.mimeType || match?.[1] || '';
-    const data = match ? match[2] : att.dataUrl;
+    const data = match ? match[2] : dataUrl;
     if (mimeType.startsWith('image/') && data) {
       images.push({ mimeType, data });
     }
@@ -896,10 +936,31 @@ function extractImageAttachments(
 }
 
 /**
+ * 附件上下文块：把磁盘产物清单（文件名 / 类型 / 大小 / 绝对路径）拼进用户消息，
+ * 让模型知道用户附了什么文件、能从哪里读到它（read / CLI 工具均可消费该路径）。
+ */
+function formatAttachedFilesContext(
+  attachments: readonly MessageAttachment[] | undefined,
+  db?: Pick<HubContext['db'], 'getArtifactWithStoragePath'>,
+): string {
+  if (!Array.isArray(attachments) || attachments.length === 0) return '';
+  const lines: string[] = [];
+  for (const att of attachments) {
+    if (!att) continue;
+    const disk = resolveDiskArtifact(att, db);
+    if (!disk) continue;
+    lines.push(`- ${disk.filename} (${disk.mimeType}, ${disk.sizeBytes} bytes) -> path: ${disk.storagePath}`);
+  }
+  if (lines.length === 0) return '';
+  return `[Attached Files]:\n${lines.join('\n')}`;
+}
+
+/**
  * 用户消息 → Durable Router 会话提交（全双工：`whenBusy: "steer"`）：
  * - 支持内置斜杠原语：`/compact [instructions]` 直接触发 `pi-durable` 原生非阻塞上下文压缩，
  *   `/new [handoff]` 直接触发 `pi-durable` 原生 `pi.reset` 开启新上下文；
- * - 支持多模态图片附件（`attachments` 自动转 `ImageContent`）；
+ * - 支持多模态图片附件：磁盘产物优先读盘、内联 dataUrl 回退，自动转 `ImageContent`；
+ * - 附件磁盘路径以 `[Attached Files]` 块拼进消息文本（非图片附件对模型可见可读）；
  * - 无 durable runtime 时返回 undefined，调用方继续走原 GroupRouter 路径。
  */
 export async function submitSessionMessageToDurable(
@@ -938,8 +999,16 @@ export async function submitSessionMessageToDurable(
     return routerId;
   }
 
-  const images = extractImageAttachments(options?.attachments);
-  await rt.submitUserMessage(routerId, content, {
+  const images = extractImageAttachments(options?.attachments, ctx.db);
+  // 附件清单拼进消息文本：模型得以感知非图片附件（csv/pdf/zip…）及其磁盘路径；
+  // 纯附件（空文本）消息也不至于提交空字符串。
+  const attachedFiles = formatAttachedFilesContext(options?.attachments, ctx.db);
+  const effectiveContent = attachedFiles
+    ? content.trim()
+      ? `${content}\n\n${attachedFiles}`
+      : attachedFiles
+    : content;
+  await rt.submitUserMessage(routerId, effectiveContent, {
     requestId: `hub-msg:${sessionId}:${Date.now()}`,
     whenBusy: 'steer',
     ...(images.length > 0 ? { images } : {}),

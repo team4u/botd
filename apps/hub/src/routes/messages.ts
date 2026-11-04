@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { MessageAttachment } from '@botd/protocol';
 import { extractMentions, parseSlashCommand } from '../group-router.js';
 import { resolveOwnedSession } from '../http-helpers.js';
+import type { ArtifactActor, ArtifactService } from '../artifact-service.js';
+import type { HubDatabase } from '../db.js';
 import {
   rewindDurableSessionBeforeMessage,
   submitSessionMessageToDurable,
@@ -9,6 +11,87 @@ import {
 } from './workers.js';
 import type { HubDurableRuntime } from '../harness/hub-harness.js';
 import type { HubApp, HubContext } from './context.js';
+
+const DATA_URL_PATTERN = /^data:([^;]+);base64,([\s\S]+)$/;
+
+/** 解析内联 dataUrl（`data:<mime>;base64,xxx` 或裸 base64）为字节缓冲。 */
+function decodeInlineDataUrl(dataUrl: string): { buffer: Buffer; mimeType?: string } | undefined {
+  const match = DATA_URL_PATTERN.exec(dataUrl.trim());
+  const encoded = match ? match[2] : dataUrl.trim();
+  if (!encoded) return undefined;
+  const buffer = Buffer.from(encoded, 'base64');
+  if (buffer.length === 0) return undefined;
+  return { buffer, ...(match ? { mimeType: match[1] } : {}) };
+}
+
+/**
+ * 消息附件规范化：内联 dataUrl 自动落盘为 Artifact（物理字节只住磁盘），
+ * 并剥离一切 dataUrl 字段——SQLite `messages.attachments_json` 永远只存
+ * 轻量指针 `{ id, filename, mimeType, sizeBytes, url }`，杜绝 base64 膨胀。
+ */
+function normalizeMessageAttachments(
+  rawAttachments: readonly unknown[],
+  input: {
+    db: Pick<HubDatabase, 'getArtifact'>;
+    artifacts: Pick<ArtifactService, 'uploadArtifactBuffer'>;
+    sessionId: string;
+    actor: ArtifactActor;
+  },
+): MessageAttachment[] {
+  const normalized: MessageAttachment[] = [];
+  for (const raw of rawAttachments) {
+    if (!raw || typeof raw !== 'object') continue;
+    const att = raw as Partial<MessageAttachment> & { dataUrl?: unknown };
+
+    // 已落盘产物：以 Artifact 行为准重建指针（补齐缺失字段、剥离 dataUrl）
+    if (typeof att.id === 'string' && att.id) {
+      const existing = input.db.getArtifact(att.id);
+      if (existing) {
+        normalized.push({
+          id: existing.id,
+          filename: att.filename || existing.filename,
+          mimeType: att.mimeType || existing.mimeType,
+          sizeBytes: att.sizeBytes ?? existing.sizeBytes,
+          url: att.url || `/api/artifacts/${existing.id}/content`,
+        });
+        continue;
+      }
+    }
+
+    // 内联 dataUrl：解码落盘为 Artifact，替换为磁盘产物指针
+    if (typeof att.dataUrl === 'string' && att.dataUrl) {
+      const decoded = decodeInlineDataUrl(att.dataUrl);
+      if (decoded) {
+        const uploaded = input.artifacts.uploadArtifactBuffer(input.actor, {
+          sessionId: input.sessionId,
+          filename: att.filename || 'attachment',
+          mimeType: att.mimeType || decoded.mimeType || 'application/octet-stream',
+          content: decoded.buffer,
+        });
+        normalized.push({
+          id: uploaded.id,
+          filename: uploaded.filename,
+          mimeType: uploaded.mimeType,
+          sizeBytes: uploaded.sizeBytes,
+          url: `/api/artifacts/${uploaded.id}/content`,
+        });
+        continue;
+      }
+    }
+
+    // 既非磁盘产物也无内联字节：仅保留指针元数据（无 id 的纯载荷直接丢弃）
+    if (typeof att.id === 'string' && att.id) {
+      normalized.push({
+        id: att.id,
+        filename: att.filename ?? '',
+        mimeType: att.mimeType ?? '',
+        sizeBytes: att.sizeBytes ?? 0,
+        url: att.url ?? '',
+      });
+    }
+  }
+  return normalized;
+}
 
 export function registerMessageRoutes(
   app: HubApp,
@@ -20,7 +103,7 @@ export function registerMessageRoutes(
     durableInjected?: boolean;
   },
 ): void {
-  const { db, router, sseHub } = ctx;
+  const { db, router, sseHub, artifacts } = ctx;
   const durableMirror = ctx.durableMirror;
   // 主线切流门槛：仅当 runtime 为显式注入，或 Hub 已配置任一 Provider 凭据时生效。
   // 否则（如无凭据的测试 Hub）直接走 GroupRouter，避免提交给无凭据的 Durable 运行时阻塞。
@@ -102,8 +185,8 @@ export function registerMessageRoutes(
       content?: string;
       attachments?: MessageAttachment[];
     };
-    const attachments = Array.isArray(body.attachments) ? body.attachments : [];
-    if ((typeof body.content !== 'string' || !body.content.trim()) && attachments.length === 0) {
+    const rawAttachments: unknown[] = Array.isArray(body.attachments) ? body.attachments : [];
+    if ((typeof body.content !== 'string' || !body.content.trim()) && rawAttachments.length === 0) {
       return c.json({ error: 'Missing content' }, 400);
     }
     const content = typeof body.content === 'string' ? body.content : '';
@@ -115,6 +198,24 @@ export function registerMessageRoutes(
     }
 
     const user = c.get('user');
+
+    // 附件规范化：内联 dataUrl 落盘为 Artifact，attachments_json 只存轻量指针
+    // （ArtifactError 等业务错误带 status，原语义透传，如 413 超限）
+    let attachments: MessageAttachment[];
+    try {
+      attachments = normalizeMessageAttachments(rawAttachments, {
+        db,
+        artifacts,
+        sessionId: id,
+        actor: { type: 'user', userId: user.id },
+      });
+    } catch (err: any) {
+      const status = typeof err?.status === 'number' ? err.status : 500;
+      return c.json({ error: err?.message || 'Invalid attachments' }, status);
+    }
+    if (!content.trim() && attachments.length === 0) {
+      return c.json({ error: 'Missing content' }, 400);
+    }
 
     const mentions = cmdResult.targetBotId
       ? [cmdResult.targetBotId]
