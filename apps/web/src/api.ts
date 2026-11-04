@@ -1,5 +1,6 @@
 import type {
   NodeWithBots,
+  ActiveWorkerSummary,
   SaveBotInput,
   BotConfig,
   SessionRecord,
@@ -713,6 +714,37 @@ export const api = {
   // 节点上可绑定的项目 Space 列表
   async listSpaces(nodeId: string): Promise<WorkspaceSpaceInfo[]> {
     return request<WorkspaceSpaceInfo[]>(`/api/nodes/${encodeURIComponent(nodeId)}/spaces`);
+  },
+
+  // Super-agent 手动派生后台 Worker（可选 worktree 隔离与多个 Pass-through 线程订阅）
+  async spawnSuperAgentWorker(
+    sessionId: string,
+    data: {
+      title: string;
+      instructions: string;
+      isolation?: 'none' | 'worktree';
+      threadKeys?: string[];
+    }
+  ): Promise<{ worker: ActiveWorkerSummary }> {
+    const res = await request<ActiveWorkerSummary | { worker: ActiveWorkerSummary }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workers`,
+      { method: 'POST', body: JSON.stringify(data) }
+    );
+    return { worker: (res as { worker: ActiveWorkerSummary }).worker ?? res };
+  },
+
+  // Watchdog 健康诊断：runPass=true 时先跑一轮看门狗巡检再返回报告
+  async getWatchdogHealth(
+    runPass = false
+  ): Promise<{
+    status: string;
+    activeSessions: number;
+    runningWorkers: number;
+    waitingWorkers: number;
+    stalledWorkers: unknown[];
+    failedWorkers: unknown[];
+  }> {
+    return request(`/api/watchdog/health${runPass ? '?runPass=1' : ''}`);
   },
 };
 

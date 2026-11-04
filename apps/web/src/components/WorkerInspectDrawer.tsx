@@ -360,13 +360,31 @@ export const WorkerInspectDrawer: React.FC<WorkerInspectDrawerProps> = ({
               {worker.toolUses} 次工具调用
             </span>
           )}
+          {typeof worker.turns === 'number' && worker.turns > 0 && (
+            <span
+              title={`累计回合数：${worker.turns}`}
+              className="inline-flex items-center px-1.5 py-px rounded bg-violet-50 dark:bg-violet-950/50 border border-violet-200/60 dark:border-violet-800/60 text-[10px] font-medium text-violet-600 dark:text-violet-300"
+            >
+              回合 {worker.turns}
+            </span>
+          )}
+          {typeof worker.tokens === 'number' && worker.tokens > 0 && (
+            <span
+              title={`累计 Token 消耗：${worker.tokens.toLocaleString()}`}
+              className="inline-flex items-center px-1.5 py-px rounded bg-violet-50 dark:bg-violet-950/50 border border-violet-200/60 dark:border-violet-800/60 text-[10px] font-medium text-violet-600 dark:text-violet-300 font-mono tabular-nums"
+            >
+              Tokens {worker.tokens.toLocaleString()}
+            </span>
+          )}
           {worker.worktreePath && (
             <span
               title={`Git worktree 隔离：${worker.worktreePath}`}
               className="inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200/60 dark:border-emerald-800/60 text-[10px] font-medium text-emerald-600 dark:text-emerald-300"
             >
               <GitBranch className="w-2.5 h-2.5" />
-              <span className="font-mono max-w-[220px] truncate">{worker.worktreePath}</span>
+              <span className="font-mono max-w-[220px] truncate">
+                {worker.branchName ? `worktree · ${worker.branchName}` : 'worktree'}
+              </span>
             </span>
           )}
           {worker.cwd && !worker.worktreePath && (
