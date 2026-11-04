@@ -1,6 +1,8 @@
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createBirpc, type BirpcReturn } from 'birpc';
 import {
@@ -82,6 +84,40 @@ interface NodeOnlineWaiter {
   detachAbortListener: () => void;
 }
 
+/** 语义化版本比较（忽略预发布后缀）：a > b 返回 1，相等 0，a < b 返回 -1。 */
+export function compareSemver(a: string, b: string): number {
+  const parse = (v: string) =>
+    v.replace(/^v/, '').split(/[+-]/)[0].split('.').map((seg) => Number.parseInt(seg, 10) || 0);
+  const [aParts, bParts] = [parse(a), parse(b)];
+  const len = Math.max(aParts.length, bParts.length);
+  for (let i = 0; i < len; i++) {
+    const diff = (aParts[i] ?? 0) - (bParts[i] ?? 0);
+    if (diff !== 0) return diff > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
+/** Hub 自身版本：环境变量覆盖优先，否则读 apps/hub/package.json。 */
+function resolveHubVersion(): string {
+  const fromEnv = process.env.BOTD_VERSION_OVERRIDE;
+  if (fromEnv && fromEnv.trim()) return fromEnv.trim();
+  try {
+    // 直读 package.json；读取失败退回 0.0.0（永不触发自动升级）。
+    const pkgPath = fileURLToPath(new URL('../../package.json', import.meta.url));
+    const version = (JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: string }).version;
+    return version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+export interface NodeConnectionManagerOptions {
+  /** 节点注册后版本落后于 Hub 时自动下发 upgradeDaemon（默认 BOTD_AUTO_UPGRADE_NODES=1 才启用）。 */
+  autoUpgradeNodes?: boolean;
+  /** Hub 自身版本（节点对齐目标）；缺省读 BOTD_VERSION_OVERRIDE 或 package.json。 */
+  hubVersion?: string;
+}
+
 export class NodeConnectionManager {
   public wss: WebSocketServer;
   private connections = new Map<string, NodeConnection>();
@@ -91,6 +127,10 @@ export class NodeConnectionManager {
   private router?: GroupRouterDelegate;
   private artifactService: ArtifactService;
   private heartbeatTimer?: NodeJS.Timeout;
+  /** 节点版本落后于 Hub 时自动下发升级（默认关闭，npm 包未发布前不启用）。 */
+  private autoUpgradeNodes: boolean;
+  /** Hub 自身版本：节点自动升级的对齐目标。 */
+  private hubVersion: string;
   /** 远端执行环境流式输出分发器（Node 回调 onEnvExecOutput 的统一入口）。 */
   readonly execOutputHub = new ExecOutputHub();
   /** 节点离线时挂起的 waitForNodeOnline 等待者（按 nodeId 分组）。 */
@@ -100,13 +140,16 @@ export class NodeConnectionManager {
     db: HubDatabase,
     auth: AuthManager,
     sseHub: SseHub,
-    artifactService?: ArtifactService
+    artifactService?: ArtifactService,
+    options?: NodeConnectionManagerOptions
   ) {
     this.db = db;
     this.auth = auth;
     this.sseHub = sseHub;
     this.artifactService = artifactService ?? new ArtifactService(db, sseHub);
     this.wss = new WebSocketServer({ noServer: true });
+    this.autoUpgradeNodes = options?.autoUpgradeNodes ?? process.env.BOTD_AUTO_UPGRADE_NODES === '1';
+    this.hubVersion = options?.hubVersion ?? resolveHubVersion();
   }
 
   setRouter(router: GroupRouterDelegate): void {
@@ -224,6 +267,20 @@ export class NodeConnectionManager {
         }
 
         this.resolveOnlineWaiters(nodeId);
+
+        // Hub 管控节点版本对齐：注册完成后发现节点版本落后时异步下发升级
+        //（不阻塞注册返回；升级失败仅告警，下次注册重新评估）。
+        const nodeVersion = info.version?.trim();
+        if (this.autoUpgradeNodes && nodeVersion && compareSemver(this.hubVersion, nodeVersion) > 0) {
+          const conn = this.connections.get(nodeId);
+          if (conn !== undefined) {
+            void conn.rpc
+              .upgradeDaemon?.({ targetVersion: this.hubVersion })
+              .catch((err) =>
+                console.warn(`[hub] auto-upgrade node ${nodeId} failed:`, err instanceof Error ? err.message : err),
+              );
+          }
+        }
 
         return;
       },

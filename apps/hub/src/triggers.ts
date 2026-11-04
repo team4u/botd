@@ -319,13 +319,17 @@ export function registerTriggerRoutes(
     return c.json(updated);
   });
 
-  app.post('/api/triggers/:triggerId/run', (c) => {
+  app.post('/api/triggers/:triggerId/run', async (c) => {
     const triggerId = c.req.param('triggerId');
     const tRes = resolveOwnedTrigger(c, db, triggerId);
     if (!tRes.ok) return tRes.response;
 
-    // fire-and-forget：立即返回，唤醒/派生回合在后台异步执行
-    const { childSessionId } = service.dispatchTrigger(tRes.trigger, `[手动触发: ${tRes.trigger.name}] ${tRes.trigger.prompt}`);
+    // fire-and-forget 语义保持：分发不等待回合完成，但会同步完成提交
+    // （含 Durable 主线切流），childSessionId（subsession 模式）照常返回。
+    const { childSessionId } = await service.dispatchTrigger(
+      tRes.trigger,
+      `[手动触发: ${tRes.trigger.name}] ${tRes.trigger.prompt}`,
+    );
 
     return c.json({ ok: true, ...(childSessionId ? { childSessionId } : {}) });
   });

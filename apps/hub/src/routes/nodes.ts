@@ -1,8 +1,24 @@
 import { isSafeId } from '@botd/protocol';
 import { resolveOwnedNode, resolveOwnedNodeRpc } from '../http-helpers.js';
+import { installResourceLocally } from '../local-installer.js';
 import type { HubApp, HubContext } from './context.js';
 
 const isText = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
+
+/** 确保 nodeId 存在节点行（虚拟节点按首位声明者归属）；存在但不属于该用户时返回 false */
+function ensureNodeOwned(db: HubContext['db'], nodeId: string, userId: string): boolean {
+  if (db.getNode(nodeId)) {
+    return db.getNodeOwner(nodeId) === userId;
+  }
+  db.createNode({
+    id: nodeId,
+    name: nodeId === 'local' ? 'Local' : nodeId,
+    platform: process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : 'linux',
+    tokenHash: 'virtual:' + '0'.repeat(64),
+    ownerId: userId,
+  });
+  return true;
+}
 
 export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
   const { db, connections } = ctx;
@@ -151,11 +167,9 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
     });
   }
 
-  // --- 节点独有能力（安装/重启/升级）：仍需节点在线 ---
+  // --- 节点能力：安装（在线节点优先，Hub 本地兜底）/ 重启 / 升级 ---
   app.post('/api/nodes/:nodeId/install', async (c) => {
     const { nodeId } = c.req.param();
-    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
-    if (!nodeRpc.ok) return nodeRpc.response;
     const body = await c.req.json<{
       source?: string;
       kind?: 'auto' | 'skill' | 'extension';
@@ -170,27 +184,116 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
     if (body.customId !== undefined && body.customId !== '' && !isSafeId(body.customId)) {
       return c.json({ error: 'Invalid customId' }, 400);
     }
-    try {
-      const installed = await nodeRpc.rpc.installResource({
-        source: body.source.trim(),
-        kind: body.kind,
-        customId: body.customId?.trim() || undefined,
-      });
-      // 安装内容回读：从节点读回真实文件内容（而非空串占位），Hub 侧才是权威存储。
-      const content = await nodeRpc.rpc
-        .readFile({ kind: installed.kind, id: installed.id })
-        .catch(() => '');
-      if (installed.kind === 'skill') {
-        db.addNodeSkill(nodeId, installed.id);
-        db.saveSkillContent(installed.id, content);
+    const input = {
+      source: body.source.trim(),
+      ...(body.kind !== undefined ? { kind: body.kind } : {}),
+      ...(body.customId?.trim() ? { customId: body.customId.trim() } : {}),
+    };
+
+    /** 入库 + 刷新分身：Hub SQLite 是权威存储，节点清单同步登记。 */
+    const persist = (kind: 'skill' | 'extension', id: string, content: string) => {
+      if (kind === 'skill') {
+        db.addNodeSkill(nodeId, id);
+        db.saveSkillContent(id, content);
       } else {
-        db.addNodeExtension(nodeId, installed.id);
-        db.saveExtensionContent(installed.id, content);
+        db.addNodeExtension(nodeId, id);
+        db.saveExtensionContent(id, content);
       }
       void ctx.refreshDurablePersonas?.();
-      return c.json(installed);
+    };
+
+    // 虚拟 local 节点：不要求真实节点，自动建虚拟节点行后直接走 Hub 本地安装。
+    if (nodeId === 'local') {
+      if (!ensureNodeOwned(db, 'local', c.get('user').id)) {
+        return c.json({ error: 'Forbidden' }, 403);
+      }
+      try {
+        const installed = await installResourceLocally(input);
+        persist(installed.kind, installed.id, installed.content);
+        return c.json({ kind: installed.kind, id: installed.id });
+      } catch (err: any) {
+        return c.json({ error: err?.message || 'Failed to install resource locally' }, 500);
+      }
+    }
+
+    const nodeRpc = resolveOwnedNodeRpc(c, db, connections, nodeId);
+    if (nodeRpc.ok) {
+      try {
+        const installed = await nodeRpc.rpc.installResource(input);
+        // 安装内容回读：从节点读回真实文件内容（而非空串占位），Hub 侧才是权威存储；
+        // 旧节点不支持 readFile 时退回 Hub 本地解析。
+        const content = await nodeRpc.rpc
+          .readFile({ kind: installed.kind, id: installed.id })
+          .catch(() => '');
+        if (content.trim()) {
+          persist(installed.kind, installed.id, content);
+          return c.json(installed);
+        }
+        const local = await installResourceLocally(input).catch(() => undefined);
+        persist(installed.kind, installed.id, local?.content ?? '');
+        return c.json(installed);
+      } catch (err: any) {
+        // 节点安装失败（来源不可达 / 不支持）：Hub 能本地解析的来源降级本地安装。
+        const local = await installResourceLocally(input).catch(() => undefined);
+        if (local) {
+          persist(local.kind, local.id, local.content);
+          return c.json({ kind: local.kind, id: local.id });
+        }
+        return c.json({ error: err?.message || 'Failed to install resource' }, 500);
+      }
+    }
+
+    // 节点离线：本地路径 / git / npm 来源允许 Hub 本地安装兜底（零节点可用）。
+    const nodeRes = resolveOwnedNode(c, db, nodeId);
+    if (!nodeRes.ok) return nodeRes.response;
+    try {
+      const installed = await installResourceLocally(input);
+      persist(installed.kind, installed.id, installed.content);
+      return c.json({ kind: installed.kind, id: installed.id });
     } catch (err: any) {
-      return c.json({ error: err?.message || 'Failed to install resource' }, 500);
+      return c.json(
+        { error: err?.message || 'Node is offline and the source cannot be installed locally' },
+        502,
+      );
+    }
+  });
+
+  // 全局安装别名：等价 POST /api/nodes/local/install（零外部节点的 Hub 直装入口）。
+  app.post('/api/install', async (c) => {
+    const body = await c.req.json<{
+      source?: string;
+      kind?: 'auto' | 'skill' | 'extension';
+      customId?: string;
+    }>().catch(() => null);
+    if (!body || !isText(body.source)) {
+      return c.json({ error: 'Invalid install source' }, 400);
+    }
+    if (body.kind !== undefined && !['auto', 'skill', 'extension'].includes(body.kind)) {
+      return c.json({ error: 'Invalid kind' }, 400);
+    }
+    if (body.customId !== undefined && body.customId !== '' && !isSafeId(body.customId)) {
+      return c.json({ error: 'Invalid customId' }, 400);
+    }
+    if (!ensureNodeOwned(db, 'local', c.get('user').id)) {
+      return c.json({ error: 'Forbidden' }, 403);
+    }
+    try {
+      const installed = await installResourceLocally({
+        source: body.source.trim(),
+        ...(body.kind !== undefined ? { kind: body.kind } : {}),
+        ...(body.customId?.trim() ? { customId: body.customId.trim() } : {}),
+      });
+      if (installed.kind === 'skill') {
+        db.addNodeSkill('local', installed.id);
+        db.saveSkillContent(installed.id, installed.content);
+      } else {
+        db.addNodeExtension('local', installed.id);
+        db.saveExtensionContent(installed.id, installed.content);
+      }
+      void ctx.refreshDurablePersonas?.();
+      return c.json({ kind: installed.kind, id: installed.id });
+    } catch (err: any) {
+      return c.json({ error: err?.message || 'Failed to install resource locally' }, 500);
     }
   });
 

@@ -7,6 +7,8 @@ import type { HubDatabase } from './db.js';
 import type { GroupRouter } from './group-router.js';
 import type { SseHub } from './sse.js';
 import type { ArtifactService } from './artifact-service.js';
+import type { HubDurableRuntime } from './harness/hub-harness.js';
+import { submitSessionMessageToDurable, type DurableSessionMirror } from './routes/workers.js';
 import { watchSubSessionCompletion } from './subsession.js';
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -22,6 +24,12 @@ export interface TriggerSchedulerHandle {
 export interface TriggerServiceOptions {
   sseHub?: SseHub;
   artifacts?: ArtifactService;
+  /** 主线切流门槛（与 messages.ts 一致）：注入 runtime 或已配 Provider 凭据时触发器走 Durable。 */
+  shouldUseDurable?: () => boolean;
+  /** 取 Durable 运行时（shouldUseDurable 为真时调用）。 */
+  getDurableRuntime?: () => Promise<HubDurableRuntime>;
+  /** Durable Router 会话镜像（触发器驱动的回合同样要镜像回 botd 会话时间线）。 */
+  getDurableMirror?: () => DurableSessionMirror | undefined;
 }
 
 /** Webhook 处理结果：由路由层映射为 HTTP 响应 */
@@ -163,6 +171,9 @@ export class TriggerService {
   private readonly router: GroupRouter;
   private readonly sseHub?: SseHub;
   private readonly artifacts?: ArtifactService;
+  private readonly shouldUseDurable?: () => boolean;
+  private readonly getDurableRuntime?: () => Promise<HubDurableRuntime>;
+  private readonly getDurableMirror?: () => DurableSessionMirror | undefined;
   private readonly getOwner: (sessionId: string) => string | undefined;
   /** 路由层 PATCH 后调用 resetRateLimit 重置限流窗口 */
   readonly webhookGuard = createWebhookGuard();
@@ -178,6 +189,33 @@ export class TriggerService {
     this.getOwner = getSessionOwnerId ?? ((sid: string) => db.getSessionOwner(sid));
     this.sseHub = options?.sseHub;
     this.artifacts = options?.artifacts;
+    this.shouldUseDurable = options?.shouldUseDurable;
+    this.getDurableRuntime = options?.getDurableRuntime;
+    this.getDurableMirror = options?.getDurableMirror;
+  }
+
+  /** 触发器分发是否切流到 Durable 主线（需同时具备运行时获取器）。 */
+  private durableActive(): boolean {
+    return this.shouldUseDurable?.() === true && this.getDurableRuntime !== undefined;
+  }
+
+  /** 把消息提交进会话的 Durable Router 会话；失败返回 false（退回 GroupRouter）。 */
+  private async submitToDurable(sessionId: string, botId: string, content: string): Promise<boolean> {
+    if (!this.durableActive() || this.sseHub === undefined) return false;
+    try {
+      const rt = await this.getDurableRuntime!();
+      const submitted = await submitSessionMessageToDurable(
+        { db: this.db, sseHub: this.sseHub, durableRuntime: rt },
+        sessionId,
+        botId,
+        content,
+        this.getDurableMirror?.(),
+      );
+      return submitted !== undefined;
+    } catch (err) {
+      console.warn('[triggers] durable dispatch failed, falling back to GroupRouter:', err instanceof Error ? err.message : err);
+      return false;
+    }
   }
 
   /** 目标会话归属者未变且 bot 仍可运行；失效则自动停用触发器并返回 false */
@@ -218,12 +256,14 @@ export class TriggerService {
    * Subsession 分发（参考 delegation.ts）：在父会话下创建独立子会话，父会话插入派生通知，
    * 订阅子会话完成/失败回传；载荷 Artifact 在子会话启动前挂载，确保首轮即可下载到 inbox/。
    * 子会话完成时把新产出的交付物零拷贝回传父会话（对齐 delegation.ts 的回传逻辑）。
+   * Durable 主线激活时，初始消息提交进子会话的 Durable Router 会话（镜像回时间线），
+   * GroupRouter 路径仅在 Durable 不可用/提交失败时兜底。
    */
-  private dispatchSubsession(
+  private async dispatchSubsession(
     trigger: OwnedTrigger,
     prompt: string,
     attachPayload?: (childSessionId: string) => string | undefined
-  ): { childSessionId: string; payloadArtifactId?: string } {
+  ): Promise<{ childSessionId: string; payloadArtifactId?: string }> {
     const childTitle = `[自动任务] ${trigger.name}`;
     const childSessionId = `sess_${randomUUID()}`;
     const childSession = this.db.createSession({
@@ -268,18 +308,29 @@ export class TriggerService {
       message: initialMsg.message,
     });
 
-    this.router.handleUserMessage(childSession.id, initialMsg.message.id, initialMsg.message.content);
+    // Durable 主线：初始消息直接提交给子会话的 Router 会话；
+    // 未切流或提交失败时退回 GroupRouter 路径。
+    const durableSubmitted = await this.submitToDurable(childSession.id, trigger.botId, initialMsg.message.content);
+    if (!durableSubmitted) {
+      this.router.handleUserMessage(childSession.id, initialMsg.message.id, initialMsg.message.content);
+    }
 
     return { childSessionId: childSession.id, ...(payloadArtifactId ? { payloadArtifactId } : {}) };
   }
 
   /** 按触发器的 dispatchMode 分发（fire-and-forget）：append 唤醒目标会话；subsession 派生子会话 */
-  dispatchTrigger(trigger: OwnedTrigger, wakeupMsg: string): { childSessionId?: string } {
+  async dispatchTrigger(trigger: OwnedTrigger, wakeupMsg: string): Promise<{ childSessionId?: string }> {
     if (trigger.dispatchMode === 'subsession') {
-      const { childSessionId } = this.dispatchSubsession(trigger, wakeupMsg);
+      const { childSessionId } = await this.dispatchSubsession(trigger, wakeupMsg);
       return { childSessionId };
     }
-    void this.router.handleWakeup(trigger.sessionId, trigger.botId, wakeupMsg).catch(() => {});
+    // Durable 主线：唤醒直接提交进会话的 Router 会话（带触发器署名，Router 可辨识来源）；
+    // 未切流或提交失败时退回 GroupRouter 的 handleWakeup。
+    const durableWakeup = `[Trigger "${trigger.name}" (@${trigger.botId})]: ${wakeupMsg}`;
+    const durableSubmitted = await this.submitToDurable(trigger.sessionId, trigger.botId, durableWakeup);
+    if (!durableSubmitted) {
+      void this.router.handleWakeup(trigger.sessionId, trigger.botId, wakeupMsg).catch(() => {});
+    }
     return {};
   }
 
@@ -403,7 +454,7 @@ export class TriggerService {
 
     this.db.markTriggerFired(trigger.id);
     if (inserted && trigger.dispatchMode === 'subsession') {
-      const result = this.dispatchSubsession(trigger, subsessionPrompt, (sid) =>
+      const result = await this.dispatchSubsession(trigger, subsessionPrompt, (sid) =>
         this.persistEventPayload(trigger, sid, eventId, raw)
       );
       this.db.updateAutomationEvent(eventId, {
@@ -421,7 +472,10 @@ export class TriggerService {
     if (inserted && payloadArtifactId) {
       this.db.updateAutomationEvent(eventId, { payloadArtifactId });
     }
-    await this.router.handleWakeup(trigger.sessionId, trigger.botId, wakeupMsg);
+    const durableWakeup = `[Trigger "${trigger.name}" (@${trigger.botId})]: ${wakeupMsg}`;
+    if (!(await this.submitToDurable(trigger.sessionId, trigger.botId, durableWakeup))) {
+      await this.router.handleWakeup(trigger.sessionId, trigger.botId, wakeupMsg);
+    }
 
     return { status: 200, body: { ok: true, triggerId: trigger.id, sessionId: trigger.sessionId } };
   }

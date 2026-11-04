@@ -24,6 +24,7 @@ import {
 } from '../harness/event-router.js';
 import { diagnoseSystemHealth, runWatchdogPass } from '../harness/watchdog.js';
 import type { HubApp, HubContext } from './context.js';
+import type { SseHub } from '../sse.js';
 
 /** botd 会话 → Router 会话 映射（scope: session 的 family，key = sessionId）。 */
 const SessionRouterDoc = defineDocFamily<{ conversationId: string }, null>({
@@ -174,6 +175,109 @@ async function askConversations(
   return ids;
 }
 
+/**
+ * 读取会话的 Durable pending asks（AskDoc）：覆盖会话的 Router 会话与其全部
+ * 活跃 Worker 会话（Worker 一样能调 ask_human）。无 Durable 映射时返回空数组。
+ */
+export async function getDurablePendingAsks(
+  rt: HubDurableRuntime,
+  sessionId: string,
+  leadBotId?: string,
+): Promise<PendingAskRecord[]> {
+  const routerId = await findRouterConversationId(rt, sessionId);
+  if (routerId === undefined) return [];
+  const out: PendingAskRecord[] = [];
+  for (const conversationId of await askConversations(rt, routerId)) {
+    try {
+      const numeric = Number(conversationId);
+      if (!Number.isInteger(numeric)) continue;
+      const doc = await rt.harness.snapshot(
+        AskDoc,
+        numeric as import('@earendil-works/pi-durable').ConversationId,
+        BACKGROUND_CONTEXT,
+      );
+      if (!doc) continue;
+      for (const ask of Object.values(doc.asks as Record<string, AskEntry>)) {
+        if (ask.status !== 'pending') continue;
+        out.push({
+          id: ask.askId,
+          sessionId,
+          botId: leadBotId ?? '',
+          prompt: ask.prompt,
+          options: ask.options ?? [],
+          status: 'pending' as const,
+          createdAt: new Date(ask.createdAt).toISOString(),
+        });
+      }
+    } catch {
+      // 会话缺失等：跳过该会话
+    }
+  }
+  return out;
+}
+
+/**
+ * 回答一条 Durable pending ask（AskDoc）：在会话的 Router/Worker 会话里定位，
+ * 落 `status = 'answered'` + `answer` + `answeredAt`，广播 `interaction_resolved`，
+ * 并把答案以用户消息 steer 回提问的会话（唤醒等待中的 agent）。
+ * 找不到（或已非 pending）时返回 null；调用方负责 GroupRouter 路径兜底。
+ */
+export async function respondToDurableAsk(input: {
+  rt: HubDurableRuntime;
+  sseHub: SseHub;
+  sessionId: string;
+  askId: string;
+  answer: string;
+}): Promise<PendingAskRecord | null> {
+  const { rt, sseHub, sessionId, askId, answer } = input;
+  const routerId = await findRouterConversationId(rt, sessionId);
+  if (routerId === undefined) return null;
+  for (const conversationId of await askConversations(rt, routerId)) {
+    const numeric = Number(conversationId);
+    if (!Number.isInteger(numeric)) continue;
+    let prompt: string | undefined;
+    try {
+      await rt.harness.commit(async (tx) => {
+        const doc = await tx.doc(
+          AskDoc,
+          numeric as import('@earendil-works/pi-durable').ConversationId,
+        );
+        const ask = doc.asks[askId];
+        if (ask !== undefined && ask.status === 'pending') {
+          ask.status = 'answered';
+          ask.answer = answer;
+          ask.answeredAt = Date.now();
+          // doc 代理在 commit 结算后不可读：所需字段在事务内拷出。
+          prompt = String(ask.prompt);
+        }
+      }, BACKGROUND_CONTEXT);
+    } catch {
+      continue;
+    }
+    if (prompt === undefined) continue;
+    sseHub.broadcast(sessionId, { type: 'interaction_resolved', sessionId, askId, answer });
+    // 唤醒提问方：答案以用户消息 steer 回去，等待中的回合继续推进。
+    await rt
+      .submitUserMessage(
+        String(conversationId),
+        `[Human Response to Ask "${prompt}"]: ${answer}`,
+        { requestId: `ask-reply:${askId}`, whenBusy: 'steer' },
+      )
+      .catch(() => undefined);
+    return {
+      id: askId,
+      sessionId,
+      botId: '',
+      prompt,
+      options: [],
+      status: 'answered',
+      answer,
+      createdAt: new Date().toISOString(),
+    };
+  }
+  return null;
+}
+
 export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
   const { db, router, sseHub } = ctx;
 
@@ -185,50 +289,14 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
   // GroupRouter 路径：内存 + pending_asks 表（router.getPendingAsks/respondToAsk）。
   // Durable 路径：ask_human 工具写入会话 Router/Worker 会话的 AskDoc，这里合并透出。
 
-  const durablePendingAsks = async (sessionId: string): Promise<PendingAskRecord[]> => {
-    const rt = await runtime();
-    if (rt === undefined) return [];
-    const routerId = await findRouterConversationId(rt, sessionId);
-    if (routerId === undefined) return [];
-    const botId = db.getSession(sessionId)?.leadBotId ?? '';
-    const out: PendingAskRecord[] = [];
-    // Router 与其全部 Worker 的 AskDoc 都要透出：Worker 一样能调 ask_human。
-    for (const conversationId of await askConversations(rt, routerId)) {
-      try {
-        const numeric = Number(conversationId);
-        if (!Number.isInteger(numeric)) continue;
-        const doc = await rt.harness.snapshot(
-          AskDoc,
-          numeric as import('@earendil-works/pi-durable').ConversationId,
-          BACKGROUND_CONTEXT,
-        );
-        if (!doc) continue;
-        for (const ask of Object.values(doc.asks as Record<string, AskEntry>)) {
-          if (ask.status !== 'pending') continue;
-          out.push({
-            id: ask.askId,
-            sessionId,
-            botId,
-            prompt: ask.prompt,
-            options: ask.options ?? [],
-            status: 'pending' as const,
-            createdAt: new Date(ask.createdAt).toISOString(),
-          });
-        }
-      } catch {
-        // 会话缺失等：跳过该会话
-      }
-    }
-    return out;
-  };
-
   app.get('/api/sessions/:id/asks', async (c) => {
     const id = c.req.param('id');
     const sRes = resolveOwnedSession(c, db, id);
     if (!sRes.ok) return sRes.response;
 
     const asks = router.getPendingAsks(id);
-    const durable = await durablePendingAsks(id);
+    const rt = await runtime();
+    const durable = rt === undefined ? [] : await getDurablePendingAsks(rt, id, sRes.session.leadBotId);
     const seen = new Set(asks.map((a) => a.id));
     return c.json([...asks, ...durable.filter((a) => !seen.has(a.id))]);
   });
@@ -288,45 +356,11 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
     // Durable 路径：在会话的 Router/Worker 会话 AskDoc 里找这条 pending ask，
     // 落 answered 并把答案作为用户消息 steer 回提问的会话（唤醒等待中的 agent）。
     const rt = await runtime();
-    const answer = body.answer.trim();
-    if (rt !== undefined) {
-      const routerId = await findRouterConversationId(rt, id);
-      if (routerId !== undefined) {
-        for (const conversationId of await askConversations(rt, routerId)) {
-          const numeric = Number(conversationId);
-          if (!Number.isInteger(numeric)) continue;
-          let prompt: string | undefined;
-          try {
-            await rt.harness.commit(async (tx) => {
-              const doc = await tx.doc(
-                AskDoc,
-                numeric as import('@earendil-works/pi-durable').ConversationId,
-              );
-              const ask = doc.asks[askId];
-              if (ask !== undefined && ask.status === 'pending') {
-                ask.status = 'answered';
-                ask.answer = answer;
-                ask.answeredAt = Date.now();
-                // doc 代理在 commit 结算后不可读：所需字段在事务内拷出。
-                prompt = String(ask.prompt);
-              }
-            }, BACKGROUND_CONTEXT);
-          } catch {
-            continue;
-          }
-          if (prompt === undefined) continue;
-          sseHub.broadcast(id, { type: 'interaction_resolved', sessionId: id, askId, answer });
-          // 唤醒提问方：答案以用户消息 steer 回去，等待中的回合继续推进。
-          await rt
-            .submitUserMessage(
-              String(conversationId),
-              `[Human Response to Ask "${prompt}"]: ${answer}`,
-              { requestId: `ask-reply:${askId}`, whenBusy: 'steer' },
-            )
-            .catch(() => undefined);
-          return c.json({ ok: true, ask: { id: askId, sessionId: id, status: 'answered', answer } });
-        }
-      }
+    const durableResolved = rt === undefined
+      ? null
+      : await respondToDurableAsk({ rt, sseHub, sessionId: id, askId, answer: body.answer.trim() });
+    if (durableResolved !== null) {
+      return c.json({ ok: true, ask: durableResolved });
     }
     return c.json({ error: 'Ask not found' }, 404);
   });
@@ -846,4 +880,19 @@ export async function cancelDurableSession(rt: HubDurableRuntime, sessionId: str
   }
   const conv = await rt.conversation(routerId, BACKGROUND_CONTEXT);
   await conv?.abort(BACKGROUND_CONTEXT).catch(() => undefined);
+}
+
+/**
+ * 重置会话的 Durable 侧（清空消息 / 删除会话前调用）：先 `cancelDurableSession`
+ * 停掉全部运行中的 Worker 与 Router 回合，再清掉 `SessionRouterDoc` 的映射，
+ * 让清空后的会话下一条消息重新懒建一个全新的 Durable Router 会话。
+ */
+export async function resetDurableSession(rt: HubDurableRuntime, sessionId: string): Promise<void> {
+  await cancelDurableSession(rt, sessionId);
+  await rt.harness
+    .commit(async (tx) => {
+      const doc = await tx.doc(SessionRouterDoc, sessionId, null);
+      doc.conversationId = '';
+    }, BACKGROUND_CONTEXT)
+    .catch(() => undefined);
 }
