@@ -18,7 +18,7 @@ import { GroupRouter } from './group-router.js';
 import { createStaticMiddleware } from './static.js';
 import { ArtifactService } from './artifact-service.js';
 import { HubDurableRuntime, SecretInjectingEnv, type BotPersonaConfig } from './harness/hub-harness.js';
-import { createHubCredentialStore, registerStoredProviders } from './credential-store.js';
+import { createHubCredentialStore, registerStoredProviders, listEffectiveProviderCredentials } from './credential-store.js';
 import { loadDynamicDurableExtension } from './harness/dynamic-extension-loader.js';
 import { TargetDoc } from './harness/docs.js';
 import { registerProviderRoutes } from './providers.js';
@@ -456,7 +456,7 @@ export function createHub(options?: HubOptions): HubInstance {
     // 主线切流门槛与 messages.ts 一致：仅当 runtime 为显式注入，或 Hub 已配置
     // 任一 Provider 凭据时生效（懒加载路径下 startHub 打开运行时后同样命中）。
     shouldUseDurable: () =>
-      options?.durableRuntime !== undefined || db.listProviderCredentials().length > 0,
+      options?.durableRuntime !== undefined || listEffectiveProviderCredentials(db).length > 0,
     getDurableRuntime: ensureDurableRuntime,
     getDurableMirror: () => durableMirror,
   });

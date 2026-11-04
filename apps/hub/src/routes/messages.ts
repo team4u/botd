@@ -11,6 +11,7 @@ import {
 } from './workers.js';
 import type { HubDurableRuntime } from '../harness/hub-harness.js';
 import type { HubApp, HubContext } from './context.js';
+import { listEffectiveProviderCredentials } from '../credential-store.js';
 
 const DATA_URL_PATTERN = /^data:([^;]+);base64,([\s\S]+)$/;
 
@@ -116,7 +117,7 @@ export function registerMessageRoutes(
   const durableCtx = () => ({
     ...ctx,
     durableRuntime:
-      ctx.durableInjected || db.listProviderCredentials().length > 0 ? ctx.durableRuntime : undefined,
+      ctx.durableInjected || listEffectiveProviderCredentials(db).length > 0 ? ctx.durableRuntime : undefined,
     ...(ctx.getDurableRuntime ? { getDurableRuntime: ctx.getDurableRuntime } : {}),
   });
 
