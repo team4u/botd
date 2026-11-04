@@ -1,331 +1,240 @@
-# 触发器
+# 触发器与 EventRouter
 
-触发器让会话按计划时间或外部事件自动开始运行。[文档目录](README.md)
+触发器让会话按计划时间或外部事件自动执行任务。[文档目录](README.md)
 
-## 触发器是什么
+## 架构概览
 
-触发器保存在 Hub。每个触发器绑定一个会话和一个 Bot。满足条件时，Hub 把预设的提示词交给该 Bot 执行。目标 Bot 必须是会话成员，否则 Hub 拒绝创建。
+EventRouter 是 Hub 的事件路由中枢。
+系统支持四种触发源：
 
-触发器分三类：
+1. **Webhook**：外部系统向专属 URL 发送 HTTP POST 请求。
+2. **Cron 定时**：系统按 5 段式 Cron 表达式周期触发。
+3. **Once 延时**：系统到达指定时间点执行一次。
+4. **IM 外部事件**：飞书、钉钉、Discord 或 Slack 渠道推送消息事件。
 
-| 类型 | `kind` 值 | 触发时机 |
-| --- | --- | --- |
-| Webhook | `webhook` | 外部系统向专属 URL 发送 HTTP POST |
-| Cron 定时 | `cron` | Cron 表达式匹配时，按分钟粒度 |
-| 一次性延时 | `once` | 到达指定时间点，只触发一次 |
+```mermaid
+flowchart TD
+    E[入站事件 IncomingEvent] --> S1[步骤 1: 快路径程序化过滤]
+    S1 -->|规则不匹配| D1[丢弃事件 0ms 且无 LLM 开销]
+    S1 -->|规则放行| S2{步骤 2: threadKey 查表直通?}
+    S2 -->|命中 ThreadSubscriptionsDoc| PT[直通 Worker 会话<br/>Router LLM 调用 = 0]
+    S2 -->|未命中订阅| S3[步骤 3: 慢路径 Router 决策]
+    S3 --> S4[步骤 4: Inline & Spill 载荷控制]
+    S4 -->|超限载荷| SP[存入 SpillStoreDoc 并附带 recall 指针]
+    S4 -->|内联载荷| RT[提交目标 Router 会话]
+    S1 -.->|candidate 模式| SE[推测执行策略: 静默启动 Worker]
+    SE -->|confirmed=true| RT
+    SE -->|confirmed=false| D2[静默丢弃 零打扰 Router]
+```
 
-## 配置字段
+## 数据模型
 
-`TriggerRecord` 的全部字段：
+触发器配置保存在 Hub 数据库。
+`TriggerRecord` 包含以下字段：
 
 | 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `id` | string | 触发器 ID，格式 `trg_<uuid>` |
-| `sessionId` | string | 绑定的会话 |
-| `botId` | string | 触发时执行提示词的 Bot，创建后不可改 |
-| `name` | string | 名称 |
-| `kind` | string | `webhook`、`cron` 或 `once`，创建后不可改 |
-| `token` | string | 仅 `webhook`。36 位十六进制随机串，创建时自动生成 |
-| `secret` | string | 仅 `webhook`。可选 HMAC 验签密钥 |
-| `cronExpr` | string | 仅 `cron`。5 段式 Cron 表达式 |
-| `runAt` | string | 仅 `once`。ISO 时间点 |
-| `prompt` | string | 触发时交给 Bot 的提示词 |
-| `enabled` | boolean | 是否启用，默认 `true` |
-| `dispatchMode` | string | `append` 或 `subsession`，默认 `append` |
-| `skillId` | string | 可选。触发时自动以 `/skill:<id>` 启动技能 |
-| `eventFilter` | object | 仅 `webhook`。事件过滤条件 |
-| `lastTriggeredAt` | string | 上次触发时间 |
-| `createdAt` | string | 创建时间 |
+| :--- | :--- | :--- |
+| `id` | string | 触发器 ID。格式为 `trg_<uuid>`。 |
+| `sessionId` | string | 绑定的会话 ID。 |
+| `botId` | string | 执行提示词的主控 Bot ID。 |
+| `name` | string | 触发器显示名称。 |
+| `kind` | string | 触发类型：`webhook`、`cron` 或 `once`。 |
+| `token` | string | Webhook 专属随机令牌。 |
+| `secret` | string | 可选。HMAC-SHA256 验签密钥。 |
+| `cronExpr` | string | 仅 cron 类型。标准 5 段式表达式。 |
+| `runAt` | string | 仅 once 类型。ISO 8601 时间戳。 |
+| `prompt` | string | 触发时提交给 Bot 的指令。 |
+| `enabled` | boolean | 启用状态。默认值为 `true`。 |
+| `dispatchMode` | string | 分发模式：`append` 或 `subsession`。 |
+| `skillId` | string | 可选。触发时挂载的技能 ID。 |
+| `eventFilter` | object | 仅 webhook 类型。过滤规则对象。 |
+| `lastTriggeredAt` | string | 上次触发时间戳。 |
+| `createdAt` | string | 创建时间戳。 |
 
-`eventFilter`（`TriggerEventFilter`）包含三个可选字段，同时指定时必须全部满足（AND）才放行：
+### 过滤规则结构
 
-- `source`：事件来源字符串。
-- `types`：允许的事件类型数组。
-- `payloadMatch`：载荷字段匹配表，值为字符串、数字或布尔。
+`eventFilter` 支持三项条件匹配：
 
-`payloadMatch` 的匹配规则：
-
-- 键为载荷顶层字面量键时优先按字面量匹配：值严格相等，或数组包含该值。
-- 键含点号时按路径递归下钻，如 `pull_request.draft`、`repository.owner.login`。中途遇到数组逐项穿透，末段与期望值严格相等（字符串 `"7"` 不匹配数字 `7`）。
-- 路径不存在，或中途遇到标量无法继续下钻，均判不匹配。
-- 请求体不是 JSON 对象时，`payloadMatch` 整体不匹配。
-
-Hub 收到 Webhook 后按以下规则识别来源与类型：
-
-1. 请求带 `x-github-event` 头时，来源为 `github`。类型为 `<事件名>.<action>`，如 `pull_request.opened`。载荷无 `action` 时类型就是事件名。
-2. 其他 JSON 载荷取 `source` 和 `type` 字段。缺省时来源为 `webhook`，类型为 `webhook.received`。
-
-## 触发后发生什么
-
-`dispatchMode` 决定执行方式。
-
-### append：唤醒当前会话
-
-Hub 向目标会话注入一条回调消息，并排队一个模型回合。消息格式：
-
-```text
-[Wake-up] [Webhook: <名称>] <提示词>
-Payload: <载荷文本>
+```json
+{
+  "source": "github",
+  "types": ["pull_request.opened", "issue_comment.created"],
+  "payloadMatch": {
+    "action": "opened",
+    "repository.owner.login": "team4u"
+  }
+}
 ```
 
-定时触发的前缀为 `[定时任务: <名称>]`。一次性触发为 `[Timer: <名称>]`。手动运行为 `[手动触发: <名称>]`。
+- `source`：限定事件来源。
+- `types`：限定事件类型数组。
+- `payloadMatch`：深度匹配载荷键值。支持点号路径下钻。
 
-Webhook 载荷文本的提取顺序：JSON 的 `message` 字段、`text` 字段、`JSON.stringify(payload)`、整体 JSON 序列化。纯文本载荷原样使用。
+## 四步事件流水线
 
-### subsession：派生独立子会话
+EventRouter 处理入站事件包含四个阶段。
 
-每次触发创建一个新的子会话：
+### 步骤 1：快路径过滤
 
-1. 子会话标题为 `[自动任务] <触发器名称>`，主控 Bot 就是触发器绑定的 Bot。
-2. 父会话收到一条派生通知。
-3. Webhook 原始载荷先存入子会话产物 `event_<eventId>.json`。子会话首轮即可从 `./inbox/` 下载。工作区目录结构见[工作区指南](workspace.md)。
-4. 初始消息不拼接原始载荷，只含事件元数据和触发器提示词。提示词要求 Bot 把载荷当作外部不可信数据读取，防止提示词注入。
-5. 子会话完成后，父会话收到结果回调，包含子会话最后一条回复的摘要。
-6. 子会话执行期间新产出的产物以引用方式回传父会话，回调消息附带产物列表。
-7. 子会话失败时，父会话收到失败回调。
+`filterEventFastPath` 使用确定性规则计算结果。
+该函数不调用语言模型。判定耗时低于 1 毫秒。
 
-`append` 模式下载荷文件存入目标会话本身。
-
-### 技能前缀
-
-`subsession` 模式下，配置了 `skillId` 且提示词不以 `/` 开头时，Hub 在子会话初始消息前加 `/skill:<skillId> ` 前缀。`append` 模式不加工提示词。
-
-## Cron 语法
-
-botd 使用标准 5 段式表达式，实现见 [cron.ts](../packages/protocol/src/cron.ts)：
-
-```text
-分 时 日 月 周
+```typescript
+export interface EventFilterPolicy {
+  source?: string[];
+  eventTypes?: string[];
+  senderWhitelist?: string[];
+  mode: 'explicit_only' | 'candidate' | 'ignore';
+}
 ```
 
-| 字段 | 位置 | 取值范围 |
-| --- | --- | --- |
-| 分 | 1 | 0-59 |
-| 时 | 2 | 0-23 |
-| 日 | 3 | 1-31 |
-| 月 | 4 | 1-12 |
-| 周 | 5 | 0-7，`0` 和 `7` 都表示周日 |
+过滤逻辑执行三次校验：
 
-每个字段支持：
+1. 校验 `source` 是否在允许列表。
+2. 校验 `event.type` 是否在允许类型列表。
+3. 校验 `event.sender` 是否命中白名单。
 
-- `*`：任意值
-- 单个数字，如 `30`
-- 区间，如 `1-5`
-- 步进，如 `*/15` 或 `10-50/5`
-- 逗号列表，如 `1,15,30`
-- 以上形式的组合
+任意一项不满足时，系统抛出 `EventDropped` 异常。
+调用方记录日志并结束处理。
 
-不支持：`JAN`、`MON` 等名称，秒字段，第六段，`?`、`L`、`W`、`#`。
+### 步骤 2：threadKey 查表直通
 
-求值规则：
+事件通过快路径后，系统推导确定性 `threadKey`：
 
-- 时间按 Hub 服务器本地时区，分钟粒度。
-- 日与周同时受限时，命中任一即匹配。例如 `0 9 1 * 1` 在每月 1 日和每个周一的 09:00 都触发。
-- 仅其一时，按该字段匹配。
+- GitHub PR：`github:pr:<repo>#<number>`。
+- GitHub Issue：`github:issue:<repo>#<number>`。
+- IM 话题：`im:thread:<chatId>:<threadId>`。
 
-示例：
+系统读取 `ThreadSubscriptionsDoc` 快照。
+如果存在活跃 Worker 订阅该 `threadKey`，系统执行直通投递：
 
-```text
-*/15 * * * *    每 15 分钟
-0 * * * *       每小时整点
-30 9 * * *      每天 09:30
-0 9 * * 1-5     每个周一至周五 09:00
-```
+1. 系统格式化内联载荷。
+2. 系统直接调用 `worker.submit()`。
+3. 系统配置 `whenBusy` 策略为 `steer`。
+4. 前台 Router 产生 0 次模型调用。
 
-常见模式在网页与列表中显示中文短标签，如「每 15 分钟」「每天 09:30」。
+Worker 如果无法处理后续事件，可调用 `handbackToRouter`。
+系统退订该 Worker，并将事件重投给慢路径 Router。
 
-Hub 停机期间错过的时间点不会补跑。同一自然分钟内重复巡检只触发一次。
+### 步骤 3：上下文内联与外溢
 
-## 一次性触发器
+系统使用 `formatEventInlineAndSpill` 控制注入上下文的体积。
+默认内联字符上限为 120 字符（`DEFAULT_INLINE_CHAR_LIMIT`）。
 
-创建时二选一：
+处理规则如下：
 
-- `delaySeconds`：正整数秒数。Hub 换算为「当前时间 + 延时」。
-- `runAt`：相对时长或绝对时间。相对时长支持纯数字（秒）和 `s`、`m`、`h`、`d` 后缀，如 `30s`、`15m`、`2h`、`1d`。绝对时间用 ISO 格式。
-
-到达时间点后，Hub 先标记触发器已触发并停用，再执行分发。这保证一次性触发器只触发一次。即使 Hub 晚于预定时间启动，触发器仍会在下一次巡检时执行。
-
-## Webhook 触发器
-
-### URL 与鉴权
-
-创建 `webhook` 触发器时，Hub 自动生成 36 位十六进制 token。调用地址：
+1. 载荷未超限时，系统完整内联正文。
+2. 载荷超限时，系统截取前 120 字符。
+3. 系统创建 `SpillStoreDoc` 保存完整载荷。
+4. 系统创建唯一指针 `spill_<hash>`。
+5. 系统在消息末尾追加 recall 指令提示。
 
 ```text
-POST /api/webhooks/<token>
+[github] pr.comment from alice
+summary: Review feedback for PR #42
+content: Please optimize SQL query index…
+[Spilled: spill_x89a2bc1 | Call recall({ "id": "spill_x89a2bc1" }) to read full content]
 ```
 
-该路由不要求登录。token 就是凭证，完整 URL 等同于密码，应当保密。请求体上限 64KB。
+Worker 在后续回合中调用 `recall({ id: "spill_x89a2bc1" })`。
+系统按需从 `SpillStoreDoc` 取出完整数据。
 
-响应状态码：
+### 步骤 4：推测执行策略
 
-| 状态码 | 含义 |
-| --- | --- |
-| 200 | 已触发、已去重或已跳过 |
-| 401 | 配置了 `secret` 但签名不匹配 |
-| 403 | 触发器已停用，或目标 Bot 已不在会话中 |
-| 404 | token 不存在 |
-| 413 | 请求体超过 64KB |
-| 429 | 超出频率限制 |
+当事件过滤模式为 `candidate` 时，系统触发推测执行。
+典型场景包括可疑 Bug 报告与候选工单。
 
-### HMAC 签名
+执行流程如下：
 
-配置 `secret` 后，请求必须携带签名头：`x-hub-signature-256` 或 `x-hub-signature`。
+1. 系统静默创建后台 Worker 会话。
+2. Worker 尝试在沙箱中复现问题。
+3. 验证成功时（`confirmed: true`），Worker 向 Router 提交交付产物。
+4. 验证未确认时（`confirmed: false`），系统静默销毁 Worker。
+5. 未确认的任务不会打扰用户与前台 Router。
 
-签名算法：`sha256=` 前缀加请求原始字节的 HMAC-SHA256 十六进制摘要。Hub 用常数时间比较校验。生成示例：
+## 分发模式
+
+传统触发器支持两种分发模式。
+
+### append 模式
+
+Hub 向目标主会话追加一条系统消息。
+系统随后排队启动一个模型回合。
+消息前缀标明触发器类型与名称。
+
+### subsession 模式
+
+Hub 为本次触发派生独立子会话：
+
+1. 系统创建标题为 `[自动任务] <名称>` 的子会话。
+2. 系统把原始载荷写入产物文件 `event_<id>.json`。
+3. 系统向子会话投递提示词。
+4. 子会话执行完成后，系统向父会话发送摘要汇报。
+5. 执行期间产生的产物文件自动同步至父会话。
+
+## Cron 与 Once 语法
+
+### Cron 表达式
+
+botd 使用标准 5 段式空格分隔语法：
+
+```text
+*    *    *    *    *
+┬    ┬    ┬    ┬    ┬
+│    │    │    │    └ 星期 (0 - 6, 0 为周日)
+│    │    │    └───── 月份 (1 - 12)
+│    │    └────────── 日期 (1 - 31)
+│    └─────────────── 小时 (0 - 23)
+└──────────────────── 分钟 (0 - 59)
+```
+
+支持字段符号：
+- `*`：匹配任意值。
+- `,`：枚举多个值（如 `1,15,30`）。
+- `-`：定义数值区间（如 `9-17`）。
+- `/`：定义间隔步长（如 `*/10`）。
+
+### Once 表达式
+
+一次性延时支持两种参数：
+
+1. `runAt`：标准 ISO 8601 时间戳（如 `2026-11-04T12:00:00Z`）。
+2. `delaySeconds`：相对当前时间的延时秒数（如 `3600`）。
+
+## HTTP API 接口
+
+### 创建触发器
+
+发送 POST 请求到 `/api/sessions/:id/triggers`：
 
 ```bash
-echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET"
-# 输出形如 "SHA2-256(stdin)= <摘要>"，取摘要部分并加上 "sha256=" 前缀填入签名头
+curl -X POST http://localhost:3002/api/sessions/s_123/triggers \
+  -H "Content-Type: application/json" \
+  -b "botd_token=<TOKEN>" \
+  -d '{
+    "name": "GitHub CI 监控",
+    "botId": "architect",
+    "kind": "webhook",
+    "prompt": "分析 CI 失败日志并提交修复代码",
+    "dispatchMode": "subsession",
+    "eventFilter": {
+      "source": "github",
+      "types": ["workflow_run.completed"]
+    }
+  }'
 ```
 
-`secret` 在 CLI 创建时经 `--secret` 传入；`PATCH /api/triggers/:id` 可设置或清除。网页表单不提供该项。
+### 触发 Webhook
 
-### 频率限制与去重
-
-- 同一 token 的最小触发间隔为 10 秒。窗口内的重复请求返回 429。所有者更新触发器后，限流窗口重置。
-- 请求可携带 `X-Botd-Dedup` 或 `X-GitHub-Delivery` 头作为去重键。`X-Botd-Dedup` 额外享受 5 分钟内存窗口；两种键都受数据库唯一索引保护，Hub 重启后依然生效。重复请求返回 `deduplicated: true`，不执行触发。
-
-### 事件过滤
-
-配置 `eventFilter` 后，不匹配的事件被记录并跳过，返回 `skipped: true` 和 `reason: "filter_mismatch"`。被跳过的事件不消耗限流窗口。
-
-CLI 用 `--event-types` 传逗号分隔的类型列表，`--event-source` 限定来源，`--match key=value` 传载荷匹配（可重复，值自动识别布尔与数字，支持点号路径）。网页表单的「事件类型过滤」输入框同样只填类型列表。
-
-### 事件收件箱
-
-每次 Webhook 调用（含被过滤的，命中去重的除外）都落库为自动化事件。查询接口：
-
-```text
-GET /api/sessions/<sessionId>/automation-events?limit=100
-```
-
-事件记录包含 `source`、`eventType`、`summary`（载荷前 200 字符）、`dedupKey`、派生的 `childSessionId` 和载荷产物 `payloadArtifactId`。该接口需要会话所有者登录。
-
-子会话模式的响应体额外返回 `eventId` 与 `childSessionId`，方便调用方追踪。
-
-## 手动运行
-
-立即执行一次触发器，不影响原计划，也不消耗一次性触发次数：
-
-```text
-POST /api/triggers/<triggerId>/run
-```
-
-仅触发器所有者可调用。接口立即返回，分发在后台执行。`subsession` 模式的响应包含新子会话 ID。
-
-## 管理接口
-
-| 方法与路径 | 说明 |
-| --- | --- |
-| `GET /api/sessions/:id/triggers` | 列出会话的全部触发器 |
-| `POST /api/sessions/:id/triggers` | 创建触发器 |
-| `PATCH /api/triggers/:triggerId` | 更新触发器 |
-| `POST /api/triggers/:triggerId/run` | 手动运行一次 |
-| `DELETE /api/triggers/:triggerId` | 删除触发器 |
-
-创建校验规则：
-
-1. `name`、`botId`、`kind`、`prompt` 必填。
-2. `botId` 必须是会话成员。
-3. `cron` 类型必须带合法 `cronExpr`。`cronExpr` 不允许用于其他类型。
-4. `once` 类型必须带 `delaySeconds` 或可解析的 `runAt`。
-5. `dispatchMode` 只接受 `append` 或 `subsession`。
-
-`PATCH` 可更新 `enabled`、`name`、`prompt`、`cronExpr`、`runAt`、`dispatchMode`、`skillId`、`secret`、`eventFilter`。`skillId`、`secret` 和 `eventFilter` 传 `null` 清除。`kind`、`botId`、`token` 不可改。
-
-触发器在每次触发时机（Webhook 请求到达、cron/once 巡检）校验目标：会话已删除、归属者已变，或目标 Bot 已不可在该会话运行（如 Bot 被删除）时，Hub 自动停用该触发器，Webhook 请求返回 `403`。删除会话会连同删除其全部触发器。
-
-## CLI 命令
-
-`botd triggers` 提供三个子命令。
-
-列出会话触发器：
+发送 POST 请求到专属 URL：
 
 ```bash
-botd triggers list <sessionId>
+curl -X POST http://localhost:3002/api/triggers/webhook/<TOKEN> \
+  -H "Content-Type: application/json" \
+  -H "X-GitHub-Event: workflow_run" \
+  -H "X-GitHub-Delivery: d-456" \
+  -d '{"action": "completed", "workflow_run": {"conclusion": "failure"}}'
 ```
 
-创建触发器：
-
-```bash
-botd triggers create <sessionId> \
-  --name '目录检查' --bot <botId> \
-  --prompt '检查工作目录中新生成的报告，汇总变化。' \
-  --kind cron --cron '*/15 * * * *'
-```
-
-全部选项：
-
-| 选项 | 说明 |
-| --- | --- |
-| `--name <name>` | 必填。名称 |
-| `--bot <botId>` | 必填。执行的 Bot |
-| `--prompt <prompt>` | 必填。触发时交付的提示词 |
-| `--kind <kind>` | `webhook`、`cron`、`once`，默认 `webhook` |
-| `--cron <expr>` | Cron 表达式，仅 `--kind cron` |
-| `--delay <duration>` | 延时，如 `30s`、`15m`、`2h`，仅 `--kind once` |
-| `--at <isoOrDuration>` | ISO 时间或时长，仅 `--kind once` |
-| `--dispatch <mode>` | `append` 或 `subsession`，默认 `append` |
-| `--skill <skillId>` | 触发时以 `/skill:<id>` 前缀调用技能 |
-| `--secret <secret>` | HMAC 验签密钥，仅 `--kind webhook` |
-| `--event-types <csv>` | 逗号分隔的事件类型，仅 `--kind webhook` |
-| `--event-source <source>` | 事件来源过滤，如 `github`，仅 `--kind webhook` |
-| `--match <key=value>` | 载荷字段匹配，可重复，如 `--match pull_request.draft=false`，仅 `--kind webhook` |
-
-删除触发器：
-
-```bash
-botd triggers delete <triggerId>
-```
-
-子会话派发的完整示例：
-
-```bash
-botd triggers create "$BOTD_SESSION_ID" \
-  --name 'PR 审查' --bot "$BOTD_BOT_ID" \
-  --prompt '审查 PR 变更并给出结论。' --kind webhook \
-  --dispatch subsession \
-  --skill pr-review \
-  --event-types "pull_request.opened"
-```
-
-## 网页配置步骤
-
-入口：会话页顶部「更多操作」菜单，点击「定时与触发器」。弹窗标题为「自动化与消息桥接」，含「触发器」和「通知通道」两个标签页。通知通道属于出站通知，见[自动化指南](automation.md)。
-
-新建触发器：
-
-1. 点击「新建触发器」。
-2. 选择类型：Webhook、Cron 定时或一次性延时。
-3. 填写触发器名称。
-4. 在「响应智能体」下拉框选择会话中的 Bot。创建后不可更换。
-5. 选择执行方式：派生独立子会话（默认，隔离每次运行）或追加到当前会话。
-6. 可选填写「绑定技能」。触发时自动以 `/skill:<id>` 启动。
-7. 按类型填写：
-   - Cron：输入表达式，可用下方预设快填，输入框下方实时显示校验与中文描述。
-   - 一次性：输入相对延时（如 `15m`）或 ISO 时间，可用预设快填。
-   - Webhook：可选填写事件类型过滤，逗号分隔。留空接收全部事件。
-8. 填写触发指令或提示词。
-9. 点击「保存触发器」。
-
-管理已有触发器：
-
-- 点击「已启用/已停用」切换状态。
-- 点击闪电图标立即触发一次，需在确认框中确认。
-- 点击铅笔图标编辑。类型和 Bot 不可改，其余字段可改。
-- 点击垃圾桶图标删除。
-
-Webhook 触发器卡片额外展示专属 URL 和现成的 curl 命令，均可一键复制。URL 以当前浏览器地址拼接，本机开发时网页在 3001 端口，Hub 在 3002 端口，生产默认 3000。
-
-「事件收件箱」折叠区列出 Webhook 最近收到的事件，含来源、类型、摘要和时间。子会话模式的事件附带「查看子会话」链接。出站通知通道（Telegram、Slack、飞书等）在同弹窗的「通知通道」标签页配置，见[外部渠道](channels.md)。
-
-## 轮询间隔
-
-Hub 用定时巡检检查 `cron` 与 `once` 触发器。间隔由环境变量控制：
-
-```text
-BOTD_TRIGGER_POLL_MS
-```
-
-默认 `2000` 毫秒，下限 `200` 毫秒。调小间隔让触发更准时，但增加数据库查询频率。Webhook 触发器不依赖巡检，不受此变量影响。
+系统按去重窗口与速率限制校验请求。
+校验通过后，EventRouter 执行流水线分发。
