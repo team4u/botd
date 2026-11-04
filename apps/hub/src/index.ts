@@ -146,16 +146,44 @@ export function createHub(options?: HubOptions): HubInstance {
             // 凭据来自 Hub SQLite（provider_credentials）：Hub 侧 LLM 请求直接解析认证
             models: options?.durableModels ?? createModels({ credentials: createHubCredentialStore(db) }),
             // Hub 托管 Skills 与 Memory：分身的 Router/Worker 会话获得 load_skill /
-            // update_memory 工具，内容直接读写 Hub SQLite 权威存储
+            // update_memory 工具，内容直接读写 Hub 文件系统权威存储（含 Bot
+            // workspace 的 .agents/skills / .agent/skills 自动发现）
             skills: {
-              getBotEnabledSkills: (botId) =>
-                db.getBot(botId)?.enabledSkills.map((skillId) => ({
-                  id: skillId,
-                  content: db.getSkillContent(skillId),
-                })) ?? [],
-              getSkillContent: (skillId) => {
-                const content = db.getSkillContent(skillId);
+              getBotEnabledSkills: (botId) => {
+                const bot = db.getBot(botId);
+                if (!bot) return [];
+                const extraDirs = bot.workspaceDir ? [bot.workspaceDir] : [];
+                const seen = new Set<string>();
+                const skills: Array<{ id: string; content: string }> = [];
+                for (const skillId of bot.enabledSkills ?? []) {
+                  if (seen.has(skillId)) continue;
+                  const content = db.getSkillContent(skillId, 'SKILL.md', extraDirs);
+                  if (content !== '') {
+                    seen.add(skillId);
+                    skills.push({ id: skillId, content });
+                  }
+                }
+                // Bot workspace 内 .agents/skills / .agent/skills 的技能自动可用
+                for (const skill of db.listSkills(extraDirs)) {
+                  if (seen.has(skill.id) || skill.source !== 'agent-dir') continue;
+                  const content = db.getSkillContent(skill.id, 'SKILL.md', extraDirs);
+                  if (content !== '') {
+                    seen.add(skill.id);
+                    skills.push({ id: skill.id, content });
+                  }
+                }
+                return skills;
+              },
+              getSkillContent: (skillId, relPath, botId) => {
+                const bot = botId ? db.getBot(botId) : undefined;
+                const extra = bot?.workspaceDir ? [bot.workspaceDir] : [];
+                const content = db.getSkillContent(skillId, relPath ?? 'SKILL.md', extra);
                 return content === '' ? undefined : content;
+              },
+              listSkillFiles: (skillId, botId) => {
+                const bot = botId ? db.getBot(botId) : undefined;
+                const extra = bot?.workspaceDir ? [bot.workspaceDir] : [];
+                return db.listSkillFiles(skillId, extra);
               },
               getBotMemory: (botId) => db.getBotFile(botId, 'memory'),
               setBotMemory: (botId, content) => db.setBotFile(botId, 'memory', content),
@@ -225,13 +253,14 @@ export function createHub(options?: HubOptions): HubInstance {
         nodeId: bot.nodeId,
         cwd: bot.workspaceDir?.trim() || process.cwd(),
       };
-      // 动态挂载 Hub 托管的用户扩展：首次遇到未安装的扩展时从源码加载并注册
+      // 动态挂载 Hub 托管的用户扩展：从 <dataDir>/extensions/<extId>/ 目录包
+      // 加载；目录内容变更（HTTP 保存）时重载热替换
       for (const extId of bot.enabledExtensions ?? []) {
-        if (runtime.getDynamicExtension(extId) !== undefined) continue;
-        const source = db.getExtensionContent(extId);
-        if (!source.trim()) continue;
+        if (!db.hasExtensionDir(extId)) continue;
         try {
-          runtime.installDynamicExtension(await loadDynamicDurableExtension(extId, source));
+          runtime.installDynamicExtension(
+            await loadDynamicDurableExtension(extId, db.getExtensionDir(extId)),
+          );
         } catch (err) {
           console.warn(`[hub] 加载动态扩展 ${extId} 失败（已跳过）:`, err instanceof Error ? err.message : err);
         }

@@ -4,6 +4,24 @@ import type { HubApp, HubContext } from './context.js';
 
 const isText = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
 
+const isFilesMap = (value: unknown): value is Record<string, string> =>
+  typeof value === 'object' &&
+  value !== null &&
+  !Array.isArray(value) &&
+  Object.entries(value).every(([key, content]) => isText(key) && typeof content === 'string');
+
+/** PUT body 校验与分流：files 映射优先，其次 content+path；都无效返回 400 语义错误。 */
+function parseResourceBody(body: unknown): { files?: Record<string, string>; content?: string; path?: string } | undefined {
+  if (typeof body !== 'object' || body === null) return undefined;
+  const { files, content, path: relPath } = body as { files?: unknown; content?: unknown; path?: unknown };
+  if (isFilesMap(files)) return { files };
+  if (typeof content === 'string') {
+    if (relPath !== undefined && typeof relPath !== 'string') return undefined;
+    return { content, ...(typeof relPath === 'string' ? { path: relPath } : {}) };
+  }
+  return undefined;
+}
+
 export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
   const { db, connections } = ctx;
 
@@ -32,22 +50,30 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
     return c.json({ ok: true });
   });
 
-  // --- Hub 全局 Skill / Extension 路由（内容存 Hub SQLite，与节点无关） ---
+  // --- Hub 全局 Skill / Extension 路由（文件系统包目录存储，与节点无关） ---
 
   app.get('/api/skills', (c) => c.json(db.listSkills()));
 
   app.get('/api/skills/:skillId', (c) => {
     const skillId = c.req.param('skillId');
     if (!isSafeId(skillId)) return c.json({ error: 'Invalid skill id format' }, 400);
-    return c.json({ content: db.getSkillContent(skillId) });
+    const relPath = c.req.query('path');
+    if (relPath !== undefined && relPath.includes('..')) {
+      return c.json({ error: 'Invalid path' }, 400);
+    }
+    return c.json({
+      content: db.getSkillContent(skillId, relPath || 'SKILL.md'),
+      files: db.listSkillFiles(skillId),
+    });
   });
 
   app.put('/api/skills/:skillId', async (c) => {
     const skillId = c.req.param('skillId');
     if (!isSafeId(skillId)) return c.json({ error: 'Invalid skill id format' }, 400);
-    const body = await c.req.json<{ content?: string }>().catch(() => null);
-    if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
-    db.saveSkillContent(skillId, body.content);
+    const body = parseResourceBody(await c.req.json().catch(() => null));
+    if (!body) return c.json({ error: 'Content must be a string or files an object' }, 400);
+    if (body.files) db.saveSkillFiles(skillId, body.files);
+    else db.saveSkillContent(skillId, body.content!, body.path || 'SKILL.md');
     void ctx.refreshDurablePersonas?.();
     return c.json({ ok: true });
   });
@@ -65,15 +91,23 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
   app.get('/api/extensions/:extId', (c) => {
     const extId = c.req.param('extId');
     if (!isSafeId(extId)) return c.json({ error: 'Invalid extension id format' }, 400);
-    return c.json({ content: db.getExtensionContent(extId) });
+    const relPath = c.req.query('path');
+    if (relPath !== undefined && relPath.includes('..')) {
+      return c.json({ error: 'Invalid path' }, 400);
+    }
+    return c.json({
+      content: db.getExtensionContent(extId, relPath || 'index.ts'),
+      files: db.listExtensionFiles(extId),
+    });
   });
 
   app.put('/api/extensions/:extId', async (c) => {
     const extId = c.req.param('extId');
     if (!isSafeId(extId)) return c.json({ error: 'Invalid extension id format' }, 400);
-    const body = await c.req.json<{ content?: string }>().catch(() => null);
-    if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
-    db.saveExtensionContent(extId, body.content);
+    const body = parseResourceBody(await c.req.json().catch(() => null));
+    if (!body) return c.json({ error: 'Content must be a string or files an object' }, 400);
+    if (body.files) db.saveExtensionFiles(extId, body.files);
+    else db.saveExtensionContent(extId, body.content!, body.path || 'index.ts');
     void ctx.refreshDurablePersonas?.();
     return c.json({ ok: true });
   });
@@ -114,8 +148,20 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
       }
       const nodeRes = resolveOwnedNode(c, db, nodeId);
       if (!nodeRes.ok) return nodeRes.response;
-      const content = kind === 'skill' ? db.getSkillContent(id) : db.getExtensionContent(id);
-      return c.json({ content });
+      const relPath = c.req.query('path');
+      if (relPath !== undefined && relPath.includes('..')) {
+        return c.json({ error: 'Invalid path' }, 400);
+      }
+      if (kind === 'skill') {
+        return c.json({
+          content: db.getSkillContent(id, relPath || 'SKILL.md'),
+          files: db.listSkillFiles(id),
+        });
+      }
+      return c.json({
+        content: db.getExtensionContent(id, relPath || 'index.ts'),
+        files: db.listExtensionFiles(id),
+      });
     });
 
     app.put(`/api/nodes/:nodeId/${subpath}/:${paramName}`, async (c) => {
@@ -126,10 +172,15 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
       }
       const nodeRes = resolveOwnedNode(c, db, nodeId);
       if (!nodeRes.ok) return nodeRes.response;
-      const body = await c.req.json<{ content?: string }>().catch(() => null);
-      if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
-      if (kind === 'skill') db.saveSkillContent(id, body.content);
-      else db.saveExtensionContent(id, body.content);
+      const body = parseResourceBody(await c.req.json().catch(() => null));
+      if (!body) return c.json({ error: 'Content must be a string or files an object' }, 400);
+      if (kind === 'skill') {
+        if (body.files) db.saveSkillFiles(id, body.files);
+        else db.saveSkillContent(id, body.content!, body.path || 'SKILL.md');
+      } else {
+        if (body.files) db.saveExtensionFiles(id, body.files);
+        else db.saveExtensionContent(id, body.content!, body.path || 'index.ts');
+      }
       onAdd(nodeId, id);
       void ctx.refreshDurablePersonas?.();
       return c.json({ ok: true });

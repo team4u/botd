@@ -107,24 +107,15 @@ flowchart TD
 
 新架构实现免节点 Hub 直管全局体系。
 
-所有技能与扩展统一持久化在 Hub SQLite：
+所有技能与扩展统一持久化在 Hub 文件系统包目录（单一事实源，SQLite 不再存储内容）：
 
-- `hub_skills` 表：存储全量技能的标识与 `SKILL.md` 内容。
-- `hub_extensions` 表：存储自定义扩展的 TypeScript 源代码。
+- `<dataDir>/skills/<id>/`：多文件技能目录（`SKILL.md`、`references/*.md`、`scripts/*` 等）。
+- `<dataDir>/extensions/<id>/`：多文件扩展包目录（入口 `index.ts`，可相对导入 `./helper.ts`、`./ui/card.ts`）。
 
-```sql
-CREATE TABLE IF NOT EXISTS hub_skills (
-  id TEXT PRIMARY KEY,
-  content TEXT NOT NULL DEFAULT '',
-  updated_at TEXT NOT NULL
-);
+此外，Bot 工作区（`workspaceDir`）与用户主目录下的标准 Agent 技能目录会被自动发现：
 
-CREATE TABLE IF NOT EXISTS hub_extensions (
-  id TEXT PRIMARY KEY,
-  content TEXT NOT NULL DEFAULT '',
-  updated_at TEXT NOT NULL
-);
-```
+- `<workspaceDir>/.agents/skills/<id>/`、`<workspaceDir>/.agent/skills/<id>/`
+- `~/.agents/skills/<id>/`、`~/.agent/skills/<id>/`
 
 Node 节点完全退化为无状态执行环境，无需安装任何扩展代码。
 

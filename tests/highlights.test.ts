@@ -445,8 +445,8 @@ test('skills live in Hub storage shared across nodes without any sync endpoint',
   await f.json(`/api/nodes/${nodeA.identity.nodeId}/skills/shared-skill`, 'PUT', { content: skillMd });
 
   // 任意节点维度与全局路由读到的是同一份 Hub 内容：无需同步
-  assert.deepEqual(await f.json(`/api/nodes/${nodeB.identity.nodeId}/skills/shared-skill`), { content: skillMd });
-  assert.deepEqual(await f.json('/api/skills/shared-skill'), { content: skillMd });
+  assert.deepEqual(await f.json(`/api/nodes/${nodeB.identity.nodeId}/skills/shared-skill`), { content: skillMd, files: ['SKILL.md'] });
+  assert.deepEqual(await f.json('/api/skills/shared-skill'), { content: skillMd, files: ['SKILL.md'] });
 
   // 目标节点挂到自己的清单上即可（启用语义）
   await f.json(`/api/nodes/${nodeB.identity.nodeId}/skills/shared-skill`, 'PUT', { content: skillMd });

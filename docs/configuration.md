@@ -107,6 +107,14 @@ Hub 与 Node 默认共享或独立使用 `~/.botd` 目录。
 ```text
 ~/.botd/
 ├── hub.sqlite                 # Hub SQLite 核心数据库文件
+├── skills/                    # Hub 托管技能包目录（多文件，文件系统为唯一事实源）
+│   └── <skillId>/
+│       ├── SKILL.md
+│       └── references/*.md
+├── extensions/                # Hub 托管扩展包目录（多文件 TypeScript）
+│   └── <extId>/
+│       ├── index.ts
+│       └── helper.ts
 ├── artifacts/                 # Hub 统一产物文件保存目录
 │   └── <artifactId>           # 原始产物二进制载荷
 ├── agent.sock                 # Node 守护进程 IPC 本地 Socket（Windows 下为命名管道）
@@ -151,8 +159,6 @@ Hub 使用 SQLite 记录全部核心元数据。
 | `triggers` | 自动化触发器表。保存触发器 ID、类型（cron/webhook/once）、调度参数与分发模式。 |
 | `automation_events` | Webhook 收件箱表。保存接收到的外部事件载荷、去重键与关联产物。 |
 | `pending_asks` | 人机协同待办表。保存 Ask 请求 ID、提示词、选项列表、过期时间与确认答案。 |
-| `hub_skills` | Hub 全局托管 Skills 表。保存全局 Skill ID 与 Markdown 正文。 |
-| `hub_extensions` | Hub 全局托管 Extensions 表。保存全局 Extension ID 与代码内容。 |
 | `provider_credentials` | Hub 全局模型供应商凭据表。保存供应商 ID、认证方式、API Key 与 OAuth 信息。 |
 | `session_shares` | 会话公开分享表。保存分享令牌 Token、关联会话与有效期。 |
 | `notification_channels` | 出站通知通道表。保存通道类型、目标 Webhook URL、HMAC 密钥与推送事件过滤。 |
