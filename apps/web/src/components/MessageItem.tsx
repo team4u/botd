@@ -1776,9 +1776,9 @@ export const MessageItem: React.FC<MessageItemProps> = ({
           <span className="px-1" title={fullTime}>
             {formattedTime}
           </span>
-          {!isEditing && <MessageCopyButton content={message.content} label />}
+          {!isEditing && <MessageCopyButton content={message.content} />}
           {!isEditing && onForkMessage && (
-            <MessageForkButton messageId={message.id} onForkMessage={onForkMessage} label />
+            <MessageForkButton messageId={message.id} onForkMessage={onForkMessage} />
           )}
           {canEdit && onStartEdit && (
             <button
@@ -1789,7 +1789,6 @@ export const MessageItem: React.FC<MessageItemProps> = ({
               className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] text-zinc-400 dark:text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors cursor-pointer shrink-0"
             >
               <Pencil className="w-3.5 h-3.5" />
-              <span>编辑</span>
             </button>
           )}
         </div>
@@ -1843,9 +1842,9 @@ export const MessageItem: React.FC<MessageItemProps> = ({
         <span className="px-1" title={fullTime}>
           {formattedTime}
         </span>
-        <MessageCopyButton content={message.content} label />
+        <MessageCopyButton content={message.content} />
         {onForkMessage && (
-          <MessageForkButton messageId={message.id} onForkMessage={onForkMessage} label />
+          <MessageForkButton messageId={message.id} onForkMessage={onForkMessage} />
         )}
         {usageBadge}
       </div>
