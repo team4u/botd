@@ -10,23 +10,27 @@
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Context } from "@earendil-works/chord";
-import { createModels, type Models } from "@earendil-works/pi-ai";
+import { createModels, type ModelThinkingLevel, type Models } from "@earendil-works/pi-ai";
 import {
 	configure,
 	createRegistry,
 	Harness,
 	MemoryStorage,
 	type AgentChange,
+	type CompactionResult,
 	type Conversation,
 	type ConversationId,
 	type ConversationView,
+	type EntryId,
 	type Extension,
 	type HarnessOptions,
 	type Registry,
 	type Storage,
 	type Submission,
 	type TaskGraph,
+	type TaskId,
 	type ToolRegistration,
+	type UserInput,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -53,6 +57,10 @@ export interface BotPersonaConfig {
 	enabledSkills?: string[];
 	/** Dynamic extension names enabled for this persona (mounted on Router and Worker). */
 	enabledExtensions?: string[];
+	/** Thinking effort for the persona's model requests; `'max'` clamps to pi-durable's `'xhigh'`. */
+	thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+	/** Extra env vars for the persona's shell commands, merged over the Hub process env. */
+	env?: Record<string, string>;
 	nodeId: string;
 	cwd: string;
 }
@@ -97,6 +105,12 @@ function personaInstructions(persona: BotPersonaConfig): string {
 	const parts = [persona.instructions];
 	if (persona.memory !== undefined && persona.memory !== "") parts.push("", "## Memory", persona.memory);
 	return parts.join("\n");
+}
+
+/** Persona thinking level as pi-durable's `ModelThinkingLevel`: `'max'` clamps to `'xhigh'`. */
+function thinkingLevelFor(persona: BotPersonaConfig): ModelThinkingLevel | undefined {
+	if (persona.thinkingLevel === undefined) return undefined;
+	return persona.thinkingLevel === "max" ? "xhigh" : persona.thinkingLevel;
 }
 
 /** Session index: one main-session conversation id per bot persona (keyed by botId). */
@@ -193,7 +207,15 @@ export class HubDurableRuntime {
 			registry,
 			env:
 				options.env === undefined
-					? ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? process.cwd() })
+					? async (target, context) => {
+							// Persona env vars ride along as the conversation's shell env (merged over the process env).
+							const targetState = await target.read.snapshot(TargetDoc, target.conversationId, context);
+							const personaEnv = personas.get(targetState?.botId ?? "")?.env;
+							return new NodeExecutionEnv({
+								cwd: target.cwd ?? process.cwd(),
+								...(personaEnv === undefined ? {} : { shellEnv: personaEnv }),
+							});
+					}
 					: options.env,
 			...(options.onReport === undefined ? {} : { onReport: options.onReport as never }),
 		};
@@ -272,8 +294,10 @@ export class HubDurableRuntime {
 	 * answers, recalls, and dispatches; any hands-on work belongs to a worker.
 	 */
 	routerAgent(persona: BotPersonaConfig): AgentChange {
+		const thinkingLevel = thinkingLevelFor(persona);
 		return {
 			model: persona.model,
+			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
 			instructions: personaInstructions(persona),
 			cwd: persona.cwd,
 			extensions: { add: [this.routerExtension, ...this.personaExtensions(persona)] },
@@ -438,8 +462,10 @@ export class HubDurableRuntime {
 	 * any filter a forked parent carried: a worker always gets the coding tools back.
 	 */
 	workerAgentFor(persona: BotPersonaConfig): AgentChange {
+		const thinkingLevel = thinkingLevelFor(persona);
 		return {
 			model: persona.model,
+			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
 			instructions: personaInstructions(persona),
 			cwd: persona.cwd,
 			extensions: {
@@ -453,24 +479,98 @@ export class HubDurableRuntime {
 		};
 	}
 
-	/** Submit a user message to a conversation (optionally steer a busy one). */
+	/** Submit a user message to a conversation — plain text or text + images; optionally steer a busy one. */
 	async submitUserMessage(
 		conversationId: string,
 		content: string,
-		options?: { requestId?: string; whenBusy?: "steer" | "followUp" },
+		options?: {
+			requestId?: string;
+			whenBusy?: "steer" | "followUp" | "queue" | "reject";
+			images?: Array<{ mimeType: string; data: string }>;
+		},
 		context: Context = BACKGROUND_CONTEXT,
 	): Promise<Submission> {
 		const conversation = await this.harness.conversation(stringToConversationId(conversationId), context);
 		if (conversation === undefined) throw new Error(`unknown conversation: ${conversationId}`);
+		const images = options?.images ?? [];
+		const message: UserInput =
+			images.length === 0
+				? content
+				: [
+						{ type: "text", text: content },
+						...images.map((image) => ({
+							type: "image" as const,
+							data: image.data,
+							mimeType: image.mimeType,
+						})),
+					];
+		// pi-durable has no queued `whenBusy`; a queued follow-up is the closest behavior.
+		const whenBusy: "steer" | "followUp" | "reject" | undefined =
+			options?.whenBusy === undefined
+				? undefined
+				: options.whenBusy === "queue"
+					? "followUp"
+					: options.whenBusy;
 		return conversation.submit(
 			{
 				type: "input",
-				content,
+				content: message,
 				...(options?.requestId === undefined ? {} : { requestId: options.requestId }),
-				...(options?.whenBusy === undefined ? {} : { whenBusy: options.whenBusy }),
+				...(whenBusy === undefined ? {} : { whenBusy }),
 			},
 			context,
 		);
+	}
+
+	/** Fork a conversation at an entry via pi-durable's native zero-copy fork; `botId` re-targets the fork. */
+	async forkConversation(
+		sourceConversationId: ConversationId,
+		atEntryId: EntryId,
+		botId?: string,
+		ctx: Context = BACKGROUND_CONTEXT,
+	): Promise<Conversation> {
+		const source = await this.harness.conversation(sourceConversationId, ctx);
+		if (source === undefined) throw new Error(`unknown conversation: ${sourceConversationId}`);
+		const persona = botId === undefined ? undefined : this.personas.get(botId);
+		return source.fork(
+			atEntryId,
+			{
+				ownership: { kind: "ownerless" },
+				...(persona === undefined
+					? {}
+					: {
+						agent: this.routerAgent(persona),
+						init: async (tx, id) => {
+							const target = await tx.doc(TargetDoc, id);
+							target.botId = persona.botId;
+							target.nodeId = persona.nodeId;
+							target.cwd = persona.cwd;
+						},
+					}),
+			},
+			ctx,
+		);
+	}
+
+	/** Reset a conversation's context via pi-durable's native `pi.reset` entry, carrying a handoff summary. */
+	async resetConversation(
+		conversationId: ConversationId,
+		handoff?: string,
+		ctx: Context = BACKGROUND_CONTEXT,
+	): Promise<void> {
+		const conv = await this.harness.conversation(conversationId, ctx);
+		await conv?.reset(handoff, ctx);
+	}
+
+	/** Admit a manual compaction task; returns its id, or undefined for an unknown conversation. */
+	async compactConversation(
+		conversationId: ConversationId,
+		instructions?: string,
+		ctx: Context = BACKGROUND_CONTEXT,
+	): Promise<TaskId<CompactionResult> | undefined> {
+		const conv = await this.harness.conversation(conversationId, ctx);
+		if (conv === undefined) return undefined;
+		return conv.compact(instructions, ctx);
 	}
 
 	/** Active and recent workers of a Router conversation. */

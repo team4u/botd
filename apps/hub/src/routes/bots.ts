@@ -1,5 +1,5 @@
 import { isBotConfig, isValidBotEnvKey } from '@botd/protocol';
-import type { BotConfig, SaveBotInput } from '@botd/protocol';
+import type { BotConfig, ChatCommand, SaveBotInput } from '@botd/protocol';
 import { resolveOwnedBot } from '../http-helpers.js';
 import type { BotFileKind, HubDatabase } from '../db.js';
 import type { HubApp, HubContext } from './context.js';
@@ -38,6 +38,14 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
   const writeBotEnv = (botId: string, env: Record<string, string>): Record<string, string> => {
     db.setBotFile(botId, 'env', JSON.stringify(env, null, 2));
     return env;
+  };
+
+  // 从 SKILL.md YAML frontmatter 提取 description（权威在 Hub SQLite，节点离线也可直出）。
+  const skillDescription = (skillId: string): string => {
+    const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(db.getSkillContent(skillId))?.[1];
+    const description =
+      frontmatter === undefined ? undefined : /^description:\s*(.+)$/m.exec(frontmatter)?.[1];
+    return description?.trim().replace(/^["']|["']$/g, '') || `加载技能 ${skillId}`;
   };
 
   // --- Bot CRUD：Hub SQLite 权威存储，节点离线也能创建/编辑/删除 ---
@@ -260,18 +268,36 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
     return c.json({ ok: true, keys: Object.keys(saved), env: saved });
   });
 
-  // --- Bot 命令列表：节点在线时透传，离线时返回空列表（不再失败） ---
+  // --- Bot 命令列表：Hub SQLite 直出（零节点在线可用），节点在线时追加其自定义命令 ---
   app.get('/api/bots/:botId/commands', async (c) => {
     const botId = c.req.param('botId');
     const botRes = resolveOwnedBot(c, db, botId);
     if (!botRes.ok) return botRes.response;
 
-    const rpc = connections.getNodeRpc(botRes.bot.nodeId);
-    if (!rpc) return c.json([]);
-    try {
-      return c.json(await rpc.getCommands(botId));
-    } catch {
-      return c.json([]);
+    const bot = botRes.bot;
+    // Skills 继承：inheritSkills 且存在父 Bot 时以父 Bot 的启用列表为准。
+    const enabledSkills =
+      bot.inheritSkills && bot.parentBotId
+        ? (db.getBot(bot.parentBotId)?.enabledSkills ?? bot.enabledSkills ?? [])
+        : (bot.enabledSkills ?? []);
+
+    const commands: ChatCommand[] = [...new Set(enabledSkills)].map((skillId) => ({
+      name: skillId,
+      description: skillDescription(skillId),
+      source: 'skill' as const,
+    }));
+    for (const extId of bot.enabledExtensions ?? []) {
+      commands.push({ name: extId, description: `扩展 ${extId}`, source: 'extension' as const });
     }
+
+    // 向后兼容：节点在线时追加其自定义命令（按名称去重）。
+    const rpc = connections.getNodeRpc(bot.nodeId);
+    if (rpc) {
+      const seen = new Set(commands.map((command) => command.name));
+      for (const command of await rpc.getCommands(botId).catch(() => [])) {
+        if (!seen.has(command.name)) commands.push(command);
+      }
+    }
+    return c.json(commands);
   });
 }
