@@ -418,8 +418,6 @@ export const App: React.FC = () => {
             highlightMessageId={route.messageId}
             onRespondToAsk={chat.handleRespondToAsk}
             onAddToast={addToast}
-            onInspectSubagentRun={(run) => chat.setInspectingRunId(run ? run.id : null)}
-            inspectingRunId={chat.inspectingRunId}
           />
         ) : (
           /* Mobile startup header with accessible menu when no active session */

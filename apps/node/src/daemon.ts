@@ -2,10 +2,14 @@ import net from 'node:net';
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import http from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 import ReconnectingWebSocket from 'partysocket/ws';
 import { WebSocket as WsWebSocket } from 'ws';
 import { createBirpc, type BirpcReturn } from 'birpc';
 import {
+  validateUiSpec,
+  type AskPreviewType,
   type HubRpcFunctions,
   type NodeRpcFunctions,
   type PlatformType,
@@ -31,19 +35,25 @@ import {
   writeFileTarget,
 } from './storage.js';
 import {
+  buildBotShellEnv,
   ensureBotdBinWrapper,
 } from './runtime.js';
-import { createLocalIpcServer } from './local-ipc.js';
 import { getNodeModelCatalog } from './models.js';
 import { ProviderAuthManager } from './provider-auth.js';
 import { installResourceToNode } from './installer.js';
-import { BgJobManager } from './bg-jobs.js';
-import { getWorkspaceDiff, listSpaces, listWorkspaceFiles, revertWorkspaceFile } from './workspace-diff.js';
 import { ensureBuiltinSkill } from './builtin-skill.js';
 import { createNodeEnvRpcServer } from './env-rpc-server.js';
 import { ensureWindowsShell, isWindows } from './windows-shell.js';
 import { notifyDaemonReady, spawnReplacementDaemon } from './daemon-launch.js';
-import { getNodeVersion, checkNodeUpgrade, performNodeUpgrade, filterRpcRegistryUrl, startAutoUpgradeLoop as startAutoUpgradeLoopFactory, type AutoUpgradeLoopHandle } from './upgrader.js';
+import {
+  getNodeVersion,
+  checkNodeUpgrade,
+  performNodeUpgrade,
+  filterRpcRegistryUrl,
+  startAutoUpgradeLoop as startAutoUpgradeLoopFactory,
+  UpgradeRejectedError,
+  type AutoUpgradeLoopHandle,
+} from './upgrader.js';
 
 export interface DaemonHandle {
   nodeId: string;
@@ -95,11 +105,409 @@ async function checkOrCleanSocket(socketPath: string): Promise<void> {
 
 let restartRequested = false;
 
-/** 清理旧架构遗留的本地 Pi 会话文件（.jsonl）与回执：回合已迁至 Hub，目录残留只作磁盘回收。 */
-async function resetBotSessionFiles(dataDir: string, sessionId: string, botId: string): Promise<void> {
-  const sessionDir = path.join(dataDir, 'bots', botId, 'sessions');
-  await fs.rm(path.join(sessionDir, `${sessionId}.jsonl`), { force: true }).catch(() => {});
-  await fs.rm(path.join(sessionDir, `${sessionId}.receipt.json`), { force: true }).catch(() => {});
+/**
+ * 本地守护进程控制面（Unix socket / Windows 命名管道上的极简 HTTP）：
+ * 只服务 CLI 的进程管理（status/shutdown/reload）与回合计入面
+ * （wake/ask/artifact），全部转发给 Hub；无任何本地状态。
+ */
+const MAX_BODY_BYTES = 64 * 1024;
+const MAX_ASK_BODY_BYTES = 512 * 1024;
+const MAX_ARTIFACT_BODY_BYTES = 15 * 1024 * 1024;
+const IPC_TOKEN_HEADER = 'x-botd-ipc-token';
+
+/** daemon 控制面依赖：全部为可注入回调，无本地状态（测试可用 mock hub 构建进程内实例）。 */
+export interface ControlDeps {
+  dataDir: string;
+  socketPath: string;
+  startedAt: number;
+  identity: { nodeId: string; name: string; hubUrl: string; token?: string };
+  ipcToken: string | null;
+  isHubConnected: () => boolean;
+  getHubRpc: () => BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null;
+  syncRegistrationWithHub: () => Promise<void>;
+  handleShutdown: () => void;
+}
+
+function isValidIpcToken(presented: string | undefined, expected: string | null): boolean {
+  if (!expected) return false;
+  if (typeof presented !== 'string' || presented.length === 0) return false;
+  const a = Buffer.from(presented, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+function sendJson(res: http.ServerResponse, statusCode: number, payload: unknown): void {
+  res.writeHead(statusCode, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(payload));
+}
+
+function readJsonBody(req: http.IncomingMessage, res: http.ServerResponse, maxBytes: number = MAX_BODY_BYTES): Promise<any> {
+  return new Promise((resolve) => {
+    req.setEncoding('utf8');
+    let body = '';
+    let exceeded = false;
+    req.on('data', (chunk: string) => {
+      if (exceeded) return;
+      body += chunk;
+      if (Buffer.byteLength(body, 'utf8') > maxBytes) {
+        exceeded = true;
+        sendJson(res, 413, { error: 'Payload Too Large' });
+        req.destroy();
+        resolve(null);
+      }
+    });
+    req.on('end', () => {
+      if (exceeded) return;
+      try {
+        resolve(body.trim() ? JSON.parse(body) : {});
+      } catch {
+        sendJson(res, 400, { error: 'Invalid JSON' });
+        resolve(null);
+      }
+    });
+    req.on('error', () => resolve(null));
+  });
+}
+
+function requireHubRpc(deps: ControlDeps): BirpcReturn<HubRpcFunctions, NodeRpcFunctions> {
+  const hubRpc = deps.getHubRpc();
+  if (!hubRpc || !deps.isHubConnected()) {
+    const error: any = new Error('Hub connection not established');
+    error.statusCode = 503;
+    throw error;
+  }
+  return hubRpc;
+}
+
+/** 创建本地守护进程控制面服务器（Unix socket / Windows 命名管道上的极简 HTTP）。 */
+export function createDaemonControlServer(deps: ControlDeps): http.Server {
+  const handleStatus = (req: http.IncomingMessage, res: http.ServerResponse) => {
+    req.resume();
+    sendJson(res, 200, {
+      ok: true,
+      nodeId: deps.identity.nodeId,
+      name: deps.identity.name,
+      hubUrl: deps.identity.hubUrl,
+      dataDir: deps.dataDir,
+      socketPath: deps.socketPath,
+      logFile: process.env.BOTD_DAEMON_LOG || path.join(deps.dataDir, 'daemon.log'),
+      pid: process.pid,
+      uptimeSeconds: Math.floor((Date.now() - deps.startedAt) / 1000),
+      hubConnected: deps.isHubConnected(),
+      version: getNodeVersion(),
+    });
+  };
+
+  const handleShutdown = (req: http.IncomingMessage, res: http.ServerResponse) => {
+    req.resume();
+    sendJson(res, 200, { ok: true });
+    setImmediate(() => deps.handleShutdown());
+  };
+
+  const handleUpgradeCheck = async (req: http.IncomingMessage, res: http.ServerResponse, { url }: { url: URL }) => {
+    req.resume();
+    const registryUrl = url.searchParams.get('registryUrl') || undefined;
+    try {
+      const result = await checkNodeUpgrade(deps.dataDir, { registryUrl });
+      sendJson(res, 200, result);
+    } catch (err: any) {
+      sendJson(res, 500, { error: err?.message || String(err) });
+    }
+  };
+
+  const handleUpgrade = async (_req: http.IncomingMessage, res: http.ServerResponse, { body }: { body: any }) => {
+    try {
+      const result = await performNodeUpgrade(deps.dataDir, {
+        targetVersion: body?.targetVersion,
+        registryUrl: body?.registryUrl,
+        force: body?.force,
+        onScheduleShutdown: () => {
+          setTimeout(() => {
+            deps.handleShutdown();
+          }, 100).unref();
+        },
+      });
+      sendJson(res, 200, result);
+    } catch (err: any) {
+      const statusCode = err instanceof UpgradeRejectedError ? 400 : 500;
+      sendJson(res, statusCode, { error: err?.message || String(err) });
+    }
+  };
+
+  const handleReload = async (req: http.IncomingMessage, res: http.ServerResponse) => {
+    req.resume();
+    try {
+      await deps.syncRegistrationWithHub();
+      sendJson(res, 200, { ok: true });
+    } catch (err: any) {
+      const message = err?.message || String(err);
+      const statusCode = message.includes('hub not connected') || message.includes('Hub connection') ? 503 : 500;
+      sendJson(res, statusCode, { error: message });
+    }
+  };
+
+  const handleWake = async (_req: http.IncomingMessage, res: http.ServerResponse, { body }: { body: any }) => {
+    const { sessionId, botId, message, replyToBotId, noTurn, delaySeconds } = body ?? {};
+    if (typeof sessionId !== 'string' || typeof botId !== 'string' || typeof message !== 'string' || !sessionId.trim() || !botId.trim()) {
+      sendJson(res, 400, { error: 'Missing or invalid sessionId, botId, or message' });
+      return;
+    }
+    if (delaySeconds !== undefined && !(typeof delaySeconds === 'number' && Number.isFinite(delaySeconds) && delaySeconds > 0)) {
+      sendJson(res, 400, { error: 'delaySeconds must be a positive number' });
+      return;
+    }
+    assertSafeId(sessionId, 'Session ID');
+    assertSafeId(botId, 'Bot ID');
+    if (replyToBotId !== undefined) assertSafeId(String(replyToBotId), 'Reply-To Bot ID');
+    const hubRpc = requireHubRpc(deps);
+    const wakeRes = await hubRpc.requestWakeupTurn({
+      sessionId,
+      botId,
+      wakeupMessage: String(message),
+      ...(replyToBotId ? { replyToBotId: String(replyToBotId) } : {}),
+      ...(noTurn ? { noTurn: true } : {}),
+      ...(delaySeconds ? { delaySeconds: Math.floor(delaySeconds) } : {}),
+    });
+    sendJson(res, 200, { ok: true, ...(wakeRes && typeof wakeRes === 'object' ? wakeRes : {}) });
+  };
+
+  const handleAsk = async (_req: http.IncomingMessage, res: http.ServerResponse, { body }: { body: any }) => {
+    const { sessionId, botId, prompt, options, timeoutSeconds, previewType, previewContent } = body ?? {};
+    if (typeof sessionId !== 'string' || typeof botId !== 'string' || typeof prompt !== 'string' || !sessionId.trim() || !botId.trim() || !prompt.trim()) {
+      sendJson(res, 400, { error: 'Missing or invalid sessionId, botId, or prompt' });
+      return;
+    }
+    assertSafeId(sessionId, 'Session ID');
+    assertSafeId(botId, 'Bot ID');
+    let normalizedPreviewContent = typeof previewContent === 'string' && previewContent ? previewContent : undefined;
+    if (previewType === 'ui') {
+      if (!normalizedPreviewContent || !normalizedPreviewContent.trim()) {
+        sendJson(res, 400, { error: 'Missing or empty previewContent for UI preview' });
+        return;
+      }
+      const validation = validateUiSpec(normalizedPreviewContent);
+      if (!validation.ok) {
+        sendJson(res, 400, { error: `Invalid UI spec: ${validation.errors.join('; ')}` });
+        return;
+      }
+      normalizedPreviewContent = validation.normalizedJson;
+    }
+    const hubRpc = requireHubRpc(deps);
+    const result = await hubRpc.requestHumanInput({
+      sessionId,
+      botId,
+      prompt: String(prompt),
+      ...(Array.isArray(options) ? { options: options.map(String) } : {}),
+      ...(typeof timeoutSeconds === 'number' && timeoutSeconds >= 0 ? { timeoutSeconds } : {}),
+      ...(previewType === 'diff' || previewType === 'markdown' || previewType === 'text' || previewType === 'ui' ? { previewType: previewType as AskPreviewType } : {}),
+      ...(normalizedPreviewContent ? { previewContent: normalizedPreviewContent } : {}),
+    });
+    sendJson(res, 200, { ok: true, answer: result.answer });
+  };
+
+  const handleArtifactPut = async (_req: http.IncomingMessage, res: http.ServerResponse, { body }: { body: any }) => {
+    const { sessionId, botId, filePath, message, mimeType } = body ?? {};
+    let { filename, contentBase64 } = body ?? {};
+    if (typeof sessionId !== 'string' || !sessionId.trim()) {
+      sendJson(res, 400, { error: 'Missing or invalid sessionId' });
+      return;
+    }
+    assertSafeId(sessionId, 'Session ID');
+    if (botId) assertSafeId(String(botId), 'Bot ID');
+
+    let fileBuffer: Buffer | null = null;
+    if (filePath && !contentBase64) {
+      const resolvedPath = path.resolve(String(filePath));
+      fileBuffer = await fs.readFile(resolvedPath);
+      if (!filename) filename = path.basename(resolvedPath);
+    } else if (typeof contentBase64 === 'string') {
+      fileBuffer = Buffer.from(contentBase64, 'base64');
+    }
+    if (typeof filename !== 'string' || !filename.trim() || !fileBuffer) {
+      sendJson(res, 400, { error: 'Missing filename or contentBase64' });
+      return;
+    }
+
+    let uploadedArtifact: any = null;
+    if (deps.identity.token && deps.identity.hubUrl) {
+      try {
+        const uploadUrl = `${deps.identity.hubUrl.replace(/\/$/, '')}/api/sessions/${encodeURIComponent(sessionId)}/artifacts`;
+        const resp = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/octet-stream',
+            'x-botd-node-id': deps.identity.nodeId,
+            'x-botd-node-token': deps.identity.token,
+            'x-artifact-filename': encodeURIComponent(filename),
+            ...(mimeType ? { 'x-artifact-mime-type': String(mimeType) } : {}),
+            ...(botId ? { 'x-artifact-bot-id': String(botId) } : {}),
+            ...(message ? { 'x-artifact-message': encodeURIComponent(String(message)) } : {}),
+          },
+          body: new Uint8Array(fileBuffer),
+        });
+        if (resp.ok) uploadedArtifact = await resp.json();
+      } catch {
+        // Network or HTTP error -> fallback to hubRpc
+      }
+    }
+    if (!uploadedArtifact) {
+      const hubRpc = requireHubRpc(deps);
+      const base64Content = typeof contentBase64 === 'string' ? contentBase64 : fileBuffer.toString('base64');
+      uploadedArtifact = await hubRpc.uploadArtifact({
+        sessionId,
+        ...(botId ? { botId: String(botId) } : {}),
+        filename: String(filename),
+        ...(mimeType ? { mimeType: String(mimeType) } : {}),
+        contentBase64: base64Content,
+        ...(message ? { message: String(message) } : {}),
+      });
+    }
+    sendJson(res, 200, { ok: true, artifact: uploadedArtifact, ...uploadedArtifact });
+  };
+
+  const artifactRecordFromResponse = (artifactId: string, fileBuffer: Buffer, resp: Response): any => {
+    let filename = '';
+    const disp = resp.headers.get('content-disposition');
+    if (disp) {
+      const match = disp.match(/filename="?([^";]+)"?/i);
+      if (match && match[1]) {
+        try {
+          filename = decodeURIComponent(match[1]);
+        } catch {
+          filename = match[1];
+        }
+      }
+    }
+    const record: any = {
+      id: resp.headers.get('x-artifact-id') || artifactId,
+      sessionId: resp.headers.get('x-artifact-session-id') || '',
+      filename: filename || `artifact-${artifactId}`,
+      mimeType: resp.headers.get('content-type') || 'application/octet-stream',
+      sizeBytes: fileBuffer.length,
+      createdAt: resp.headers.get('x-artifact-created-at') || new Date().toISOString(),
+    };
+    const senderBotId = resp.headers.get('x-artifact-sender-bot-id');
+    if (senderBotId) record.senderBotId = senderBotId;
+    return record;
+  };
+
+  const handleArtifactPull = async (_req: http.IncomingMessage, res: http.ServerResponse, { body }: { body: any }) => {
+    const { artifactId, outputPath } = body ?? {};
+    if (typeof artifactId !== 'string' || !artifactId.trim()) {
+      sendJson(res, 400, { error: 'Missing or invalid artifactId' });
+      return;
+    }
+
+    let fileBuffer: Buffer | null = null;
+    let artifactRecord: any = null;
+    if (deps.identity.token && deps.identity.hubUrl) {
+      try {
+        const pullUrl = `${deps.identity.hubUrl.replace(/\/$/, '')}/api/artifacts/${encodeURIComponent(artifactId)}/content`;
+        const resp = await fetch(pullUrl, {
+          method: 'GET',
+          headers: {
+            'x-botd-node-id': deps.identity.nodeId,
+            'x-botd-node-token': deps.identity.token,
+          },
+        });
+        if (resp.ok) {
+          const arrayBuf = await resp.arrayBuffer();
+          fileBuffer = Buffer.from(arrayBuf);
+          artifactRecord = artifactRecordFromResponse(artifactId, fileBuffer, resp);
+        }
+      } catch {
+        // Network or HTTP error -> fallback to hubRpc
+      }
+    }
+
+    let savedTo: string | undefined;
+    let contentBase64: string | undefined;
+    if (fileBuffer && artifactRecord) {
+      if (outputPath) {
+        savedTo = path.resolve(String(outputPath));
+        await ensureDir(path.dirname(savedTo));
+        await fs.writeFile(savedTo, fileBuffer);
+      } else {
+        contentBase64 = fileBuffer.toString('base64');
+      }
+      sendJson(res, 200, { ok: true, artifact: artifactRecord, ...artifactRecord, ...(savedTo ? { savedTo } : { contentBase64 }) });
+      return;
+    }
+
+    const hubRpc = requireHubRpc(deps);
+    const result = await hubRpc.downloadArtifact(String(artifactId));
+    if (outputPath) {
+      savedTo = path.resolve(String(outputPath));
+      await ensureDir(path.dirname(savedTo));
+      await fs.writeFile(savedTo, Buffer.from(result.contentBase64, 'base64'));
+    }
+    sendJson(res, 200, {
+      ok: true,
+      artifact: result.artifact,
+      ...result.artifact,
+      ...(savedTo ? { savedTo } : { contentBase64: result.contentBase64 }),
+    });
+  };
+
+  const handleArtifactList = async (req: http.IncomingMessage, res: http.ServerResponse, { url }: { url: URL }) => {
+    req.resume();
+    const sessionId = url.searchParams.get('sessionId');
+    if (!sessionId || !sessionId.trim()) {
+      sendJson(res, 400, { error: 'Missing or invalid sessionId' });
+      return;
+    }
+    assertSafeId(sessionId, 'Session ID');
+    const hubRpc = requireHubRpc(deps);
+    const artifacts = await hubRpc.listSessionArtifacts(sessionId);
+    sendJson(res, 200, { ok: true, artifacts });
+  };
+
+  const routes: { method: 'GET' | 'POST'; match: (url: string) => boolean; maxBodyBytes?: number; handler: (req: http.IncomingMessage, res: http.ServerResponse, ctx: { url: URL; body: any }) => Promise<void> | void }[] = [
+    { method: 'GET', match: (u) => u === '/status', handler: handleStatus },
+    { method: 'POST', match: (u) => u === '/shutdown', handler: handleShutdown },
+    { method: 'POST', match: (u) => u === '/reload', handler: handleReload },
+    { method: 'GET', match: (u) => u === '/upgrade/check' || u.startsWith('/upgrade/check?'), handler: handleUpgradeCheck },
+    { method: 'POST', match: (u) => u === '/upgrade', handler: handleUpgrade },
+    { method: 'POST', match: (u) => u === '/wake', handler: handleWake },
+    { method: 'POST', match: (u) => u === '/ask', maxBodyBytes: MAX_ASK_BODY_BYTES, handler: handleAsk },
+    { method: 'POST', match: (u) => u === '/artifact/put', maxBodyBytes: MAX_ARTIFACT_BODY_BYTES, handler: handleArtifactPut },
+    { method: 'POST', match: (u) => u === '/artifact/pull', handler: handleArtifactPull },
+    { method: 'GET', match: (u) => u === '/artifact/list' || u.startsWith('/artifact/list?'), handler: handleArtifactList },
+  ];
+
+  return http.createServer(async (req, res) => {
+    try {
+      const reqUrl = req.url || '/';
+      if (deps.ipcToken && !isValidIpcToken(req.headers[IPC_TOKEN_HEADER] as string | undefined, deps.ipcToken)) {
+        req.resume();
+        sendJson(res, 401, { error: 'unauthorized' });
+        return;
+      }
+      const route = routes.find((r) => req.method === r.method && r.match(reqUrl));
+      if (!route) {
+        req.resume();
+        sendJson(res, 404, { error: 'Not found' });
+        return;
+      }
+      const url = new URL(reqUrl, 'http://localhost');
+      const body = route.method === 'POST' ? await readJsonBody(req, res, route.maxBodyBytes) : undefined;
+      if (body === null) return;
+      await route.handler(req, res, { url, body });
+    } catch (err: any) {
+      if (!res.headersSent) {
+        const statusCode =
+          typeof err.statusCode === 'number'
+            ? err.statusCode
+            : err.message?.includes('invalid')
+              ? 400
+              : err.message?.includes('not found')
+                ? 404
+                : 500;
+        sendJson(res, statusCode, { error: err.message || 'Internal server error' });
+      }
+    }
+  });
 }
 
 export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandle> {
@@ -113,7 +521,7 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
 
   await seedStorageIfEmpty(dataDir, identity.nodeId);
   await ensureBuiltinSkill(dataDir);
-  await ensureBotdBinWrapper(dataDir);
+  const binDir = await ensureBotdBinWrapper(dataDir);
 
   // Windows needs a resolvable bash.exe for the Pi bash tool; resolve or
   // download a portable MinGit once before serving any traffic.
@@ -161,8 +569,17 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
 
   // 远端执行环境 RPC 服务端（Brain in Hub, Hands on Node）：文件/shell/worktree
   // 能力在 Node 本机执行，流式输出经 onExecOutput 回传 Hub。
+  // shellEnv 注入 botd CLI 包装器（~/.botd/bin → PATH 头部）与 BOTD_DATA_DIR，
+  // 让 durable Worker 在回合内跑 bash 时开箱即用 `botd` 命令。
   const envRpcServer = createNodeEnvRpcServer({
     defaultCwd: dataDir,
+    shellEnv: buildBotShellEnv(process.env, {
+      dataDir,
+      binDir,
+      sessionId: '',
+      botId: '',
+      botEnv: {},
+    }),
     onExecOutput: (event) => {
       try {
         hubRpc?.onEnvExecOutput?.(event);
@@ -170,12 +587,6 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
         // 输出回传失败不影响命令本身（断连重连后新输出走新连接）
       }
     },
-  });
-
-  const bgManager = new BgJobManager(dataDir, async (wakeInput) => {
-    if (hubRpc && rws && rws.readyState === ReconnectingWebSocket.OPEN) {
-      await hubRpc.requestWakeupTurn(wakeInput);
-    }
   });
 
   let isStopping = false;
@@ -221,24 +632,23 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
     });
   };
 
-  // 1. Setup local Unix domain socket HTTP server for wake requests
+  // 1. Setup local Unix domain socket HTTP server (daemon control plane)
   let handleShutdown = async (): Promise<void> => {};
-  const wakeServer = createLocalIpcServer({
-    identity,
+  const controlServer = createDaemonControlServer({
     dataDir,
     socketPath,
     startedAt,
+    identity,
     ipcToken,
     isHubConnected: () => Boolean(rws && rws.readyState === ReconnectingWebSocket.OPEN),
     getHubRpc: () => hubRpc,
-    bgManager,
     syncRegistrationWithHub: () => syncRegistrationWithHub(),
     handleShutdown: () => handleShutdown(),
   });
 
   await new Promise<void>((resolve, reject) => {
-    wakeServer.once('error', reject);
-    wakeServer.listen(socketPath, () => {
+    controlServer.once('error', reject);
+    controlServer.listen(socketPath, () => {
       if (process.platform !== 'win32') {
         fs.chmod(socketPath, 0o600).catch(() => {});
       }
@@ -308,7 +718,7 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
           onScheduleShutdown: () => {
             setTimeout(() => {
               void handleShutdown();
-            }, 100).unref();
+            }, 100);
           },
         });
       },
@@ -375,35 +785,8 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
         ok: false,
         error: `subagent runs moved to the Hub durable runtime; cannot interact with ${input.runId} on node`,
       }),
-      resetSession: async (sessionId, botId) => {
-        // 兼容旧 Hub：本地 Pi 会话文件已随回合执行迁移作废；目录若残留则清理。
-        const bots = await listBots(dataDir);
-        const bot = bots.find((b) => b.id === botId);
-        if (!bot) {
-          throw new Error(`Bot "${botId}" not found on node`);
-        }
-        await resetBotSessionFiles(dataDir, sessionId, botId);
-      },
-      listBgJobs: async (filter) => {
-        return bgManager.listJobs(filter);
-      },
-      getBgJobLogs: async (jobId, tailLines) => {
-        return await bgManager.getJobLogs(jobId, tailLines ?? 100);
-      },
-      killBgJob: async (jobId) => {
-        return await bgManager.killJob(jobId);
-      },
-      getWorkspaceDiff: async (input) => {
-        return await getWorkspaceDiff(dataDir, input);
-      },
-      listSpaces: async () => {
-        return await listSpaces(dataDir);
-      },
-      listWorkspaceFiles: async (input) => {
-        return await listWorkspaceFiles(dataDir, input);
-      },
-      revertWorkspaceFile: async (input) => {
-        return await revertWorkspaceFile(dataDir, input);
+      resetSession: async () => {
+        // 回合已迁至 Hub；Node 无本地会话文件可清理。
       },
       ...envRpcServer,
     },
@@ -504,7 +887,6 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       }
     }
 
-    await bgManager.closeAll().catch(() => {});
     await envRpcServer.envCleanup().catch(() => undefined);
 
     try {
@@ -514,7 +896,7 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
     }
 
     await new Promise<void>((resolve) => {
-      wakeServer.close(() => resolve());
+      controlServer.close(() => resolve());
     });
 
     await fs.unlink(pidFilePath).catch(() => {});

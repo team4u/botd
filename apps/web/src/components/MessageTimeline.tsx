@@ -27,7 +27,7 @@ import { AssistantTurnContent } from './MessageItem';
 import type { StreamingAssistantState } from '../types';
 
 /**
- * 会话消息时间线（ChatView 主对话与 SubagentRunDrawer 子代理检视共用的唯一渲染器）。
+ * 会话消息时间线（ChatView 主对话与 Worker 检视抽屉共用的唯一渲染器）。
  *
  * 承载：消息列表（日期分隔线 + MemoizedMessageItem + 定位高亮）、多 BOT 并发流式网格、
  * 自动贴底与「回到底部」悬浮按钮、向上分页（prepend 锚定 + IntersectionObserver 哨兵）、

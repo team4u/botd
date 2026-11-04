@@ -14,8 +14,6 @@ import {
   Hourglass,
   Package,
   PlayCircle,
-  SquareTerminal,
-  FileDiff,
   Share2,
   Sparkles,
   History as HistoryIcon,
@@ -29,7 +27,6 @@ import type {
   NodeWithBots,
   MessageAttachment,
   PendingAskRecord,
-  BgJobRecord,
   SubagentRunRecord,
   ChatCommand,
 } from '@botd/protocol';
@@ -40,12 +37,8 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { AskCard } from './AskCard';
 import { TriggersModal } from './TriggersModal';
 import { ArtifactsDrawer } from './ArtifactsDrawer';
-import { BgJobsDrawer } from './BgJobsDrawer';
-import { WorkspaceDiffDrawer } from './WorkspaceDiffDrawer';
 import { ShareSessionModal } from './ShareSessionModal';
 import { BotHistoryDrawer } from './BotHistoryDrawer';
-import { SubagentRunDrawer } from './SubagentRunDrawer';
-import { SubSessionDrawer } from './SubSessionDrawer';
 import { ActiveWorkersBar } from './ActiveWorkersBar';
 import { WorkerInspectDrawer } from './WorkerInspectDrawer';
 import { useSuperAgentWorkers } from '../hooks/useSuperAgentWorkers';
@@ -93,10 +86,6 @@ interface ChatViewProps {
   onRespondToAsk?: (sessionId: string, askId: string, answer: string) => Promise<void>;
   /** 全局 toast 通知（供弹窗内部使用） */
   onAddToast?: (type: ToastItem['type'], message: string) => void;
-  /** 点击子代理运行记录打开详情抽屉（Steer / Resume / 停止控制）；传 null 关闭 */
-  onInspectSubagentRun?: (run: SubagentRunRecord | null) => void;
-  /** 当前抽屉正在查看的子代理运行 ID（由上层从实时状态与已落库消息中派生最新记录传入） */
-  inspectingRunId?: string | null;
   /** 是否还有更早的历史消息可加载（App 负责分页） */
   hasEarlierMessages?: boolean;
   /** 正在加载更早消息 */
@@ -105,49 +94,6 @@ interface ChatViewProps {
   onLoadEarlier?: () => void;
   /** 搜索跳转定位高亮的消息 id */
   highlightMessageId?: string | null;
-}
-
-export function pickPollIntervalMs(hasActiveWork: boolean): number {
-  return hasActiveWork ? 5000 : 30000;
-}
-
-/** 点击工作流/子代理步骤后的检视目标 */
-export type RunInspectionTarget =
-  | { kind: 'none' }
-  | { kind: 'subsession'; childSessionId: string }
-  | { kind: 'subagent'; run: SubagentRunRecord };
-
-/**
- * 纯函数：判定点击某条 SubagentRunRecord 应打开哪种检视抽屉。
- * - 带childSessionId 的工作流/编排步骤 → 跨BOT子会话抽屉（SubSessionDrawer）
- * - 普通本地子代理运行 → 子代理运行抽屉（SubagentRunDrawer）
- */
-export function resolveRunInspectionTarget(run: SubagentRunRecord | null): RunInspectionTarget {
-  if (!run) return { kind: 'none' };
-  const childSessionId = (run as { childSessionId?: string }).childSessionId;
-  if (childSessionId) return { kind: 'subsession', childSessionId };
-  return { kind: 'subagent', run };
-}
-
-/** 从实时子代理轨迹与已落库消息中按 childSessionId 反查工作流步骤运行记录 */
-function findSubagentRunByChildSessionId(
-  activeSubagentRuns: Record<string, SubagentRunRecord[]>,
-  messages: MessageRecord[],
-  childSessionId: string
-): SubagentRunRecord | undefined {
-  for (const runs of Object.values(activeSubagentRuns)) {
-    const hit = runs.find(
-      (r) => (r as { childSessionId?: string }).childSessionId === childSessionId
-    );
-    if (hit) return hit;
-  }
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const hit = messages[i].subagentRuns?.find(
-      (r) => (r as { childSessionId?: string }).childSessionId === childSessionId
-    );
-    if (hit) return hit;
-  }
-  return undefined;
 }
 
 export const ChatView: React.FC<ChatViewProps> = ({
@@ -177,8 +123,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
   pendingAsks = [],
   onRespondToAsk,
   onAddToast,
-  onInspectSubagentRun,
-  inspectingRunId = null,
   hasEarlierMessages = false,
   loadingEarlier = false,
   onLoadEarlier,
@@ -191,7 +135,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const superAgent = useSuperAgentWorkers(session.id);
 
   // 本会话主控智能体（提前声明：蓝点探测/SSE/设置等多处使用）
-  // useMemo 稳定引用：下游 memberNodeIds/fetchBgJobs 等依赖链才不会每次 render 失稳
+  // useMemo 稳定引用：下游 mentionableBots 等派生链不会每次 render 失稳
   const memberBots = useMemo<BotConfig[]>(
     () => {
       const lead = botMap.get(session.leadBotId);
@@ -319,50 +263,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
     void onSendMessage(`/${cmd.name}`);
   };
 
-  // ===== 会话产物 / 后台进程抽屉 =====
+  // ===== 会话产物抽屉 =====
   const [artifactsOpen, setArtifactsOpen] = useState(false);
-  const [bgJobsOpen, setBgJobsOpen] = useState(false);
   const [artifactsUnseen, setArtifactsUnseen] = useState(false);
-  const [hasRunningBgJobs, setHasRunningBgJobs] = useState(false);
-  const [bgJobs, setBgJobs] = useState<BgJobRecord[]>([]);
-  const [selectedBgJobId, setSelectedBgJobId] = useState<string | null>(null);
 
-  // ===== 代码变更抽屉 =====
-  const [diffDrawerOpen, setDiffDrawerOpen] = useState(false);
   const [insertTextRequest, setInsertTextRequest] = useState<{ text: string; seq: number; replace?: boolean } | null>(null);
-
-  // ===== 右侧抽屉「双栏常驻（Pin 模式）」=====
-  // 偏好持久化到 localStorage；开启后抽屉与主对话并排展示，不再遮挡输入
-  const [drawerPinned, setDrawerPinned] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem('botd-drawer-pinned') === '1';
-    } catch {
-      return false;
-    }
-  });
-  const toggleDrawerPin = useCallback(() => {
-    setDrawerPinned((prev) => {
-      const next = !prev;
-      try {
-        window.localStorage.setItem('botd-drawer-pinned', next ? '1' : '0');
-      } catch {
-        // 隐私模式等场景下静默降级为会话内记忆
-      }
-      return next;
-    });
-  }, []);
-
-  // 宽屏探测：Pin 布局只在 lg(1024px)+ 生效，窄屏自动回退为浮层抽屉
-  const [isWideScreen, setIsWideScreen] = useState(
-    () => typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches
-  );
-  useEffect(() => {
-    const mql = window.matchMedia('(min-width: 1024px)');
-    const onChange = (e: MediaQueryListEvent) => setIsWideScreen(e.matches);
-    mql.addEventListener('change', onChange);
-    return () => mql.removeEventListener('change', onChange);
-  }, []);
-  const drawerPinnedActive = drawerPinned && isWideScreen;
 
   // ===== 扩展 UI（ctx.ui 桥接）=====
   // editor_text 事件预填输入框（mode=set 替换 / paste 追加）；挂件与状态徽标由 extensionUiState 渲染
@@ -459,106 +364,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const sessionIdRef = useRef(session.id);
   sessionIdRef.current = session.id;
 
-  // ===== 子会话内联检视：点击消息内 #?s= 链接或协同面板步骤时打开右侧 SubSessionDrawer，不离开父会话 =====
-  const [inspectingSubSessionId, setInspectingSubSessionId] = useState<string | null>(null);
-
-  // 未拉到真实记录前，用匹配的 SubagentRunRecord 合成兜底 SessionRecord，让抽屉立即打开
-  const inspectingSubSession = useMemo(() => {
-    if (!inspectingSubSessionId) return null;
-    const matchingRun = findSubagentRunByChildSessionId(
-      activeSubagentRuns,
-      messages,
-      inspectingSubSessionId
-    );
-    const leadId = matchingRun?.subagentId || session.leadBotId;
-    return {
-      id: inspectingSubSessionId,
-      title: matchingRun?.task || inspectingSubSessionId,
-      leadBotId: leadId,
-      status:
-        matchingRun?.status === 'running'
-          ? ('running' as const)
-          : matchingRun?.status === 'error'
-            ? ('failed' as const)
-            : ('idle' as const),
-      parentSessionId: session.id,
-      createdAt: matchingRun?.startedAt || session.createdAt,
-      updatedAt: matchingRun?.startedAt || session.updatedAt,
-    };
-  }, [inspectingSubSessionId, activeSubagentRuns, messages, session]);
-
-  // 探测本会话后台进程：成员节点集合派生 join 字符串作稳定依赖，成员不变时 fetchBgJobs 引用不换新
-  const memberNodeIds = useMemo(
-    () =>
-      [...new Set(memberBots.map((b) => b.nodeId).filter(Boolean))],
-    [memberBots]
-  );
-  const memberNodeIdsKey = memberNodeIds.join(',');
-
-  const fetchBgJobs = useCallback(async () => {
-    const capturedSessionId = sessionIdRef.current;
-    const nodeIds = memberNodeIdsKey ? memberNodeIdsKey.split(',') : [];
-    if (nodeIds.length === 0) {
-      setBgJobs([]);
-      setHasRunningBgJobs(false);
-      return;
-    }
-    const results = await Promise.allSettled(
-      nodeIds.map((id) => api.listBgJobs(id, { sessionId: capturedSessionId }))
-    );
-    if (sessionIdRef.current !== capturedSessionId) return;
-    const collected: BgJobRecord[] = [];
-    results.forEach((r) => {
-      if (r.status === 'fulfilled') {
-        collected.push(...r.value);
-      }
-    });
-    setBgJobs(collected);
-    setHasRunningBgJobs(collected.some((j) => j.status === 'running'));
-  }, [memberNodeIdsKey]);
-
-  // 最新回调引用：轮询 interval 与 SSE 订阅经 ref 调用，避免依赖函数引用导致订阅被反复拆建
-  const fetchBgJobsRef = useRef(fetchBgJobs);
-  fetchBgJobsRef.current = fetchBgJobs;
-
   // 切换会话时重置抽屉与状态标记
   const prevMessagesLengthRef = useRef(messages.length);
   useEffect(() => {
     setArtifactsUnseen(false);
-    setHasRunningBgJobs(false);
-    setBgJobs([]);
-    setSelectedBgJobId(null);
-    setInspectingSubSessionId(null);
     prevMessagesLengthRef.current = messages.length;
   }, [session.id]);
-
-  // 会话或成员节点集合变化时立即探测一次后台进程
-  useEffect(() => {
-    void fetchBgJobsRef.current();
-  }, [session.id, memberNodeIdsKey]);
-
-  // 消息条数实际发生变化（包括 callback 消息到达）时拉取后台进程，避免仅引用变化引起的无效请求
-  useEffect(() => {
-    if (messages.length === prevMessagesLengthRef.current) return;
-    prevMessagesLengthRef.current = messages.length;
-    void fetchBgJobsRef.current();
-  }, [messages.length]);
-
-  const hasActiveWork = bgJobs.some((j) => j.status === 'running');
-
-  // 统一轮询：存在运行中后台进程时 5s 轮询，闲置时降频至 30s；
-  // interval 仅依赖 hasActiveWork 布尔值并经 ref 调用最新加载函数，避免被高频重渲染拆建导致降频计时不断重置
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      void fetchBgJobsRef.current();
-    }, pickPollIntervalMs(hasActiveWork));
-    return () => window.clearInterval(interval);
-  }, [hasActiveWork]);
-
-  const runningBgJobs = useMemo(
-    () => bgJobs.filter((j) => j.status === 'running'),
-    [bgJobs]
-  );
 
   // 计算最新上下文水位线百分比
   const latestCtxPct = useMemo(() => {
@@ -627,20 +438,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   };
 
   // ===== 全局开发快捷键 =====
-  // Cmd/Ctrl+. 切换代码变更抽屉；Cmd/Ctrl+Shift+J 切换后台进程抽屉；Cmd/Ctrl+Shift+O 开启新话题
-  // 经 ref 调用最新回调，避免依赖变化导致监听反复拆建；输入框聚焦时同样生效（可随时切换右栏视野）
-  const toggleDiffDrawerRef = useRef(() => setDiffDrawerOpen((v) => !v));
-  toggleDiffDrawerRef.current = () => setDiffDrawerOpen((v) => !v);
-  const toggleBgJobsRef = useRef(() => {
-    setSelectedBgJobId(null);
-    setBgJobsOpen((v) => !v);
-    setHasRunningBgJobs(false);
-  });
-  toggleBgJobsRef.current = () => {
-    setSelectedBgJobId(null);
-    setBgJobsOpen((v) => !v);
-    setHasRunningBgJobs(false);
-  };
+  // Cmd/Ctrl+Shift+O 开启新话题；经 ref 调用最新回调，避免依赖变化导致监听反复拆建
   const newTopicRef = useRef(() => void onNewTopic(session.id));
   newTopicRef.current = () => void onNewTopic(session.id);
 
@@ -648,13 +446,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const onKeyDown = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
-      if (e.key === '.') {
-        e.preventDefault();
-        toggleDiffDrawerRef.current();
-      } else if (e.shiftKey && (e.key === 'J' || e.key === 'j')) {
-        e.preventDefault();
-        toggleBgJobsRef.current();
-      } else if (e.shiftKey && (e.key === 'O' || e.key === 'o')) {
+      if (e.shiftKey && (e.key === 'O' || e.key === 'o')) {
         e.preventDefault();
         newTopicRef.current();
       }
@@ -663,39 +455,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // ===== 代码变更抽屉静默刷新信号 =====
-  // 会话消息数或流式工具状态变化时，打开中的右栏 diff 跟随左栏对话实时刷新
-  const streamingToolSignal = useMemo(
-    () =>
-      streamingStates
-        .map(
-          (s) =>
-            `${s.botId}:${s.tools.map((t) => `${t.toolName}@${t.status}`).join(',')}`
-        )
-        .join('|'),
-    [streamingStates]
-  );
-  const diffRefreshSignal = `${messages.length}:${streamingToolSignal}`;
-
   // 用 ref 避免订阅 effect 依赖抽屉开关导致反复重订阅
   const artifactsOpenRef = useRef(false);
-  const bgJobsOpenRef = useRef(false);
   artifactsOpenRef.current = artifactsOpen;
-  bgJobsOpenRef.current = bgJobsOpen;
 
-  // 全局 SSE：本会话 artifact_created 且抽屉未开时置红点；后台进程完成的回调到达时重新探测
-  // 订阅仅依赖 session.id，经 ref 调用最新 fetchBgJobs，不再每 render 退订重订
+  // 全局 SSE：本会话 artifact_created 且抽屉未开时置红点
   useEffect(() => {
     const unsubscribe = onGlobalEvent((e) => {
       if (e.type === 'artifact_created' && e.sessionId === session.id) {
         if (!artifactsOpenRef.current) setArtifactsUnseen(true);
-      } else if (
-        e.type === 'message_created' &&
-        e.message.sessionId === session.id &&
-        e.message.role === 'callback' &&
-        e.message.content.includes('[Background Job')
-      ) {
-        if (!bgJobsOpenRef.current) void fetchBgJobsRef.current();
       }
     });
     return unsubscribe;
@@ -841,79 +609,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return true;
   }, [session.status, lastUserMessage]);
 
-  // 从实时 activeSubagentRuns 或已落库 messages 中派生抽屉当前查看的最新子代理运行记录：
-  // 后台完成 / resume / stop 更新时，打开的抽屉能实时热更新
-  const inspectingRun = useMemo<SubagentRunRecord | null>(() => {
-    if (!inspectingRunId) return null;
-    // 优先实时流状态（主回合仍在跑）
-    for (const runs of Object.values(activeSubagentRuns)) {
-      const hit = runs.find((r) => r.id === inspectingRunId);
-      if (hit) return hit;
-    }
-    // 已落库消息（后台完成 / resume 更新已持久化）；
-    // 历史「自己挂自己」的镜像 run 可能缺 replyFull/blocks/toolCalls，
-    // 用宿主消息自身内容兑底补全，保证抽屉可完整展示
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
-      const hit = msg.subagentRuns?.find((r) => r.id === inspectingRunId);
-      if (hit) {
-        if (!hit.replyFull && hit.subagentId === msg.senderBotId) {
-          return {
-            ...hit,
-            replyFull: msg.content,
-            blocks: hit.blocks ?? msg.blocks,
-            toolCalls: hit.toolCalls ?? msg.toolCalls,
-          };
-        }
-        return hit;
-      }
-    }
-    return null;
-  }, [inspectingRunId, activeSubagentRuns, messages]);
-
-  // 拦截消息正文内指向子会话的 #?s=sess_... 链接：目标是其他会话时就地打开检视抽屉，
-  // 不跳转离开父会话；按住修饰键（新标签/窗口）时放行浏览器默认行为
-  const handleRootClick = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-      const target = e.target as HTMLElement | null;
-      const anchor = target?.closest?.('a[href]') as HTMLAnchorElement | null;
-      if (!anchor) return;
-      const match = anchor.getAttribute('href')?.match(/^#\?s=(sess_[a-zA-Z0-9_-]+)$/);
-      if (!match) return;
-      if (match[1] === session.id) return;
-      e.preventDefault();
-      setInspectingSubSessionId(match[1]);
-    },
-    [session.id]
-  );
-
-  // 工作流步骤 / 本地子代理运行的统一检视入口（分流逻辑见 resolveRunInspectionTarget）：
-  // 带 childSessionId 的编排步骤打开跨BOT子会话抽屉，否则走本地子代理运行抽屉
-  const handleInspectRun = useCallback(
-    (run: SubagentRunRecord | null) => {
-      const target = resolveRunInspectionTarget(run);
-      if (target.kind === 'none') {
-        onInspectSubagentRun?.(null);
-        return;
-      }
-      if (target.kind === 'subsession') {
-        onInspectSubagentRun?.(null);
-        setInspectingSubSessionId(target.childSessionId);
-        return;
-      }
-      setInspectingSubSessionId(null);
-      onInspectSubagentRun?.(target.run);
-    },
-    [onInspectSubagentRun]
-  );
-
   return (
     <div className="flex-1 flex h-full bg-white dark:bg-zinc-950 overflow-hidden">
       {/* 左侧主聊天列：抽屉固定分栏时右移让位，其余时刻独占全宽 */}
       <div
         className="flex-1 min-w-0 flex flex-col h-full overflow-hidden"
-        onClick={handleRootClick}
       >
       {/* 极简顶栏（h-13 sm:h-14，删掉参会胶囊火车与停止按钮） */}
       <header className="h-13 sm:h-14 px-3 sm:px-4 bg-white dark:bg-zinc-950 border-b border-zinc-200/80 dark:border-zinc-800/80 flex items-center justify-between shrink-0 z-10">
@@ -1161,43 +861,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
             )}
           </div>
 
-          {/* 后台进程抽屉入口：本会话存在 running 进程时蓝点 */}
-          <div className="relative">
-            <button
-              onClick={() => {
-                setSelectedBgJobId(null);
-                setBgJobsOpen(true);
-                setHasRunningBgJobs(false);
-              }}
-              className="h-8 w-8 rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-center transition-colors cursor-pointer"
-              title="后台进程 (Ctrl/Cmd+Shift+J)"
-              aria-label="后台进程"
-            >
-              <SquareTerminal className="w-4 h-4" />
-            </button>
-            {hasRunningBgJobs && !bgJobsOpen && (
-              <span
-                className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-blue-500 pointer-events-none"
-                aria-hidden="true"
-              />
-            )}
-          </div>
-
-          {/* 代码变更抽屉入口：查看 BOT 工作区 Git 净变更 */}
-          <button
-            type="button"
-            onClick={() => setDiffDrawerOpen(true)}
-            className={`h-8 w-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
-              diffDrawerOpen
-                ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400'
-                : 'text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'
-            }`}
-            title="代码变更 (Ctrl/Cmd+.)"
-            aria-label="代码变更"
-          >
-            <FileDiff className="w-4 h-4" />
-          </button>
-
           {/* 更多操作下拉菜单：收纳分享、重命名、定时与触发器、清空、删除等低频操作（绝不与外显图标重复） */}
           <div className="relative" ref={menuRef}>
             <button
@@ -1355,7 +1018,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         highlightMessageId={highlightMessageId}
         onStartEdit={startEdit}
         onForkMessage={handleForkMessage}
-        onInspectSubagentRun={handleInspectRun}
+        onInspectSubagentRun={(run) => superAgent.setSelectedWorkerId(run ? run.id : null)}
         editingMessage={editingMessage}
         canEdit={canEdit}
         hasEarlierMessages={hasEarlierMessages}
@@ -1364,44 +1027,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
         keyboardInset={keyboardInset}
         activeSubagentRunsFor={activeSubagentRuns}
       />
-
-      {/* 后台进程运行中状态条 */}
-      {runningBgJobs.length > 0 && (
-        <div className="px-3 sm:px-4 pt-1.5 max-w-4xl w-full mx-auto">
-          <div
-            onClick={() => {
-              setSelectedBgJobId(runningBgJobs[0].id);
-              setBgJobsOpen(true);
-              setHasRunningBgJobs(false);
-            }}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                setSelectedBgJobId(runningBgJobs[0].id);
-                setBgJobsOpen(true);
-                setHasRunningBgJobs(false);
-              }
-            }}
-            className="flex items-center justify-between gap-2 px-3 py-1.5 bg-blue-50/80 dark:bg-blue-950/40 border border-blue-200/80 dark:border-blue-900/60 rounded-lg text-xs text-blue-800 dark:text-blue-300 hover:bg-blue-100/70 dark:hover:bg-blue-900/50 transition-colors cursor-pointer shadow-2xs"
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
-              <span className="font-medium shrink-0">
-                {runningBgJobs.length} 个后台进程运行中
-              </span>
-              <span className="text-zinc-400 dark:text-zinc-500">·</span>
-              <span className="font-mono text-[11px] truncate text-blue-700/90 dark:text-blue-300/90">
-                {runningBgJobs[0].command}
-              </span>
-            </div>
-            <span className="text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:underline shrink-0 ml-1">
-              查看日志 / 管理 →
-            </span>
-          </div>
-        </div>
-      )}
 
       {/* 人机协同交互卡片：BOT 通过 botd ask 发起的待响应请求，置于输入框上方 */}
       {pendingAsks.length > 0 && (
@@ -1498,42 +1123,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
       )}
       </div>{/* /左侧主聊天列 */}
 
-      {/* 右侧固定抽屉列（Pin 模式）：代码变更优先，其次子代理运行详情；窄屏自动隐藏 */}
-      {drawerPinnedActive && (diffDrawerOpen || Boolean(inspectingRun)) && (
-        <div className="hidden lg:flex w-[440px] xl:w-[540px] shrink-0 border-l border-zinc-200/90 dark:border-zinc-800/90 h-full">
-          {diffDrawerOpen ? (
-            <WorkspaceDiffDrawer
-              isOpen
-              pinned
-              onTogglePin={toggleDrawerPin}
-              sessionId={session.id}
-              bot={directBot || botMap.get(session.leadBotId)}
-              messages={messages}
-              onClose={() => setDiffDrawerOpen(false)}
-              onQuoteFile={(filePath) => {
-                setInsertTextRequest({ text: `\`${filePath}\` `, seq: Date.now() });
-              }}
-              onQuoteDiffLine={(quoteText) => {
-                setInsertTextRequest({ text: `${quoteText} `, seq: Date.now() });
-              }}
-              refreshSignal={diffRefreshSignal}
-            />
-          ) : (
-            <SubagentRunDrawer
-              isOpen
-              pinned
-              onTogglePin={toggleDrawerPin}
-              sessionId={session.id}
-              run={inspectingRun}
-              botMap={botMap}
-              nodeMap={nodeMap}
-              onClose={() => onInspectSubagentRun?.(null)}
-              onToast={(type, message) => onAddToast?.(type, message)}
-            />
-          )}
-        </div>
-      )}
-
       {/* 清空消息 / 删除会话二次确认 */}
       <ConfirmDialog
         isOpen={!!confirmAction}
@@ -1573,25 +1162,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
         botMap={botMap}
         onClose={() => setArtifactsOpen(false)}
       />
-
-      {/* 代码变更抽屉（浮层模式）：查看工作区 Git 净变更，引用文件路径/行插入输入框；Pin 分栏时由右列渲染 */}
-      {!drawerPinnedActive && (
-        <WorkspaceDiffDrawer
-          isOpen={diffDrawerOpen}
-          sessionId={session.id}
-          bot={directBot || botMap.get(session.leadBotId)}
-          messages={messages}
-          onClose={() => setDiffDrawerOpen(false)}
-          onTogglePin={toggleDrawerPin}
-          onQuoteFile={(filePath) => {
-            setInsertTextRequest({ text: `\`${filePath}\` `, seq: Date.now() });
-          }}
-          onQuoteDiffLine={(quoteText) => {
-            setInsertTextRequest({ text: `${quoteText} `, seq: Date.now() });
-          }}
-          refreshSignal={diffRefreshSignal}
-        />
-      )}
 
       {/* 分享对话弹窗 */}
       {shareModalOpen && (
@@ -1635,35 +1205,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
         />
       )}
 
-      {/* 后台进程抽屉 */}
-      <BgJobsDrawer
-        isOpen={bgJobsOpen}
-        sessionId={session.id}
-        memberBotIds={[session.leadBotId]}
-        botMap={botMap}
-        nodeMap={nodeMap}
-        initialJobId={selectedBgJobId}
-        onClose={() => {
-          setBgJobsOpen(false);
-          setSelectedBgJobId(null);
-        }}
-        onToast={(type, message) => onAddToast?.(type, message)}
-      />
-
-      {/* 子代理运行详情抽屉（浮层模式）：与主对话同源的时间线 + Steer/Resume/停止控制；Pin 分栏时由右列渲染 */}
-      {!drawerPinnedActive && (
-        <SubagentRunDrawer
-          isOpen={Boolean(inspectingRunId)}
-          sessionId={session.id}
-          run={inspectingRun}
-          botMap={botMap}
-          nodeMap={nodeMap}
-          onClose={() => onInspectSubagentRun?.(null)}
-          onTogglePin={toggleDrawerPin}
-          onToast={(type, message) => onAddToast?.(type, message)}
-        />
-      )}
-
       {/* Super-agent 后台 Worker 检视抽屉：实时执行时间线 + Steer / Follow-up / Abort 全双工干预台 */}
       <WorkerInspectDrawer
         isOpen={Boolean(superAgent.selectedWorker)}
@@ -1673,20 +1214,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onClose={() => superAgent.setSelectedWorkerId(null)}
         onSteer={superAgent.steerWorker}
         onStop={superAgent.stopWorker}
-      />
-
-      {/* 跨 BOT 子会话内联检视抽屉：不离开父会话就地查看/插话子任务 */}
-      <SubSessionDrawer
-        isOpen={Boolean(inspectingSubSession)}
-        subSession={inspectingSubSession}
-        botMap={botMap}
-        nodeMap={nodeMap}
-        onClose={() => setInspectingSubSessionId(null)}
-        onOpenFullSession={(sid) => {
-          setInspectingSubSessionId(null);
-          window.location.hash = `#?s=${sid}`;
-        }}
-        onToast={(type, message) => onAddToast?.(type, message)}
       />
     </div>
   );

@@ -16,15 +16,6 @@ export async function load(url, context, nextLoad) {
 `)
 );
 
-test('1. pickPollIntervalMs: 活跃任务时 5s 轮询，闲置时降频至 30s', async () => {
-  const chatViewModule = (await import('../apps/web/src/components/ChatView.js' as any)) as {
-    pickPollIntervalMs: (hasActiveWork: boolean) => number;
-  };
-  assert.equal(typeof chatViewModule.pickPollIntervalMs, 'function');
-  assert.equal(chatViewModule.pickPollIntervalMs(true), 5000, '存在 running 后台进程时应为 5000ms');
-  assert.equal(chatViewModule.pickPollIntervalMs(false), 30000, '闲置无运行进程时应降频至 30000ms');
-});
-
 test('2. pickCurrentDirectSession: 严格排除 parentSessionId 子会话与归档会话', async () => {
   const sidebarModule = (await import('../apps/web/src/components/Sidebar.js' as any)) as {
     pickCurrentDirectSession: (sessions: SessionRecord[], botId: string) => SessionRecord | undefined;

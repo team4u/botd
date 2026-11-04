@@ -25,7 +25,7 @@ import {
   getNodeServiceStatus,
 } from '../apps/node/src/service.js';
 import { buildDaemonSpawnSpec } from '../apps/node/src/daemon-launch.js';
-import { createLocalIpcServer } from '../apps/node/src/local-ipc.js';
+import { createDaemonControlServer } from '../apps/node/src/daemon.js';
 import { getDaemonSocketPath } from '../apps/node/src/storage.js';
 import { buildProgram } from '../apps/node/src/cli/program.js';
 import { registerNodeCommands } from '../apps/node/src/cli/commands/node.js';
@@ -625,7 +625,7 @@ describe('Local IPC Integration', () => {
   test('GET /status includes version string', async () => {
     process.env.BOTD_VERSION_OVERRIDE = '0.9.9-test';
 
-    server = createLocalIpcServer({
+    server = createDaemonControlServer({
       identity: {
         nodeId: 'node-test-1',
         name: 'test-node',
@@ -636,7 +636,7 @@ describe('Local IPC Integration', () => {
       startedAt: Date.now(),
       isHubConnected: () => true,
       getHubRpc: () => null,
-      bgManager: {} as any,
+      ipcToken: null,
       syncRegistrationWithHub: async () => {},
       handleShutdown: async () => {},
     });
@@ -668,7 +668,7 @@ describe('Local IPC Integration', () => {
       updatedAt: new Date().toISOString(),
     });
 
-    server = createLocalIpcServer({
+    server = createDaemonControlServer({
       identity: {
         nodeId: 'node-test-upgrade',
         name: 'test-node',

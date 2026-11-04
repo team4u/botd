@@ -5,6 +5,9 @@
  * （`packages/protocol/src/env-rpc.ts` 的 `NodeEnvRpcFunctions`）暴露给 Hub：
  * - 每个 cwd 缓存一个 `NodeExecutionEnv`（cwd 变更即换实例，互不污染）；
  * - `envExec` 以 `withCancel` 派生可取消 Context，`envAbortExec(execId)` 立即终止该命令；
+ * - 每个 `NodeExecutionEnv` 以 `shellEnv`（buildBotShellEnv 结果）为基底：
+ *   PATH 头部挂 ~/.botd/bin（botd CLI 包装器）、写入 BOTD_DATA_DIR，
+ *   AI Worker 在回合内执行 bash 时可直接调用 `botd` 命令；
  * - 输出经 `onExecOutput` 回调流式回传 Hub（birpc/WebSocket 双向通道的另一侧）；
  * - Git Worktree 并发隔离：`envAcquireWorktree` 在 `<repoDir>/.botd-worktrees/<workerId>`
  *   下以 `git worktree add -B botd/<workerId> <path> HEAD` 创建隔离工作树，
@@ -165,6 +168,12 @@ export interface NodeEnvRpcServerOptions {
   defaultCwd: string;
   /** shell 输出流式回调（通常转发回 Hub 的 onEnvExecOutput）。 */
   onExecOutput?: (event: EnvExecOutputEvent) => void;
+  /**
+   * 注入到每个 shell 子进程的环境（Brain in Hub, Hands on Node）：
+   * 通常由 daemon 传入 buildBotShellEnv() 的结果——把 ~/.botd/bin（botd CLI 包装器）
+   * 挂到 PATH 头部并写入 BOTD_DATA_DIR，让 Worker 在回合内直接可用 `botd` 命令。
+   */
+  shellEnv?: Record<string, string | undefined>;
 }
 
 interface RunningExec {
@@ -176,14 +185,14 @@ interface RunningExec {
  * `createNodeEnvRpcServer({ defaultCwd, onExecOutput: (e) => hubNotify.onEnvExecOutput(e) })`
  */
 export function createNodeEnvRpcServer(options: NodeEnvRpcServerOptions): NodeEnvRpcFunctions {
-  const { defaultCwd, onExecOutput } = options;
+  const { defaultCwd, onExecOutput, shellEnv } = options;
 
   const envs = new Map<string, NodeExecutionEnv>();
   const envFor = (cwd?: string): NodeExecutionEnv => {
     const base = cwd ?? defaultCwd;
     let env = envs.get(base);
     if (env === undefined) {
-      env = new NodeExecutionEnv({ cwd: base });
+      env = new NodeExecutionEnv({ cwd: base, ...(shellEnv ? { shellEnv: shellEnv as NodeJS.ProcessEnv } : {}) });
       envs.set(base, env);
     }
     return env;

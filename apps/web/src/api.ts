@@ -7,7 +7,6 @@ import type {
   MessageRecord,
   SessionSseEvent,
   GlobalSseEvent,
-  BgJobRecord,
   PairingResult,
   ModelCatalog,
   ProviderAuthType,
@@ -34,7 +33,6 @@ import type {
   AutomationEventRecord,
   NotificationOutboxRecord,
   SubagentRunRecord,
-  WorkspaceDiffResult,
   WorkspaceSpaceInfo,
 } from '@botd/protocol';
 
@@ -754,83 +752,9 @@ export const api = {
     return request<MessageSearchHit[]>(`/api/messages/search?${params.toString()}`);
   },
 
-  // Background jobs (Node bg-jobs 面板)
-  async listBgJobs(
-    nodeId: string,
-    filter?: { sessionId?: string }
-  ): Promise<BgJobRecord[]> {
-    const query = filter?.sessionId
-      ? `?sessionId=${encodeURIComponent(filter.sessionId)}`
-      : '';
-    return request<BgJobRecord[]>(`/api/nodes/${encodeURIComponent(nodeId)}/bg-jobs${query}`);
-  },
-
-  async getBgJobLogs(
-    nodeId: string,
-    jobId: string,
-    lines?: number
-  ): Promise<{ job: BgJobRecord; logs: string }> {
-    const query = lines !== undefined ? `?lines=${encodeURIComponent(String(lines))}` : '';
-    return request<{ job: BgJobRecord; logs: string }>(
-      `/api/nodes/${encodeURIComponent(nodeId)}/bg-jobs/${encodeURIComponent(jobId)}/logs${query}`
-    );
-  },
-
-  async killBgJob(nodeId: string, jobId: string): Promise<{ job: BgJobRecord }> {
-    return request<{ job: BgJobRecord }>(
-      `/api/nodes/${encodeURIComponent(nodeId)}/bg-jobs/${encodeURIComponent(jobId)}/kill`,
-      { method: 'POST', body: JSON.stringify({}) }
-    );
-  },
-
-  // BOT 工作区代码变更（只读 Git diff）
-  async getWorkspaceDiff(
-    nodeId: string,
-    botId: string,
-    sessionId?: string,
-    workspaceDir?: string
-  ): Promise<WorkspaceDiffResult> {
-    const params = new URLSearchParams();
-    if (sessionId) params.set('sessionId', sessionId);
-    if (workspaceDir) params.set('workspaceDir', workspaceDir);
-    const query = params.toString();
-    return request<WorkspaceDiffResult>(
-      `/api/nodes/${encodeURIComponent(nodeId)}/bots/${encodeURIComponent(botId)}/diff${query ? `?${query}` : ''}`
-    );
-  },
-
   // 节点上可绑定的项目 Space 列表
   async listSpaces(nodeId: string): Promise<WorkspaceSpaceInfo[]> {
     return request<WorkspaceSpaceInfo[]>(`/api/nodes/${encodeURIComponent(nodeId)}/spaces`);
-  },
-
-  // 工作区文件模糊检索（# 文件补全）
-  async listWorkspaceFiles(
-    nodeId: string,
-    botId: string,
-    params?: { sessionId?: string; workspaceDir?: string; query?: string; limit?: number }
-  ): Promise<{ files: string[] }> {
-    const search = new URLSearchParams();
-    if (params?.sessionId) search.set('sessionId', params.sessionId);
-    if (params?.workspaceDir) search.set('workspaceDir', params.workspaceDir);
-    if (params?.query) search.set('q', params.query);
-    if (params?.limit !== undefined) search.set('limit', String(params.limit));
-    const query = search.toString();
-    return request<{ files: string[] }>(
-      `/api/nodes/${encodeURIComponent(nodeId)}/bots/${encodeURIComponent(botId)}/files${query ? `?${query}` : ''}`
-    );
-  },
-
-  // 单文件一键回滚
-  async revertWorkspaceFile(
-    nodeId: string,
-    botId: string,
-    input: { sessionId?: string; workspaceDir?: string; filePath: string }
-  ): Promise<{ ok: boolean; error?: string }> {
-    return request<{ ok: boolean; error?: string }>(
-      `/api/nodes/${encodeURIComponent(nodeId)}/bots/${encodeURIComponent(botId)}/diff/revert`,
-      { method: 'POST', body: JSON.stringify(input) }
-    );
   },
 };
 

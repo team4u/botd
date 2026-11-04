@@ -5,7 +5,7 @@ import type { BotConfig } from '@botd/protocol';
  * # 工作区文件模糊补全：纯过滤排序函数（导出以便单元测试）。
  * 匹配策略按优先级分层，同层内按路径长度升序（短路径更可能是目标）：
  * 1. 文件名精确 / 前缀匹配；
- * 2. 文件名首字母驼峰 / 分隔符缩写匹配（wdd → WorkspaceDiffDrawer.tsx，ci → ChatInput.tsx）；
+ * 2. 文件名首字母驼峰 / 分隔符缩写匹配（mt → MessageTimeline.tsx，ci → ChatInput.tsx）；
  * 3. 路径子串包含匹配；
  * 4. 字符顺序子序列 fuzzy 匹配。
  */

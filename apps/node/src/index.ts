@@ -1,4 +1,4 @@
-export { startDaemon, type DaemonHandle } from './daemon.js';
+export { startDaemon, createDaemonControlServer, type DaemonHandle, type ControlDeps } from './daemon.js';
 export { ensureBotdBinWrapper } from './runtime.js';
 export { createNodeEnvRpcServer } from './env-rpc-server.js';
 export {
@@ -28,8 +28,3 @@ export {
   writeFileTarget,
   seedStorageIfEmpty,
 } from './storage.js';
-export {
-  installResourceToNode,
-  type InstallInput,
-} from './installer.js';
-export { getWorkspaceDiff } from './workspace-diff.js';
