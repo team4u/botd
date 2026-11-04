@@ -949,12 +949,14 @@ export function createDurableSessionMirror(
     if (entry.kind === 'botd.worker-report') {
       const text = workerReportText(entry);
       if (text === undefined) return;
+      // worker 完成回执不是分身的发言，而是系统通知：落 role:'callback'，
+      // 前端以轻量回执卡（默认折叠）呈现，避免与 Router 随后的正式汇总重复刷屏。
       let message;
       try {
         message = db.createMessage({
           id: `msg_dur_${sessionId}_${Number(entry.id)}`,
           sessionId,
-          role: 'assistant',
+          role: 'callback',
           senderBotId,
           ...(senderBotName !== senderBotId ? { senderBotName } : {}),
           content: text,

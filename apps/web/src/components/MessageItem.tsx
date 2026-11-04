@@ -1520,6 +1520,7 @@ interface MessageItemProps {
 
 /** 按回调正文语义推导标题（后端已不再产生 📋 过程消息） */
 export function deriveCallbackTitle(content: string): string {
+  if (content.startsWith('[Worker Completed:')) return '后台任务完成';
   if (content.includes('[Background Job')) return '后台进程完成';
   if (
     content.includes('[Timer:') ||
@@ -1537,6 +1538,15 @@ export function deriveCallbackTitle(content: string): string {
 /** 拆分长回执：首行为 headline（去尾冒号），其余为可折叠详情；正文剥去 [Wake-up] 前缀 */
 export function splitCallbackReceipt(content: string): { headline: string; detailBody: string | null } {
   const normalized = content.startsWith('[Wake-up] ') ? content.slice('[Wake-up] '.length) : content;
+  // Worker 完成回执：headline 只留「workerId · 任务标题」，Summary/Worktree 全文归入折叠详情
+  const workerMatch = /^\[Worker Completed: ([^\]|]+) \| ([^\]]+)\]\n([\s\S]*)$/.exec(normalized);
+  if (workerMatch) {
+    const detail = workerMatch[3].trim();
+    return {
+      headline: `${workerMatch[1].trim()} · ${workerMatch[2].trim()}`,
+      detailBody: detail || null,
+    };
+  }
   const sepIdx = normalized.indexOf('\n\n');
   if (sepIdx < 0) return { headline: normalized, detailBody: null };
   return {
@@ -1564,7 +1574,7 @@ const CallbackMessageCard: React.FC<CallbackMessageCardProps> = ({
   const [expanded, setExpanded] = useState(false);
   const title = deriveCallbackTitle(content);
   const { headline, detailBody } = splitCallbackReceipt(content);
-  const collapsible = Boolean(childSessionId) && detailBody !== null;
+  const collapsible = detailBody !== null;
 
   return (
     <div data-message-id={messageId} className="flex justify-center my-3">
