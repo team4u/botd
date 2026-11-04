@@ -1,30 +1,42 @@
-# 入门指南
+# 快速起步指南
 
-[文档目录](README.md)
+本指南指导用户从零启动 botd 系统，完成节点配对，并体验首次对话与派生后台 Worker。[返回文档目录](README.md)
 
-本指南带你从零启动 botd，完成节点配对，并收到 Bot 的第一条真实回复。
+## 前置环境要求
 
-## 准备环境
-
-需要以下工具：
+系统需要以下环境：
 
 - Node.js ≥ 24.12.0。
 - pnpm 10.34.9。
 - Git。
-- 一个可用的模型账号或 API Key。
+- 可用的模型账户或 API Key。
 
-以下命令适用于 macOS、Linux 或 Windows 的 Git Bash。Windows 节点的 Bash 配置见[配置参考](configuration.md)。
+执行以下命令检查环境版本：
 
 ```bash
 node --version
 corepack enable
 corepack prepare pnpm@10.34.9 --activate
 pnpm --version
+git --version
 ```
 
-本次体验需要两个终端。一个运行 Web 和 Hub，另一个运行节点。
+## 端口约定
 
-## 1. 下载和构建
+本地开发环境严格遵守以下端口分配：
+
+| 服务 | 端口 | 说明 |
+| --- | --- | --- |
+| Web 前端（Vite） | `3001` | 浏览器唯一访问入口。 |
+| Dev Hub 服务端 | `3002` | Hub 后端服务端口，必须通过 `BOTD_PORT=3002` 指定。 |
+
+宿主机 `3000` 端口保留给其他用途。botd 本地开发严禁占用 `3000` 端口。
+
+生产环境部署时，Hub 默认使用 `3000` 端口。
+
+## 1. 下载源码与编译
+
+克隆仓库并安装依赖：
 
 ```bash
 git clone https://github.com/team4u/botd.git
@@ -33,164 +45,153 @@ pnpm install
 pnpm build
 ```
 
-后续命令均在仓库根目录执行。项目从源码构建，不需要全局安装 `botd`。
+项目通过源码工作区编译。用户无需全局安装 npm 包。
 
-## 2. 启动 Web 和 Hub
+## 2. 首次启动 Web 与 Hub
 
-在第一个终端执行：
+开启第一个终端窗口，启动前后端服务：
 
 ```bash
-BOTD_PORT=3002 BOTD_ADMIN_PASSWORD='replace-with-a-long-password' pnpm dev
+BOTD_PORT=3002 BOTD_ADMIN_PASSWORD='my-strong-password' pnpm dev
 ```
 
-先把示例密码换成自己的密码。保持此终端运行。
+该命令启动 Vite（`3001` 端口）与 Hub（`3002` 端口）。用户必须带上 `BOTD_PORT=3002`。
 
-`BOTD_ADMIN_PASSWORD` 只在首次初始化数据库时生效。已有账户需要使用原密码。未设置该变量时，Hub 会在终端打印一次性随机密码。
+打开浏览器访问 `http://localhost:3001`。使用用户名 `admin` 与刚才配置的密码登录。
 
-打开 http://localhost:3001，使用用户名 `admin` 和刚才的密码登录。
+`pnpm dev` 仅启动管理控制台与服务端，不包含任务执行节点。
 
-| 地址 | 用途 |
-| --- | --- |
-| `http://localhost:3001` | 浏览器入口，由 Vite 提供前端 |
-| `http://localhost:3002` | Hub 上游，接收 Vite 代理的 API 和 WebSocket |
+## 3. 创建节点配对码
 
-本机开发固定使用上述端口。生产部署和 Compose 容器默认端口为 3000，见[部署指南](deployment.md)。
+在网页端创建配对凭据：
 
-`pnpm dev` 只启动 Web 和 Hub，不启动执行任务的节点。
+1. 点击左下角「节点与智能体」。
+2. 点击右上角「配对节点」按钮。
+3. 查看弹窗中的 6 位数字配对码。
 
-## 3. 生成配对码
+配对码有效期为 10 分钟。配对完成后配对码自动失效。
 
-按以下步骤在网页中生成配对码：
+## 4. 节点配对与启动
 
-1. 在网页左下角打开「节点与智能体」。
-2. 点击页面右上角的「配对节点」按钮。
-3. 等待弹窗显示配对码。
-
-弹窗会自动生成配对码，并包含以下内容：
-
-- 一次性配对码。6 位数字，大字显示在弹窗中央。
-- 有效期提示。配对码有效期为 10 分钟，使用后立即作废。
-- 「节点名称」输入框。预设值为 `worker-node`，可以改成自己的名字。
-- 完整的 join 命令。点击命令右侧按钮即可复制。
-
-## 4. 配对并启动节点
-
-另开一个终端，进入仓库根目录。将 `123456` 换成网页中的配对码：
+开启第二个终端窗口，进入项目根目录。将 `123456` 替换为网页显示的配对码：
 
 ```bash
+# 节点配对
 pnpm node join http://localhost:3001 --code 123456 --name my-workstation
+
+# 启动节点守护进程
 pnpm node start
 ```
 
-`join` 命令的 `--code` 和 `--name` 都是必填参数。配对成功后，终端输出 `Node successfully paired!` 和节点 ID。节点凭据保存在 `~/.botd/node.json`。
+终端输出 `Node successfully paired!` 表示配对成功。配对凭据保存在 `~/.botd/node.json`。
 
-`pnpm node start` 在前台启动 Node Agent。保持此终端运行。
+`pnpm node start` 在前台启动守护进程。守护进程负责执行具体的模型工具与 Shell 指令。
 
-执行以下命令验证节点状态：
+开启第三个终端验证节点状态：
 
 ```bash
 pnpm node status
 ```
 
-输出会显示 daemon 的 PID、运行时长、节点名，以及 Hub 连接状态。未运行时输出 `daemon: not running`，退出码为 1。
+输出显示守护进程 PID、节点名称与 Hub 连接状态。回到网页端，刷新可确认 `my-workstation` 节点处于在线状态。
 
-回到网页，等待 `my-workstation` 显示在线。
+## 5. 配置模型凭据
 
-首次启动空节点时，Node Agent 会创建默认 Bot「默认助手」，并预置 `cli-helper` 技能。「默认助手」默认使用 `anthropic/claude-sonnet-4-5`。接下来可以换成你有权限使用的模型。
+首次启动空节点时，系统创建内置 Bot「默认助手」。
 
-以后启动节点只需运行 `pnpm node start`。
+用户按以下步骤配置模型：
 
-## 5. 配置模型
+1. 打开 Web 控制台左下角「模型与凭据配置」。
+2. 选择已连接的 `my-workstation` 节点。
+3. 选择模型供应商（如 Anthropic 或 OpenAI），填入 API Key 并保存。
+4. 打开「节点与智能体」页面，编辑「默认助手」。
+5. 选择刚配置的模型供应商与具体模型 ID，保存配置。
 
-1. 打开左下角的「模型与凭据设置」。
-2. 选择刚上线的节点。
-3. 选择模型供应商，按页面提示登录或输入 API Key。
-4. 回到「节点与智能体」，编辑「默认助手」。
-5. 选择该节点可用的供应商和模型，保存配置。
+凭据安全保存在节点的 `~/.botd/.agent/auth.json` 文件中。
 
-凭据保存在所选节点的 `~/.botd/.agent/auth.json`。该文件不提供内容加密。请保护节点账户和备份。
+## 6. 首次对话体验
 
-仅添加另一个供应商的凭据，不会切换「默认助手」的模型。需要同时修改 Bot 的模型配置。
+在 Web 控制台左侧列表点击「默认助手」，进入会话界面。
 
-登录失败、自定义模型和环境变量配置见[模型指南](models.md)。
+向 Bot 发送第一条测试指令：
 
-## 6. 交给 Bot 第一条任务
+> 检查当前工作目录，并输出当前操作系统与 Node.js 版本。
 
-在左侧「智能体」列表点击「默认助手」。网页会打开它的单聊会话。
+Bot 会调用系统工具，并在会话中返回执行结果。
 
-发送以下内容：
-
-> 查看你的工作目录。运行命令，告诉我当前操作系统和 Node.js 版本。
-
-你应该看到工具执行轨迹，随后收到系统信息。模型会自行选择命令，实际调用步骤可能不同。
-
-再用 CLI 验证 Hub 侧的注册结果：
+用户也可通过 CLI 发送测试消息：
 
 ```bash
-pnpm node nodes list
+# 获取默认助手所在会话并发送指令
+pnpm node chat send sess_1 "你好，请汇报当前状态" --wait 60
 ```
 
-该命令从 Hub 拉取节点清单。输出中应能看到 `my-workstation` 和「默认助手」。
+CLI 订阅事件流，等待回复完成后输出内容。
 
-到这里，你已经可以在浏览器里让本机 Bot 完成任务。接下来可以尝试上传一份文件，或创建另一个 Bot。
+## 7. 派生 Worker 体验（Super-agent）
 
-## 在手机上使用
+botd 支持通过派生后台 Worker 执行多步长耗时任务。Worker 享有独立 Git Worktree 隔离与异步事件通知。
 
-Web 界面提供 PWA，可以安装到手机主屏幕。
+### 方式一：在对话中通过自然语言派生
 
-1. 让手机能够访问 Hub 地址。本机开发时，手机与电脑需在同一网络。
-2. 在手机浏览器打开站点地址并登录。
-3. 使用浏览器菜单中的「添加到主屏幕」或「安装应用」。
-4. 从主屏幕图标打开 botd。
+在会话中向「默认助手」发送以下提示词：
 
-安装后，界面以独立窗口运行，不显示浏览器地址栏。公网访问的配置见[部署指南](deployment.md)。
+> 请派生一个后台 Worker，在独立分支上重构项目 README 文档。
 
-## 停止和再次启动
+主控 Bot 会调用派生工具，在后台启动新 Worker。
 
-前台运行时，在各自终端按 `Ctrl+C` 停止进程。停止进程会保留磁盘数据。
+### 方式二：通过 CLI 显式派生 Worker
 
-再次使用时，在第一个终端执行：
+用户可直接使用 `botd workers` 命令派生任务：
 
 ```bash
+# 为指定会话派生带 Worktree 隔离的 Worker
+pnpm node workers spawn sess_1 \
+  --title "文档优化任务" \
+  --task "梳理 docs 目录结构，并补齐快速起步文档" \
+  --worktree
+```
+
+命令立即返回 Worker ID（例如 `wrk_a1b2c3`）。
+
+### 检视与干预 Worker
+
+通过 CLI 检视 Worker 执行进度：
+
+```bash
+# 查看会话下的 Worker 列表与状态
+pnpm node workers list sess_1
+
+# 向执行中的 Worker 追加指令（插话引导）
+pnpm node workers steer sess_1 wrk_a1b2c3 "优先整理 API 文档" --mode steer
+
+# 检视 Worker 的执行历史与记忆回忆链
+pnpm node workers recall sess_1 wrk_a1b2c3
+```
+
+任务完成后，Worker 状态自动变为 `completed`。系统将结果摘要写入回忆链，主控 Bot 可随时检索。
+
+## 停止与重启服务
+
+停止服务：
+
+- 在前台终端按 `Ctrl+C` 停止开发服务。
+- 执行 `pnpm node stop` 停止后台守护进程。
+
+再次启动服务：
+
+```bash
+# 启动 Web 与 Hub
 BOTD_PORT=3002 pnpm dev
-```
 
-在第二个终端执行：
-
-```bash
-pnpm node start
-```
-
-需要后台运行节点时，先停止前台节点，再执行：
-
-```bash
+# 在另一个终端启动 Node 守护进程
 pnpm node start -d
-pnpm node status
 ```
 
-`-d` 让 Node Agent 在后台运行。日志默认写入 `~/.botd/daemon.log`，可用 `--log-file <path>` 指定其他位置。使用 `pnpm node stop` 停止后台节点。
-
-## 遇到问题
-
-| 现象 | 检查方法 |
-| --- | --- |
-| 网页打不开 | 检查两个开发进程的日志，浏览器使用 `3001` |
-| Vite 报端口占用 | 结束占用 `3001` 的旧开发进程，再启动 |
-| 节点显示离线 | 检查第二个终端是否仍运行，用 `pnpm node status` 查看 Hub 连接状态 |
-| 配对码无效 | 重新生成配对码，使用未过期且未使用的码 |
-| 模型提示缺少凭据 | 检查凭据所在节点，以及 Bot 当前选择的供应商 |
-| 登录密码不正确 | 检查是否使用过同一数据库，初始化变量不会覆盖已有密码 |
-
-不要通过删除数据目录来排查普通连接问题。目录中包含凭据、记忆和会话文件。
-
-源码命令不自动加载 `.env` 文件。环境变量需要直接设置在进程环境中。
+`-d` 选项指示守护进程在后台执行。日志默认输出至 `~/.botd/daemon.log`。
 
 ## 下一步
 
-- [用户指南](user-guide.md)：上传文件、切换话题、多角色盲评与子会话协同。
-- [工作区指南](workspace.md)：项目工作区与 Diff 抽屉。
-- [模型指南](models.md)：供应商登录、自定义模型与环境变量。
-- [自动化指南](automation.md)：后台任务、确认卡片、定时触发与事件驱动子会话。
-- [部署指南](deployment.md)：长期运行、Docker 和备份。
-- [安全边界](security.md)：了解工具执行所使用的系统权限。
-- [故障排查](troubleshooting.md)：配对失败、节点离线、模型登录异常等症状的解法。
+- [CLI 手册](cli.md)：学习全部命令行管理指令。
+- [API 参考](api.md)：查阅 REST 路由与 WebSocket 契约。
+- [配置指南](configuration.md)：了解环境变量与数据目录布局。
