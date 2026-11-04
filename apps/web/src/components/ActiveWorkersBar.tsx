@@ -219,7 +219,7 @@ export const ActiveWorkersBar: React.FC<ActiveWorkersBarProps> = ({
     }
   };
 
-  if (workers.length === 0 && !showSpawnForm) return null;
+  if (workers.length === 0 && !onSpawnWorker && !onRunWatchdog && !showSpawnForm) return null;
 
   const activeWorkers = workers.filter((worker) => isWorkerActive(worker.status));
   const completedCount = workers.length - activeWorkers.length;
@@ -238,13 +238,18 @@ export const ActiveWorkersBar: React.FC<ActiveWorkersBarProps> = ({
           >
             <span
               className={`inline-flex items-center gap-1.5 font-medium ${
-                hasActive ? 'text-blue-700 dark:text-blue-300' : 'text-emerald-700 dark:text-emerald-300'
+                hasActive ? 'text-blue-700 dark:text-blue-300' : workers.length === 0 ? 'text-zinc-600 dark:text-zinc-300' : 'text-emerald-700 dark:text-emerald-300'
               }`}
             >
               {hasActive ? (
                 <>
                   <Zap className="w-3.5 h-3.5 shrink-0" />
                   <span>⚡ 全双工常驻 · {activeWorkers.length} 个后台任务运行中</span>
+                </>
+              ) : workers.length === 0 ? (
+                <>
+                  <Zap className="w-3.5 h-3.5 shrink-0" />
+                  <span>后台任务</span>
                 </>
               ) : (
                 <>

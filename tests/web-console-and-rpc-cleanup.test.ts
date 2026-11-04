@@ -78,6 +78,14 @@ test('ActiveWorkersBar SSR: 派发任务与巡检按钮随胶囊一起渲染', (
   assert.match(html, /派发任务/, '「+ 派发任务」按钮文案应渲染');
 });
 
+test('ActiveWorkersBar SSR: 零 Worker 时仍可派发首个任务与巡检', () => {
+  const html = renderWorkersBar({ workers: [] });
+  assert.match(html, /aria-label="派发后台 Worker"/);
+  assert.match(html, /title="运行 Watchdog 巡检"/);
+  assert.doesNotMatch(html, /0 个后台任务已完成/);
+  assert.equal(renderWorkersBar({ workers: [], onSpawnWorker: undefined, onRunWatchdog: undefined }), '');
+});
+
 test('ActiveWorkersBar SSR: 未传入回调时不渲染动作入口（保持既有外观）', () => {
   const html = renderWorkersBar({ onSpawnWorker: undefined, onRunWatchdog: undefined });
   assert.doesNotMatch(html, /派发后台 Worker/, '未提供 onSpawnWorker 时不应渲染派发按钮');

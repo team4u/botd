@@ -737,12 +737,10 @@ export const api = {
   async getWatchdogHealth(
     runPass = false
   ): Promise<{
-    status: string;
-    activeSessions: number;
-    runningWorkers: number;
-    waitingWorkers: number;
-    stalledWorkers: unknown[];
-    failedWorkers: unknown[];
+    healthy: boolean;
+    summary: string;
+    findings: unknown[];
+    interventions: unknown[];
   }> {
     return request(`/api/watchdog/health${runPass ? '?runPass=1' : ''}`);
   },

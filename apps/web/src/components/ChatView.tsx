@@ -139,10 +139,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const runWatchdog = async (): Promise<{ healthy: boolean; summary: string } | null> => {
     try {
       const res = await api.getWatchdogHealth(true);
-      return {
-        healthy: ((res as { interventions?: unknown[] }).interventions?.length ?? 0) === 0,
-        summary: (res as { summary?: string }).summary || '巡检完成',
-      };
+      return { healthy: res.healthy, summary: res.summary || '巡检完成' };
     } catch {
       return null;
     }
@@ -961,19 +958,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       </header>
 
-      {/* Super-agent 全双工常驻胶囊条：后台 Worker / Workflow 运行（或近期完成）时展示，
-          点击胶囊打开检视抽屉，× 快速停止单个后台任务，完全不影响前台输入 */}
-      {superAgent.workers.length > 0 && (
-        <ActiveWorkersBar
-          workers={superAgent.workers}
-          onSelectWorker={(id) => superAgent.setSelectedWorkerId(id)}
-          onStopWorker={(id) => {
-            void superAgent.stopWorker(id);
-          }}
-          onSpawnWorker={spawnBackgroundWorker}
-          onRunWatchdog={runWatchdog}
-        />
-      )}
+      {/* 会话后台任务控制台：零 Worker 时也可派发首个任务。 */}
+      <ActiveWorkersBar
+        key={session.id}
+        workers={superAgent.workers}
+        onSelectWorker={(id) => superAgent.setSelectedWorkerId(id)}
+        onStopWorker={(id) => {
+          void superAgent.stopWorker(id);
+        }}
+        onSpawnWorker={spawnBackgroundWorker}
+        onRunWatchdog={runWatchdog}
+      />
 
       {/* 子会话模式返回父会话横幅 */}
       {session.parentSessionId && (
