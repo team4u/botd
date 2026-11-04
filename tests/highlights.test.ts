@@ -106,6 +106,7 @@ async function fixture(t: TestContext) {
       runTurn: runTurn ?? (async input => ({ replyText: `Reply from ${input.botId}`, modelBadge: 'openai/test-model' })),
       cancelTurn: async () => {},
       resetSession: async () => {},
+      readResourcePackage: async () => ({ files: [], kind: 'skill', id: 'stub' }),
     }, {
       post: data => socket.send(data),
       on: callback => socket.on('message', data => callback(data.toString())),

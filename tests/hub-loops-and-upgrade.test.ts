@@ -212,6 +212,7 @@ const nodeRpcStub = (overrides: {
   runTurn: async (input) => ({ replyText: `Reply from ${input.botId}`, modelBadge: 'x/y' }),
   cancelTurn: async () => {},
   resetSession: async () => {},
+  readResourcePackage: async () => ({ files: [], kind: 'skill', id: 'stub' }),
   ...(overrides.upgradeDaemon ? { upgradeDaemon: overrides.upgradeDaemon } : {}),
 });
 

@@ -200,6 +200,7 @@ async function fixture(t: TestContext): Promise<Fixture> {
       respondProviderLogin: async (input) => ({ id: input.loginId } as ProviderLoginState),
       cancelProviderLogin: async () => {},
       logoutProvider: async () => {},
+      deleteResource: async () => {},
       saveBot: async () => {},
       deleteBot: async () => {},
       readFile: async (target) => files.get(`${target.kind}:${target.id}`) ?? '',
@@ -212,14 +213,21 @@ async function fixture(t: TestContext): Promise<Fixture> {
         files.set(`${kind}:${id}`, `# Installed from ${input.source}\nReal content body.`);
         return { kind: kind as 'skill' | 'extension', id };
       },
-      deleteResource: async (target) => {
-        files.delete(`${target.kind}:${target.id}`);
-      },
       restartDaemon: async () => ({ ok: true as const, pid: 4321 }),
       getCommands: async () => [],
       runTurn: async (input) => ({ replyText: `Reply from ${input.botId}`, modelBadge: 'faux/main' }),
       cancelTurn: async () => {},
       resetSession: async () => {},
+      readResourcePackage: async (target: { kind: 'skill' | 'extension'; id: string }) => ({
+        kind: target.kind,
+        id: target.id,
+        files: [
+          {
+            path: target.kind === 'skill' ? 'SKILL.md' : 'index.ts',
+            content: files.get(`${target.kind}:${target.id}`) ?? '',
+          },
+        ],
+      }),
     }, {
       post: (data) => socket.send(data),
       on: (callback) => socket.on('message', (d) => callback(d.toString())),

@@ -126,6 +126,7 @@ async function createMeshFixture(t: TestContext) {
         runTurn: runTurn ?? (async (input) => ({ replyText: `Reply from @${input.botId}`, modelBadge: 'test/model' })),
         cancelTurn: async () => {},
         resetSession: async () => {},
+        readResourcePackage: async () => ({ files: [], kind: 'skill', id: 'stub' }),
       },
       {
         post: (data) => socket.send(data),

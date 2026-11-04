@@ -135,6 +135,16 @@ async function fixture(t: TestContext) {
       runTurn: runTurn ?? (async input => ({ replyText: `Reply from ${input.botId}`, modelBadge: 'openai/test-model' })),
       cancelTurn: cancelTurn ?? (async () => {}),
       resetSession: async (sessionId, botId) => { resetCalls.push({ sessionId, botId }); },
+      readResourcePackage: async (target: { kind: 'skill' | 'extension'; id: string }) => ({
+        kind: target.kind,
+        id: target.id,
+        files: [
+          {
+            path: target.kind === 'skill' ? 'SKILL.md' : 'index.ts',
+            content: files.get(`${target.kind}:${target.id}`) ?? '',
+          },
+        ],
+      }),
     }, {
       post: data => socket.send(data),
       on: callback => socket.on('message', data => callback(data.toString())),

@@ -144,7 +144,7 @@ async function resolveFromDir(
   if (entry === undefined || !files[entry].trim()) {
     throw new Error(`No usable entry file (.ts/index.ts) found in "${input.source}"`);
   }
-  return { kind, id, files, entry };
+  return { kind, id, files: withNormalizedEntry(files, entry), entry: 'index.ts' };
 }
 
 /**
@@ -235,6 +235,15 @@ async function installNpm(pkgSpec: string, input: LocalInstallInput): Promise<Lo
   }
 }
 
+/**
+ * 入口归一：单文件 / 自定义入口的扩展包落盘后必须存在 `index.ts`，
+ * 否则 getExtensionContent 默认入口 / 动态加载器都解析不到。
+ */
+function withNormalizedEntry(files: Record<string, string>, entry: string): Record<string, string> {
+  if (entry === 'index.ts' || files['index.ts'] !== undefined) return files;
+  return { ...files, 'index.ts': files[entry] };
+}
+
 /** 标准嵌套技能根（Agent Skills 规范布局）。 */
 const NESTED_SKILL_ROOTS = ['skills', path.join('.agents', 'skills'), path.join('.agent', 'skills')];
 
@@ -281,8 +290,11 @@ export async function installResourceLocally(input: LocalInstallInput): Promise<
       return {
         kind,
         id: baseId,
-        files: kind === 'skill' ? { 'SKILL.md': content } : { [fileName]: content },
-        entry: kind === 'skill' ? 'SKILL.md' : fileName,
+        files:
+          kind === 'skill'
+            ? { 'SKILL.md': content }
+            : withNormalizedEntry({ [fileName]: content }, fileName),
+        entry: kind === 'skill' ? 'SKILL.md' : 'index.ts',
       };
     }
     if (stat?.isDirectory()) {

@@ -294,6 +294,7 @@ test('会话运行时，session_status SSE 事件携带 activeBotIds 数组', as
       },
       cancelTurn: async () => {},
       resetSession: async () => {},
+      readResourcePackage: async () => ({ files: [], kind: 'skill', id: 'stub' }),
     },
     {
       post: (data) => socket.send(data),

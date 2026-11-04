@@ -206,6 +206,7 @@ async function createHubFixture(t: TestContext) {
         })),
         cancelTurn: cancelTurn ?? (async () => {}),
         resetSession: async () => {},
+        readResourcePackage: async () => ({ files: [], kind: 'skill', id: 'stub' }),
       },
       {
         post: (data) => socket.send(data),
