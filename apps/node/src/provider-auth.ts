@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
+import type { Models } from '@earendil-works/pi-ai';
 import type { AuthEvent, AuthPrompt } from '@earendil-works/pi-ai';
 import type { ProviderAuthType, ProviderLoginEvent, ProviderLoginPrompt, ProviderLoginState } from '@botd/protocol';
 import { createRuntimeForProvider } from './models.js';
@@ -19,16 +19,16 @@ interface LoginJob {
   secrets: Set<string>;
 }
 export interface ProviderAuthManagerOptions {
-  /** Resolves the runtime used for login/logout; defaults to one that activates
-   *  extension providers (e.g. magpie) on demand for the requested provider. */
-  createRuntime?: (providerId: string) => Promise<ModelRuntime>;
+  /** Resolves the runtime used for login/logout; defaults to the isolated
+   *  node runtime (builtin + models.json providers, file-backed auth.json). */
+  createRuntime?: (providerId: string) => Promise<Models>;
   ttlMs?: number;
 }
 const abortError = () => Object.assign(new Error('Login cancelled'), { name: 'AbortError' });
 
-/** Delegates every provider-specific flow, token exchange and persistence to Pi SDK. */
+/** Delegates every provider-specific flow, token exchange and persistence to the Pi SDK Models collection. */
 export class ProviderAuthManager {
-  private readonly createRuntime: (providerId: string) => Promise<ModelRuntime>;
+  private readonly createRuntime: (providerId: string) => Promise<Models>;
   private readonly ttlMs: number;
   private readonly jobs = new Map<string, LoginJob>();
   private closed = false;

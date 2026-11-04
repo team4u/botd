@@ -296,7 +296,7 @@ lightbulb, info, alert-triangle, alert-circle, check-circle, cpu, database, serv
 Extension = \`~/.botd/extensions/<id>/index.ts\`, exporting a default factory:
 
 \`\`\`typescript
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI } from 'pi'; // 宿主注入的扩展 API 类型
 
 export default function (pi: ExtensionAPI) {
   // ... register capabilities
@@ -355,7 +355,7 @@ return {
 保存为 \`~/.botd/extensions/deploy-guard/index.ts\`：
 
 \`\`\`typescript
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI } from 'pi'; // 宿主注入的扩展 API 类型
 
 export default function (pi: ExtensionAPI) {
   // 1. 拦截高危 bash 命令，弹出结构化审批卡片

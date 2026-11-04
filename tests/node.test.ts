@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { startHub } from '../apps/hub/src/index.js';
-import { resetBotSession } from '../apps/node/src/runtime.js';
+import { ensureBotdBinWrapper, buildBotShellEnv } from '../apps/node/src/runtime.js';
 import type { NodeWithBots, SessionRecord } from '../packages/protocol/src/index.js';
 
 const cli = path.resolve('apps/node/src/cli.ts');
@@ -34,32 +34,25 @@ function command(args: string[], env: NodeJS.ProcessEnv) {
   return { child, done, output: () => output };
 }
 
-test('resetBotSession deletes the session file and is idempotent', async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'botd-reset-test-'));
+test('buildBotShellEnv injects botd session identity and bin dir into child env', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'botd-shellenv-test-'));
   try {
     const dataDir = path.join(dir, 'data');
-    const botId = 'bot-alpha';
-    const sessionId = 'sess-1';
-    const sessionDir = path.join(dataDir, 'bots', botId, 'sessions');
-    await mkdir(sessionDir, { recursive: true });
-    const sessionFile = path.join(sessionDir, `${sessionId}.jsonl`);
-    const original = '{"role":"user","content":"hello"}\n';
-    await writeFile(sessionFile, original, 'utf8');
-
-    await resetBotSession(dataDir, sessionId, botId);
-
-    assert.equal(existsSync(sessionFile), false);
-    const entries = await readdir(sessionDir);
-    assert.equal(entries.length, 0, `session dir must be empty after reset, got: ${entries.join(', ')}`);
-
-    // Idempotent: resetting again without a session file must not throw and
-    // must not leave anything behind.
-    await resetBotSession(dataDir, sessionId, botId);
-    assert.equal((await readdir(sessionDir)).length, 0);
-
-    // Note: the "pendingRuns occupied" guard is not asserted here because
-    // pendingRuns is module-private and only populated during a live turn,
-    // which requires a full model/catalog fixture.
+    const binDir = await ensureBotdBinWrapper(dataDir);
+    const env = buildBotShellEnv(process.env, {
+      dataDir,
+      binDir,
+      sessionId: 'sess-shell',
+      botId: 'bot-shell',
+      botEnv: { CUSTOM_BOT_VAR: 'yes' },
+    });
+    assert.equal(env.BOTD_DATA_DIR, dataDir);
+    assert.equal(env.BOTD_SESSION_ID, 'sess-shell');
+    assert.equal(env.BOTD_BOT_ID, 'bot-shell');
+    assert.equal(env.CUSTOM_BOT_VAR, 'yes');
+    assert.ok(env.PATH?.startsWith(binDir), 'bin dir must be prepended to PATH');
+    // 纯函数约定：不污染全局 process.env
+    assert.equal(process.env.BOTD_SESSION_ID, undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

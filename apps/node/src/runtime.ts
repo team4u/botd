@@ -2,8 +2,9 @@
  * runtime 模块的对外门面（桶文件）：历史导入路径 ./runtime.js 全部继续可用，
  * 实现拆分在 ./runtime/ 下的单一职责模块中。
  *
- * 拆分动机：原 1900+ 行单文件混合了 CLI 包装器、shell 环境、自动化事件解析、
- * 工具摘要脱敏、回合编排、子代理控制六种职责，且 session 事件拼装存在三份平行实现。
+ * Phase 3A 之后 Node 只保留纯环境辅助（CLI 包装器、shell 环境、自动化事件解析、
+ * 工具摘要脱敏、BOT 路径与记忆提示词）；回合执行与子代理编排已随
+ * "Brain in Hub, Hands on Node" 架构迁移到 Hub 的 Durable Runtime。
  */
 
 export { ensureBotdBinWrapper, getTsxLoaderUrl, resolveCliEntry } from './runtime/bin-wrapper.js';
@@ -18,18 +19,16 @@ export {
   extractToolOutputPreview,
   sanitizeToolArgs,
 } from './runtime/tool-preview.js';
-export { executeBotTurn, type BotTurnResult } from './runtime/execute-turn.js';
 export {
-  turnSignature,
-  runTurnWithResilience,
-  clearTurnReceipt,
-} from './runtime/turn-receipt.js';
-export { getBotCommands } from './runtime/commands-bridge.js';
-export { runRegistry, getActiveSessionCount } from './runtime/run-registry.js';
-export { resetBotSession, cancelBotTurn, cancelAllBotTurns } from './runtime/turn-lifecycle.js';
+  resolveEffectiveBot,
+  resolveBotPaths,
+  cleanupEphemeralAgents,
+  type BotData,
+} from './runtime/bot-context.js';
 export {
-  setRuntimeHubRpc,
-  steerBotTurn,
-  stopSubagent,
-  interactSubagent,
-} from './runtime/subagent-control.js';
+  MEMORY_INDEX_MAX_LINES,
+  truncateMemoryIndex,
+  canBotWriteMemory,
+  buildMemoryPromptSection,
+  type MemoryPromptInput,
+} from './runtime/memory-prompt.js';
