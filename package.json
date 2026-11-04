@@ -20,12 +20,14 @@
     "release": "node scripts/release.ts"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@earendil-works/chord": "1.5.0",
     "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-durable": "1.5.0",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.0",
+    "birpc": "^2.9.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.3",
-    "@types/ws": "^8.18.0",
-    "ws": "^8.18.0",
-    "birpc": "^2.9.0"
+    "ws": "^8.18.0"
   }
 }
