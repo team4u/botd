@@ -155,7 +155,15 @@ pnpm test
 pnpm exec tsx --test tests/hub.test.ts
 ```
 
+`pnpm test` 即 `tsx --test tests/*.test.ts`，直接跑在仓库根目录的 `tests/` 下。
+
 CI 在 `.github/workflows/ci.yml` 中按 `install → typecheck → build → test` 顺序执行。
+
+## 发布与文档同步
+
+根 `package.json` 提供了发布快捷方式：`pnpm release` 等价于 `node scripts/release.ts`，参数透传（如 `pnpm release --patch --dry-run`）。发版流程与分发规范见仓库根目录的 `AGENTS.md`。
+
+改动功能时同步更新 `docs/` 下对应文档（命令、环境变量、端口、默认值变更尤其如此），文档与源码不一致时以源码为准修文档。
 
 ## 按问题定位代码
 

@@ -92,7 +92,7 @@ Hub 地址的解析优先级：`--hub` 参数、环境变量 `BOTD_HUB_URL`、`c
 
 ## 节点守护进程
 
-这组命令管理本机 Node Agent。守护进程通过本地 IPC 接口通信：POSIX 系统使用 `<数据目录>/agent.sock`，Windows 使用命名管道。新版守护进程在 `<数据目录>/ipc-token` 写入令牌，CLI 每次请求自动携带。CLI 与守护进程版本不匹配时，请求返回 `401`，此时执行 `botd restart` 或升级到匹配版本。
+这组命令管理本机 Node Agent，通过本地 IPC 接口通信，不经过 Hub、免登录。守护进程使用：POSIX 系统使用 `<数据目录>/agent.sock`，Windows 使用命名管道。新版守护进程在 `<数据目录>/ipc-token` 写入令牌，CLI 每次请求自动携带。CLI 与守护进程版本不匹配时，请求返回 `401`，此时执行 `botd restart` 或升级到匹配版本。
 
 ### start
 
@@ -217,7 +217,7 @@ install <source> [--kind auto|skill|extension] [--id <customId>] [--bot <botIds.
 
 | 来源 | 示例 | 行为 |
 | --- | --- |
-| npm 包 | `npm:@scope/pkg@1.0.0` | 在扩展目录下 `npm install` 该包并重导出其默认导出。带 `pi-package` 关键字与 `pi` 清单（Pi Package manifest）的包会被完整装载 |
+| npm 包 | `npm:@scope/pkg@1.0.0` | 默认装为扩展：在扩展目录下 `npm install` 该包并重导出其默认导出。包声明 Pi Package `pi` 清单的 `pi.extensions` 字段时，改写为相对安装目录的清单路径由加载器完整装载 |
 | Git 仓库 | `git:github.com/owner/repo@ref` | 浅克隆仓库并切到 `ref`（分支 / 标签），识别根目录 `SKILL.md`、`skills/`、`.agents/skills/` 等标准布局 |
 | GitHub 简写 | `owner/repo` 或 `owner/repo@skillName` | 等价 `https://github.com/owner/repo.git`；带 `@skillName` 时只装仓库内同名技能 |
 | GitHub 子路径 | `https://github.com/o/r/tree/main/skills/x` | 克隆后只装子路径，`@ref` 段作为分支 |
@@ -343,7 +343,7 @@ bg kill <jobId>
 
 ### artifact
 
-在会话与节点之间传递产物文件。命令组名 `artifact`，别名 `artifacts`。
+在会话与节点之间传递产物文件。命令组名 `artifact`，别名 `artifacts`。上传下载优先走 Hub HTTP 接口直传（单文件上限 15MB），失败时回落到节点 WebSocket birpc 通道。
 
 #### artifact put
 

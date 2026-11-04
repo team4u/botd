@@ -37,11 +37,18 @@
 | `lastTriggeredAt` | string | 上次触发时间 |
 | `createdAt` | string | 创建时间 |
 
-`eventFilter` 包含三个可选字段，同时指定时必须全部满足：
+`eventFilter`（`TriggerEventFilter`）包含三个可选字段，同时指定时必须全部满足（AND）才放行：
 
 - `source`：事件来源字符串。
 - `types`：允许的事件类型数组。
-- `payloadMatch`：载荷顶层字段的精确匹配表，值为字符串、数字或布尔。
+- `payloadMatch`：载荷字段匹配表，值为字符串、数字或布尔。
+
+`payloadMatch` 的匹配规则：
+
+- 键为载荷顶层字面量键时优先按字面量匹配：值严格相等，或数组包含该值。
+- 键含点号时按路径递归下钻，如 `pull_request.draft`、`repository.owner.login`。中途遇到数组逐项穿透，末段与期望值严格相等（字符串 `"7"` 不匹配数字 `7`）。
+- 路径不存在，或中途遇到标量无法继续下钻，均判不匹配。
+- 请求体不是 JSON 对象时，`payloadMatch` 整体不匹配。
 
 Hub 收到 Webhook 后按以下规则识别来源与类型：
 
@@ -71,7 +78,7 @@ Webhook 载荷文本的提取顺序：JSON 的 `message` 字段、`text` 字段�
 
 1. 子会话标题为 `[自动任务] <触发器名称>`，主控 Bot 就是触发器绑定的 Bot。
 2. 父会话收到一条派生通知。
-3. Webhook 原始载荷先存入子会话产物 `event_<eventId>.json`。子会话首轮即可从 `./inbox/` 下载。
+3. Webhook 原始载荷先存入子会话产物 `event_<eventId>.json`。子会话首轮即可从 `./inbox/` 下载。工作区目录结构见[工作区指南](workspace.md)。
 4. 初始消息不拼接原始载荷，只含事件元数据和触发器提示词。提示词要求 Bot 把载荷当作外部不可信数据读取，防止提示词注入。
 5. 子会话完成后，父会话收到结果回调，包含子会话最后一条回复的摘要。
 6. 子会话执行期间新产出的产物以引用方式回传父会话，回调消息附带产物列表。
@@ -183,7 +190,7 @@ echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET"
 
 配置 `eventFilter` 后，不匹配的事件被记录并跳过，返回 `skipped: true` 和 `reason: "filter_mismatch"`。被跳过的事件不消耗限流窗口。
 
-CLI 用 `--event-types` 传逗号分隔的类型列表。网页表单的「事件类型过滤」输入框同样只填类型列表。
+CLI 用 `--event-types` 传逗号分隔的类型列表，`--event-source` 限定来源，`--match key=value` 传载荷匹配（可重复，值自动识别布尔与数字，支持点号路径）。网页表单的「事件类型过滤」输入框同样只填类型列表。
 
 ### 事件收件箱
 
@@ -225,9 +232,9 @@ POST /api/triggers/<triggerId>/run
 4. `once` 类型必须带 `delaySeconds` 或可解析的 `runAt`。
 5. `dispatchMode` 只接受 `append` 或 `subsession`。
 
-`PATCH` 可更新 `enabled`、`name`、`prompt`、`cronExpr`、`runAt`、`dispatchMode`、`skillId`、`secret`。`skillId` 和 `secret` 传 `null` 清除。`kind`、`botId`、`token` 不可改。
+`PATCH` 可更新 `enabled`、`name`、`prompt`、`cronExpr`、`runAt`、`dispatchMode`、`skillId`、`secret`、`eventFilter`。`skillId`、`secret` 和 `eventFilter` 传 `null` 清除。`kind`、`botId`、`token` 不可改。
 
-会话移除某个 Bot 成员时，Hub 自动停用绑定该 Bot 的全部触发器。
+触发器在每次触发时机（Webhook 请求到达、cron/once 巡检）校验目标：会话已删除、归属者已变，或目标 Bot 已不可在该会话运行（如 Bot 被删除）时，Hub 自动停用该触发器，Webhook 请求返回 `403`。删除会话会连同删除其全部触发器。
 
 ## CLI 命令
 
@@ -263,6 +270,8 @@ botd triggers create <sessionId> \
 | `--skill <skillId>` | 触发时以 `/skill:<id>` 前缀调用技能 |
 | `--secret <secret>` | HMAC 验签密钥，仅 `--kind webhook` |
 | `--event-types <csv>` | 逗号分隔的事件类型，仅 `--kind webhook` |
+| `--event-source <source>` | 事件来源过滤，如 `github`，仅 `--kind webhook` |
+| `--match <key=value>` | 载荷字段匹配，可重复，如 `--match pull_request.draft=false`，仅 `--kind webhook` |
 
 删除触发器：
 
@@ -309,7 +318,7 @@ botd triggers create "$BOTD_SESSION_ID" \
 
 Webhook 触发器卡片额外展示专属 URL 和现成的 curl 命令，均可一键复制。URL 以当前浏览器地址拼接，本机开发时网页在 3001 端口，Hub 在 3002 端口，生产默认 3000。
 
-「事件收件箱」折叠区列出 Webhook 最近收到的事件，含来源、类型、摘要和时间。子会话模式的事件附带「查看子会话」链接。
+「事件收件箱」折叠区列出 Webhook 最近收到的事件，含来源、类型、摘要和时间。子会话模式的事件附带「查看子会话」链接。出站通知通道（Telegram、Slack、飞书等）在同弹窗的「通知通道」标签页配置，见[外部渠道](channels.md)。
 
 ## 轮询间隔
 

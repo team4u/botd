@@ -206,7 +206,8 @@ Bot 有独立工作目录和模型上下文，但没有操作系统沙箱。工�
 1. 创建 `webhook` 类型触发器时，Hub 生成随机 token 拼入 URL。
 2. 可以为触发器配置 secret。配置后，请求必须携带匹配的 HMAC 签名头（`x-hub-signature-256`），校验用常数时间比较。
 3. Hub 按 5 分钟窗口去重，按触发器限最小触发间隔 10 秒。
-4. 未配置 secret 时，URL 本身就是完整凭据。对外公开的触发器应配置 secret。
+4. subsession 模式下，原始 payload 落盘为子会话产物 `./inbox/event_<id>.json`，不拼进提示词；初始消息只携带干净的元数据头，并显式声明该文件应视为外部不可信数据，降低提示注入面。
+5. 未配置 secret 时，URL 本身就是完整凭据。对外公开的触发器应配置 secret。
 
 ### 出站通知
 
@@ -217,7 +218,7 @@ Bot 有独立工作目录和模型上下文，但没有操作系统沙箱。工�
 ### 外部确认链接
 
 1. Bot 发起确认请求且会话配置了出站通道时，Hub 生成免登录应答链接。
-2. 链接中的 token 由 `BOTD_ASK_SECRET` 对 `sessionId:askId` 做 HMAC-SHA256 签名得出。
+2. 链接中的 token 由 `BOTD_ASK_SECRET` 对 `sessionId:askId` 做 HMAC-SHA256 签名得出，服务端用 `timingSafeEqual` 常数时间比对，防止时序侧信道逐字节猜解。
 3. 密钥解析顺序：环境变量 `BOTD_ASK_SECRET` 优先，其次 `settings` 表中持久化的值，两者都没有时自动生成 64 位随机 hex 并落库。
 4. 多实例部署时应显式统一设置 `BOTD_ASK_SECRET`，否则各实例密钥不一致，链接互不通用。
 
@@ -236,7 +237,9 @@ Hub 默认监听 `0.0.0.0`，可用 `BOTD_HOST` 收紧。直接暴露公网前�
 
 1. 常规 `/api/*` 请求体上限 1MB；Webhook 上限 64KB；产物上传按上限放宽。
 2. 内部错误不外泄原文，统一返回通用 500 信息，原文仅记录在 Hub 日志。
-3. 节点升级只信任官方 registry 或显式设置的 `BOTD_NPM_REGISTRY`。
+3. 节点升级只信任官方 registry 或显式设置的 `BOTD_NPM_REGISTRY`：Hub-RPC 下发的 registry 地址不在白名单内时直接丢弃，被攻破或配置错误的 Hub 无法把节点指向攻击者仓库。
+4. 供应链完整性：升级 tarball 下载后计算 sha512，与 registry 元数据中该版本的 `dist.integrity` 比对，不一致则中止升级并清理临时目录（依赖包未逐一锁定，为已知残余风险）。
+5. 防降级：不加 `--force` 时拒绝升级到比当前更低的版本，避免旧漏洞版本被回填。
 
 具体部署步骤见[部署指南](deployment.md)，环境变量清单见[配置说明](configuration.md)。
 

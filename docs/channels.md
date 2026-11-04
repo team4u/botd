@@ -30,6 +30,8 @@
 
 失败回调的判定：消息内容含 `❌`、`失败`、`failed` 或 `error`，忽略大小写。failed 会话指会话状态为 `failed`。
 
+另有一条与策略无关的静默规则：助手回复以 `[PASS]` 或 `[IGNORE]` 开头时（多 Bot 接力的路过原语），不向任何通道推送，避免噪音通知。
+
 ### 绑定关系
 
 创建通道的请求发到 `POST /api/sessions/:id/channels`。Hub 把会话 ID 存入通道记录的 `sessionId` 字段。之后该会话的事件自动推送到此通道，无需其他绑定操作。
@@ -188,6 +190,15 @@ X-Botd-Signature: sha256=<HMAC-SHA256(请求体原始字节, secret) 的 hex>
 ## 确认交互与签名回调
 
 四个渠道的确认流程一致：Hub 生成带签名的链接，推送到渠道；用户点链接，浏览器直接请求 Hub 完成确认。
+
+### UI ask 的降级摘要
+
+ask 的预览为生成式 UI（`previewType: 'ui'` 的 `BotdUiSpec`）时，Hub 在推送前从 Spec 提取文本渠道可消费的降级内容：
+
+- Callout 提取为 `[标题] 正文`，KeyValueList 提取为 `key: value`，表单控件（TextInput / Select / Switch / CheckboxGroup）提取为 `[表单项] 标签`；摘要行拼在 prompt 下方，最多保留前 6 行。
+- ask 未提供 options 但 Spec 含 `Button` 且无表单项时（纯按钮审批卡），用按钮文案（去重）补齐选项，每个选项生成免登录一键确认链接。
+- Spec 含表单项时，免登录链接无法携带表单 state，改为附上网页填写入口（`{baseUrl}/#?s={sessionId}`），引导到网页完成交互。
+- 非法 Spec 静默降级：不提取摘要，按原有 options 渲染。
 
 ### 链接与签名
 

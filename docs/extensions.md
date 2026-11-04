@@ -30,6 +30,7 @@ export default function (pi: ExtensionAPI) {
 | 事件钩子（拦截 / 注入上下文） | `pi.on('tool_call', handler)` 等 | 回合生命周期各阶段 |
 | 模型可调用的工具 | `pi.registerTool({...})` | Bot 的工具循环 |
 | 斜杠命令 | `pi.registerCommand(name, {...})` | 输入框 `/` 命令浮层 |
+| 自定义模型 provider | `pi.registerProvider(...)` | Bot 的模型供应商清单 |
 | Web 交互界面 | `ctx.ui.*` + `details.ui` | 网页会话界面 |
 
 文件布局约定：
@@ -214,6 +215,8 @@ UI 能挂到网页的三个位置（插槽思想），完整代码示例见[生�
 npm 来源的包若在其 `package.json` 中声明了 `pi` 清单（`{ "pi": { "extensions": [...] } }`，即标准 Pi Package），botd 会完整装载其声明的入口，而不是只重导出默认导出——Pi 社区发布的扩展包可以直接装。
 
 ### 一键绑定
+
+网页安装界面的「启用到本节点智能体」多选区提供一键挂载：保存扩展后，Hub 自动 diff 前后选中集合，为各 Bot 挂载或解绑 `enabledExtensions`，无需逐个执行 `bots update`。
 
 `--bot` 参数在安装后立即把资源写入指定 Bot 的启用清单，省去二次操作：
 

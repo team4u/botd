@@ -114,10 +114,10 @@ curl -fLO https://raw.githubusercontent.com/team4u/botd/main/deploy/docker-compo
 # 配置管理员密码
 echo 'BOTD_ADMIN_PASSWORD=your-password' > .env
 # 固定版本启动（推荐）
-BOTD_VERSION=1.0.0 docker compose -f docker-compose.ghcr.yml up -d
+BOTD_VERSION=<version> docker compose -f docker-compose.ghcr.yml up -d
 ```
 
-也可省略 `BOTD_VERSION` 使用 `latest` 标签。生产环境建议固定到具体版本（如 `1.0.0` 或 `1.0`），避免 `latest` 在重启时意外跨版本升级。
+也可省略 `BOTD_VERSION` 使用 `latest` 标签。生产环境建议固定到具体版本（如 `1.0.0` 或 `1.0`），避免 `latest` 在重启时意外跨版本升级。`<version>` 取官方 Release 对应的镜像标签。
 
 镜像随官方 Release 自动构建并推送，版本号与 Release 一致。服务结构、健康检查、数据卷与本地 build 模式完全一致：
 
@@ -545,6 +545,23 @@ Hub 收到 `SIGTERM` 或 `SIGINT` 后：
 
 - 目标版本低于当前版本时默认拒绝，`--force` 可覆盖。
 - 目标与当前版本相同时直接返回 `upgraded: false`，不做变更。
+
+### 节点自动升级
+
+守护进程支持周期性自动升级，默认关闭。设 `BOTD_AUTO_UPGRADE` 为非空值（如 `1`）开启；`BOTD_AUTO_UPGRADE_INTERVAL_MS` 控制检查间隔，默认 6 小时，下限 60 秒。
+
+自动升级完全复用手动升级链路：
+
+1. 检查 registry，无更新版本则本次跳过。防降级规则同样生效：非 `--force` 拒绝升到更旧版本。
+2. 下载后校验 tarball sha512 与 registry 发布的 `dist.integrity` 一致。
+3. 安装到 `releases/` 暂存目录后原子切换。
+4. 排空：等待活动回合数归零，上限 30 秒；超时放弃本次升级。
+5. 金丝雀验证：新进程 15 秒内上报 `botd:daemon-ready` 才算成功。
+6. 失败自动回滚旧版本，并将该版本封禁 30 分钟（`BOTD_UPGRADE_BLOCK_COOLDOWN_MS`）。
+
+检查不依赖 Hub 连接，节点离线也可自动升级。升级成功后自动替换进程，无需人工重启。
+
+Docker 部署注意：容器内自升级不符合不可变镜像原则，建议关闭自动升级，随镜像版本一起升级。
 
 ### Hub 升级（源码）
 

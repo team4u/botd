@@ -49,8 +49,11 @@ Docker Compose 的 `--env-file .env` 只提供变量替换值。只有 Compose `
 | 环境变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `BOTD_DATA_DIR` | `~/.botd` | 节点数据目录；CLI 的 `--data-dir` 优先 |
+| `BOTD_CODE_DIR` | `~/code` | Space 项目扫描根：其下每个一级 Git 目录是一个可绑定的项目 |
+| `BOTD_SKILLS_DIRS` | 无 | 在默认搜索根之外追加技能目录，多值用系统路径分隔符（POSIX `:`、Windows `;`）分隔 |
 | `BOTD_API_KEY_<PROVIDER>` | 无 | 指定供应商的 API Key，优先于节点已保存的凭据 |
 | `BOTD_AUTO_COMPACT` | 启用 | 仅设为 `0` 时关闭回合的自动上下文压缩 |
+| `BOTD_CROSS_BOT_TIMEOUT_SECONDS` | `600` | 跨 Bot 工作流等待每个子会话的超时，单位秒 |
 | `BOTD_DAEMON_LOG` | `<数据目录>/daemon.log` | 守护进程日志；`botd start -d --log-file` 优先 |
 | `BOTD_SHELL_PATH` | 系统默认 shell | 非 Windows 后台任务使用的 shell 路径 |
 | `BOTD_BASH_PATH` | 自动查找（见下文） | Windows 上 Bash 的显式路径 |
@@ -80,7 +83,7 @@ Docker Compose 的 `--env-file .env` 只提供变量替换值。只有 Compose `
 | `BOTD_DAEMON_BIND_RETRY_MS` | `0`；替代进程 `20000` | 本地 IPC 地址绑定冲突的重试窗口，单位毫秒 |
 | `BOTD_VERSION_OVERRIDE` | 无 | 覆盖节点上报的版本号，供升级机制使用 |
 
-读取位置：`apps/node/src/storage.ts`、`apps/node/src/daemon.ts`、`apps/node/src/models.ts`、`apps/node/src/windows-shell.ts`、`apps/node/src/bg-jobs.ts`、`apps/node/src/runtime/execute-turn.ts`、`apps/node/src/upgrader.ts`、`apps/node/src/daemon-launch.ts`。
+读取位置：`apps/node/src/storage.ts`、`apps/node/src/workspace-diff.ts`、`apps/node/src/cross-bot/session.ts`、`apps/node/src/daemon.ts`、`apps/node/src/models.ts`、`apps/node/src/windows-shell.ts`、`apps/node/src/bg-jobs.ts`、`apps/node/src/runtime/execute-turn.ts`、`apps/node/src/upgrader.ts`、`apps/node/src/daemon-launch.ts`。
 
 ## CLI 与工具环境侧
 
@@ -98,7 +101,7 @@ Docker Compose 的 `--env-file .env` 只提供变量替换值。只有 Compose `
 
 - `login` 把会话配置保存到 `<数据目录>/cli.json`（0600 权限）。仅显式传 `--save-credentials` 才保存明文密码。
 - `BOTD_ADMIN_PASSWORD` 一名两用：Hub 用它自举管理员，CLI 用它作登录密码。作用取决于读取它的进程。
-- `botd ask --ui-schema` 打印生成式 UI 目录。内容来自代码常量 `BOTD_UI_CATALOG_VERSION`（`botd.v1`）、`BOTD_UI_COMPONENT_TYPES`（15 种组件）和 `BOTD_UI_SCHEMA_DOC`。它们是代码标识符，不是环境变量。
+- `botd ask --ui-schema` 打印生成式 UI 目录。内容来自代码常量 `BOTD_UI_CATALOG_VERSION`（`botd.v1`）、`BOTD_UI_COMPONENT_TYPES`（17 种组件，含 `BarList`、`Table`）和 `BOTD_UI_SCHEMA_DOC`。单个 UI 规格上限 64KB、64 个元素、树深 6。它们是代码标识符，不是环境变量。
 
 读取位置：`apps/node/src/cli/context.ts`、`apps/node/src/cli/commands/auth.ts`、`apps/node/src/cli/commands/node.ts`。
 
@@ -173,7 +176,8 @@ Hub 侧（`BOTD_HUB_DATA_DIR`，默认 `~/.botd`）：
     ├── sessions/<sessionId>.jsonl
     └── workspace/          # 子代理共享主控 Bot 的工作区
         ├── inbox/          # 回合附件与上游产物落盘处
-        └── .bg/<jobId>.log # 后台任务日志
+        ├── .bg/<jobId>.log # 后台任务日志
+        └── .workflows/     # 跨 Bot 工作流的脚本副本与断点日志
 ```
 
 要点：

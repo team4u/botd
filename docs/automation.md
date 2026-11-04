@@ -54,7 +54,7 @@ botd bg kill bg_example
 
 行为细节：
 
-- 日志保存在 Bot 工作区的 `.bg/<jobId>.log`。`bg logs` 从文件尾部读取，默认 100 行。
+- 日志保存在 Bot 工作区的 `.bg/<jobId>.log`。`bg logs` 从文件尾部读取，默认 100 行，单次最多回读尾部 64KB，超大日志不会整体加载。
 - `bg kill` 终止整个进程树。进程忽略 SIGTERM 时，自动升级为 SIGKILL。
 - 终止无法确认时，任务保持 `running`。连续 3 次确认失败后，任务标记为 `failed`。
 - 手动终止不触发唤醒回调。
@@ -83,7 +83,7 @@ botd wake --message '日志分析完成，报告保存在工作目录。'
 | `--message <msg>` | 回调消息内容，必填 |
 | `--reply-to <botId>` | 后续接力目标，必须满足会话成员规则 |
 | `--no-turn` | 只写回调，不触发模型回答 |
-| `--delay <duration>` | 延时唤醒，例如 `30s`、`15m`、`2h`、`1d` |
+| `--delay <duration>` | 延时唤醒，支持 `30s`、`15m`、`2h`、`1d` |
 
 稍后提醒 Bot 检查进度：
 
@@ -91,7 +91,7 @@ botd wake --message '日志分析完成，报告保存在工作目录。'
 botd wake --delay 15m --message '检查刚才任务的进度。'
 ```
 
-延时请求保存为 Hub 的一次性触发器，命令输出 `scheduledTriggerId`。它不依赖终端里的 `sleep`。实际触发时间仍取决于 Hub 轮询、节点连接和会话状态。
+延时请求在 Hub 侧创建一个持久的一次性触发器（名称为「延时唤醒 (<botId>)」），命令输出 `scheduledTriggerId`。它不依赖终端里的 `sleep`，也不依赖命令所在进程存活；Hub 重启后触发器仍在，到点照常触发。实际触发时间仍取决于 Hub 轮询、节点连接和会话状态。一次性触发器的调度细节见[触发器指南](triggers.md)。
 
 ## 在脚本中等你确认
 
@@ -122,7 +122,13 @@ botd artifact put ./check-report.md --message '检查报告已生成。'
 `ask` 发出后，用户可以从两个入口作答：
 
 1. **网页卡片**。Hub 向会话广播 `interaction_request` 事件，网页渲染交互卡片。用户提交后，命令立即收到答案。
-2. **外部通知通道**。会话配置了订阅 `ask_request` 的通知通道时，Hub 推送确认请求。消息为每个选项附一条免登录回调链接，指向 `/api/public/asks/:askId/respond`。点击链接等同作答。
+2. **外部通知通道**。会话配置了订阅 `ask_request` 的通知通道时（含子会话向上继承父会话通道，同通道去重），Hub 推送确认请求。消息为每个选项附一条免登录回调链接，指向 `/api/public/asks/:askId/respond`。点击链接等同作答。
+
+外部渠道降级的全链路：
+
+1. 会话命中启用通道后，若 ask 预览是 `botd.v1` UI Spec，Hub 从 `BotdUiSpec` 提取降级摘要（Callout、键值列表、表单项标签）与按钮文案；纯按钮审批卡即使未传 `--options` 也能从 UI 按钮补齐选项，含表单项的卡片则引导到网页填写。
+2. 每个选项生成一条 HMAC 签名的免登录一键确认 URL（`GET`/`POST` `/api/public/asks/:askId/respond`）。Hub 用 `timingSafeEqual` 验签，且答案强制在选项内，防止伪造提交任意文本。签名细节见[外部渠道](channels.md)。
+3. 通知先写入持久化 Outbox 再投递：首次立即投，失败按指数退避重试（5 秒起步，上限 5 次 / 300 秒封顶），超过上限标记 `dead`。
 
 两条路径回答同一个待确认请求。先到先生效。
 
@@ -162,7 +168,7 @@ botd ask '是否应用这份补丁？' \
 
 预览内容上限为 256 KiB。`--file` 按扩展名识别类型：`.md` 为 markdown，`.diff` 和 `.patch` 为差异，`.ui.json` 为 UI 规格。`--stdin` 从管道读取预览。
 
-`--ui` 渲染交互式 UI 卡，`--ui-schema` 打印 botd.v1 UI 规格文档。详见[生成式 UI](generative-ui.md)。
+`--ui` 渲染交互式 UI 卡，`--ui-schema` 打印 botd.v1 UI 规范文档与 17 个组件的完整目录。详见[生成式 UI](generative-ui.md)。
 
 `ask` 是显式工具，不是危险操作的自动拦截器。需要审批的流程必须主动调用它。权限边界见[安全边界](security.md)。
 
@@ -191,12 +197,12 @@ botd artifact pull art_example -o ./incoming-report.md
 
 ## 事件收件箱
 
-Webhook 触发器每次收到请求，Hub 都记录一条自动化事件。事件构成会话的自动化运行账本。
+Webhook 触发器每次收到请求，Hub 都记录一条自动化事件。事件构成会话的自动化运行账本。查询与去重细节见[触发器指南](triggers.md)。
 
 - 查询接口为 `GET /api/sessions/:id/automation-events`，按时间倒序，默认返回 100 条，可用 `limit` 参数调整。
 - 事件记录包含来源（`source`）、事件类型（`eventType`）、去重键（`dedupKey`）、摘要（`summary`）。
 - 子会话派发模式下，记录还包含子会话 ID（`childSessionId`）和载荷产物 ID（`payloadArtifactId`）。
-- Webhook 原始载荷保存为 `event_<id>.json` 产物，投递到目标会话的 `workspace/inbox/`。子会话的初始消息只引用该文件，不拼接不可信载荷，防止提示词注入。空请求体不落盘。
+- Webhook 原始载荷保存为 `event_<id>.json` 产物，投递到目标会话的 `workspace/inbox/`。子会话的初始消息只引用该文件，不拼接不可信载荷，防止提示词注入。空请求体不落盘。工作区目录结构见[工作区指南](workspace.md)。
 
 ### 区分自动化回合与手动回合
 
@@ -255,7 +261,19 @@ botd sessions subsessions "$BOTD_SESSION_ID"
 
 目标 Bot 必须属于调用者。委派接口不能直接使用其他用户共享的 Bot。子会话事件向上继承父会话的通知通道配置，同一通道去重，不重复推送。
 
+多个兄弟子会话并行时存在 Barrier 汇合：先完成的子会话只落库回调消息与回传产物，不唤醒父会话；等最后一个子会话收敛后，才以 `@<主控 Bot>` 提及统一唤醒父会话主控 Bot 汇总。
+
 同机的多角色协同（并发盲评、流水线、对抗打磨）不需要子会话。主控 Bot 直接通过内置 `Agent` / `SubagentWorkflow` 工具调度子代理。详见[用户指南](user-guide.md)。
+
+### 跨 Bot 工作流断点续跑
+
+`SubagentWorkflow` 编排跨 Bot 工作流时，每次运行把脚本副本和 `.workflow.jsonl` 断点日志落到 `<workspace>/.workflows/`。某步失败或超时后，用返回的 `runId` 续跑：
+
+```js
+SubagentWorkflow({ scriptPath: "<workspace>/.workflows/wf_xxx.mjs", resumeFromRunId: "wf_xxx" })
+```
+
+已完成的步骤从日志缓存回放，不重新执行；后台跑完的步骤同样被复用；从第一个失败或变更的步骤起 live 重跑。Hub 还会在工作区写入 `latest-unfinished.json` 断点标记，失败后主 Bot 的下一回合自动收到含 `runId` 的续跑提示，成功完成后标记自动清除。
 
 ## 定时执行与 Webhook
 
@@ -310,12 +328,19 @@ botd triggers create "$BOTD_SESSION_ID" \
 - `--dispatch append` 是默认值，唤醒目标会话。`--dispatch subsession` 为每次事件派生子会话，标题为 `[自动任务] <名称>`。Webhook 响应附带 `eventId` 与 `childSessionId`。
 - `--skill <skillId>` 在触发时以 `/skill:<id>` 前缀调用技能。
 - `--event-types` 只接受匹配的事件类型。GitHub 事件自动拼接 action，如 `pull_request.opened`。不匹配的事件记录后跳过。
+- `--event-source` 限定事件来源（如 `github`）；`--match key=value` 按载荷字段过滤（可重复，支持点号路径如 `pull_request.draft=false`）。三项条件同时指定时全部满足才触发。被过滤事件不消耗限流窗口。
 - `--secret` 要求请求携带 `x-hub-signature-256` 签名头，即 `sha256=<hmac>`。签名不符返回 `401`。
 
 Webhook 请求还有两条保护：
 
 - 去重：`X-Botd-Dedup` 或 `X-GitHub-Delivery` 头作为去重键。内存短窗口加 `automation_events` 唯一索引双重去重，跨 Hub 重启仍生效。
 - 限流：同一 token 最小触发间隔 10 秒，超出返回 `429`。事件过滤不匹配不消耗限流窗口。
+
+### 静默跳过原语
+
+触发器派生的子会话以 `[PASS]` 或 `[IGNORE]` 开头（后接空白、标点或结尾）的回复收敛，且没有新产物时，视为静默跳过：不向父会话投递 callback 消息。有新产物时产物仍回传（避免丢失交付物引用），callback 恢复投递。
+
+该原语同时作用于外部通知与会话内接力：任何助手回复以 `[PASS]` / `[IGNORE]` 开头时，不推送外部通道（无论 `tellPolicy`），也不提取 `@` 提及触发下一棒。典型用法是事件过滤后的非目标分支：子会话判定本轮无需人工介入，用 `[IGNORE] 非目标分支` 之类的回复收敛，自动化链路保持安静。普通回复不受影响。
 
 管理触发器：
 
@@ -336,7 +361,7 @@ botd triggers delete trg_example
 | `needed` | 仅在请求人工确认或任务失败时推送，日常成功静默 |
 | `never` | 全静默 |
 
-出站通知先写入持久化 Outbox 再投递。失败按指数退避自动重试，超过上限标记 `dead`。通过 `GET /api/sessions/:id/outbox` 查询投递记录。`webhook` 类型通道可配置 `secret`，Hub 以 `X-Botd-Signature: sha256=<hmac>` 头签名请求体。
+出站通知先写入持久化 Outbox 再投递：首次立即投递，失败按指数退避自动重试（5 秒起步，上限 5 次、单次退避封顶 300 秒），超过上限标记 `dead`。通过 `GET /api/sessions/:id/outbox` 查询投递记录。`webhook` 类型通道可配置 `secret`，Hub 以 `X-Botd-Signature: sha256=<hmac>` 头签名请求体。通道配置与确认链接签名细节见[外部渠道](channels.md)。
 
 出站通知与入站 Webhook 是不同功能。前者是 Hub 推出事件，后者是外部系统触发任务。
 

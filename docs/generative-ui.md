@@ -635,6 +635,13 @@ ctx.ui.setWidget('build-progress', undefined);
 
 `content` 也可以传 `string[]`，渲染为等宽文本行（适合日志尾巴）。组件工厂函数（终端画布）在 Web 端显式拒绝。面板可手动收起，切换会话时重置。
 
+挂件交互规则：
+
+- Spec 含 `Button` 时自动切为可交互模式，按钮可点击；会话运行中禁用点击，防止并发回合干扰。纯展示挂件保持只读。
+- 按钮点击后交互回流：前端把 `{decision, params, state}` 组装为单行 JSON 回灌到输入框发送。`params.command` 为非空字符串时改发该命令（附表单 state 作参数），实现「卡片按钮 → 扩展命令 → 刷新卡片」的操控闭环。
+
+另有一个轻量插槽 **composer.pill**：主控 Bot 注册的扩展斜杠命令自动出现在输入框上方的快捷胶囊条里，无参命令点击即发，带 `argumentHint` 的命令点击后预填到输入框等待补参。
+
 ### 插槽三：dialog.custom —— 弹出自定义表单并等待结果
 
 `await ctx.ui.custom({ title, prompt, ui })` 发起一次阻塞式交互：网页弹出完整交互卡，参与者填写并提交后，`await` 返回提交的 JSON：

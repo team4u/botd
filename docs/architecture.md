@@ -96,6 +96,7 @@ SSE 承担实时推送。有两路订阅：
 | `session_status` | 会话状态与队列计划 |
 | `messages_truncated` | 编辑重发截断通知 |
 | `interaction_request` / `interaction_resolved` | 人工确认卡片 |
+| `extension_ui` | 扩展 UI 实时事件（notify / status / working_message / widget / editor_text） |
 | `artifact_created` | 新产物 |
 
 全局事件额外包含 `node_status`（节点上下线）。详细契约见 [API 参考](api.md)。
@@ -189,7 +190,7 @@ sequenceDiagram
 
 1. Hub 校验会话归属，把用户消息写入 `messages` 表，广播 `message_created`，返回 `202`。
 2. Router 解析内容。斜杠命令按 `parseSlashCommand` 定向。普通消息按 `extractMentions` 提取 `@Bot`。无命令无提及时，派给主控 Bot。
-3. Router 按增量游标（`cursor_map_json`，每 Bot 一个 rowid）收集未读消息，组装 `incrementalMessages`。Bot 自己发的消息不计入。
+3. Router 按增量游标（`cursor_map_json`，每 Bot 一个 rowid）收集未读消息，组装 `incrementalMessages`。Bot 自己发的消息不计入。游标在该 Bot 的回合成功结束后才推进：断线补发时按游标重新收集全部未读，同一回合的输入保持不变，补发幂等。
 4. 会话状态改为 `running`，Router 通过节点 RPC 调 `runTurn`。
 5. Node Agent 以 `runKey = sessionId:botId` 占位。占位失败说明同 Bot 同会话已有回合在跑，直接报错。
 6. 附件经 `downloadArtifact` 落盘到 `workspace/inbox/`。视觉类图片转为模型输入。
@@ -276,21 +277,76 @@ flowchart TB
 - 完成与失败回调通过 `markSessionParentNotified` 做幂等防重。Hub 重启后首个到达的回调仍然生效。
 - `autoWakeParent !== false` 时，回调消息以 `@主控Bot` 前缀唤醒父会话执行汇总回合。
 - 触发器的 `subsession` 分发模式复用同一机制。Webhook 原始载荷落盘为 `event_<id>.json` 产物投递到 inbox，防止提示词注入。
+- Barrier 汇合：父会话下有多个子会话并发时，先完成的子会话只落库 callback 消息与回传产物，不立即唤醒父会话；等最后一个子会话收敛后再统一唤醒主控 Bot 汇总，避免多次汇总回合。
+- 静默收敛：子会话回复以 `[PASS]` 或 `[IGNORE]` 开头且无新产出附件时，跳过父会话 callback 投递与唤醒，不产生噪音消息（外部通道通知同样跳过）。
+
+## Space 与工作区
+
+Space 是会话或主 BOT 绑定的项目工作目录（`workspaceDir`），会话级绑定优先于 BOT 级兜底，两者都未绑定时回落到节点 `bots/<botId>/workspace/` 默认目录。绑定入口与使用方法见[工作区指南](workspace.md)。
+
+节点侧的关键行为：
+
+- 回合的工作目录（`cwd`）设为工作区，工具默认在此目录执行；工作区根目录的 `AGENTS.md` 自动注入系统提示。
+- 子代理默认共享主控 Bot 的工作区；`isolation: "worktree"` 时基于绑定仓库创建 Git worktree。
+- 同一工作区目录上的回合跨会话串行（`runRegistry.acquireWorkspace`，FIFO 排队），不同 Space 互不阻塞。这层互斥与 Hub 的会话队列相互独立：Hub 串行化的是会话内回合，节点串行化的是同目录写操作。
+- 工作区还承载运行时文件：附件落 `inbox/`、后台任务日志落 `.bg/<jobId>.log`、跨 BOT 工作流断点落 `.workflows/`。
 
 ## 可靠性
 
+### 长任务容错与恢复
+
+一个回合可能运行几十分钟，期间 Hub 重启、网络闪断都是常态。设计目标：模型的推理恰好执行一次，结果可靠交付，中断处可继续。
+
+四层机制配合：
+
+| 机制 | 覆盖场景 | 保证 |
+| --- | --- | --- |
+| 断连不杀回合 | 节点与 Hub 之间 WS 断开 | 在途回合继续执行，不因断连中止 |
+| 在途附着 + 单槽回执 | 断连期间同一回合被重发 | 模型推理恰好执行一次 |
+| Hub 离线队列 | 回合派发时节点不在线 / 派发后断连 | 节点上线后补发，会话不置 failed |
+| 工作流断点 | 跨 BOT 工作流中断 | 下回合注入断点提示，续跑不重复已完成步骤 |
+
+**断连不杀回合。** 节点检测到 WS 断开时不取消在途回合，只递增连接代数（`hubEpoch`）。推流走 `dynamicHubRpc` 动态代理——每次调用转发到当前最新的 birpc 实例，重连后推流自动切到新连接恢复，无需重建回合上下文。
+
+**在途附着 + 单槽回执。** Hub 断连后会把回合转入离线队列并在节点重连后重发（`runKey = sessionId:botId`，回合签名由增量消息与命令文本派生）。节点收到重发时：
+
+1. 同签名的回合仍在执行：直接附着到同一个 Promise，等待同一结果，不重复调用模型。
+2. 回合已在断连期间跑完、发起连接已死且无人附着：结果此前已原子写入 `<botDir>/sessions/<sessionId>.receipt.json`，此时消费该回执——读一次、删一次，只消费一次。
+3. 结果经当前活跃 RPC 正常返回：清除旧回执。
+
+```mermaid
+sequenceDiagram
+    participant H as Hub
+    participant N as Node Agent
+    H->>N: runTurn（连接 A）
+    N->>N: 回合执行中
+    H--xN: 连接 A 断开（回合继续跑）
+    N->>N: 回合跑完，无人附着消费<br/>原子写 receipt.json
+    H->>N: 重连（连接 B）后补发同一回合
+    N->>N: 签名一致 → 消费回执（读后即删）
+    N-->>H: 返回缓存结果，模型未重复执行
+```
+
+取消与重置会话时清除对应回执；`aborted` 结果不写回执。
+
+**steer 接管。** 会话运行中收到新用户消息时优先走 `steerBotTurn` 实时注入当前回合（前台子代理自动转后台），失败才回落入队。见上文[运行中插话](#运行中插话)。
+
+**工作流断点。** 跨 BOT 工作流启动时写入 `<workspaceDir>/.workflows/latest-unfinished.json`，正常跑完删除；失败、中断或进程被杀则保留。主 BOT 的下一回合读到断点标记，在上下文中注入提示（含 `runId` 与脚本路径），模型调用 `SubagentWorkflow({ scriptPath, resumeFromRunId })` 即可从失败步骤续跑——已完成步骤从 `.workflows/<runId>.workflow.jsonl` 日志缓存回放，不再重新调用子代理或子会话。
+
 ### Hub 重启恢复
 
-Hub 启动时执行 `resetStaleMetadata`：
+Hub 启动时执行 `resetStaleMetadata`，按磁盘状态诚实交代中断：
 
 - 全部节点状态重置为 `offline`。
-- `running` 与 `queued` 会话重置为 `idle`。
+- 有未过期 `queued_offline` 待发任务的会话保持 `queued`，节点重连后由 `onNodeOnline` 补发恢复。
+- `running` 且无待发任务的会话说明 Hub 在回合运行期间重启：置 `failed` 并插入一条系统消息，提示已完成的工作区变更与工作流断点已保留、发送「继续」即可接着执行。
+- `queued` 且无待发任务的会话：内存队列已随重启丢失，回到 `idle`。
 
 节点重连后重新 `registerNode`，恢复 `online`。SQLite 中的消息、产物、触发器、待确认记录全部保留。登录签名密钥存数据库，正常重启后登录仍有效。
 
 内存中的活动队列与接力状态不跨重启保留。运行中的模型调用不支持从断开的流恢复。配对码存内存，Hub 重启后失效。
 
-`HUB_SCHEMA_VERSION` 当前为 `4`。升级迁移前先 `VACUUM INTO` 备份。数据库文件权限 `0600`。
+`HUB_SCHEMA_VERSION` 当前为 `5`。升级迁移前先 `VACUUM INTO` 备份。数据库文件权限 `0600`。
 
 停机走 `drain`：清空各会话队列，把 `queued` 会话置 `idle`，等待活动回合最多 25 秒，然后关闭。`/api/health` 公开返回 `draining` 与 `activeTurns`，供外部探活。
 
@@ -306,20 +362,32 @@ Hub 启动时执行 `resetStaleMetadata`：
 
 Hub 侧也有心跳保护。服务端每 30 秒 `ping` 一次。连续 2 轮无 `pong` 即 `terminate`，触发下线清理。这防止 NAT 静默失联后 `runTurn` RPC 永久挂死。
 
-节点检测到连接断开时执行 `cancelAllBotTurns`。本地回合立即中止，不等待 Hub 指令。
+断开时节点只递增连接代数、清空 RPC 句柄，**不取消在途回合**（见[长任务容错与恢复](#长任务容错与恢复)）。`cancelAllBotTurns` 仅在守护进程主动停机（`close`）时执行。
 
 ### 离线暂存
 
-回合派发时节点不在线，Router 把任务写入 `outbound_task_queue`（状态 `queued_offline`），队列项放回内存队首，会话置 `queued`。节点上线触发 `onNodeOnline`：
+回合派发时节点不在线，或派发后连接断开（非执行错误），Router 把任务写入 `outbound_task_queue`（状态 `queued_offline`，TTL 默认 72 小时），队列项放回内存队首，会话置 `queued`、不置 `failed`。节点上线触发 `onNodeOnline`：
 
 1. 读取该节点的全部 `queued_offline` 任务。
 2. 同一 Bot 已在内存队列时跳过该任务（防双跑），仅触发队列处理。
 3. 不同 Bot 的任务全部入队，由串行消费逐个执行。
 4. 任务确认入队后才标记 `dispatched`。
 
-补发任务只携带旧的 `wakeupMessage` 引用。回合输入按增量游标重新收集全部未读消息，语义等于执行最新增量。过期任务（`expires_at` 到期）在读取时标记 `expired`。
+补发任务只携带旧的 `wakeupMessage` 引用。回合输入按增量游标重新收集全部未读消息，语义等于执行最新增量。过期任务（`expires_at` 到期，默认 72 小时）在读取时标记 `expired`。
 
-离线暂存不保证任务恰好执行一次。执行有外部副作用的脚本时，任务自身需要处理重复请求。
+同一回合的模型推理由节点侧在途附着与单槽回执保证恰好执行一次（见[长任务容错与恢复](#长任务容错与恢复)）。但离线补发不消除工具的外部副作用边界：过期后用户重新发送的消息是新回合，副作用脚本仍需自行处理重复请求。
+
+### 节点升级体系
+
+节点支持手动升级（`botd upgrade`，或 Hub 侧 `nodes upgrade` 转发 `upgradeDaemon` RPC）与自动升级循环（`BOTD_AUTO_UPGRADE`，默认关闭；检查间隔 `BOTD_AUTO_UPGRADE_INTERVAL_MS`，默认 6 小时，下限 60 秒）。自动升级复用手动升级的完整链路，不依赖 Hub 连接。
+
+一次升级的完整链路：
+
+1. **封禁检查**：目标版本在金丝雀失败封禁冷却期内（默认 30 分钟，`BOTD_UPGRADE_BLOCK_COOLDOWN_MS`）则拒绝；拒绝降级，`force` 可覆盖。
+2. **排空**：等待节点活跃回合清零，默认 30 秒超时，超时放弃本次升级。
+3. **下载校验**：`npm pack` 拉取精确版本的 tarball 到 staging 目录，sha512 摘要对 registry 元数据中的 `dist.integrity` 逐字节校验，不匹配即中止。（已知残余：只校验顶层 botd 包，依赖 tarball 的供应链信任继承自 registry 与 npm 策略。）
+4. **金丝雀验证**：`spawnReplacementDaemon` 以新版本拉起子进程，15 秒内收到 `botd:daemon-ready` IPC 信号才算成功。
+5. **切换或回滚**：金丝雀成功则旧进程平滑退出，新进程接管；失败则保留旧进程、回滚 staging，目标版本写入封禁记录，冷却期内不再尝试。
 
 ### 回合中断与保留
 
@@ -349,6 +417,7 @@ Hub 侧也有心跳保护。服务端每 30 秒 `ping` 一次。连续 2 轮无 
 | 会话参与者 | Hub SQLite `session_participants` | 仅 Hub |
 | Bot 配置、SYSTEM.md、MEMORY.md、env.json | 节点 `bots/<botId>/` | Hub 经 RPC 转发读写 |
 | Pi 会话完整记录 | 节点 `bots/<botId>/sessions/<sessionId>.jsonl` | 仅节点；重置时删除 |
+| 断连回合结果回执 | 节点 `bots/<botId>/sessions/<sessionId>.receipt.json` | 单槽原子写；消费一次即删 |
 | 工作区文件与 inbox | 节点 `bots/<botId>/workspace/` | 仅节点 |
 | 模型凭据 | 节点 `.agent/` | Hub 转发登录输入，不维护凭据库 |
 | 技能与扩展 | 节点 `skills/` 与 `extensions/` | Hub 经 RPC 安装读取 |
@@ -359,7 +428,7 @@ Hub 侧也有心跳保护。服务端每 30 秒 `ping` 一次。连续 2 轮无 
 
 ## 术语与边界
 
-- 子代理默认共享主控 Bot 的工作区目录。需要并发修改同一 Git 仓库时，可在调用 `Agent` 时传 `isolation: "worktree"`。
+- 子代理默认共享主控 Bot 的工作区目录。需要并发修改同一 Git 仓库时，可在调用 `Agent` 时传 `isolation: "worktree"`。Space 绑定与工作区行为详见[工作区指南](workspace.md)。
 - `SYSTEM.md` 提供角色设定。`MEMORY.md` 提供长期记忆。Bot 可用 `edit`/`write` 工具更新自己的记忆文件。
 - 清空、编辑重发、删除会话会调用 `resetSession` 删除节点本地会话文件。下一回合从 Hub 历史全量重建上下文。工作区普通文件不回滚。
 - 这是配置与上下文隔离，不是操作系统沙箱。工具能访问系统用户有权限访问的任何路径。

@@ -28,7 +28,7 @@
 
 你的代码在笔记本上，服务在 Linux 服务器上。团队共用一台服务器，想让协调、编码、审查、测试各有专职 Bot；或者机器分散在多处，想让它们在同一界面里协同。
 
-botd 为每个 Bot 提供一个单聊会话，把跨 Bot 协作收敛进同一条时间线。主控 Bot 在所属机器上执行命令、并发调度子代理，也可以用 `SubagentWorkflow` 把本地子代理、同节点其他主 Bot 与远端机器上的主 Bot 编排成一条工作流；任务需要独立上下文时，再委派成子会话，回复与文件自动带回。手机也能通过 PWA 接着用。
+botd 为每个 Bot 提供一个单聊会话，把跨 Bot 协作收敛进同一条时间线。主控 Bot 在所属机器上执行命令、并发调度子代理，也可以用 `SubagentWorkflow` 把本地子代理、同节点其他主 Bot 与远端机器上的主 Bot 编排成一条工作流；任务需要独立上下文时，再委派成子会话，回复与文件自动带回。会话或 Bot 可以绑定本地 Git 仓库目录（Space），Bot 直接在你的真实仓库里工作，变更进入 Diff 抽屉审查与回滚。手机也能通过 PWA 接着用。
 
 从一台机器、一个 Bot 开始。需要分工时，在同一节点上加几个专职主 Bot；需要跨机时，接入第二台机器。
 
@@ -47,55 +47,49 @@ flowchart LR
 
 ## 可以这样用
 
-### 跨 Bot 工作流编排与断点续跑
+### 跨 Bot 工作流：编排、观测、干预
 
-主控 Bot 用 `SubagentWorkflow` 编排一条跨 Bot 工作流：脚本里用 `phase()` 划分阶段、`parallel()` 并发执行，每一步可以指定本地子代理（共享工作区），也可以写 `agentType: "@<botId>"` 委派给同节点或跨节点的其他主 Bot（独立工作区），并用 JSON Schema 约束步骤的结构化输出，直接传给下一步。
+主控 Bot 用 `SubagentWorkflow` 编排跨 Bot 工作流：`phase()` 划分阶段，`parallel()` 并发执行；每一步可以指定共享工作区的本地子代理，也可以写 `agentType: "@<botId>"` 委派给同节点或远端机器上的主 Bot，并用 JSON Schema 约束结构化输出。脚本副本与断点日志落在 `<workspace>/.workflows/`，某步失败后用 `resumeFromRunId` 从断点续跑，已完成的步骤直接复用结果。
 
-每次运行会把脚本副本和断点日志落到 `<workspace>/.workflows/`。某步失败或超时后，用 `resumeFromRunId` 从断点继续：已完成的步骤直接复用上次结果，不重新执行；后台跑完的步骤同样会被复用。
-
-适合多阶段发布流水线（构建 → 多平台测试 → 汇总）、需要边跑边修的长任务，或任何“只重跑失败步骤”的场景。
+需要独立上下文的任务委派成子会话：父会话文件零拷贝继承，子会话产物自动回传，`Barrier` 等所有分支汇合后再继续，`[PASS]`/`[IGNORE]` 让汇总静默收敛。运行中随时打开子会话抽屉，实时看思考流与工具调用；方向偏了就插话 `steer`（前台子代理自动转后台），跑完了 `resume` 追问，出问题可以单独停掉某个 run。
 
 → [多角色协同与子会话](docs/user-guide.md) · [自动化指南](docs/automation.md)
 
-### 协同过程可观测、可交互
+### Space：让 Bot 工作在你的 Git 仓库里
 
-跨 Bot 工作流运行时，Web 端展示阶段队列与步骤进度。点击任意跨 Bot 步骤，右侧打开子会话检视抽屉（`SubSessionDrawer`）：实时查看该子会话的思考流、工具调用与输出，也能在抽屉里直接追问、停止或插话，不离开父会话。
+把会话或 Bot 绑定到本地 Git 仓库目录。绑定后 `AGENTS.md` 自动注入上下文，输入 `#` 直接补全仓库文件，并发的子代理各自在独立 worktree 里工作，互不踩踏；同一目录的回合跨会话排队互斥，避免并发写入。
 
-子会话产出的报告和构建文件在父子会话间零拷贝双向同步：父会话的文件自动带到子会话，子会话的新产物自动回传并汇总。
+每次代码变更进入 Git Diff 抽屉：Pin 双栏并排对比，消息里引用到具体行，不满意时按单文件两段式回滚。
 
-→ [多角色协同与子会话](docs/user-guide.md)
+→ [工作区指南](docs/workspace.md)
 
-### 单节点多人团队与多机协同
+### 触发器与外部通知：任务自己跑，结果找到你
 
-一台服务器就够了：在同一个节点上创建多个不同职责的主 Bot（如 `coordinator`、`coder`、`reviewer`、`qa`），各自有独立工作目录、模型与角色设定，开启团队共享给成员使用。多人同时用到同一个主 Bot 时，Node 侧自动按工作区排队互斥，避免并发写入冲突。
+Webhook、Cron 与 once 三种触发器让会话自动开始：`eventFilter` 按点号路径匹配载荷字段与数组，`subsession` 派生模式让每次触发都拿到独立上下文，触发载荷隔离落盘。
 
-机器分散在多处时，每台机器接入自己的节点，主 Bot 照常跨节点委派与编排。同一套会话、产物与记忆模型在两种拓扑下通用。
+结果推送到飞书、Slack、Telegram 或通用 Webhook。`tellPolicy` 决定什么时候可以打扰你，Outbox 指数退避保证送达；`botd ask` 在你不在线时降级为渠道摘要，附带免登录 HMAC 一键确认 URL，点链接就能拍板。
 
-→ [团队协作](docs/team.md)
+→ [触发器](docs/triggers.md) · [外部渠道](docs/channels.md)
 
-### 分层长期记忆与自动化触发
+### 长任务不怕断连
 
-Bot 的长期记忆分三层：节点共享记忆（同节点所有 Bot 可读，适合放机器级事实）、主 Bot 独立记忆（每个 Bot 自己的 `MEMORY.md` 索引）与按需读取的主题记忆（`memory/<topic>.md`，只在需要时才读，不占上下文）。
+回合在节点上执行，浏览器断开或 Hub 重启不会杀掉正在跑的任务。重新连接后附着到在途回合，单槽磁盘回执保证每条指令恰好执行一次。Hub 重启后，无法确认结果的孤儿回合诚实标记为 failed 并提示「继续」；节点离线期间积压的任务在 72 小时内补投。
 
-配合 Cron 触发器与 Webhook 事件收件箱，Bot 可以定时执行任务或响应外部事件；通知带重试 Outbox，按需策略决定什么时候打扰你。
+→ [架构说明](docs/architecture.md)
 
-→ [模型与供应商](docs/models.md) · [技能与自动化](docs/automation.md)
+### 从一台机器到一个机群
 
-### 把任务留在机器上，把结果带到手机上
+同一节点上创建 `coordinator`、`coder`、`reviewer` 等专职主 Bot，各自有独立工作目录、模型与记忆；多人共用时，Node 侧按工作区排队互斥。机器分散在多处时，每台接入自己的节点，主 Bot 照常跨节点委派与编排。
 
-让服务器上的 Bot 分析日志，或让笔记本上的 Bot 运行测试。耗时命令可以交给后台任务。任务结束后，Bot 会收到回调，再到会话里汇报。
+节点支持手动或自动升级（`BOTD_AUTO_UPGRADE`）：金丝雀 15 秒就绪探针，失败自动回滚并封禁该版本 30 分钟冷却，tarball 经 sha512 供应链校验。
 
-报告和构建文件可以作为产物上传。另一台机器上的 Bot 也能拉取这些文件。需要你选择下一步时，脚本可以在会话里发出确认卡片。
+→ [团队协作](docs/team.md) · [部署指南](docs/deployment.md)
 
-→ [后台任务、确认与文件交接](docs/automation.md)
+### 为高频操作保留肌肉记忆
 
-### 让 Bot 用上你已经在用的工具
+输入框就是终端：`#` 唤起四级模糊匹配的文件补全，`@` 点名 Bot，`/` 打开技能、提示词与扩展命令菜单；底栏秒切模型与七档思考（`off`~`max`）；空输入框按 `↑` 直接编辑上一条，本地保留 50 条发送历史。侧边栏用注意力状态灯标出每个会话的状态（failed 红、待验收绿、运行中蓝脉冲），活跃雷达置顶最多 4 条需要关注的会话，全局搜索直达任意历史消息。
 
-在节点上安装 CLI，再把操作方法写成 `SKILL.md`。Bot 读取技能后，通过 Bash 调用工具。跑通的流程可以保存成技能，供后续会话复用。
-
-你可以为不同 Bot 设置模型、角色、记忆、技能和扩展。节点上的凭据和工作目录由你管理。
-
-→ [模型与供应商](docs/models.md) · [技能与自动化](docs/automation.md)
+→ [用户指南](docs/user-guide.md)
 
 ## 先跑起来
 
@@ -143,23 +137,78 @@ pnpm node start
 
 完整步骤、常见问题和停止方法见[入门指南](docs/getting-started.md)。长期运行可按[部署指南](docs/deployment.md)配置源码服务或 Docker Compose。
 
-## 随着任务增加，再用这些能力
+## 能力一览
 
-| 你想做的事 | 对应能力 |
+### 对话体验
+
+| 能力 | 说明 |
 | --- | --- |
-| 换一个话题，又保留之前的讨论 | 新话题、历史会话、消息分叉 |
-| 改正提问，重新生成后续回复 | 编辑重发、同步重置 Bot 的会话上下文 |
-| 看清 Bot 做过什么 | 工具轨迹、执行输出、Token 用量 |
-| 给 Bot 一张截图或一份文件 | 图片粘贴、附件上传、产物下载 |
-| 编排多 Bot 多阶段任务，失败了从断点重跑 | 跨 Bot 工作流（`SubagentWorkflow`）与断点续跑 |
-| 检视某个委派出去的子任务，中途插话或停止 | 子会话检视抽屉（`SubSessionDrawer`）与产物零拷贝回传 |
-| 让每个 Bot 记住长期背景，又不臃肿上下文 | 分层长期记忆（节点 / Bot / 主题） |
-| 让任务定时执行，或响应外部事件 | Cron 触发器、Webhook 事件收件箱、子会话派发 |
-| 与同事共用 Bot、一起讨论 | 共享 Bot、多人会话、参与者管理 |
-| 只在需要时被通知打扰 | 通知通道按需策略（`tellPolicy`）与重试 Outbox |
-| 用脚本管理 Bot 和会话 | CLI、JSON 输出、HTTP API、SSE |
+| `#` 文件补全与 `@` 提及 | 四级模糊匹配补全仓库文件，`@` 直接点名 Bot |
+| 底栏秒切模型与思考档位 | 输入框底栏切换 Model 与七档思考（`off`~`max`），不进设置页 |
+| `↑` 编辑上一条 | 空输入框按 `↑` 直达编辑最近一条发送，本地保留 50 条历史 |
+| `/` 命令菜单 | 技能、提示词与扩展命令统一在一个菜单里渐进式披露 |
+| 消息分叉与只读分享 | 从任意消息分叉新话题；会话生成只读链接外发 |
+| 上下文水位与 `/compact` | 胶囊提示上下文余量，随时手动压缩 |
+| 生成式 UI | 17 个声明式组件（64KB / 64 元素 / 深 6），渲染确认卡、表单与命令面板 |
 
-→ [用户指南](docs/user-guide.md) · [团队协作](docs/team.md) · [CLI 参考](docs/cli.md) · [HTTP API](docs/api.md)
+### 工作区
+
+| 能力 | 说明 |
+| --- | --- |
+| Space 仓库绑定 | 会话 / Bot 绑定本地 Git 仓库目录，`AGENTS.md` 自动注入 |
+| 子代理 worktree 隔离 | 并发子代理各自在独立 worktree 里工作，互不踩踏 |
+| Git Diff 抽屉 | 双栏并排、行级引用、单文件两段式回滚 |
+| 回合互斥 | 同一目录的回合跨会话排队，避免并发写入 |
+
+### 多智能体
+
+| 能力 | 说明 |
+| --- | --- |
+| `SubagentWorkflow` | 阶段 / 并行 / 断点续跑，混编本地子代理与跨 Bot 步骤 |
+| 深度干预 | `steer` 插话、`resume` 追问、单停某个 run |
+| 跨 Bot 子会话委派 | 产物零拷贝继承、`Barrier` 汇合、`[PASS]`/`[IGNORE]` 静默收敛 |
+| 分层长期记忆 | 节点共享 / Bot 独立 / 按需读取的主题记忆三层 |
+
+### 自动化
+
+| 能力 | 说明 |
+| --- | --- |
+| 触发器 | `webhook` / `cron` / `once`；`eventFilter` 支持点号路径与数组匹配 |
+| 子会话派生 | 触发器按 `subsession` 模式派生独立会话，载荷隔离落盘 |
+| 后台任务与产物 | 耗时命令后台化并在抽屉里管理；产物跨会话、跨节点流转 |
+
+### 通知
+
+| 能力 | 说明 |
+| --- | --- |
+| 四渠道 | 飞书 / Slack / Telegram / 通用 Webhook |
+| `tellPolicy` | 按策略决定什么时候可以打扰你 |
+| Outbox 重试 | 指数退避，保证通知送达 |
+| `botd ask` 降级 | 你不在线时降级为渠道摘要，附带免登录 HMAC 一键确认 URL |
+
+### 可靠性
+
+| 能力 | 说明 |
+| --- | --- |
+| 断连容错 | 断连不杀回合；在途附着 + 单槽磁盘回执，保证恰好执行一次 |
+| 孤儿回合处理 | Hub 重启后诚实置 `failed`，提示一键「继续」 |
+| 离线补投 | 离线节点积压的任务 72 小时内补投 |
+| 节点升级 | 金丝雀 15s 就绪探针、失败自动回滚 + 版本封禁 30 分钟、tarball sha512 校验 |
+
+### 安全
+
+| 能力 | 说明 |
+| --- | --- |
+| 凭据本地化 | 模型凭据只保存在节点 `~/.botd/`，不经过 Hub |
+| 明确的权限边界 | 工具以节点系统用户权限执行，边界与部署要求见[安全文档](docs/security.md) |
+
+### 生态
+
+| 能力 | 说明 |
+| --- | --- |
+| 技能与扩展安装 | npm / git / GitHub 单目录 / Pi Package 兼容，`install --bot` 一键挂载到 Bot |
+| 跨节点技能同步 | 技能在节点之间自动同步 |
+| PWA | 手机安装到主屏幕，独立窗口使用 |
 
 ## 运行在哪里，数据就怎样分工
 
@@ -171,14 +220,29 @@ Bot 的 Bash 和文件工具使用 Node Agent 的系统用户权限。工作目�
 
 实现使用 TypeScript、React / Vite、Hono、SQLite 和 Pi SDK。通信与存储的细节见[架构说明](docs/architecture.md)。
 
-## 文档与贡献
+## 文档
 
-- 第一次使用：[入门指南](docs/getting-started.md)。
-- 准备长期运行：[部署指南](docs/deployment.md)和[配置参考](docs/configuration.md)。
-- 想把任务接进现有流程：[自动化指南](docs/automation.md)和[API 参考](docs/api.md)。
-- 想修改代码：[贡献指南](CONTRIBUTING.md)、[开发指南](docs/development.md)和[测试指南](docs/testing.md)。
-- 按主题查找：[完整文档目录](docs/README.md)。
+全部文档按读者路径组织，见[文档目录](docs/README.md)。常用入口：
 
-欢迎提交问题、使用反馈和 Pull Request。描述具体任务、复现步骤与预期结果，能帮助我们更快定位问题。
+- 上手：[入门指南](docs/getting-started.md) · [用户指南](docs/user-guide.md) · [工作区指南](docs/workspace.md)
+- 自动化：[自动化指南](docs/automation.md) · [触发器](docs/triggers.md) · [外部渠道](docs/channels.md)
+- 运维：[部署指南](docs/deployment.md) · [配置参考](docs/configuration.md) · [安全边界](docs/security.md) · [故障排查](docs/troubleshooting.md)
+- 开发：[开发指南](docs/development.md) · [架构说明](docs/architecture.md) · [扩展开发](docs/extensions.md) · [生成式 UI](docs/generative-ui.md) · [HTTP API](docs/api.md) · [CLI 参考](docs/cli.md) · [测试指南](docs/testing.md)
+
+## 开发与贡献
+
+需要 Node.js ≥ 24.12.0 和 pnpm 10.34.9。本机开发 Web 使用 `3001`、Hub 使用 `3002`（`BOTD_PORT=3002`），不占用 `3000`；生产部署与 Compose 默认端口仍为 `3000`。
+
+```bash
+git clone https://github.com/team4u/botd.git
+cd botd
+corepack enable
+corepack prepare pnpm@10.34.9 --activate
+pnpm install
+pnpm build
+BOTD_PORT=3002 pnpm dev
+```
+
+提交 Pull Request 前请阅读[贡献指南](CONTRIBUTING.md)。欢迎提交问题、使用反馈和 Pull Request：描述具体任务、复现步骤与预期结果，能帮助我们更快定位问题。
 
 botd 使用 [MIT 许可证](LICENSE)。

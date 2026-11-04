@@ -55,7 +55,7 @@ CI 不构建 Docker 镜像，不执行部署。
 
 ## 测试清单
 
-tests/ 目录共 42 个测试文件。按验证对象归类如下。
+tests/ 目录下的全部 `*.test.ts` 都会被 `pnpm test` 运行。按验证对象归类的主要文件如下。
 
 | 类别 | 文件 | 验证内容 |
 | --- | --- | --- |
@@ -65,7 +65,7 @@ tests/ 目录共 42 个测试文件。按验证对象归类如下。
 | 契约 | `workflow-dsl.test.ts` | 群聊编排原语：`ChainBudget` 消耗、`extractMentions`、`parseSlashCommand`、群上下文提示词构建 |
 | 升级 | `node-upgrade-service.test.ts`、`hub-upgrade-drain.test.ts` | 节点侧升级检测、灰度回滚与服务管理、节点版本上报与升级 RPC 转发、Hub 升级排空流程 |
 | Windows | `windows-support.test.ts` | Windows 命名管道路径、`botd` 包装脚本、shell 解析的跨平台逻辑 |
-| 生成式 UI | `generative-ui.test.ts`、`node-ask-approval.test.ts` | `validateUiSpec` 对全部 15 种组件的校验、审批卡构建 |
+| 生成式 UI | `generative-ui.test.ts`、`node-ask-approval.test.ts` | `validateUiSpec` 对全部 17 种组件的校验、审批卡构建 |
 | 渠道 | `external-channels.test.ts`、`notification-outbox.test.ts`、`event-inbox.test.ts` | 外部消息通道桥接、`tellPolicy` 静默策略、Webhook 事件提取与去重 |
 | 委派子会话 | `sub-session-delegation.test.ts`、`delegation-artifact-loop.test.ts`、`subagent-run-control.test.ts`、`subagent-primary-enforcement.test.ts` | 子会话委派与父会话回报、产物零拷贝回传、子代理运行记录与主 Bot 校验 |
 | 产物 | `artifact-streaming.test.ts`、`artifact-regressions.test.ts` | 产物二进制流上传下载、限额拒绝与清理 |

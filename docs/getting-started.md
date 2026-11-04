@@ -188,6 +188,7 @@ pnpm node status
 ## 下一步
 
 - [用户指南](user-guide.md)：上传文件、切换话题、多角色盲评与子会话协同。
+- [工作区指南](workspace.md)：项目工作区与 Diff 抽屉。
 - [模型指南](models.md)：供应商登录、自定义模型与环境变量。
 - [自动化指南](automation.md)：后台任务、确认卡片、定时触发与事件驱动子会话。
 - [部署指南](deployment.md)：长期运行、Docker 和备份。

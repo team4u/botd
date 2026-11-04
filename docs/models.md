@@ -6,6 +6,13 @@
 
 凭据以节点为单位保存。Bot 通过 `provider/modelId` 引用模型。同一个 Hub 下的不同节点可以使用不同账户。
 
+Provider 鉴权有两条通道：
+
+1. **API Key 注入**：在节点进程环境设置 `BOTD_API_KEY_<PROVIDER>`，见[使用环境变量注入 Key](#使用环境变量注入-key)。
+2. **交互式登录**：Web 设置界面（按节点作用域选择）或 `botd providers login`，凭据写入节点 `~/.botd/.agent/auth.json`。交互过程支持 OAuth 跳转、设备码、手动粘贴回调、选择账号四种提示类型。
+
+只支持 OAuth 的供应商不能只配 Key；botd 不借用宿主机 `~/.agent/auth.json` 之外的密钥。
+
 ## 使用网页配置
 
 1. 确认目标节点在线。
@@ -15,7 +22,7 @@
 5. 按弹窗提示完成 API Key、OAuth 或设备码交互。
 6. 编辑 Bot，选择该供应商和模型。
 
-面板打开时自动选中第一个在线节点。节点目录获取失败时，页面回退到内置目录并给出提示。
+面板打开时自动选中第一个在线节点。模型目录按节点读取；未指定节点时，Hub 返回内置目录且所有供应商 `configured:false`。节点目录获取失败时，页面回退到内置目录并给出提示。
 
 ### 登录方式
 
@@ -159,15 +166,19 @@ Bot 的 `env.json` 用于工具环境，不是模型凭据库。详细边界见[
 
 模型目录有三层来源：
 
-1. **内置目录**：来自 `@botd/models` 包，底层是锁定版本（1.4.0）的 pi-ai 内置供应商。目录元数据带 `source: 'pi'` 和 `sdkVersion`。升级依赖才会更新内置目录。
+1. **内置目录**：来自 `@botd/models` 包，底层是锁定版本（1.5.0）的 pi-ai 内置供应商，覆盖 anthropic、openai、google、azure、bedrock、deepseek、openrouter、moonshot、qwen、groq、xai、zai、xiaomi、minimax、mistral、github-copilot 等 40 余家。目录元数据带 `source: 'pi'` 和 `sdkVersion`。升级依赖才会更新内置目录。
 2. **节点自定义模型**：节点数据目录下 `.agent/models.json` 中声明的兼容端点模型。
-3. **扩展注册的供应商**：节点安装的扩展可以注册自定义供应商。读取节点目录时，Node Agent 按需激活扩展池，把注册项合入目录。
+3. **扩展注册的供应商**：节点安装的扩展可调用运行时 `registerProvider(name, { baseUrl, apiKey, headers, models })` 注册自定义网关供应商。读取节点目录时，Node Agent 按需激活扩展池，把注册项合入目录。扩展损坏或注册项非法时跳过，不影响内置目录。
 
 节点读取目录时，只对扩展注册的供应商发起在线刷新。刷新带 8 秒超时。刷新成功的结果写入 `.agent/models-store.json`，之后的目录读取和 Bot 调用直接复用，不再联网。刷新失败时回退到已保存的目录。
 
 Bot 会话使用的运行时禁止模型网络访问，启动时不刷新目录。仅当所选模型不在目录中且供应商存在时，运行时对该供应商做一次 8 秒在线刷新，仍找不到才报错。
 
 目录只输出公开元数据：供应商 `id`、`name`、`authMethods`，模型的 `id`、`name`、`reasoning`、`thinkingLevels`、`input`、`contextWindow`、`maxTokens`。自定义端点的 `baseUrl`、`apiKey` 和私有 headers 不会出现在目录中。
+
+## 思考档位
+
+思考档位共七级：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。目录为每个模型输出 `thinkingLevels`，Web 端只展示该模型实际支持的档位；Bot 已选档位不再受支持时，自动钳制到最近的档位（优先更深，其次更浅）。Bot 默认 `medium`。
 
 ## 查看模型目录
 
@@ -188,7 +199,7 @@ pnpm node models catalog --node <nodeId>
 命令输出示例：
 
 ```text
-source: pi  sdk: 1.4.0
+source: pi  sdk: 1.5.0
 anthropic               Anthropic  auth=[api_key,oauth]  configured=false  models=17
   claude-sonnet-4-5  (Claude Sonnet 4.5 (latest), reasoning)
 ```
@@ -233,6 +244,10 @@ pnpm node start
 随后刷新节点模型目录，为 Bot 选择 `local-gateway` 和对应模型。模型不存在于目录时，运行时会报错，不会猜测接口。
 
 示例使用的协议标识为 `openai-completions`。其他端点按所用 pi-ai 支持的协议配置。
+
+### 手输自定义服务商标识
+
+目录中找不到目标供应商时，在 Bot 编辑器的服务商下拉选择「自定义服务商...」，手输 provider 标识（保存时转小写），再选择或手输模型型号。该路径配合上一节的自定义端点或扩展注册的供应商使用。
 
 ## 常见问题
 
