@@ -15,7 +15,8 @@ import { NodesBotsView } from './components/NodesBotsView';
 import { SettingsModal } from './components/SettingsModal';
 import { UsersModal } from './components/UsersModal';
 import { ToastContainer } from './components/Toast';
-import { Loader2, Menu, Bot } from 'lucide-react';
+import { Loader2, Menu, Bot, Server, ChevronRight } from 'lucide-react';
+import { BotAvatarBadge } from './components/MessageItem';
 
 export const App: React.FC = () => {
   // Auth state
@@ -91,7 +92,12 @@ export const App: React.FC = () => {
   const botMapRef = useRef(botMap);
   botMapRef.current = botMap;
 
-  // Active session object
+  // 主分身列表（无 parentBotId 或孤儿）：空态直达卡片直接开聊
+  const primaryBots = useMemo(
+    () => allBots.filter((bot) => !bot.parentBotId || !allBots.some((b) => b.id === bot.parentBotId)),
+    [allBots]
+  );
+
   const activeSession = useMemo(
     () => sessions.find((s) => s.id === activeSessionId) || null,
     [sessions, activeSessionId]
@@ -420,7 +426,7 @@ export const App: React.FC = () => {
             onAddToast={addToast}
           />
         ) : (
-          /* Mobile startup header with accessible menu when no active session */
+          /* 无选中会话：欢迎空态，可直接点选分身开始或前往节点管理 */
           <div className="flex-1 flex flex-col h-full bg-white dark:bg-zinc-950 overflow-hidden">
             <header className="h-14 px-4 bg-white/90 dark:bg-zinc-950/90 backdrop-blur-md border-b border-zinc-200/80 dark:border-zinc-800/80 flex items-center justify-between lg:hidden shrink-0">
               <button
@@ -439,14 +445,57 @@ export const App: React.FC = () => {
               </div>
             </header>
 
-            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
+            <div className="flex-1 overflow-y-auto flex flex-col items-center justify-center p-6 sm:p-8 text-center">
               <div className="w-14 h-14 rounded-2xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-200/80 dark:border-zinc-800/80 flex items-center justify-center text-zinc-800 dark:text-zinc-200 mb-4 shadow-xs">
                 <Bot className="w-7 h-7" />
               </div>
-              <h2 className="text-sm sm:text-base font-bold text-zinc-900 dark:text-zinc-100 mb-1.5">欢迎使用 botd</h2>
-              <p className="text-xs sm:text-sm text-zinc-500 dark:text-zinc-400 max-w-sm leading-relaxed">
-                从左侧智能体列表选择一个智能体即可开始对话。
+              <h2 className="text-sm sm:text-base font-bold text-zinc-900 dark:text-zinc-100 mb-1.5">
+                欢迎使用 botd
+              </h2>
+              <p className="text-xs sm:text-sm text-zinc-500 dark:text-zinc-400 max-w-sm leading-relaxed mb-6">
+                选一个角色分身即可开始 24/7 协同对话。
               </p>
+
+              {/* 分身直达卡片：一键开聊 */}
+              {primaryBots.length > 0 ? (
+                <div className="w-full max-w-md grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {primaryBots.slice(0, 6).map((bot) => {
+                    const node = nodeMap.get(bot.nodeId);
+                    return (
+                      <button
+                        key={bot.id}
+                        type="button"
+                        onClick={() => sessionActions.handleOpenBotChat(bot)}
+                        title={`@${bot.id}`}
+                        className="group flex items-center gap-3 p-3 rounded-xl border border-zinc-200/80 dark:border-zinc-800/80 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800/80 hover:border-zinc-300 dark:hover:border-zinc-700 transition-all text-left cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500"
+                      >
+                        <BotAvatarBadge botId={bot.id} name={bot.name} color={bot.color} className="!w-9 !h-9 !text-sm" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                            {bot.name}
+                          </span>
+                          <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-500">
+                            {node?.name || bot.nodeId}
+                            {node?.status === 'online' ? ' · 在线' : ' · 离线'}
+                          </span>
+                        </span>
+                        <ChevronRight className="w-4 h-4 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-400 shrink-0 transition-colors" />
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-xs text-zinc-400 dark:text-zinc-500 mb-4">还没有可用分身，先去创建一个。</p>
+              )}
+
+              <button
+                type="button"
+                onClick={() => navigate({ view: 'nodes' })}
+                className="mt-6 inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-xl bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-colors cursor-pointer"
+              >
+                <Server className="w-4 h-4" />
+                节点与分身管理
+              </button>
             </div>
           </div>
         )}

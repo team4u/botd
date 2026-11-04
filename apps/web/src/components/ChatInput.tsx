@@ -512,7 +512,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   });
 
   return (
-    <div className="chat-input-container relative bg-gradient-to-t from-white via-white/95 to-transparent dark:from-zinc-950 dark:via-zinc-950/95 px-3 sm:px-4 pt-3 shrink-0 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))]">
+    <div className="chat-input-container relative bg-gradient-to-t from-white via-white/95 to-transparent dark:from-zinc-950 dark:via-zinc-950/95 px-3 sm:px-4 pt-1.5 shrink-0 pb-[max(0.5rem,env(safe-area-inset-bottom,0px))]">
       {/* 校验错误提示条 */}
       {validationNotice && (
         <div className="max-w-4xl mx-auto mb-2 px-3 py-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/50 text-xs text-amber-800 dark:text-amber-300 flex items-center justify-between animate-in fade-in">
@@ -707,7 +707,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             placeholder={
               editingMessage
                 ? '编辑消息，Enter 保存，Esc 取消...'
-                : '输入 / 命令，@ 提及智能体，# 引用工作区文件...'
+                : '发消息，输入 / 命令或 @ 分身...'
             }
             rows={1}
             disabled={disabled || sending}
@@ -786,34 +786,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           )}
         </div>
 
-        {/* 底栏微操舱：模型/思考档位秒切、工作区徽章与快捷指令芯片（编辑态隐藏） */}
+        {/* 底栏微操舱：模型/思考档位秒切（编辑态隐藏） */}
         {!editingMessage && currentBot && (
           <div className="mt-1.5 px-1">
-            <ComposerStatusBar
-              currentBot={currentBot}
-              onCompact={() => {
-                setContent('/compact ');
-                setTimeout(() => {
-                  const el = textareaRef.current;
-                  if (el) {
-                    el.focus();
-                    const end = el.value.length;
-                    el.setSelectionRange(end, end);
-                  }
-                }, 0);
-              }}
-              onNewTopic={() => {
-                setContent('/new ');
-                setTimeout(() => {
-                  const el = textareaRef.current;
-                  if (el) {
-                    el.focus();
-                    const end = el.value.length;
-                    el.setSelectionRange(end, end);
-                  }
-                }, 0);
-              }}
-            />
+            <ComposerStatusBar currentBot={currentBot} />
           </div>
         )}
       </div>

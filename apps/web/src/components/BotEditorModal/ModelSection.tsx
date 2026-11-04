@@ -142,15 +142,19 @@ export const ModelSection: React.FC<ModelSectionProps> = ({
                 <option value="" className="dark:bg-zinc-900 dark:text-zinc-100">默认（自动）</option>
                 {modelThinkingLevels.map((level) => (
                   <option key={level} value={level} className="dark:bg-zinc-900 dark:text-zinc-100">
-                    {THINKING_LEVEL_LABELS[level] || level}
+                    {`${THINKING_LEVEL_LABELS[level] || level} (${level})`}
                   </option>
                 ))}
               </select>
-              {currentModelMeta?.thinkingLevels && (
+              {modelThinkingLevels.length === 1 ? (
+                <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                  {`当前模型固定支持 ${THINKING_LEVEL_LABELS[modelThinkingLevels[0]] || modelThinkingLevels[0]}（${modelThinkingLevels[0]}）`}
+                </p>
+              ) : currentModelMeta?.thinkingLevels ? (
                 <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
                   按模型 {currentModelMeta.name || currentModelMeta.id} 实际支持的等级展示
                 </p>
-              )}
+              ) : null}
             </div>
           </div>
 

@@ -57,7 +57,7 @@ export const FileMentionDropdown: React.FC<FileMentionDropdownProps> = ({
     <div
       ref={dropdownRef}
       id="file-mention-listbox"
-      className="absolute bottom-full left-3 right-3 sm:left-4 sm:max-w-md mb-2 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden z-30 max-h-60 flex flex-col animate-in fade-in slide-in-from-bottom-2"
+      className="absolute bottom-full left-3 right-3 sm:left-4 sm:max-w-md mb-2 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden z-30 max-h-60 max-w-[calc(100vw-1.5rem)] flex flex-col animate-in fade-in slide-in-from-bottom-2"
       role="listbox"
       aria-label="引用工作区文件"
     >

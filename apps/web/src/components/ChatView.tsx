@@ -18,6 +18,7 @@ import {
   Sparkles,
   History as HistoryIcon,
   FolderGit2,
+  Zap,
 } from 'lucide-react';
 import type {
   SessionRecord,
@@ -43,6 +44,7 @@ import { ActiveWorkersBar } from './ActiveWorkersBar';
 import { WorkerInspectDrawer } from './WorkerInspectDrawer';
 import { useSuperAgentWorkers } from '../hooks/useSuperAgentWorkers';
 import { BotEditorModal } from './BotEditorModal';
+import { BotAvatarBadge } from './MessageItem';
 import { BotdUiRenderer } from './generative-ui/BotdUiRenderer';
 import { api } from '../api';
 import { onGlobalEvent } from '../events';
@@ -214,6 +216,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
   // 智能体/子代理专属设置弹窗开关
   const [botEditorOpen, setBotEditorOpen] = useState(false);
+  // 按需展开后台任务控制台：零 Worker 正常聊天时胶囊条完全不占像素
+  const [showWorkerToolsBar, setShowWorkerToolsBar] = useState(false);
+  useEffect(() => {
+    setShowWorkerToolsBar(false);
+  }, [session.id]);
 
   // 单聊对应的目标智能体（主 BOT 或子代理）
   const directBot = useMemo<BotConfig | undefined>(() => {
@@ -398,6 +405,43 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return 0;
   }, [messages]);
 
+  // ===== 会话产物计数（顶栏产物入口徽标数）=====
+  // 会话加载时拉取一次列表，之后靠 SSE artifact_created 增量去重追加，
+  // 让「会话产物」按钮上的数字随会话生命周期实时可见
+  const [artifactItems, setArtifactItems] = useState<Array<{ id?: string }>>([]);
+  useEffect(() => {
+    let cancelled = false;
+    setArtifactItems([]);
+    api
+      .listSessionArtifacts(session.id)
+      .then((list) => {
+        if (!cancelled) setArtifactItems(list.map((a) => ({ id: a.id })));
+      })
+      .catch(() => {
+        // 拉取失败时徽标退化为无数字展示，抽屉内部仍会重试
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session.id]);
+
+  const openArtifacts = useCallback(() => {
+    setArtifactsOpen(true);
+    setArtifactsUnseen(false);
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = onGlobalEvent((e) => {
+      if (e.type !== 'artifact_created' || e.sessionId !== session.id) return;
+      setArtifactItems((prev) =>
+        prev.some((a) => a.id === e.artifact.id) ? prev : [...prev, { id: e.artifact.id }]
+      );
+    });
+    return unsubscribe;
+  }, [session.id]);
+
+  const artifactCount = artifactItems.length;
+
   // ===== 顶栏 Space（项目工作目录）徽标与快速绑定 =====
   // 目录可能挂在 session 或 BOT 上；绑定通过 PATCH /api/sessions/:id 即时生效
   const sessionWorkspaceDir =
@@ -447,6 +491,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
       setSpaceBusy(false);
     }
   };
+
+  // 顶栏副标题：工作目录取尾段（如 /root/code/botd -> botd），
+  // 以 10px 等宽交字静静躺在标题下方，不再占用头部行宽
+  const currentSpaceName = sessionWorkspaceDir
+    ? sessionWorkspaceDir.split('/').filter(Boolean).pop() || sessionWorkspaceDir
+    : '';
 
   // ===== 全局开发快捷键 =====
   // Cmd/Ctrl+Shift+O 开启新话题；经 ref 调用最新回调，避免依赖变化导致监听反复拆建
@@ -626,12 +676,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
       <div
         className="flex-1 min-w-0 flex flex-col h-full overflow-hidden"
       >
-      {/* 极简顶栏（h-13 sm:h-14，删掉参会胶囊火车与停止按钮） */}
-      <header className="h-13 sm:h-14 px-3 sm:px-4 bg-white dark:bg-zinc-950 border-b border-zinc-200/80 dark:border-zinc-800/80 flex items-center justify-between shrink-0 z-10">
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+      {/* 极简顶栏（h-13 sm:h-14）：左侧身份区（侧栏开关 + 徽章 + 标题/工作目录副标题），
+          右侧仅 3 个紧凑触发器（新话题 / 产物 / 更多菜单），移动端不再挤压标题 */}
+      <header className="h-13 sm:h-14 px-2.5 sm:px-4 bg-white dark:bg-zinc-950 border-b border-zinc-200/80 dark:border-zinc-800/80 flex items-center justify-between gap-1 shrink-0 z-10">
+        {/* 左侧身份区 */}
+        <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0 flex-1">
           <button
             onClick={onToggleSidebar}
-            className="p-1.5 -ml-1 text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-lg lg:hidden cursor-pointer"
+            className="w-9 h-9 flex items-center justify-center text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-lg lg:hidden cursor-pointer shrink-0"
             aria-label="打开侧边导航"
           >
             <Menu className="w-5 h-5" />
@@ -683,200 +735,66 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </button>
             </div>
           ) : (
+            /* 身份徽章 + 标题/副标题：点击标题行内重命名，Bot 徽章打开智能体设置 */
             <div
-              className={`flex items-center gap-2 min-w-0 ${
-                directBot && isDirectNodeOnline
-                  ? 'cursor-pointer hover:opacity-85 transition-opacity'
-                  : ''
-              }`}
-              onClick={
-                directBot && isDirectNodeOnline
-                  ? () => setBotEditorOpen(true)
-                  : undefined
-              }
-              title={
-                directBot
-                  ? isDirectNodeOnline
-                    ? directBot.parentBotId
-                      ? `点击打开子代理「${directBot.name}」设置`
-                      : `点击打开智能体「${directBot.name}」设置`
-                    : '节点离线'
-                  : undefined
-              }
+              className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer group/title"
+              onClick={startRename}
+              title="点击重命名会话"
             >
-              <h2 className="font-semibold text-sm sm:text-base text-zinc-900 dark:text-zinc-100 truncate">
-                {session.title}
-              </h2>
-
-              {/* Space（项目工作目录）徽标：点击弹出轻量绑定浮层 */}
-              <div className="relative shrink-0" ref={spaceMenuRef}>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setSpaceMenuOpen((v) => !v);
-                  }}
-                  title={sessionWorkspaceDir || '绑定当前会话对应的本地项目目录'}
-                  className={`inline-flex items-center gap-1 h-6 px-2 rounded-full text-[11px] font-medium transition-colors cursor-pointer max-w-40 sm:max-w-56 ${
-                    sessionWorkspaceDir
-                      ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
-                      : 'border border-dashed border-zinc-300 dark:border-zinc-700 text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 hover:border-zinc-400 dark:hover:border-zinc-600'
-                  }`}
-                >
-                  <FolderGit2 className="w-3 h-3 shrink-0" />
-                  <span className="truncate font-mono">
-                    {sessionWorkspaceDir
-                      ? sessionWorkspaceDir.split('/').filter(Boolean).pop() || sessionWorkspaceDir
-                      : '绑定项目目录'}
-                  </span>
-                </button>
-                {spaceMenuOpen && (
-                  <div className="absolute left-0 top-full mt-1.5 w-72 max-w-[calc(100vw-1.5rem)] bg-white dark:bg-zinc-900 border border-zinc-200/90 dark:border-zinc-800 rounded-xl shadow-lg p-2.5 z-50 animate-in fade-in">
-                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mb-1.5 leading-relaxed">
-                      绑定当前会话对应的本地项目目录（如 /root/code/botd），留空即解绑。
-                    </p>
-                    <input
-                      autoFocus
-                      type="text"
-                      value={spaceInput}
-                      disabled={spaceBusy}
-                      onChange={(e) => setSpaceInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
-                          e.preventDefault();
-                          void commitSpaceDir();
-                        } else if (e.key === 'Escape') {
-                          e.preventDefault();
-                          setSpaceMenuOpen(false);
-                        }
-                      }}
-                      placeholder="/root/code/my-project"
-                      aria-label="项目工作目录"
-                      className="w-full px-2 py-1.5 text-xs font-mono bg-white dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-blue-500 dark:focus:border-blue-400"
-                    />
-                    <div className="flex items-center justify-end gap-1.5 mt-2">
-                      <button
-                        type="button"
-                        onClick={() => setSpaceMenuOpen(false)}
-                        disabled={spaceBusy}
-                        className="px-2.5 py-1 rounded-lg text-xs text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-                      >
-                        取消
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void commitSpaceDir()}
-                        disabled={spaceBusy}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-medium transition-colors cursor-pointer"
-                      >
-                        {spaceBusy && <Loader2 className="w-3 h-3 animate-spin-fast" />}
-                        保存
-                      </button>
-                    </div>
-                  </div>
-                )}
+              {directBot && (
+                <BotAvatarBadge
+                  botId={directBot.id}
+                  name={directBot.name}
+                  color={directBot.color}
+                  className="w-6 h-6 text-[11px] shrink-0"
+                />
+              )}
+              <div className="flex flex-col min-w-0 leading-tight">
+                <span className="font-semibold text-sm sm:text-base text-zinc-900 dark:text-zinc-100 truncate">
+                  {session.title}
+                </span>
+                <span className="font-mono text-[10px] text-zinc-400 dark:text-zinc-500 truncate">
+                  {directBot ? `${directBot.name}${currentSpaceName ? ` · ${currentSpaceName}` : ''}` : currentSpaceName}
+                </span>
               </div>
+              <Pencil className="w-3 h-3 text-zinc-300 dark:text-zinc-600 shrink-0 sm:opacity-0 sm:group-hover/title:opacity-100 transition-opacity" />
             </div>
           )}
         </div>
 
-        {/* 右侧操作：常驻上下文水位胶囊 + 开启新话题 + 产物/后台进程抽屉入口 + 更多操作下拉菜单 */}
-        <div className="flex items-center gap-1 shrink-0">
-          {/* 上下文水位常驻胶囊：>0 即展示；>=75% 琥珀色预警，点击发送 /compact */}
-          {latestCtxPct > 0 && (
-            <button
-              type="button"
-              onClick={() => void onSendMessage('/compact')}
-              className={`inline-flex items-center gap-1.5 h-8 rounded-lg text-xs font-medium transition-colors cursor-pointer shrink-0 border mr-0.5 ${
-                latestCtxPct >= 75
-                  ? 'px-2.5 bg-amber-50 dark:bg-amber-950/40 border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/60'
-                  : 'px-2 bg-zinc-50 dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400 border-zinc-200/80 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-800'
-              }`}
-              title={
-                latestCtxPct >= 75
-                  ? '当前上下文水位较高，点击自动发送 /compact 进行上下文压缩'
-                  : `当前上下文水位 ${latestCtxPct}%，点击发送 /compact 主动压缩`
-              }
-            >
-              <span
-                className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                  latestCtxPct >= 75 ? 'bg-amber-500 animate-pulse' : 'bg-zinc-400 dark:bg-zinc-500'
-                }`}
-              />
-              <span className="font-mono tabular-nums">Ctx {latestCtxPct}%</span>
-              {latestCtxPct >= 75 && <span className="hidden md:inline">· 压缩</span>}
-            </button>
-          )}
-
-          {/* 开启新话题 */}
+        {/* 右侧 3 个紧凑触发器：开启新话题 / 会话产物（有产物或桌面端展示）/ 更多操作菜单 */}
+        <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
           <button
             onClick={() => void onNewTopic(session.id)}
-            className="p-2 rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+            className="w-9 h-9 flex items-center justify-center rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
             title="开启新话题 (Ctrl/Cmd+Shift+O)"
             aria-label="开启新话题"
           >
             <MessageSquarePlus className="w-4 h-4" />
           </button>
 
-          {/* 历史话题（单聊专属）：打开当前主 BOT 或子代理的历史话题抽屉 */}
-          {directBot && (
-            <button
-              type="button"
-              onClick={() => setHistoryDrawerOpen(true)}
-              className="p-2 rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-              title={`历史话题（${directBot.name}）`}
-              aria-label={`查看 ${directBot.name} 的历史话题`}
-            >
-              <HistoryIcon className="w-4 h-4" />
-            </button>
-          )}
-
-          {/* 智能体/子代理设置（单聊专属）：打开自身设置界面 */}
-          {directBot && (
-            <button
-              type="button"
-              onClick={() => setBotEditorOpen(true)}
-              disabled={!isDirectNodeOnline}
-              className="p-2 rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-              title={
-                !isDirectNodeOnline
-                  ? '节点离线，无法编辑配置'
-                  : directBot.parentBotId
-                  ? `子代理设置（${directBot.name}）`
-                  : `智能体设置（${directBot.name}）`
-              }
-              aria-label={directBot.parentBotId ? '子代理设置' : '智能体设置'}
-            >
-              <SettingsIcon className="w-4 h-4" />
-            </button>
-          )}
-
-          {/* 会话产物抽屉入口：新产物未查看时右上角红点 */}
-          <div className="relative">
-            <button
-              onClick={() => {
-                setArtifactsOpen(true);
-                setArtifactsUnseen(false);
-              }}
-              className="h-8 w-8 rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-center transition-colors cursor-pointer"
-              title="会话产物"
-              aria-label="会话产物"
-            >
-              <Package className="w-4 h-4" />
-            </button>
-            {artifactsUnseen && (
-              <span
-                className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-red-500 pointer-events-none"
-                aria-hidden="true"
-              />
+          {/* 会话产物：桌面端常驻，移动端有产物或未读红点时才占位，徽标展示数量 */}
+          <button
+            onClick={openArtifacts}
+            className={`relative w-9 h-9 items-center justify-center rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer ${
+              artifactCount > 0 || artifactsUnseen ? 'inline-flex' : 'hidden sm:inline-flex'
+            }`}
+            title="会话产物"
+            aria-label="会话产物"
+          >
+            <Package className="w-4 h-4" />
+            {artifactCount > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-blue-600 text-white text-[9px] font-semibold flex items-center justify-center pointer-events-none">
+                {artifactCount > 99 ? '99+' : artifactCount}
+              </span>
             )}
-          </div>
+          </button>
 
-          {/* 更多操作下拉菜单：收纳分享、重命名、定时与触发器、清空、删除等低频操作（绝不与外显图标重复） */}
+          {/* 更多操作下拉菜单：收纳全部二级与控制台操作（绝不与外显图标重复） */}
           <div className="relative" ref={menuRef}>
             <button
               onClick={() => setMenuOpen((v) => !v)}
-              className={`p-2 rounded-lg transition-colors cursor-pointer ${
+              className={`w-9 h-9 flex items-center justify-center rounded-lg transition-colors cursor-pointer ${
                 menuOpen
                   ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100'
                   : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800'
@@ -892,28 +810,87 @@ export const ChatView: React.FC<ChatViewProps> = ({
             {menuOpen && (
               <div
                 role="menu"
-                className="absolute right-0 top-full mt-1.5 w-44 max-w-[calc(100vw-1.5rem)] bg-white dark:bg-zinc-900 border border-zinc-200/90 dark:border-zinc-800 rounded-xl shadow-lg py-1 z-50 animate-in fade-in"
+                className="absolute right-0 top-full mt-1.5 w-60 max-w-[calc(100vw-1.5rem)] bg-white dark:bg-zinc-900 border border-zinc-200/90 dark:border-zinc-800 rounded-xl shadow-lg py-1 z-50 animate-in fade-in"
               >
+                {/* 上下文水位 + 一键压缩：内联进度条，点击发送 /compact */}
+                {latestCtxPct > 0 && (
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      void onSendMessage('/compact');
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                    title="发送 /compact 主动压缩上下文"
+                  >
+                    <Hourglass className={`w-3.5 h-3.5 shrink-0 ${latestCtxPct >= 75 ? 'text-amber-500' : 'text-zinc-400'}`} />
+                    <span className="flex-1 text-left whitespace-nowrap">
+                      上下文水位 Ctx {latestCtxPct}% · 压缩
+                    </span>
+                    <span className="w-14 h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden shrink-0">
+                      <span
+                        className={`block h-full rounded-full ${
+                          latestCtxPct >= 75 ? 'bg-amber-500' : 'bg-zinc-400 dark:bg-zinc-500'
+                        }`}
+                        style={{ width: `${latestCtxPct}%` }}
+                      />
+                    </span>
+                  </button>
+                )}
+
+                {directBot && (
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      setHistoryDrawerOpen(true);
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                  >
+                    <HistoryIcon className="w-3.5 h-3.5" />
+                    <span className="whitespace-nowrap">历史话题</span>
+                  </button>
+                )}
+
                 <button
                   role="menuitem"
                   onClick={() => {
                     setMenuOpen(false);
-                    setShareModalOpen(true);
+                    setShowWorkerToolsBar(true);
                   }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
                 >
-                  <Share2 className="w-3.5 h-3.5" />
-                  <span>分享对话</span>
+                  <Zap className="w-3.5 h-3.5" />
+                  <span className="whitespace-nowrap">派发后台任务 / 巡检</span>
                 </button>
 
                 <button
                   role="menuitem"
-                  onClick={startRename}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setSpaceMenuOpen(true);
+                  }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
                 >
-                  <Pencil className="w-3.5 h-3.5" />
-                  <span>重命名…</span>
+                  <FolderGit2 className="w-3.5 h-3.5" />
+                  <span className="whitespace-nowrap truncate">{sessionWorkspaceDir ? `工作区 ${currentSpaceName}` : '设置工作区目录'}</span>
                 </button>
+
+                {directBot && (
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      setBotEditorOpen(true);
+                    }}
+                    disabled={!isDirectNodeOnline}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    title={!isDirectNodeOnline ? '节点离线，无法编辑配置' : undefined}
+                  >
+                    <SettingsIcon className="w-3.5 h-3.5" />
+                    <span className="whitespace-nowrap">{directBot.parentBotId ? '子代理设置' : '智能体设置'}</span>
+                  </button>
+                )}
 
                 <button
                   role="menuitem"
@@ -924,10 +901,43 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
                 >
                   <Clock className="w-3.5 h-3.5" />
-                  <span>定时与触发器</span>
+                  <span className="whitespace-nowrap">定时与触发器</span>
+                </button>
+
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setShareModalOpen(true);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                >
+                  <Share2 className="w-3.5 h-3.5" />
+                  <span className="whitespace-nowrap">分享只读快照</span>
+                </button>
+
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    openArtifacts();
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                >
+                  <Package className="w-3.5 h-3.5" />
+                  <span className="whitespace-nowrap">查看会话产物{artifactCount > 0 ? `（${artifactCount}）` : ''}</span>
                 </button>
 
                 <div className="my-1 border-t border-zinc-100 dark:border-zinc-800/80" />
+
+                <button
+                  role="menuitem"
+                  onClick={startRename}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  <span>重命名会话…</span>
+                </button>
 
                 <button
                   role="menuitem"
@@ -938,7 +948,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors cursor-pointer"
                 >
                   <Eraser className="w-3.5 h-3.5" />
-                  <span>清空消息</span>
+                  <span>清空对话记录</span>
                 </button>
 
                 <button
@@ -958,17 +968,72 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       </header>
 
-      {/* 会话后台任务控制台：零 Worker 时也可派发首个任务。 */}
-      <ActiveWorkersBar
-        key={session.id}
-        workers={superAgent.workers}
-        onSelectWorker={(id) => superAgent.setSelectedWorkerId(id)}
-        onStopWorker={(id) => {
-          void superAgent.stopWorker(id);
-        }}
-        onSpawnWorker={spawnBackgroundWorker}
-        onRunWatchdog={runWatchdog}
-      />
+      {/* 工作区目录绑定浮层：锚定顶栏左侧（更多菜单入口），编辑当前会话的项目目录 */}
+      {spaceMenuOpen && (
+        <div className="px-2.5 sm:px-4 pt-2 max-w-4xl w-full mx-auto shrink-0 z-10">
+          <div ref={spaceMenuRef} className="relative">
+            <div className="relative w-72 max-w-full bg-white dark:bg-zinc-900 border border-zinc-200/90 dark:border-zinc-800 rounded-xl shadow-lg p-2.5 animate-in fade-in">
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mb-1.5 leading-relaxed">
+                绑定当前会话对应的本地项目目录（如 /root/code/botd），留空即解绑。
+              </p>
+              <input
+                autoFocus
+                type="text"
+                value={spaceInput}
+                disabled={spaceBusy}
+                onChange={(e) => setSpaceInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    void commitSpaceDir();
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setSpaceMenuOpen(false);
+                  }
+                }}
+                placeholder="/root/code/my-project"
+                aria-label="项目工作目录"
+                className="w-full px-2 py-1.5 text-xs font-mono bg-white dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-blue-500 dark:focus:border-blue-400"
+              />
+              <div className="flex items-center justify-end gap-1.5 mt-2">
+                <button
+                  type="button"
+                  onClick={() => setSpaceMenuOpen(false)}
+                  disabled={spaceBusy}
+                  className="px-2.5 py-1 rounded-lg text-xs text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void commitSpaceDir()}
+                  disabled={spaceBusy}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-medium transition-colors cursor-pointer"
+                >
+                  {spaceBusy && <Loader2 className="w-3 h-3 animate-spin-fast" />}
+                  保存
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 会话后台任务控制台：仅当存在 Worker 或用户按需展开时挂载，
+          零 Worker 正常聊天时零像素占用 */}
+      {(superAgent.workers.length > 0 || showWorkerToolsBar) && (
+        <ActiveWorkersBar
+          key={session.id}
+          workers={superAgent.workers}
+          onSelectWorker={(workerId) => superAgent.setSelectedWorkerId(workerId)}
+          onStopWorker={(workerId) => {
+            void superAgent.stopWorker(workerId);
+          }}
+          onSpawnWorker={spawnBackgroundWorker}
+          onRunWatchdog={runWatchdog}
+          onClose={() => setShowWorkerToolsBar(false)}
+        />
+      )}
 
       {/* 子会话模式返回父会话横幅 */}
       {session.parentSessionId && (

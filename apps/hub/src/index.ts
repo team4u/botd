@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { createModels, type Models } from '@earendil-works/pi-ai';
+import { createModels, type Models, type MutableModels } from '@earendil-works/pi-ai';
 import { UserRecord } from '@botd/protocol';
 import { HubDatabase } from './db.js';
 import { AuthManager } from './auth.js';
@@ -18,7 +18,7 @@ import { GroupRouter } from './group-router.js';
 import { createStaticMiddleware } from './static.js';
 import { ArtifactService } from './artifact-service.js';
 import { HubDurableRuntime, SecretInjectingEnv, type BotPersonaConfig } from './harness/hub-harness.js';
-import { createHubCredentialStore } from './credential-store.js';
+import { createHubCredentialStore, registerStoredProviders } from './credential-store.js';
 import { loadDynamicDurableExtension } from './harness/dynamic-extension-loader.js';
 import { TargetDoc } from './harness/docs.js';
 import { registerProviderRoutes } from './providers.js';
@@ -146,6 +146,12 @@ export function createHub(options?: HubOptions): HubInstance {
         : (bot.enabledSkills ?? []);
     return Array.from(new Set(['botd-cli', ...base]));
   };
+  /** 懒创建持久运行时的默认模型集合：Hub 凭据 + `.agent/` 下存储的动态 provider（如 magpie）。 */
+  const createDefaultModels = () => {
+    const defaultModels = createModels({ credentials: createHubCredentialStore(db) });
+    registerStoredProviders(defaultModels, db.getDataDir());
+    return defaultModels;
+  };
   const ensureDurableRuntime = async (): Promise<HubDurableRuntime> => {
     if (durableRuntime !== undefined) {
       // Bot 配置可能已更新（新建/改模型/改工作目录）：每次取用都重新同步分身。
@@ -157,8 +163,9 @@ export function createHub(options?: HubOptions): HubInstance {
         const runtime = await HubDurableRuntime.open(
           {
             ...(options?.dbPath ? { dbPath: `${options.dbPath}.durable.sqlite` } : {}),
-            // 凭据来自 Hub SQLite（provider_credentials）：Hub 侧 LLM 请求直接解析认证
-            models: options?.durableModels ?? createModels({ credentials: createHubCredentialStore(db) }),
+            // 凭据来自 Hub SQLite（provider_credentials）+ `.agent/auth.json`；
+            // magpie 等动态 provider 的缓存模型来自 `.agent/models-store.json`
+            models: options?.durableModels ?? createDefaultModels(),
             // Hub 托管 Skills 与 Memory：分身的 Router/Worker 会话获得 load_skill /
             // update_memory 工具，内容直接读写 Hub 文件系统权威存储（含 Bot
             // workspace 的 .agents/skills / .agent/skills 自动发现）
@@ -340,6 +347,12 @@ export function createHub(options?: HubOptions): HubInstance {
   };
   /** Hub 数据库 Bot → 持久分身（SYSTEM/MEMORY、模型、思考档位、Skills、Extensions、环境变量全部来自 Hub 权威存储）。 */
   const syncBotPersonas = async (runtime: HubDurableRuntime): Promise<void> => {
+    // `.agent/` 下新增的动态 provider 模型（如 magpie 缓存目录）热注册进运行时，
+    // 保证运行时打开后新写入的存储模型无需重启即可选型。
+    const runtimeModels = runtime.models as Models | undefined;
+    if (runtimeModels !== undefined && typeof (runtimeModels as MutableModels).setProvider === 'function') {
+      registerStoredProviders(runtimeModels as MutableModels, db.getDataDir());
+    }
     const personas: BotPersonaConfig[] = [];
     for (const bot of db.getAllBots()) {
       const parent = bot.parentBotId ? db.getBot(bot.parentBotId) : undefined;

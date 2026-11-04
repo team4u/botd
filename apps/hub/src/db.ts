@@ -396,6 +396,11 @@ export class HubDatabase {
     this.resetStaleMetadata();
   }
 
+  /** dataDir 只读访问：凭据/模型目录等 legacy 文件的定位基准（`<dataDir>/.agent/...`）。 */
+  public getDataDir(): string {
+    return this.dataDir;
+  }
+
   public getSchemaVersion(): number {
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined;
     return Number(row?.user_version ?? 0);

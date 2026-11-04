@@ -10,8 +10,9 @@ import { api } from '../../api';
 /**
  * 模型目录拉取与派生：按节点拉取 catalog（节点离线时兜底全局内置目录），
  * 并派生可用服务商、当前服务商的模型列表、选中模型元数据与其支持的思考档位。
+ * @param currentProviderId BOT 已保存的服务商标识：即使未标记 configured 也始终保留在结果中
  */
-export function useModelCatalog(isOpen: boolean, nodeId: string) {
+export function useModelCatalog(isOpen: boolean, nodeId: string, currentProviderId?: string) {
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
   const [loadingCatalog, setLoadingCatalog] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
@@ -55,13 +56,26 @@ export function useModelCatalog(isOpen: boolean, nodeId: string) {
     };
   }, [isOpen, nodeId]);
 
-  // Providers list derived from catalog：仅展示已在节点上完成登录/配置的服务商（与设置页「已配置」同口径）。
+  // Providers list derived from catalog：优先展示已在节点上完成登录/配置的服务商（与设置页「已配置」同口径），
+ // BOT 已保存的服务商始终保留；两者皆空时回退到有模型的服务商（再退全量），保证任何情况下都能选到模型。
   // 节点离线时的内置目录兜底无法判定配置状态，保持全量展示。
   const catalogProviders: ProviderCatalogEntry[] = useMemo(() => {
     const providers = catalog?.providers || [];
     if (catalogError) return providers;
-    return providers.filter((p) => p.configured || p.credentialType);
-  }, [catalog, catalogError]);
+    const seen = new Set<string>();
+    const merged: ProviderCatalogEntry[] = [];
+    const push = (p: ProviderCatalogEntry) => {
+      if (seen.has(p.id)) return;
+      seen.add(p.id);
+      merged.push(p);
+    };
+    providers.filter((p) => p.configured || p.credentialType).forEach(push);
+    if (currentProviderId) providers.filter((p) => p.id === currentProviderId).forEach(push);
+    if (merged.length > 0) return merged;
+    // 兜底：目录里没有任何已配置/已保存服务商时，展示收录了模型的服务商，避免服务商与型号完全无法选择
+    const withModels = providers.filter((p) => (p.models?.length ?? 0) > 0);
+    return withModels.length > 0 ? withModels : providers;
+  }, [catalog, catalogError, currentProviderId]);
 
   return {
     catalog,

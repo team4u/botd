@@ -123,7 +123,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
     );
   }, [availableSkills, skillSearch, enabledSkillSet]);
 
-  const { loadingCatalog, catalogError, catalogProviders } = useModelCatalog(isOpen, nodeId);
+  const { loadingCatalog, catalogError, catalogProviders } = useModelCatalog(isOpen, nodeId, modelProvider);
 
   // Current selected provider object
   const activeProvider = useMemo(() => {

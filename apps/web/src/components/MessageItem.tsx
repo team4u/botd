@@ -897,10 +897,10 @@ export const SingleToolView: React.FC<{
   initialExpanded?: boolean;
 }> = ({ tool, initialExpanded }) => {
   const isError = tool.status === 'error' || Boolean(tool.isError);
-  // 带声明式 UI 规格（tool.view 插槽）的工具默认展开；edit 工具默认展开红绿内联 Diff，
-  // 开发者无需手动点开即可看到最近变更
+  // 低噪声默认收起：仅错误与声明式 UI 规格工具默认展开；
+  // edit 卡也改为默认收起（摘要行已含 ±行数），点击再看完整红绿 Diff
   const [expanded, setExpanded] = useState<boolean>(
-    () => Boolean(initialExpanded || tool.uiSpec || isError || tool.name === 'edit')
+    () => Boolean(initialExpanded || tool.uiSpec || isError)
   );
 
   useEffect(() => {
@@ -951,7 +951,7 @@ export const ToolGroupView: React.FC<{
     tools.forEach((t, i) => {
       if (t.status === 'error' || t.isError) initial.add(i);
     });
-    // 含 edit 工具时默认展开最后一个 edit（若正在运行或刚完成），内联红绿 Diff 直接可见
+    // 含 edit 工具时也不再默认展开（摘要行的 ±行数徽标已足够低噪声），需要时点击展开
     for (let i = tools.length - 1; i >= 0; i--) {
       const t = tools[i];
       if (
@@ -959,7 +959,7 @@ export const ToolGroupView: React.FC<{
         (t.status === 'running' || t.status === 'done') &&
         !tools.slice(i + 1).some((later) => later.name === 'edit')
       ) {
-        initial.add(i);
+        initial.delete(i);
         break;
       }
     }
@@ -978,6 +978,19 @@ export const ToolGroupView: React.FC<{
       });
     }
   }, [hasError]);
+
+  // 低噪声流式：运行中的组自动收起为单行摘要（错误仍强制展开），
+  // 用户手动展开后不再被自动收回，长 bash 输出不再刷屏移动端视口
+  const [userPinnedExpanded, setUserPinnedExpanded] = useState(false);
+  useEffect(() => {
+    if (userPinnedExpanded) return;
+    setGroupExpanded(isRunning ? false : hasError);
+  }, [isRunning, hasError, userPinnedExpanded]);
+
+  const toggleGroup = () => {
+    setUserPinnedExpanded(true);
+    setGroupExpanded((v) => !v);
+  };
 
   const toggleTool = (idx: number) => {
     setExpandedIndices((prev) => {
@@ -1022,7 +1035,7 @@ export const ToolGroupView: React.FC<{
       <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/40 overflow-hidden shadow-xs">
         <button
           type="button"
-          onClick={() => setGroupExpanded((v) => !v)}
+          onClick={toggleGroup}
           className="w-full flex items-center gap-2 px-2.5 h-9 text-left hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors cursor-pointer"
         >
           <ChevronRight
@@ -1160,7 +1173,8 @@ export const ThinkingTrace: React.FC<{ block: Extract<TurnBlock, { type: 'thinki
     prevStatusRef.current = block.status;
   }, [block.status]);
 
-  const isExpanded = userOverride !== null ? userOverride : isRunning;
+  // 低噪声：思考默认收起为单行呼吸胶囊（流式与完成后一致），用户点开后自主控制
+  const isExpanded = userOverride === true;
 
   if (!block.thinking && !isRunning) return null;
 
@@ -1174,7 +1188,7 @@ export const ThinkingTrace: React.FC<{ block: Extract<TurnBlock, { type: 'thinki
         <Brain className={`w-3.5 h-3.5 shrink-0 ${isRunning ? 'animate-pulse' : ''}`} />
         <span>
           {isRunning
-            ? '深度思考中'
+            ? `深度思考中${block.thinking ? ` · ${block.thinking.length} 字` : ''}`
             : `已深度思考${
                 block.durationMs && block.durationMs >= 100
                   ? ` · ${formatDuration(block.durationMs)}`
@@ -1426,7 +1440,11 @@ export const AssistantTurnContent: React.FC<{
   );
 };
 
-export const MessageCopyButton: React.FC<{ content: string; className?: string }> = ({ content, className = '' }) => {
+export const MessageCopyButton: React.FC<{
+  content: string;
+  className?: string;
+  label?: boolean;
+}> = ({ content, className = '', label = false }) => {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -1443,15 +1461,18 @@ export const MessageCopyButton: React.FC<{ content: string; className?: string }
       onClick={handleCopy}
       aria-label={copied ? '已复制' : '复制消息'}
       title={copied ? '已复制' : '复制'}
-      className={`flex items-center gap-1 p-1 rounded-md text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer transition shrink-0 ${className}`}
+      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] cursor-pointer transition-colors shrink-0 text-zinc-400 dark:text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-700 dark:hover:text-zinc-200 ${className}`}
     >
       {copied ? (
         <>
           <Check className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />
-          <span className="text-[11px] text-emerald-600 dark:text-emerald-400">已复制</span>
+          {label && <span className="text-emerald-600 dark:text-emerald-400">已复制</span>}
         </>
       ) : (
-        <Copy className="w-3.5 h-3.5" />
+        <>
+          <Copy className="w-3.5 h-3.5" />
+          {label && <span>复制</span>}
+        </>
       )}
     </button>
   );
@@ -1464,17 +1485,19 @@ export const MessageCopyButton: React.FC<{ content: string; className?: string }
 const MessageForkButton: React.FC<{
   messageId: string;
   onForkMessage: (messageId: string) => void | Promise<void>;
+  label?: boolean;
   className?: string;
-}> = ({ messageId, onForkMessage, className = '' }) => {
+}> = ({ messageId, onForkMessage, label = false, className = '' }) => {
   return (
     <button
       type="button"
       onClick={() => void onForkMessage(messageId)}
       aria-label="从这里分叉新会话"
       title="从这里分叉新会话"
-      className={`flex items-center gap-1 p-1 rounded-md text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer transition shrink-0 ${className}`}
+      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] cursor-pointer transition-colors shrink-0 text-zinc-400 dark:text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-700 dark:hover:text-zinc-200 ${className}`}
     >
       <GitFork className="w-3.5 h-3.5" />
+      {label && <span>分叉</span>}
     </button>
   );
 };
@@ -1748,13 +1771,14 @@ export const MessageItem: React.FC<MessageItemProps> = ({
         </div>
         {/* 附件（图片缩略图 / 文件下载芯片），与气泡同宽右对齐展示 */}
         <MessageAttachments attachments={message.attachments || []} />
-        <div className="flex items-center gap-0.5 mt-0.5 mr-1 select-none opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-          <span className="text-[11px] text-zinc-400 dark:text-zinc-500" title={fullTime}>
+        {/* 常显操作行：时间 + 复制 + 分叉 + 编辑（移动端与桌面端均可见） */}
+        <div className="mt-1 inline-flex items-center gap-1 text-[11px] text-zinc-400 dark:text-zinc-500 select-none">
+          <span className="px-1" title={fullTime}>
             {formattedTime}
           </span>
-          {!isEditing && <MessageCopyButton content={message.content} />}
+          {!isEditing && <MessageCopyButton content={message.content} label />}
           {!isEditing && onForkMessage && (
-            <MessageForkButton messageId={message.id} onForkMessage={onForkMessage} />
+            <MessageForkButton messageId={message.id} onForkMessage={onForkMessage} label />
           )}
           {canEdit && onStartEdit && (
             <button
@@ -1762,9 +1786,10 @@ export const MessageItem: React.FC<MessageItemProps> = ({
               onClick={() => onStartEdit(message)}
               aria-label="编辑消息"
               title="编辑并重新生成回复"
-              className="flex items-center gap-1 p-1 rounded-md text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer transition shrink-0"
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] text-zinc-400 dark:text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors cursor-pointer shrink-0"
             >
               <Pencil className="w-3.5 h-3.5" />
+              <span>编辑</span>
             </button>
           )}
         </div>
@@ -1813,14 +1838,14 @@ export const MessageItem: React.FC<MessageItemProps> = ({
       {/* 附件（图片缩略图 / 文件下载芯片），助手产出的文件产物同样可预览与下载 */}
       <MessageAttachments attachments={message.attachments || []} />
 
-      {/* 操作行：时间 + 复制 + 分叉 + Token 用量置于正文下方，移动端常显、桌面端悬停显示 */}
-      <div className="mt-1 flex items-center gap-0.5 select-none opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-        <span className="text-[11px] text-zinc-400 dark:text-zinc-500 px-1" title={fullTime}>
+      {/* 操作行：时间 + 复制 + 分叉 + Token 用量置于正文下方，移动端与桌面端均常显 */}
+      <div className="mt-1 inline-flex items-center gap-1 text-[11px] text-zinc-400 dark:text-zinc-500 select-none">
+        <span className="px-1" title={fullTime}>
           {formattedTime}
         </span>
-        <MessageCopyButton content={message.content} />
+        <MessageCopyButton content={message.content} label />
         {onForkMessage && (
-          <MessageForkButton messageId={message.id} onForkMessage={onForkMessage} />
+          <MessageForkButton messageId={message.id} onForkMessage={onForkMessage} label />
         )}
         {usageBadge}
       </div>

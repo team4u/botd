@@ -1,8 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Brain, ChevronDown, FolderClosed, Loader2, Search, Sparkles, Zap } from 'lucide-react';
-import type { BotConfig, ModelCatalog, ThinkingLevel } from '@botd/protocol';
-import { THINKING_LEVELS } from '@botd/protocol';
+import { Brain, Check, ChevronDown, Loader2, Search, Zap } from 'lucide-react';
+import type { BotConfig, ModelCatalog, ModelCatalogEntry, ProviderCatalogEntry, ThinkingLevel } from '@botd/protocol';
 import { api } from '../../api';
+import {
+  THINKING_LEVEL_LABELS,
+  clampThinkingLevel,
+  deriveModelThinkingLevels,
+} from '../BotEditorModal/useModelCatalog';
 
 /** 模型简称：截取 modelId 中有辨识度的短段（如 claude-sonnet-4-5 / glm-4.6） */
 function shortModelLabel(modelId: string): string {
@@ -10,34 +14,28 @@ function shortModelLabel(modelId: string): string {
   return modelId.length > 24 ? `${modelId.slice(0, 22)}…` : modelId;
 }
 
-const THINKING_SHORT_LABELS: Record<Exclude<ThinkingLevel, ''>, string> = {
-  off: '思考: off',
-  minimal: '思考: minimal',
-  low: '思考: low',
-  medium: '思考: medium',
-  high: '思考: high',
-  xhigh: '思考: xhigh',
-  max: '思考: max',
-};
+/** 思考档位短标签：中文 + 代码（如「深度思考 high」） */
+function shortThinkingLabel(level: Exclude<ThinkingLevel, ''>): string {
+  return THINKING_LEVEL_LABELS[level] || level;
+}
 
 interface ComposerStatusBarProps {
   /** 当前主控 BOT（模型/思考档位的秒切目标） */
   currentBot: BotConfig;
-  /** 点击 /compact 芯片：向输入框插入压缩命令 */
-  onCompact?: () => void;
-  /** 点击 /new 芯片：向输入框插入新话题命令 */
-  onNewTopic?: () => void;
+}
+
+/** 模型目录扁平条目：带 provider 维度，供搜索与档位推导 */
+interface CatalogModelEntry {
+  providerId: string;
+  providerName: string;
+  model: ModelCatalogEntry;
 }
 
 /**
- * 输入框底栏微操舱：模型秒切、思考档位秒切、工作区路径徽章与快捷指令芯片。
- * 模型/档位变更走 api.updateBot 增量保存，本地乐观更新显示，失败时回滚。
+ * 输入框底栏微操舱：模型秒切与思考档位秒切（均为模型感知，切换模型自动收敛档位）。
+ * 变更走 api.updateBot 增量保存，本地乐观更新显示，失败时回滚。
  */
-export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({
-  currentBot,
-  onCompact,
-  onNewTopic,
-}) => {
+export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot }) => {
   // 乐观 UI 状态：null 表示跟随 currentBot 真实值
   const [modelOverride, setModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
   const [thinkingOverride, setThinkingOverride] = useState<ThinkingLevel | null>(null);
@@ -57,22 +55,12 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({
 
   const modelProvider = modelOverride?.provider ?? currentBot.modelProvider;
   const modelId = modelOverride?.modelId ?? currentBot.modelId;
-  const thinkingLevel = (thinkingOverride ?? currentBot.thinkingLevel ?? 'medium') as Exclude<ThinkingLevel, ''>;
+  const thinkingLevel = (thinkingOverride ?? (currentBot.thinkingLevel || 'medium')) as Exclude<ThinkingLevel, ''>;
 
-  // 切换 BOT 时清空乐观覆盖与浮层
+  // BOT/节点变化即拉取目录（带 fallback）：保证先点「思考」胶囊也有目录可用，不必先开模型菜单
   useEffect(() => {
-    setModelOverride(null);
-    setThinkingOverride(null);
-    setSavingError(null);
-    setModelMenuOpen(false);
-    setThinkingMenuOpen(false);
-    setModelSearch('');
-  }, [currentBot.id]);
-
-  // 打开模型浮层时拉取目录（带 fallback），并聚焦搜索框
-  useEffect(() => {
-    if (!modelMenuOpen) return;
     let active = true;
+    setCatalog(null);
     setLoadingCatalog(true);
     api
       .getModelCatalog(currentBot.nodeId || undefined)
@@ -90,46 +78,107 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({
       .finally(() => {
         if (active) setLoadingCatalog(false);
       });
-    setTimeout(() => modelSearchInputRef.current?.focus(), 30);
     return () => {
       active = false;
     };
-  }, [modelMenuOpen, currentBot.nodeId]);
+  }, [currentBot.id, currentBot.nodeId]);
 
-  // 点击外部关闭两个浮层
+  // 切换 BOT 时清空乐观覆盖与浮层
+  useEffect(() => {
+    setModelOverride(null);
+    setThinkingOverride(null);
+    setSavingError(null);
+    setModelMenuOpen(false);
+    setThinkingMenuOpen(false);
+    setModelSearch('');
+  }, [currentBot.id]);
+
+  // 打开模型浮层时聚焦搜索框
+  useEffect(() => {
+    if (!modelMenuOpen) return;
+    setTimeout(() => modelSearchInputRef.current?.focus(), 30);
+  }, [modelMenuOpen]);
+
+  // 点击/触摸外部关闭两个浮层（同时监听 mousedown 与 touchstart，覆盖移动端）
   useEffect(() => {
     if (!modelMenuOpen && !thinkingMenuOpen) return;
-    const onDown = (e: MouseEvent) => {
+    const onDown = (e: Event) => {
       const target = e.target as Node;
       if (modelMenuOpen && !modelMenuRef.current?.contains(target)) setModelMenuOpen(false);
       if (thinkingMenuOpen && !thinkingMenuRef.current?.contains(target)) setThinkingMenuOpen(false);
     };
     document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
+    document.addEventListener('touchstart', onDown, { passive: true });
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('touchstart', onDown);
+    };
   }, [modelMenuOpen, thinkingMenuOpen]);
 
-  // 已配置 provider 的模型扁平列表（带 provider 维度），供搜索选择
-  const catalogModels = useMemo(() => {
+  // 模型扁平列表：优先已配置/当前 BOT 服务商，全空时回退到有模型的服务商，保证始终可选
+  const catalogModels = useMemo<CatalogModelEntry[]>(() => {
     const providers = catalog?.providers || [];
-    const configured = providers.filter((p) => p.configured || p.credentialType);
-    return configured.flatMap((p) =>
-      (p.models || []).map((m) => ({ providerId: p.id, providerName: p.name, model: m })),
+    const pick = (list: ProviderCatalogEntry[]): CatalogModelEntry[] =>
+      list.flatMap((p) =>
+        (p.models || []).map((m) => ({ providerId: p.id, providerName: p.name, model: m })),
+      );
+    const primary = providers.filter(
+      (p) => p.configured || p.credentialType || p.id === modelProvider,
     );
-  }, [catalog]);
+    const primaryModels = pick(primary);
+    if (primaryModels.length > 0) return primaryModels;
+    return pick(providers.filter((p) => (p.models?.length ?? 0) > 0));
+  }, [catalog, modelProvider]);
+
+  // 当前模型不在目录时合成回退条目置顶，保证当前模型始终可见可选
+  const catalogModelsWithFallback = useMemo<CatalogModelEntry[]>(() => {
+    if (!modelId) return catalogModels;
+    const exists = catalogModels.some(
+      (e) => (e.providerId === modelProvider && e.model.id === modelId) || e.model.id === modelId,
+    );
+    if (exists) return catalogModels;
+    return [
+      {
+        providerId: modelProvider,
+        providerName: modelProvider,
+        model: { id: modelId, name: modelId, reasoning: false, input: [], contextWindow: 0, maxTokens: 0 },
+      },
+      ...catalogModels,
+    ];
+  }, [catalogModels, modelProvider, modelId]);
 
   const filteredCatalogModels = useMemo(() => {
-    if (!modelSearch.trim()) return catalogModels;
+    if (!modelSearch.trim()) return catalogModelsWithFallback;
     const q = modelSearch.trim().toLowerCase();
-    return catalogModels.filter(
+    return catalogModelsWithFallback.filter(
       (entry) =>
         entry.model.id.toLowerCase().includes(q) ||
         entry.model.name.toLowerCase().includes(q) ||
         entry.providerId.toLowerCase().includes(q),
     );
-  }, [catalogModels, modelSearch]);
+  }, [catalogModelsWithFallback, modelSearch]);
+
+  // 当前模型元数据：先精确匹配 provider+model，再退化为仅 model 匹配
+  const currentModelMeta = useMemo(() => {
+    const exact = catalogModelsWithFallback.find(
+      (e) => e.providerId === modelProvider && e.model.id === modelId,
+    );
+    if (exact) return exact.model;
+    return catalogModelsWithFallback.find((e) => e.model.id === modelId)?.model ?? null;
+  }, [catalogModelsWithFallback, modelProvider, modelId]);
+
+  // 当前模型支持的思考档位（目录缺失时回退全量）
+  const supportedThinkingLevels = useMemo(
+    () => deriveModelThinkingLevels(currentModelMeta),
+    [currentModelMeta],
+  );
 
   /** 保存 BOT：仅提交变更字段（systemMd 未传时后端保留原值），成功保留乐观值，失败回滚 */
-  const persistBot = async (patch: { modelProvider?: string; modelId?: string; thinkingLevel?: ThinkingLevel }) => {
+  const persistBot = async (patch: {
+    modelProvider?: string;
+    modelId?: string;
+    thinkingLevel?: ThinkingLevel;
+  }) => {
     setSavingError(null);
     const prevOverride = { model: modelOverride, thinking: thinkingOverride };
     setSavingModel(true);
@@ -149,7 +198,21 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({
     setModelOverride({ provider: providerId, modelId: selectedModelId });
     setModelMenuOpen(false);
     setModelSearch('');
-    void persistBot({ modelProvider: providerId, modelId: selectedModelId });
+    // 模型感知：目标模型不支持当前思考档位时，收敛到最近的支持档位并一并保存
+    const nextMeta =
+      catalogModelsWithFallback.find(
+        (e) => e.providerId === providerId && e.model.id === selectedModelId,
+      )?.model ??
+      catalogModelsWithFallback.find((e) => e.model.id === selectedModelId)?.model ??
+      null;
+    const nextSupported = deriveModelThinkingLevels(nextMeta);
+    const clamped = clampThinkingLevel(thinkingLevel, nextSupported);
+    if (clamped !== null) {
+      setThinkingOverride(clamped);
+      void persistBot({ modelProvider: providerId, modelId: selectedModelId, thinkingLevel: clamped });
+    } else {
+      void persistBot({ modelProvider: providerId, modelId: selectedModelId });
+    }
   };
 
   const selectThinking = (level: Exclude<ThinkingLevel, ''>) => {
@@ -158,13 +221,8 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({
     void persistBot({ thinkingLevel: level });
   };
 
-  const workspaceDir: string | undefined = (currentBot as any).workspaceDir;
-  const workspaceName = workspaceDir
-    ? workspaceDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || workspaceDir
-    : null;
-
   return (
-    <div className="flex items-center gap-1.5 flex-wrap text-[11px] text-zinc-400 dark:text-zinc-500">
+    <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
       {/* 模型秒切胶囊 */}
       <div className="relative" ref={modelMenuRef}>
         <button
@@ -188,7 +246,7 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({
         </button>
 
         {modelMenuOpen && (
-          <div className="absolute bottom-full left-0 mb-1.5 w-72 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 z-40 overflow-hidden animate-in fade-in slide-in-from-bottom-2">
+          <div className="absolute bottom-full left-0 mb-1.5 w-[min(18rem,calc(100vw-1.5rem))] bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 z-50 overflow-hidden animate-in fade-in slide-in-from-bottom-2">
             <div className="p-2 border-b border-zinc-100 dark:border-zinc-800">
               <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-zinc-100 dark:bg-zinc-800/70">
                 <Search className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 shrink-0" />
@@ -231,7 +289,12 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="font-mono text-[11px] truncate">{model.id}</span>
-                        {isCurrent && <span className="text-[10px] shrink-0 text-blue-500">当前</span>}
+                        {isCurrent && (
+                          <span className="flex items-center gap-0.5 text-[10px] shrink-0 text-blue-500">
+                            <Check className="w-3 h-3" />
+                            当前
+                          </span>
+                        )}
                       </div>
                       <div className="text-[10px] text-zinc-400 dark:text-zinc-500 truncate">
                         {providerName || providerId}
@@ -255,51 +318,54 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({
             setModelMenuOpen(false);
           }}
           className="inline-flex items-center gap-1 h-6 px-2 rounded-full border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 text-zinc-600 dark:text-zinc-300 hover:border-zinc-300 hover:text-zinc-900 dark:hover:border-zinc-700 dark:hover:text-zinc-100 transition-colors cursor-pointer"
-          title="推理强度：点击秒切思考档位"
+          title={`推理强度：${shortThinkingLabel(thinkingLevel)}（${thinkingLevel}），点击秒切思考档位`}
           aria-haspopup="listbox"
           aria-expanded={thinkingMenuOpen}
         >
           <Brain className="w-3 h-3 text-zinc-400 dark:text-zinc-500 shrink-0" />
-          <span className="font-mono">{THINKING_SHORT_LABELS[thinkingLevel] || thinkingLevel}</span>
+          <span className="truncate">{shortThinkingLabel(thinkingLevel)}</span>
+          <span className="font-mono text-zinc-400 dark:text-zinc-500 shrink-0">{thinkingLevel}</span>
           <ChevronDown className="w-3 h-3 shrink-0 opacity-60" />
         </button>
 
         {thinkingMenuOpen && (
-          <div className="absolute bottom-full left-0 mb-1.5 w-40 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 z-40 overflow-hidden p-1 animate-in fade-in slide-in-from-bottom-2" role="listbox">
-            {THINKING_LEVELS.filter(Boolean).map((level) => {
-              const isCurrent = level === thinkingLevel;
-              return (
-                <button
-                  key={level}
-                  type="button"
-                  onClick={() => selectThinking(level as Exclude<ThinkingLevel, ''>)}
-                  className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-mono transition-colors cursor-pointer ${
-                    isCurrent
-                      ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-900 dark:text-blue-200'
-                      : 'hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
-                  }`}
-                  role="option"
-                  aria-selected={isCurrent}
-                >
-                  {level}
-                  {isCurrent && <span className="ml-1.5 text-[10px] text-blue-500">当前</span>}
-                </button>
-              );
-            })}
+          <div
+            className="absolute bottom-full left-0 mb-1.5 w-48 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 z-50 overflow-hidden animate-in fade-in slide-in-from-bottom-2"
+            role="listbox"
+          >
+            <div className="max-h-64 overflow-y-auto p-1">
+              {supportedThinkingLevels.map((level) => {
+                const isCurrent = level === thinkingLevel;
+                return (
+                  <button
+                    key={level}
+                    type="button"
+                    onClick={() => selectThinking(level)}
+                    className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs transition-colors cursor-pointer flex items-center justify-between gap-2 ${
+                      isCurrent
+                        ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-900 dark:text-blue-200'
+                        : 'hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
+                    }`}
+                    role="option"
+                    aria-selected={isCurrent}
+                  >
+                    <span className="truncate">{THINKING_LEVEL_LABELS[level] || level}</span>
+                    <span className="flex items-center gap-1 shrink-0">
+                      <span className="font-mono text-[10px] text-zinc-400 dark:text-zinc-500">{level}</span>
+                      {isCurrent && <Check className="w-3 h-3 text-blue-500" />}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            {supportedThinkingLevels.length === 1 && (
+              <div className="px-2.5 py-1.5 border-t border-zinc-100 dark:border-zinc-800 text-[10px] text-zinc-400 dark:text-zinc-500">
+                {`该模型仅支持 ${supportedThinkingLevels[0]} 档位`}
+              </div>
+            )}
           </div>
         )}
       </div>
-
-      {/* 工作区路径微徽章 */}
-      {workspaceName && (
-        <span
-          className="inline-flex items-center gap-1 h-6 px-2 rounded-full border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 text-zinc-500 dark:text-zinc-400 max-w-[10rem]"
-          title={workspaceDir}
-        >
-          <FolderClosed className="w-3 h-3 shrink-0" />
-          <span className="truncate font-mono">{workspaceName}</span>
-        </span>
-      )}
 
       {/* 保存失败提示 */}
       {savingError && (
@@ -307,32 +373,6 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({
           切换失败：{savingError}
         </span>
       )}
-
-      {/* 快捷指令芯片 */}
-      <div className="ml-auto flex items-center gap-1.5">
-        {onCompact && (
-          <button
-            type="button"
-            onClick={onCompact}
-            className="inline-flex items-center gap-1 h-6 px-2 rounded-full border border-zinc-200/80 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 hover:border-zinc-300 hover:text-zinc-800 dark:hover:border-zinc-700 dark:hover:text-zinc-200 transition-colors cursor-pointer font-mono"
-            title="压缩当前会话上下文（/compact）"
-          >
-            <Sparkles className="w-3 h-3 shrink-0" />
-            /compact
-          </button>
-        )}
-        {onNewTopic && (
-          <button
-            type="button"
-            onClick={onNewTopic}
-            className="inline-flex items-center gap-1 h-6 px-2 rounded-full border border-zinc-200/80 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 hover:border-zinc-300 hover:text-zinc-800 dark:hover:border-zinc-700 dark:hover:text-zinc-200 transition-colors cursor-pointer font-mono"
-            title="开启新话题（/new）"
-          >
-            <ChevronDown className="w-3 h-3 shrink-0 rotate-[-90deg]" />
-            /new
-          </button>
-        )}
-      </div>
     </div>
   );
 };

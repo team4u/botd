@@ -3,10 +3,15 @@ import type { Hono } from 'hono';
 import { isSafeId, type ProviderAuthType, type ProviderLoginState, type UserRecord } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
 import { resolveOwnedNode } from './http-helpers.js';
+import { listEffectiveProviderCredentials, loadStoredProviders, removeLegacyProviderAuth } from './credential-store.js';
 
 let builtinCatalogPromise: Promise<ReturnType<typeof import('@botd/models').getBuiltinModelCatalog>> | undefined;
 function getCachedBuiltinCatalog() {
   return (builtinCatalogPromise ??= import('@botd/models').then(m => m.getBuiltinModelCatalog()));
+}
+let builderPromise: Promise<typeof import('@botd/models').buildModelCatalog> | undefined;
+function getCachedBuilder() {
+  return (builderPromise ??= import('@botd/models').then(m => m.buildModelCatalog));
 }
 
 /** Hub 内存中的登录会话（api_key 输入流） */
@@ -28,19 +33,47 @@ export function registerProviderRoutes(
   const loginSessions = new Map<string, HubLoginSession>();
 
   const hubCatalog = async () => {
-    const builtin = await getCachedBuiltinCatalog();
-    const credentials = new Map(db.listProviderCredentials().map((c) => [c.providerId, c.authType]));
-    return {
-      ...builtin,
-      providers: builtin.providers.map((provider) => {
-        const authType = credentials.get(provider.id);
-        return {
-          ...provider,
-          configured: authType !== undefined,
-          ...(authType !== undefined ? { credentialType: authType } : {}),
-        };
-      }),
-    };
+    const [builtin, buildModelCatalog] = await Promise.all([getCachedBuiltinCatalog(), getCachedBuilder()]);
+    const storedProviders = loadStoredProviders(db.getDataDir());
+    const storedCatalog = buildModelCatalog(storedProviders);
+    // 凭据状态：SQLite 与 `.agent/auth.json` 合并（SQLite 胜出）
+    const credentials = new Map(
+      listEffectiveProviderCredentials(db).map((c) => [c.providerId, c.authType])
+    );
+    const usedProviders = new Set(db.getAllBots().map((bot) => bot.modelProvider));
+
+    // 合并：内置目录为基底，存储 provider（models-store.json / models.json）
+    // 已存在同名则用其模型覆盖（非空时），否则追加；最后按名称排序。
+    // builtin 的 configured 仅由凭据决定（保持注销语义）；存储 provider 有
+    // 模型或被任何 Bot 引用即可选（无凭据也可先选型）。
+    const storedById = new Map(storedCatalog.providers.map((p) => [p.id, p]));
+    const providers = builtin.providers.map((provider) => {
+      const authType = credentials.get(provider.id);
+      const stored = storedById.get(provider.id);
+      // 同名存储 provider 只覆盖模型列表；authMethods 保持内置定义
+      //（如 anthropic 的 oauth 入口不能因动态目录缓存丢失）
+      const entry = stored && stored.models.length > 0
+        ? { ...provider, models: stored.models }
+        : { ...provider };
+      return {
+        ...entry,
+        configured: authType !== undefined,
+        ...(authType !== undefined ? { credentialType: authType } : {}),
+      };
+    });
+    for (const stored of storedCatalog.providers) {
+      // 与内置目录同名的 provider 已在上面的 map 中合并（模型覆盖），这里只追加新 provider
+      if (builtin.providers.some((p) => p.id === stored.id)) continue;
+      const authType = credentials.get(stored.id);
+      const usable = authType !== undefined || stored.models.length > 0 || usedProviders.has(stored.id);
+      providers.push({
+        ...stored,
+        configured: usable,
+        ...(authType !== undefined ? { credentialType: authType } : usable ? { credentialType: 'api_key' as const } : {}),
+      });
+    }
+    providers.sort((a, b) => a.name.localeCompare(b.name));
+    return { ...builtin, providers };
   };
 
   const startLogin = async (
@@ -51,8 +84,13 @@ export function registerProviderRoutes(
       return { ok: false, error: 'OAuth 登录暂由节点 CLI 承载，Hub 直连目前支持 api_key' };
     }
     const catalog = await getCachedBuiltinCatalog();
-    const provider = catalog.providers.find((p) => p.id === providerId);
-    if (!provider) {
+    const builtinProvider = catalog.providers.find((p) => p.id === providerId);
+    // 存储目录（models-store.json / models.json）里的动态 provider（如 magpie）也可登录
+    const storedProvider = builtinProvider
+      ? undefined
+      : loadStoredProviders(db.getDataDir()).find((p) => p.id === providerId);
+    const providerName = builtinProvider?.name ?? storedProvider?.name;
+    if (providerName === undefined) {
       return { ok: false, error: `Unknown provider: ${providerId}` };
     }
     const id = `login_${randomUUID()}`;
@@ -62,7 +100,7 @@ export function registerProviderRoutes(
       method,
       status: 'pending',
       events: [{ type: 'info', message: '等待输入 API Key' }],
-      prompt: { id: 'api_key', type: 'secret', message: `Enter API Key for ${provider.name}` },
+      prompt: { id: 'api_key', type: 'secret', message: `Enter API Key for ${providerName}` },
     };
     loginSessions.set(id, state);
     // 过期清理：30 分钟未被应答的登录会话自动作废
@@ -109,6 +147,8 @@ export function registerProviderRoutes(
 
   const logout = (providerId: string): void => {
     db.deleteProviderCredential(providerId);
+    // 同时清理 `.agent/auth.json` 里的旧凭据，避免注销后仍从旧文件回读
+    removeLegacyProviderAuth(db.getDataDir(), providerId);
   };
 
   // --- 模型目录与 Provider 登录（Hub 全局路由） ---
