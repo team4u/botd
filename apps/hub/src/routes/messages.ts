@@ -120,6 +120,12 @@ export function registerMessageRoutes(
       ? [cmdResult.targetBotId]
       : (cmdResult.isCommand ? [] : extractMentions(content, validBots));
 
+    // 多分身群聊路由：@mention / 斜杠命令目标分身优先，否则回落主 Bot。
+    const targetBotId =
+      (cmdResult.targetBotId && db.getBot(cmdResult.targetBotId) ? cmdResult.targetBotId : undefined) ??
+      mentions.find((m) => db.getBot(m) !== undefined) ??
+      session.leadBotId;
+
     const msgResult = db.createMessage({
       id: `msg_${randomUUID()}`,
       sessionId: id,
@@ -145,7 +151,7 @@ export function registerMessageRoutes(
         const submitted = await submitSessionMessageToDurable(
           dctx,
           id,
-          session.leadBotId,
+          targetBotId,
           content,
           durableMirror,
           {
@@ -207,6 +213,12 @@ export function registerMessageRoutes(
       ? [cmdResult.targetBotId]
       : (cmdResult.isCommand ? [] : extractMentions(body.content, validBots));
 
+    // 多分身群聊路由（与 POST 一致）：@mention / 斜杠命令目标分身优先，否则回落主 Bot。
+    const targetBotId =
+      (cmdResult.targetBotId && db.getBot(cmdResult.targetBotId) ? cmdResult.targetBotId : undefined) ??
+      mentions.find((m) => db.getBot(m) !== undefined) ??
+      session.leadBotId;
+
     // 验证输入后，使用 Router 统一失效旧队列，复用 cancelSession
     await router.cancelSession(id);
 
@@ -237,7 +249,7 @@ export function registerMessageRoutes(
         if (rt !== undefined) {
           await rewindDurableSessionBeforeMessage(rt, {
             sessionId: id,
-            botId: session.leadBotId,
+            botId: targetBotId,
             previousMessage: messagesBeforeEdited.at(-1),
             messagesBeforeEdited,
           });
@@ -245,7 +257,7 @@ export function registerMessageRoutes(
         const submitted = await submitSessionMessageToDurable(
           dctx,
           id,
-          session.leadBotId,
+          targetBotId,
           body.content,
           durableMirror,
           cmdResult.isCommand && cmdResult.commandText ? { commandText: cmdResult.commandText } : undefined,

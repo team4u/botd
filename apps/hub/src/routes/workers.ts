@@ -7,13 +7,13 @@
  * `HubDurableRuntime` 的文档事务，重启后状态原样恢复。
  */
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { defineDocFamily } from '@earendil-works/pi-durable';
+import { configure, defineDocFamily } from '@earendil-works/pi-durable';
 import { randomUUID } from 'node:crypto';
 import { resolveOwnedSession } from '../http-helpers.js';
 import type { MessageAttachment, PendingAskRecord, ToolCallRecord, TurnUsage } from '@botd/protocol';
 import { stringToConversationId, type HubDurableRuntime } from '../harness/hub-harness.js';
 import { AskDoc, type AskEntry } from '../harness/docs.js';
-import type { WorkerEntry } from '../harness/docs.js';
+import { RecallIndexDoc, TargetDoc, WorkerRegistryDoc, type WorkerEntry } from '../harness/docs.js';
 import { redactSecretAskAnswer } from '../harness/secret-stash.js';
 import {
   EventDropped,
@@ -27,8 +27,8 @@ import { diagnoseSystemHealth, runWatchdogPass } from '../harness/watchdog.js';
 import type { HubApp, HubContext } from './context.js';
 import type { SseHub } from '../sse.js';
 
-/** botd 会话 → Router 会话 映射（scope: session 的 family，key = sessionId）。 */
-const SessionRouterDoc = defineDocFamily<{ conversationId: string }, null>({
+/** botd 会话 → Router 会话 映射（scope: session 的 family，key = sessionId），含会话 Space 绑定的 workspaceDir（粘性）。 */
+const SessionRouterDoc = defineDocFamily<{ conversationId: string; workspaceDir?: string }, null>({
   kind: 'botd.session-router',
   version: 1,
   scope: 'session',
@@ -49,44 +49,113 @@ interface WorkerListItem {
   nodeId?: string;
   cwd?: string;
   worktreePath?: string;
+  branchName?: string;
   threadKeys: string[];
   startedAt: string;
   updatedAt?: string;
   summary?: string;
 }
 
-const toListItem = (entry: WorkerEntry, sessionId: string): WorkerListItem => ({
-  workerId: entry.workerId,
-  conversationId: entry.conversationId,
-  parentSessionId: sessionId,
-  botId: entry.botId,
-  title: entry.title,
-  kind: 'worker',
-  status: entry.status,
-  ...(entry.nodeId ? { nodeId: entry.nodeId } : {}),
-  ...(entry.cwd ? { cwd: entry.cwd } : {}),
-  ...(entry.worktreePath ? { worktreePath: entry.worktreePath } : {}),
-  threadKeys: entry.threadKeys,
-  startedAt: new Date(entry.startedAt).toISOString(),
-  ...(entry.finishedAt ? { updatedAt: new Date(entry.finishedAt).toISOString() } : {}),
-  ...(entry.summary ? { summary: entry.summary } : {}),
-});
+const toListItem = (entry: WorkerEntry, sessionId: string): WorkerListItem => {
+  // worktree 隔离的 Worker默认分支名 botd/<workerId>（Web 派发路径未显式落 branchName 时兜底）。
+  const branchName = (entry as { branchName?: string }).branchName ?? (entry.worktreePath ? `botd/${entry.workerId}` : undefined);
+  return {
+    workerId: entry.workerId,
+    conversationId: entry.conversationId,
+    parentSessionId: sessionId,
+    botId: entry.botId,
+    title: entry.title,
+    kind: 'worker',
+    status: entry.status,
+    ...(entry.nodeId ? { nodeId: entry.nodeId } : {}),
+    ...(entry.cwd ? { cwd: entry.cwd } : {}),
+    ...(entry.worktreePath ? { worktreePath: entry.worktreePath } : {}),
+    ...(branchName ? { branchName } : {}),
+    threadKeys: entry.threadKeys,
+    startedAt: new Date(entry.startedAt).toISOString(),
+    ...(entry.finishedAt ? { updatedAt: new Date(entry.finishedAt).toISOString() } : {}),
+    ...(entry.summary ? { summary: entry.summary } : {}),
+  };
+};
 
-/** 读取（或懒建）会话对应的 Router 会话 id。 */
+/**
+ * 读取（或懒建）会话对应的 Router 会话 id，并按需校正 TargetDoc：
+ * - 新建后补记 `sessionId` 与生效 `cwd`；
+ * - `options.workspaceDir`（会话 Space 绑定）优先于分身默认 cwd；
+ * - 同一会话改 @ 另一个分身时，把 Router 会话整体切到该分身的模型与系统提示。
+ */
 export async function ensureRouterConversationId(
   runtime: HubDurableRuntime,
   sessionId: string,
   botId: string,
+  options?: { workspaceDir?: string },
 ): Promise<string> {
   const remembered = await runtime.harness.snapshot(SessionRouterDoc, sessionId, BACKGROUND_CONTEXT);
-  if (remembered?.conversationId) return remembered.conversationId;
+  // workspaceDir 粘性：首次携带后记住在映射文档里，后续不带 options 的调用
+  // （如 getDurablePendingAsks）不会把会话 cwd 意外重置回分身默认值。
+  const workspaceDir = options?.workspaceDir?.trim() || remembered?.workspaceDir || '';
+  const convId = remembered?.conversationId || '';
+  if (convId) {
+    if (options?.workspaceDir?.trim() && remembered?.workspaceDir !== options.workspaceDir.trim()) {
+      await runtime.harness.commit(async (tx) => {
+        const doc = await tx.doc(SessionRouterDoc, sessionId, null);
+        doc.workspaceDir = options.workspaceDir!.trim();
+      }, BACKGROUND_CONTEXT);
+    }
+    await syncRouterTargetDoc(runtime, convId, sessionId, botId, workspaceDir || undefined);
+    return convId;
+  }
   if (runtime.getPersona(botId) === undefined) throw new Error(`unknown persona: ${botId}`);
   const conversation = await runtime.createBotTopicSession(botId, sessionId);
+  const newId = String(conversation.id);
   await runtime.harness.commit(async (tx) => {
     const doc = await tx.doc(SessionRouterDoc, sessionId, null);
-    doc.conversationId = String(conversation.id);
+    doc.conversationId = newId;
+    if (workspaceDir) doc.workspaceDir = workspaceDir;
   }, BACKGROUND_CONTEXT);
-  return String(conversation.id);
+  await syncRouterTargetDoc(runtime, newId, sessionId, botId, workspaceDir || undefined);
+  return newId;
+}
+
+/** Router 会话 TargetDoc 的懒校正：sessionId 标记、Space cwd 覆盖与多分身 @ 切换。 */
+async function syncRouterTargetDoc(
+  runtime: HubDurableRuntime,
+  convId: string,
+  sessionId: string,
+  botId: string,
+  workspaceDir?: string,
+): Promise<void> {
+  const persona = runtime.getPersona(botId);
+  if (persona === undefined) return;
+  const effectiveCwd = workspaceDir?.trim() || persona.cwd || process.cwd();
+  const numeric = Number(convId);
+  if (!Number.isInteger(numeric)) return;
+  const id = numeric as import('@earendil-works/pi-durable').ConversationId;
+  // 先只读快照判断是否需要写（文档事务有成本，无变更时不落盘）。
+  const current = await runtime.harness.snapshot(TargetDoc, id, BACKGROUND_CONTEXT);
+  if (
+    current !== undefined &&
+    (current as { sessionId?: string }).sessionId === sessionId &&
+    current.botId === botId &&
+    current.cwd === effectiveCwd
+  ) {
+    return;
+  }
+  await runtime.harness.commit(async (tx) => {
+    const target = await tx.doc(TargetDoc, id);
+    (target as unknown as Record<string, unknown>).sessionId = sessionId;
+    if (persona && target.botId !== botId) {
+      target.botId = botId;
+      target.nodeId = persona.nodeId;
+      await configure(tx, id, {
+        ...runtime.routerAgent(persona),
+        cwd: effectiveCwd,
+      });
+    } else if (workspaceDir?.trim() && target.cwd !== effectiveCwd) {
+      await configure(tx, id, { cwd: effectiveCwd });
+    }
+    target.cwd = effectiveCwd;
+  }, BACKGROUND_CONTEXT);
 }
 
 /** 按会话定位 Router 会话；映射缺失时返回 undefined（不自动创建）。 */
@@ -97,6 +166,19 @@ async function findRouterConversationId(
   const remembered = await runtime.harness.snapshot(SessionRouterDoc, sessionId, BACKGROUND_CONTEXT);
   return remembered?.conversationId || undefined;
 }
+
+/** POST /api/sessions/:id/workers 请求体：兼容旧字段（task/worktree/threadKey）与 Web 派发载荷（instructions/isolation/threadKeys）。 */
+type SpawnWorkerBody = {
+  title?: string;
+  task?: string;
+  instructions?: string;
+  botId?: string;
+  worktree?: boolean;
+  isolation?: 'off' | 'worktree';
+  threadKey?: string;
+  threadKeys?: string[];
+  forkContext?: boolean;
+};
 
 /** 事件摄入请求体。 */
 interface EventIngestBody {
@@ -421,16 +503,14 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
     const rt = await runtime();
     if (rt === undefined) return c.json({ error: 'Durable runtime unavailable' }, 503);
 
-    const body = await c.req
-      .json<{ title?: string; task?: string; botId?: string; worktree?: boolean; threadKey?: string; forkContext?: boolean }>()
-      .catch(() => null);
-    if (
-      !body ||
-      typeof body.title !== 'string' ||
-      !body.title.trim() ||
-      typeof body.task !== 'string' ||
-      !body.task.trim()
-    ) {
+    const body = await c.req.json<SpawnWorkerBody>().catch(() => null);
+    const taskText =
+      typeof body?.task === 'string' && body.task.trim()
+        ? body.task.trim()
+        : typeof body?.instructions === 'string'
+          ? body.instructions.trim()
+          : '';
+    if (!body || typeof body.title !== 'string' || !body.title.trim() || !taskText) {
       return c.json({ error: 'title and task are required' }, 400);
     }
 
@@ -440,27 +520,91 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
       return c.json({ error: `Bot ${botId} has no durable persona registered` }, 400);
     }
 
+    const worktree = body.worktree === true || body.isolation === 'worktree';
+    const threadKeys = Array.isArray(body.threadKeys)
+      ? body.threadKeys
+          .filter((k): k is string => typeof k === 'string' && Boolean(k.trim()))
+          .map((k) => k.trim())
+      : typeof body.threadKey === 'string' && body.threadKey.trim()
+        ? [body.threadKey.trim()]
+        : [];
+
     try {
-      const routerId = await ensureRouterConversationId(rt, id, botId);
-      const spawned = await rt.forkSessionToWorker(routerId, {
+      const routerId = await ensureRouterConversationId(rt, id, botId, { workspaceDir: session.workspaceDir });
+      // 隔离参数在 forkSessionToWorker 创建事务内生效（Worker 首轮任务提交前就绑定
+      // worktree/threadKeys/cwd），不存在“先共享 cwd 再补落”的隔离竞态；旧签名忽略多余字段。
+      const spawnOptions = {
         botId,
         title: body.title.trim(),
-        task: body.task.trim(),
-        ...(body.threadKey ? { threadKey: body.threadKey } : {}),
+        task: taskText,
+        ...(threadKeys[0] ? { threadKey: threadKeys[0] } : {}),
         forkContext: body.forkContext !== false,
-      });
-      // threadKey 直通订阅：Worker 直接接收该线程上的后续事件。
-      if (body.threadKey) {
+        ...(worktree ? { worktree: true } : {}),
+        ...(threadKeys.length > 0 ? { threadKeys } : {}),
+        ...(session.workspaceDir?.trim() ? { cwd: session.workspaceDir.trim() } : {}),
+        sessionId: id,
+      };
+      const spawned = await rt.forkSessionToWorker(
+        routerId,
+        spawnOptions as Parameters<HubDurableRuntime['forkSessionToWorker']>[1],
+      );
+
+      // 兼容兜底（幂等）：若 harness 已在创建事务内落齐 worktree/threadKeys 元数据则
+      // 全部保留；仅补齐缺失字段（旧签名路径），保证 TargetDoc / WorkerRegistryDoc /
+      // RecallIndex 三处的 branchName + worktreePath + threadKeys 完整可观测。
+      if (worktree || threadKeys.length > 0) {
+        const baseCwd = session.workspaceDir?.trim() || rt.getPersona(botId)?.cwd || process.cwd();
+        const registered = (await rt.getActiveWorkers(routerId)).find((w) => w.workerId === spawned.workerId);
+        const worktreePath = registered?.worktreePath || `${baseCwd}/.botd-worktrees/${spawned.workerId}`;
+        const branchName = `botd/${spawned.workerId}`;
+        await rt.harness.commit(
+          async (tx) => {
+            const workerConvId = Number(spawned.conversation.id);
+            if (Number.isInteger(workerConvId)) {
+              const target = await tx.doc(
+                TargetDoc,
+                workerConvId as import('@earendil-works/pi-durable').ConversationId,
+              );
+              if (threadKeys.length > 0 && JSON.stringify(target.threadKeys) !== JSON.stringify(threadKeys)) {
+                target.threadKeys = threadKeys;
+              }
+              if (worktree && !target.worktreePath) target.worktreePath = worktreePath;
+            }
+            const registry = await tx.doc(WorkerRegistryDoc, stringToConversationId(routerId));
+            const entry = registry.workers[spawned.workerId] as
+              | (Record<string, unknown> & { threadKeys?: string[]; worktreePath?: string })
+              | undefined;
+            if (entry !== undefined) {
+              if (threadKeys.length > 0 && JSON.stringify(entry.threadKeys ?? []) !== JSON.stringify(threadKeys)) {
+                entry.threadKeys = threadKeys;
+              }
+              if (worktree && !entry.worktreePath) {
+                entry.worktreePath = worktreePath;
+                entry.branchName = branchName;
+              }
+            }
+            if (worktree) {
+              const recall = await tx.doc(RecallIndexDoc);
+              const recallNode = recall.nodes[spawned.workerId] as Record<string, unknown> | undefined;
+              if (recallNode !== undefined && recallNode.data === undefined) {
+                recallNode.data = { node: { worktreePath, branchName } };
+              }
+            }
+          },
+          BACKGROUND_CONTEXT,
+        );
+      }
+
+      // threadKey 直通订阅：Worker 直接接收这些线程上的后续事件（全部 key）。
+      if (threadKeys.length > 0) {
         const eventRouter = new EventRouter({
           harness: rt.harness,
           resolveRouter: async () => (await rt.conversation(routerId, BACKGROUND_CONTEXT))!,
           decide: async () => undefined,
         });
-        await eventRouter.subscribeThread(
-          spawned.conversation.id,
-          body.threadKey,
-          BACKGROUND_CONTEXT,
-        );
+        for (const key of threadKeys) {
+          await eventRouter.subscribeThread(spawned.conversation.id, key, BACKGROUND_CONTEXT);
+        }
       }
       const workers = await rt.getActiveWorkers(routerId);
       const entry = workers.find((w) => w.workerId === spawned.workerId);
@@ -748,6 +892,12 @@ export function createDurableSessionMirror(
 
   const mirror = (sessionId: string, botId: string, entry: { id: unknown; kind: string; model?: readonly unknown[] }): void => {
     if (closed) return;
+    // 群聊多分身：本会话最近被 @ 的分身优先于创建时固定的 lead bot。
+    const session = db.getSession(sessionId);
+    const activeBotId = lastActiveBotBySession.get(sessionId) ?? session?.leadBotId;
+    const bot = db.getBot(activeBotId ?? '') ?? (session ? db.getBot(session.leadBotId) : undefined);
+    const senderBotId = bot?.id ?? activeBotId ?? botId;
+    const senderBotName = bot?.name ?? senderBotId;
     if (entry.kind === 'botd.worker-report') {
       const text = workerReportText(entry);
       if (text === undefined) return;
@@ -757,7 +907,8 @@ export function createDurableSessionMirror(
           id: `msg_dur_${sessionId}_${Number(entry.id)}`,
           sessionId,
           role: 'assistant',
-          senderBotId: botId,
+          senderBotId,
+          ...(senderBotName !== senderBotId ? { senderBotName } : {}),
           content: text,
         });
       } catch {
@@ -777,7 +928,8 @@ export function createDurableSessionMirror(
         id: `msg_dur_${sessionId}_${Number(entry.id)}`,
         sessionId,
         role: 'assistant',
-        senderBotId: botId,
+        senderBotId,
+        ...(senderBotName !== senderBotId ? { senderBotName } : {}),
         content: text ?? '',
         ...(toolCalls ? { toolCalls } : {}),
         ...(usage ? { usage } : {}),
@@ -895,10 +1047,14 @@ function extractImageAttachments(
   return images;
 }
 
+/** 活跃分身登记表：submitSessionMessageToDurable 提交时写入，镜像器读取（跨模块单例）。 */
+const lastActiveBotBySession = new Map<string, string>();
+
 /**
  * 用户消息 → Durable Router 会话提交（全双工：`whenBusy: "steer"`）：
  * - 支持内置斜杠原语：`/compact [instructions]` 直接触发 `pi-durable` 原生非阻塞上下文压缩，
  *   `/new [handoff]` 直接触发 `pi-durable` 原生 `pi.reset` 开启新上下文；
+ * - `/skillName [args]` 且 Hub SQLite 存在该技能时，改写为引导模型调 `load_skill` 的提示；
  * - 支持多模态图片附件（`attachments` 自动转 `ImageContent`）；
  * - 无 durable runtime 时返回 undefined，调用方继续走原 GroupRouter 路径。
  */
@@ -920,7 +1076,10 @@ export async function submitSessionMessageToDurable(
   // 同一 Hub 生命周期内返回同一实例。
   const rt = ctx.getDurableRuntime ? await ctx.getDurableRuntime() : ctx.durableRuntime;
   if (rt === undefined) return undefined;
-  const routerId = await ensureRouterConversationId(rt, sessionId, botId);
+  lastActiveBotBySession.set(sessionId, botId);
+  const routerId = await ensureRouterConversationId(rt, sessionId, botId, {
+    workspaceDir: ctx.db.getSession(sessionId)?.workspaceDir,
+  });
   await mirror?.ensure(sessionId);
 
   const rawCommand = (options?.commandText ?? content).trim();
@@ -938,8 +1097,23 @@ export async function submitSessionMessageToDurable(
     return routerId;
   }
 
+  // Skill 斜杠命令（/skillName [args]）：Hub SQLite 存在该技能时，引导模型调
+  // load_skill 加载技能正文再执行用户请求，而不是把裸斜杠当普通文本。
+  const skillMatch = /^\/([a-zA-Z0-9_-]+)(?:\s+([\s\S]*))?$/.exec(rawCommand);
+  let finalContent = content;
+  if (skillMatch) {
+    const skillId = skillMatch[1];
+    const skillArgs = skillMatch[2]?.trim() ?? '';
+    const skillMd = ctx.db.getSkillContent?.(skillId, 'SKILL.md') ?? '';
+    if (skillMd.trim().length > 0) {
+      finalContent =
+        `[Slash Command /${skillId}]: Call \`load_skill({ skillId: "${skillId}" })\` and follow its instructions` +
+        (skillArgs ? ` for the user request:\n${skillArgs}` : '.');
+    }
+  }
+
   const images = extractImageAttachments(options?.attachments);
-  await rt.submitUserMessage(routerId, content, {
+  await rt.submitUserMessage(routerId, finalContent, {
     requestId: `hub-msg:${sessionId}:${Date.now()}`,
     whenBusy: 'steer',
     ...(images.length > 0 ? { images } : {}),
