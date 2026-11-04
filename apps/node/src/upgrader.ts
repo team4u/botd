@@ -6,7 +6,6 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { NodeUpgradeCheckResult, NodeUpgradeResult } from '@botd/protocol';
 import { writeSecureFile } from './storage.js';
-import { getActiveSessionCount } from './runtime.js';
 import { spawnReplacementDaemon } from './daemon-launch.js';
 
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
@@ -539,7 +538,9 @@ export async function performNodeUpgrade(
 
   // Drain check
   const drainTimeoutMs = options?.drainTimeoutMs ?? 30_000;
-  const getTurnsCount = options?.getActiveTurnsCount ?? getActiveSessionCount;
+  // Phase 3A 起回合在 Hub 执行，Node 无本地回合；排空检查保留可注入接口
+  // （getActiveTurnsCount 默认 0）供升级链路测试与未来本地任务复用。
+  const getTurnsCount = options?.getActiveTurnsCount ?? (() => 0);
   const drainStart = Date.now();
 
   while (getTurnsCount() > 0) {

@@ -17,12 +17,6 @@ import type {
   SessionRecord,
   SubagentRunRecord,
 } from '../packages/protocol/src/index.js';
-import {
-  getGlobalSubagentManager,
-  beginSubagentHandoffScope,
-  endSubagentHandoffScope,
-  triggerActiveSubagentHandoff,
-} from '../apps/node/src/commands.js';
 
 const PASSWORD = '{{SECRET_hb7g2sqw}}';
 
@@ -238,23 +232,6 @@ test('subagent run record protocol carries full reply / toolCalls / steers / sto
   const revived = JSON.parse(JSON.stringify(run));
   assert.deepEqual(revived.toolCalls[1], { id: 'tc_2', name: 'bash', summary: 'pnpm test', status: 'running' });
   assert.deepEqual(revived.steers[0], { message: '改用方案 B', timestamp: '2025-01-01T00:00:00Z', mode: 'steer' });
-});
-
-test('subagent handoff scope: begin → trigger → settle releases and reports correctly', () => {
-  const scope = beginSubagentHandoffScope();
-  assert.equal(scope.wasTriggered(), false);
-  assert.equal(triggerActiveSubagentHandoff(), true);
-  assert.equal(scope.wasTriggered(), true);
-  // settle 返回曾被触发，并解除全局作用域
-  assert.equal(scope.settle(), true);
-  // 作用域已结束：再次触发无处可去
-  assert.equal(triggerActiveSubagentHandoff(), false);
-});
-
-test('getGlobalSubagentManager tolerates an absent registry', () => {
-  // 无扩展激活时（测试环境未加载 pi-subagents），注册表读取不抛错
-  const manager = getGlobalSubagentManager();
-  assert.equal(typeof manager === 'undefined' || typeof manager === 'object', true);
 });
 
 test('POST /api/sessions/:id/subagents/:runId/stop forwards to the owning node and mirrors status', async (t) => {
@@ -520,6 +497,3 @@ test('native subagent stream events persist replyFull / toolCalls / steers / sto
   assert.equal(persisted.toolCalls![1].status, 'cancelled');
   assert.equal(persisted.steers![0].message, '注意锁的粒度');
 });
-
-// 引入 endSubagentHandoffScope 以在测试收尾兜底清理全局作用域
-void endSubagentHandoffScope;

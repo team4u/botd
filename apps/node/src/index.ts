@@ -1,12 +1,6 @@
 export { startDaemon, type DaemonHandle } from './daemon.js';
-export {
-  executeBotTurn,
-  getBotCommands,
-  cancelBotTurn,
-  cancelAllBotTurns,
-  getActiveSessionCount,
-  ensureBotdBinWrapper,
-} from './runtime.js';
+export { ensureBotdBinWrapper } from './runtime.js';
+export { createNodeEnvRpcServer } from './env-rpc-server.js';
 export {
   assertSafeId,
   getDataDir,

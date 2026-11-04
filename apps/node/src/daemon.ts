@@ -31,16 +31,7 @@ import {
   writeFileTarget,
 } from './storage.js';
 import {
-  cancelAllBotTurns,
-  cancelBotTurn,
   ensureBotdBinWrapper,
-  getBotCommands,
-  interactSubagent,
-  resetBotSession,
-  runTurnWithResilience,
-  setRuntimeHubRpc,
-  steerBotTurn,
-  stopSubagent,
 } from './runtime.js';
 import { createLocalIpcServer } from './local-ipc.js';
 import { getNodeModelCatalog } from './models.js';
@@ -103,6 +94,13 @@ async function checkOrCleanSocket(socketPath: string): Promise<void> {
 }
 
 let restartRequested = false;
+
+/** 清理旧架构遗留的本地 Pi 会话文件（.jsonl）与回执：回合已迁至 Hub，目录残留只作磁盘回收。 */
+async function resetBotSessionFiles(dataDir: string, sessionId: string, botId: string): Promise<void> {
+  const sessionDir = path.join(dataDir, 'bots', botId, 'sessions');
+  await fs.rm(path.join(sessionDir, `${sessionId}.jsonl`), { force: true }).catch(() => {});
+  await fs.rm(path.join(sessionDir, `${sessionId}.receipt.json`), { force: true }).catch(() => {});
+}
 
 export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandle> {
   const dataDir = getDataDir(dataDirOverride);
@@ -182,21 +180,6 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
 
   let isStopping = false;
   let hubRpc: BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null = null;
-  // 连接代数：每次 WS 断开 +1；回合发起与完成时对比代数即可判断发起连接是否已死
-  let hubEpoch = 0;
-  // 语义：hubEpoch === 0 表示从未建立过连接；每次建立（含重连）与断开都递增，
-  // 保证健康连接的代数永不为 0（runTurnWithResilience 以 0 判定断开）。
-  let hasConnectedOnce = false;
-  const isHubConnected = () => rws !== undefined && rws.readyState === ReconnectingWebSocket.OPEN;
-  /** 动态 Hub 推流代理：每次访问转发到当前最新的 hubRpc（断连重连后推流自动切到新连接） */
-  const dynamicHubRpc = new Proxy({} as BirpcReturn<HubRpcFunctions, NodeRpcFunctions>, {
-    get(_target, prop: string) {
-      const current = hubRpc;
-      if (!current) throw new Error('Hub RPC not available');
-      const value = Reflect.get(current as any, prop);
-      return typeof value === 'function' ? (value as any).bind(current) : value;
-    },
-  });
   let heartbeatTimer: NodeJS.Timeout | null = null;
   // 自动升级：默认关闭。开启后周期检查 registry，复用手动升级的排空/金丝雀/
   // 回滚/封禁链路；升级成功即由 onScheduleShutdown 平滑替换本进程。
@@ -330,10 +313,11 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
         });
       },
       getCommands: async (botId) => {
+        // Phase 3A：回合与命令已内联到 Hub Durable Runtime；Node 不再编排回合。
         assertSafeId(botId, 'Bot ID');
         const data = await readBot(dataDir, botId);
         if (!data || data.bot.nodeId !== identity.nodeId) throw new Error(`Bot "${botId}" not found on node`);
-        return await getBotCommands(dataDir, data.bot);
+        return [];
       },
       getModelCatalog: async () => {
         return await getNodeModelCatalog(dataDir);
@@ -374,41 +358,31 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       deleteResource: async (target) => {
         await deleteResource(dataDir, target);
       },
-      runTurn: async (input) => {
-        if (!hubRpc) throw new Error('Hub RPC not available');
-        const bots = await listBots(dataDir);
-        const bot = bots.find((b) => b.id === input.botId);
-        if (!bot) {
-          throw new Error(`Bot "${input.botId}" not found on node`);
-        }
-        // 断连容错：在途附着 + 单槽回执；推流经 dynamicHubRpc 在重连后自动恢复
-        return await runTurnWithResilience(
-          dataDir,
-          bot,
-          input,
-          () => (isHubConnected() ? dynamicHubRpc : null),
-          () => (isHubConnected() && hasConnectedOnce ? hubEpoch : 0),
-        );
+      runTurn: async () => {
+        // Phase 3A：回合执行已迁至 Hub Durable Runtime（Brain in Hub, Hands on Node）。
+        // 保留协议占位，拒绝新的回合请求，历史调用方会收到明确错误。
+        throw new Error('runTurn is no longer served by node: turns run in the Hub durable runtime');
       },
-      cancelTurn: async (sessionId, botId) => {
-        await cancelBotTurn(sessionId, botId, dataDir);
+      cancelTurn: async () => {
+        // 回合在 Hub 侧执行，取消由 Hub 直接处理；Node 无本地回合可取消。
       },
-      steerBotTurn: async (sessionId, botId, message) => {
-        return await steerBotTurn(sessionId, botId, message);
-      },
-      stopSubagent: async (sessionId, botId, runId) => {
-        return await stopSubagent(sessionId, botId, runId);
-      },
-      interactSubagent: async (input) => {
-        return await interactSubagent(input);
-      },
+      steerBotTurn: async () => ({ accepted: false }),
+      stopSubagent: async (_sessionId, _botId, runId) => ({
+        ok: false,
+        error: `subagent runs moved to the Hub durable runtime; cannot stop ${runId} on node`,
+      }),
+      interactSubagent: async (input) => ({
+        ok: false,
+        error: `subagent runs moved to the Hub durable runtime; cannot interact with ${input.runId} on node`,
+      }),
       resetSession: async (sessionId, botId) => {
+        // 兼容旧 Hub：本地 Pi 会话文件已随回合执行迁移作废；目录若残留则清理。
         const bots = await listBots(dataDir);
         const bot = bots.find((b) => b.id === botId);
         if (!bot) {
           throw new Error(`Bot "${botId}" not found on node`);
         }
-        await resetBotSession(dataDir, sessionId, botId);
+        await resetBotSessionFiles(dataDir, sessionId, botId);
       },
       listBgJobs: async (filter) => {
         return bgManager.listJobs(filter);
@@ -458,12 +432,9 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
 
   rws.addEventListener('open', async () => {
     if (isStopping) return;
-    hubEpoch++;
-    hasConnectedOnce = true;
     const connectedRpc = createNodeRpc();
     rpcInstance = connectedRpc;
     hubRpc = connectedRpc;
-    setRuntimeHubRpc(connectedRpc);
 
     try {
       await syncRegistrationWithHub(connectedRpc);
@@ -496,13 +467,9 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       heartbeatTimer = null;
     }
     hubRpc = null;
-    hubEpoch++;
-    setRuntimeHubRpc(null);
     rpcInstance?.$close();
     rpcInstance = null;
     onRpcMessage = undefined;
-    // 断连不杀本地正在执行的长回合：回合继续跑，推流经 dynamicHubRpc 在重连后恢复，
-    // 结果由单槽回执保障交付（Hub 侧断连转队列，重连后重发同一回合时附着/消费回执）。
   };
 
   rws.addEventListener('close', () => {
@@ -528,7 +495,6 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
 
     restartRequested = false;
     await authManager.close();
-    setRuntimeHubRpc(null);
 
     if (rpcInstance) {
       try {
@@ -538,7 +504,6 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       }
     }
 
-    await cancelAllBotTurns(dataDir).catch(() => {});
     await bgManager.closeAll().catch(() => {});
     await envRpcServer.envCleanup().catch(() => undefined);
 
