@@ -1,7 +1,9 @@
 export * from './cron.js';
+export * from './env-rpc.js';
 export * from './ui-catalog.js';
 
 import type { BotdUiSpec } from './ui-catalog.js';
+import type { HubEnvStreamFunctions, NodeEnvRpcFunctions } from './env-rpc.js';
 
 export type PlatformType = 'darwin' | 'linux' | 'win32';
 export type SessionStatus = 'idle' | 'running' | 'queued' | 'failed';
@@ -602,7 +604,7 @@ export type ExtensionUiStreamPayload =
       mode?: 'set' | 'paste';
     };
 
-export interface HubRpcFunctions {
+export interface HubSessionRpcFunctions {
   registerNode(info: {
     nodeId: string;
     name: string;
@@ -683,7 +685,10 @@ export interface HubRpcFunctions {
   listSessionArtifacts(sessionId: string): Promise<ArtifactRecord[]>;
 }
 
-export interface NodeRpcFunctions {
+/** Hub 侧 RPC：既有会话/产物函数 + Node 侧流式输出回调（envExec 分块回传）。 */
+export interface HubRpcFunctions extends HubSessionRpcFunctions, Partial<HubEnvStreamFunctions> {}
+
+export interface NodeSessionRpcFunctions {
   restartDaemon(): Promise<{ ok: true; pid: number }>;
   checkUpgrade?(options?: { registryUrl?: string }): Promise<NodeUpgradeCheckResult>;
   upgradeDaemon?(options?: { targetVersion?: string; registryUrl?: string }): Promise<NodeUpgradeResult>;
@@ -772,6 +777,9 @@ export interface NodeRpcFunctions {
     filePath: string;
   }): Promise<{ ok: boolean; error?: string }>;
 }
+
+/** Node 侧 RPC：既有回合/资源函数 + 远端执行环境函数（birpc 双向通道的 Node 端；env 方法可选以兼容旧连接/测试 mock）。 */
+export interface NodeRpcFunctions extends NodeSessionRpcFunctions, Partial<NodeEnvRpcFunctions> {}
 
 // HTTP shapes shared by the browser and Hub. Responses contain these values directly.
 export interface NodeWithBots extends NodeRecord { bots: BotConfig[] }

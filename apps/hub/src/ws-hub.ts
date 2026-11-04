@@ -20,6 +20,9 @@ import type { HubDatabase } from './db.js';
 import type { AuthManager } from './auth.js';
 import type { SseHub } from './sse.js';
 import { ArtifactService } from './artifact-service.js';
+import { ExecOutputHub, RemoteExecutionEnv } from './harness/remote-env.js';
+import type { NodeEnvRpcFunctions } from '@botd/protocol';
+import type { Context } from '@earendil-works/chord/context';
 
 export interface GroupRouterDelegate {
   handleWakeup(
@@ -73,6 +76,12 @@ export interface NodeConnection {
   missedPongs: number;
 }
 
+/** 每个在线节点的等待者：节点上线（连接建立或 registerNode）时唤醒。 */
+interface NodeOnlineWaiter {
+  resolve: (rpc: NodeEnvRpcFunctions) => void;
+  detachAbortListener: () => void;
+}
+
 export class NodeConnectionManager {
   public wss: WebSocketServer;
   private connections = new Map<string, NodeConnection>();
@@ -82,6 +91,10 @@ export class NodeConnectionManager {
   private router?: GroupRouterDelegate;
   private artifactService: ArtifactService;
   private heartbeatTimer?: NodeJS.Timeout;
+  /** 远端执行环境流式输出分发器（Node 回调 onEnvExecOutput 的统一入口）。 */
+  readonly execOutputHub = new ExecOutputHub();
+  /** 节点离线时挂起的 waitForNodeOnline 等待者（按 nodeId 分组）。 */
+  private onlineWaiters = new Map<string, Set<NodeOnlineWaiter>>();
 
   constructor(
     db: HubDatabase,
@@ -211,6 +224,8 @@ export class NodeConnectionManager {
         if (onlineOwner) {
           this.sseHub.broadcastToUser(onlineOwner, { type: 'node_status', nodeId, status: 'online' });
         }
+
+        this.resolveOnlineWaiters(nodeId);
 
         return;
       },
@@ -373,6 +388,10 @@ export class NodeConnectionManager {
       listSessionArtifacts: async (sessionId: string) => {
         return this.artifactService.listSessionArtifacts({ type: 'node', nodeId }, sessionId);
       },
+
+      onEnvExecOutput: (event) => {
+        this.execOutputHub.onEnvExecOutput(event);
+      },
     };
 
     const rpc = createBirpc<NodeRpcFunctions, HubRpcFunctions>(hubFunctions, {
@@ -398,6 +417,7 @@ export class NodeConnectionManager {
     const conn: NodeConnection = { nodeId, ws, rpc, alive: true, missedPongs: 0 };
     this.connections.set(nodeId, conn);
     this.startHeartbeat();
+    this.resolveOnlineWaiters(nodeId);
     ws.on('pong', () => {
       conn.alive = true;
     });
@@ -467,6 +487,77 @@ export class NodeConnectionManager {
 
   getNodeRpc(nodeId: string): BirpcReturn<NodeRpcFunctions, HubRpcFunctions> | undefined {
     return this.connections.get(nodeId)?.rpc;
+  }
+
+  /** 取节点 env RPC 视图（离线返回 undefined）。birpc 客户端是 Proxy，按需合成调用函数，旧节点只会在调用时报错。 */
+  getNodeEnvRpc(nodeId: string): NodeEnvRpcFunctions | undefined {
+    const rpc = this.connections.get(nodeId)?.rpc;
+    return rpc === undefined ? undefined : (rpc as unknown as NodeEnvRpcFunctions);
+  }
+
+  /** 唤醒指定节点全部在线等待者（连接建立或 registerNode 时调用）。 */
+  private resolveOnlineWaiters(nodeId: string): void {
+    const waiters = this.onlineWaiters.get(nodeId);
+    if (waiters === undefined || waiters.size === 0) return;
+    const rpc = this.getNodeEnvRpc(nodeId);
+    if (rpc === undefined) return;
+    this.onlineWaiters.delete(nodeId);
+    for (const waiter of waiters) {
+      waiter.detachAbortListener();
+      waiter.resolve(rpc);
+    }
+  }
+
+  /**
+   * 等待节点上线并返回其 env RPC（BYOM 离线韧性）：
+   * 已在线立即返回；否则挂起直到该节点重新连接（或 context 取消时拒绝）。
+   */
+  waitForNodeOnline(nodeId: string, context: Context): Promise<NodeEnvRpcFunctions> {
+    const online = this.getNodeEnvRpc(nodeId);
+    if (online !== undefined) return Promise.resolve(online);
+
+    return new Promise<NodeEnvRpcFunctions>((resolve, reject) => {
+      const onAbort = () => {
+        const set = this.onlineWaiters.get(nodeId);
+        set?.delete(waiter);
+        if (set !== undefined && set.size === 0) this.onlineWaiters.delete(nodeId);
+        const reason: unknown = context.abortSignal?.reason;
+        reject(reason instanceof Error ? reason : new Error(`wait for node ${nodeId} online aborted`));
+      };
+      const waiter: NodeOnlineWaiter = {
+        resolve,
+        detachAbortListener: () => context.abortSignal?.removeEventListener('abort', onAbort),
+      };
+      context.abortSignal?.throwIfAborted();
+      context.abortSignal?.addEventListener('abort', onAbort, { once: true });
+
+      // 挂起后竞态复查：注册等待者与连接建立之间无序，补一次在线检查
+      let set = this.onlineWaiters.get(nodeId);
+      if (set === undefined) {
+        set = new Set();
+        this.onlineWaiters.set(nodeId, set);
+      }
+      set.add(waiter);
+      const recheck = this.getNodeEnvRpc(nodeId);
+      if (recheck !== undefined) {
+        set.delete(waiter);
+        if (set.size === 0) this.onlineWaiters.delete(nodeId);
+        waiter.detachAbortListener();
+        resolve(recheck);
+      }
+    });
+  }
+
+  /** 为 nodeId 构造远端执行环境（Brain in Hub, Hands on Node）。 */
+  createRemoteEnv(options: { nodeId: string; cwd: string }): RemoteExecutionEnv {
+    return new RemoteExecutionEnv(
+      {
+        getNodeEnvRpc: (nodeId: string) => this.getNodeEnvRpc(nodeId),
+        waitForNodeOnline: (nodeId: string, context: Context) => this.waitForNodeOnline(nodeId, context),
+      },
+      options,
+      this.execOutputHub,
+    );
   }
 
   disconnectNode(nodeId: string): boolean {

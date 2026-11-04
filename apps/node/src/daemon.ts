@@ -49,6 +49,7 @@ import { installResourceToNode } from './installer.js';
 import { BgJobManager } from './bg-jobs.js';
 import { getWorkspaceDiff, listSpaces, listWorkspaceFiles, revertWorkspaceFile } from './workspace-diff.js';
 import { ensureBuiltinSkill } from './builtin-skill.js';
+import { createNodeEnvRpcServer } from './env-rpc-server.js';
 import { ensureWindowsShell, isWindows } from './windows-shell.js';
 import { notifyDaemonReady, spawnReplacementDaemon } from './daemon-launch.js';
 import { getNodeVersion, checkNodeUpgrade, performNodeUpgrade, filterRpcRegistryUrl, startAutoUpgradeLoop as startAutoUpgradeLoopFactory, type AutoUpgradeLoopHandle } from './upgrader.js';
@@ -159,6 +160,19 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
   const startedAtIso = new Date(startedAt).toISOString();
 
   const authManager = new ProviderAuthManager(dataDir);
+
+  // 远端执行环境 RPC 服务端（Brain in Hub, Hands on Node）：文件/shell/worktree
+  // 能力在 Node 本机执行，流式输出经 onExecOutput 回传 Hub。
+  const envRpcServer = createNodeEnvRpcServer({
+    defaultCwd: dataDir,
+    onExecOutput: (event) => {
+      try {
+        hubRpc?.onEnvExecOutput?.(event);
+      } catch {
+        // 输出回传失败不影响命令本身（断连重连后新输出走新连接）
+      }
+    },
+  });
 
   const bgManager = new BgJobManager(dataDir, async (wakeInput) => {
     if (hubRpc && rws && rws.readyState === ReconnectingWebSocket.OPEN) {
@@ -417,6 +431,7 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       revertWorkspaceFile: async (input) => {
         return await revertWorkspaceFile(dataDir, input);
       },
+      ...envRpcServer,
     },
     {
       post: (data) => {
@@ -525,6 +540,7 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
 
     await cancelAllBotTurns(dataDir).catch(() => {});
     await bgManager.closeAll().catch(() => {});
+    await envRpcServer.envCleanup().catch(() => undefined);
 
     try {
       rws.close();
