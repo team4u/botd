@@ -265,7 +265,8 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 			api: ToolExecutionApi<WorkflowRunDetails>,
 			context,
 		): Promise<ToolExecutionResult<WorkflowRunDetails>> => {
-			const runId = `wf_${Math.random().toString(36).slice(2, 12)}`;
+			// 确定性 runId：崩溃重放落在同一个 WorkflowRunDoc，不再因随机后缀漂移。
+			const runId = `wf_${String(api.taskId)}`;
 			const parsed = parseWorkflowScript(args.script);
 			const meta = 'error' in parsed ? { name: args.name ?? 'workflow' } : parsed.meta;
 
@@ -303,6 +304,17 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 				}, context);
 			};
 
+			/** 步骤写入 run doc：同 key 原地更新，避免崩溃重放时重复追加。 */
+			const upsertStep = async (entry: WorkflowStepJournalEntry): Promise<void> => {
+				const existing = state.steps.findIndex((s) => s.key === entry.key);
+				if (existing === -1) state.steps.push(entry);
+				else state.steps[existing] = entry;
+				await persist((doc) => {
+					const at = doc.steps.findIndex((s) => s.key === entry.key);
+					if (at === -1) doc.steps.push(entry);
+					else doc.steps[at] = entry;
+				});
+			};
 			const emit = async (): Promise<void> => {
 				await api.details(detailsOf(runId, state), context);
 			};
@@ -335,10 +347,7 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 
 				const cached = await api.memo<WorkflowStepOutcome>(key, context);
 				if (cached !== undefined) {
-					state.steps.push({ key, label, phase: phaseName, ok: cached.ok, replayed: true, value: cached.value, error: null });
-					await persist((doc) => {
-						doc.steps.push({ key, label, phase: phaseName, ok: cached.ok, replayed: true, value: cached.value, error: null });
-					});
+					await upsertStep({ key, label, phase: phaseName, ok: cached.ok, replayed: true, value: cached.value, error: null });
 					await emit();
 					if (!cached.ok) return null;
 					return cached.value !== null && cached.value !== undefined ? cached.value : cached.text;
@@ -431,10 +440,7 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 					const reason = settled.reason;
 					const outcome: WorkflowStepOutcome = { text: '', value: null, ok: false };
 					await api.memo(key, outcome, context);
-					state.steps.push({ key, label, phase: phaseName, ok: false, replayed: false, value: null, error: reason });
-					await persist((doc) => {
-						doc.steps.push({ key, label, phase: phaseName, ok: false, replayed: false, value: null, error: reason });
-					});
+					await upsertStep({ key, label, phase: phaseName, ok: false, replayed: false, value: null, error: reason });
 					await emit();
 					return null;
 				}
@@ -456,10 +462,7 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 						const detail = gateResult.ok ? `exit ${gateResult.value?.exitCode}` : (gateResult.error?.message ?? 'exec failed');
 						const outcome: WorkflowStepOutcome = { text: `gate failed: ${opts.gate} (${detail})`, value: null, ok: false };
 						await api.memo(key, outcome, context);
-						state.steps.push({ key, label, phase: phaseName, ok: false, replayed: false, value: null, error: outcome.text });
-						await persist((doc) => {
-							doc.steps.push({ key, label, phase: phaseName, ok: false, replayed: false, value: null, error: outcome.text });
-						});
+						await upsertStep({ key, label, phase: phaseName, ok: false, replayed: false, value: null, error: outcome.text });
 						await emit();
 						return null;
 					}
@@ -471,10 +474,7 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 					if (extracted === undefined || !matchesSchema(extracted, opts.schema)) {
 						const outcome: WorkflowStepOutcome = { text, value: null, ok: false };
 						await api.memo(key, outcome, context);
-						state.steps.push({ key, label, phase: phaseName, ok: false, replayed: false, value: null, error: 'schema validation failed' });
-						await persist((doc) => {
-							doc.steps.push({ key, label, phase: phaseName, ok: false, replayed: false, value: null, error: 'schema validation failed' });
-						});
+						await upsertStep({ key, label, phase: phaseName, ok: false, replayed: false, value: null, error: 'schema validation failed' });
 						await emit();
 						return null;
 					}
@@ -484,10 +484,7 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 				const outcome: WorkflowStepOutcome = { text, value: opts?.schema !== undefined ? value : null, ok: true };
 				await api.memo(key, outcome, context);
 				const storedValue = opts?.schema !== undefined ? value : asJson(text);
-				state.steps.push({ key, label, phase: phaseName, ok: true, replayed: false, value: storedValue, error: null });
-				await persist((doc) => {
-					doc.steps.push({ key, label, phase: phaseName, ok: true, replayed: false, value: storedValue, error: null });
-				});
+				await upsertStep({ key, label, phase: phaseName, ok: true, replayed: false, value: storedValue, error: null });
 				await emit();
 				return opts?.schema !== undefined ? value : text;
 			};

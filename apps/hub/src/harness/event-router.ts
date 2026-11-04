@@ -27,6 +27,8 @@ export interface IncomingEvent {
 	target?: { kind?: string; repo?: string; number?: number | string; chatId?: string; threadId?: string };
 	/** 事件摘要（内联展示用）。 */
 	summary: string;
+	/** 事件唯一 ID（如 webhook delivery id）；缺省时每次投递生成单调递增序号避免去重碰撞。 */
+	id?: string;
 	/** 全文载荷（超限外溢）。 */
 	payload?: string;
 	/** 时间 / 空间上相邻的消息（回复引用、相邻 review 评论等）。 */
@@ -198,8 +200,9 @@ export class EventRouter {
 		const threadKey = threadKeyOf(event);
 		if (threadKey !== undefined) {
 			const subscribers = await this.subscriptions(threadKey, context);
-			if (subscribers.length > 0) {
-				const formatted = formatEventInlineAndSpill(this.#deps.harness, event, context);
+		if (subscribers.length > 0) {
+				const reqKey = eventKey(event);
+				const formatted = await formatEventInlineAndSpill(this.#deps.harness, event, context);
 				const delivered: string[] = [];
 				for (const id of subscribers) {
 					const worker = await this.#deps.harness.conversation(Number(id) as ConversationId, context);
@@ -209,7 +212,7 @@ export class EventRouter {
 							type: 'input',
 							content: formatted.inline,
 							whenBusy: 'steer',
-							requestId: `event:${threadKey}:${eventTimestamp(event)}`,
+							requestId: `event:${threadKey}:${reqKey}`,
 						},
 						context,
 					);
@@ -222,8 +225,19 @@ export class EventRouter {
 			}
 		}
 
+		const reqKey = eventKey(event);
+		const formatted = await formatEventInlineAndSpill(this.#deps.harness, event, context);
 		const router = await this.#deps.resolveRouter(event);
 		this.#stats.routerLlmCalls += 1;
+		await router.submit(
+			{
+				type: 'input',
+				content: formatted.inline,
+				whenBusy: 'steer',
+				requestId: `event:router:${reqKey}`,
+			},
+			context,
+		);
 		const decision = await this.#deps.decide(event, router);
 		if (decision !== undefined && threadKey !== undefined) {
 			await this.subscribeThread(decision.worker.id, threadKey, context);
@@ -237,8 +251,20 @@ export class EventRouter {
 	async handbackToRouter(workerConversationId: ConversationId, event: IncomingEvent, context: Context): Promise<RouteOutcome> {
 		const threadKey = threadKeyOf(event);
 		if (threadKey !== undefined) await this.unsubscribeThread(workerConversationId, threadKey, context);
+		const reqKey = eventKey(event);
+		const formatted = await formatEventInlineAndSpill(this.#deps.harness, event, context);
 		const router = await this.#deps.resolveRouter(event);
 		this.#stats.routerLlmCalls += 1;
+		await router.submit(
+			{
+				type: 'input',
+				content: formatted.inline,
+				whenBusy: 'steer',
+				requestId: `event:handback:${reqKey}`,
+			},
+			context,
+		);
+		await this.#deps.decide(event, router);
 		return { action: 'router', threadKey, router, routerLlmCalls: 1 };
 	}
 }
@@ -251,8 +277,13 @@ export class EventDropped extends Error {
 	}
 }
 
-function eventTimestamp(event: IncomingEvent): string {
-	return `${event.source}:${event.type}:${event.sender}:${event.summary.length}`;
+/** 匿名事件（无 id）的单调递增序号：确保同源同发送者的不同事件生成不同去重键。 */
+let eventSeq = 0;
+
+/** 去重键：优先事件自带 id（如 webhook delivery id），否则以单调序号区分匿名事件。 */
+export function eventKey(event: IncomingEvent): string {
+	if (typeof event.id === 'string' && event.id.trim() !== '') return `id:${event.id.trim()}`;
+	return `anon:${++eventSeq}:${event.source}:${event.type}:${event.sender}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -305,12 +336,12 @@ export interface InlineAndSpillResult {
  * 超限部分外溢进 SpillStoreDoc 并追加 recall 指针。
  * Chain of Recall：worker 之后用 recallSpill(harness, spillId) 取回全文。
  */
-export function formatEventInlineAndSpill(
+export async function formatEventInlineAndSpill(
 	harness: Harness,
 	event: IncomingEvent,
 	context: Context,
 	options?: InlineAndSpillOptions,
-): InlineAndSpillResult {
+): Promise<InlineAndSpillResult> {
 	const limit = options?.inlineCharLimit ?? DEFAULT_INLINE_CHAR_LIMIT;
 	const adjacent = options?.adjacentMessages ?? event.adjacent ?? [];
 	const payload = event.payload ?? event.summary;
@@ -323,7 +354,7 @@ export function formatEventInlineAndSpill(
 		spillId = `spill_${Math.random().toString(36).slice(2, 12)}`;
 		lines.push(`content: ${payload.slice(0, limit)}…`);
 		lines.push(`[Spilled: ${spillId} | Call recall({ "id": "${spillId}" }) to read full content]`);
-		void persistSpill(harness, { spillId, event, fullContent: payload, threadKey: threadKeyOf(event), relatedIds: adjacent.map((_, i) => `${spillId}:adjacent:${i}`), context });
+		await persistSpill(harness, { spillId, event, fullContent: payload, threadKey: threadKeyOf(event), relatedIds: adjacent.map((_, i) => `${spillId}:adjacent:${i}`), context });
 	} else if (payload.length > 0) {
 		lines.push(`content: ${payload}`);
 	}

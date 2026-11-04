@@ -255,7 +255,8 @@ test('Test 3: EventRouter pass-through — first event routes via Router, later 
 		decide: async () => ({ worker: workerConversation }),
 	});
 
-	// 首事件：无订阅 → 慢路径 Router，Router 决策订阅 W1
+	// 首事件：无订阅 → 慢路径 Router，事件真正提交到 Router 会话，Router 决策订阅 W1
+	env.faux.setResponses([fauxAssistantMessage(fauxText('router acknowledges first comment'))]);
 	const first = await eventRouter.handleEvent(prEvent('first comment'), { mode: 'explicit_only' }, BACKGROUND_CONTEXT);
 	assert.equal(first.action, 'router', 'first event must route via Router');
 	assert.equal(first.routerLlmCalls, 1);
@@ -290,6 +291,7 @@ test('Test 3: EventRouter pass-through — first event routes via Router, later 
 	// 退订后回到慢路径
 	await eventRouter.unsubscribeThread(worker2.id, 'github:pr:botd#42', BACKGROUND_CONTEXT);
 	await eventRouter.unsubscribeThread(workerConversation.id, 'github:pr:botd#42', BACKGROUND_CONTEXT);
+	env.faux.setResponses([fauxAssistantMessage(fauxText('router handles sixth comment'))]);
 	const afterUnsub = await eventRouter.handleEvent(prEvent('sixth comment'), { mode: 'explicit_only' }, BACKGROUND_CONTEXT);
 	assert.equal(afterUnsub.action, 'router', 'unsubscribed thread falls back to the slow path');
 });
@@ -301,14 +303,14 @@ test('Test 4a: Inline & Spill with Chain of Recall', { timeout: 30_000 }, async 
 	t.after(async () => await harness.close(BACKGROUND_CONTEXT));
 
 	// 小载荷：全内联
-	const small = formatEventInlineAndSpill(harness, prEvent('tiny', 'short body'), BACKGROUND_CONTEXT, { inlineCharLimit: 120 });
+	const small = await formatEventInlineAndSpill(harness, prEvent('tiny', 'short body'), BACKGROUND_CONTEXT, { inlineCharLimit: 120 });
 	assert.equal(small.spilled, false);
 	assert.ok(small.inline.includes('short body'));
 	assert.ok(small.inline.includes('adjacent: previous review comment'));
 
-	// 大载荷：外溢 + recall 指针
+	// 大载荷：外溢 + recall 指针（返回后 spill 已同步落盘，立刻 recall 必能读到）
 	const bigPayload = 'x'.repeat(500);
-	const big = formatEventInlineAndSpill(harness, prEvent('huge diff', bigPayload), BACKGROUND_CONTEXT, { inlineCharLimit: 40 });
+	const big = await formatEventInlineAndSpill(harness, prEvent('huge diff', bigPayload), BACKGROUND_CONTEXT, { inlineCharLimit: 40 });
 	assert.equal(big.spilled, true);
 	assert.ok(big.spillId !== undefined);
 	assert.ok(big.inline.includes(`[Spilled: ${big.spillId} | Call recall({ "id": "${big.spillId}" }) to read full content]`));

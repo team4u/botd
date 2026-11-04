@@ -14,7 +14,7 @@
 import { BACKGROUND_CONTEXT, type Context } from '@earendil-works/chord/context';
 import type { JsonValue } from '@earendil-works/chord';
 import { LiveDoc, defineDoc, defineTask } from '@earendil-works/pi-durable';
-import type { Harness } from '@earendil-works/pi-durable';
+import type { Cursor, Harness } from '@earendil-works/pi-durable';
 
 // ---------------------------------------------------------------------------
 // 干预记录（session 单例文档）
@@ -38,6 +38,21 @@ export const WatchdogLogDoc = defineDoc({
 	version: 1,
 	scope: 'session',
 	initial: (): WatchdogLogState => ({ events: [] }),
+	checkpointWhen: () => false,
+});
+
+/** 巡检进度观测记录：会话 → 上次进度签名与时间戳。 */
+export type WatchdogProgressState = {
+	/** conversationId（字符串化） → 上次观测到的进度签名与时间。 */
+	observations: Record<string, { signature: string; lastProgressAt: number }>;
+};
+
+/** 巡检进度观测文档：跨次巡检持久化每个会话的进度签名，用于真实停滞判定。 */
+export const WatchdogProgressDoc = defineDoc({
+	kind: 'botd.watchdog.progress',
+	version: 1,
+	scope: 'session',
+	initial: (): WatchdogProgressState => ({ observations: {} as Record<string, { signature: string; lastProgressAt: number }> }),
 	checkpointWhen: () => false,
 });
 
@@ -108,6 +123,12 @@ export async function runWatchdogPass(
 	const observed: WorkerObservation[] = [];
 	const actions: WatchdogAction[] = [];
 
+	// 已请求取消的任务：巡检不再做停滞判定与自动干预，交给 abort 流程收尾。
+	const abortRequestedConversations = new Set<number>();
+	for (const task of inspection.tasks) {
+		if (task.record.abortRequested) abortRequestedConversations.add(Number(task.record.conversationId));
+	}
+
 	// 巡检范围：活任务所属会话 ∪ 有未决 runFailure 的会话（idle 的瞬态失败也必须被 continue 恢复）
 	const conversationIds = new Set<number>();
 	for (const task of inspection.tasks) {
@@ -132,6 +153,9 @@ export async function runWatchdogPass(
 		};
 		observed.push(observation);
 
+		// 已请求取消的任务：跳过停滞判定与自动干预（abort 流程自行收尾）。
+		if (abortRequestedConversations.has(conversationId)) continue;
+
 		const runFailure = live?.runFailure;
 		const failureIsTransient =
 			runFailure !== undefined && (runFailure.reason === 'model_error' || runFailure.reason === 'interrupted');
@@ -148,10 +172,31 @@ export async function runWatchdogPass(
 
 		// 循环：busy 且重复工具错误达到阈值
 		const looping = observation.busy && observation.recentToolErrors >= options.maxToolErrors;
-		// 卡死：busy 且零工具轮（长时间无任何工具活动，超过 maxStallMs 由时长判定）
-		const stalled = observation.busy && (live?.tools ?? []).length === 0 && now - (live?.run?.turns === undefined ? 0 : 0) >= 0;
 
-		if (looping || stalled) {
+		// 停滞：跨次巡检对比会话的真实进度签名（轮次 / 输入 / 工具状态 / 生成中消息），
+		// 仅当签名连续无变化超过 maxStallMs 时才判定停滞；刚启动、尚未产出工具调用的
+		// 任务不会误触发。
+		let stalledByProgress = false;
+		if (observation.busy) {
+			const cid = String(conversationId);
+			const signature = [
+				`turns:${live?.run?.turns ?? 0}`,
+				`inputs:${live?.run?.inputs?.length ?? 0}`,
+				`tools:${(live?.tools ?? []).map((t) => `${t.id}:${t.status}:${t.output?.length ?? 0}`).join(',')}`,
+				`gen:${live?.generation?.message ? JSON.stringify(live.generation.message).length : 0}`,
+			].join('|');
+			await harness.commit(async (tx) => {
+				const progress = await tx.doc(WatchdogProgressDoc);
+				const prev = progress.observations[cid];
+				if (prev === undefined || prev.signature !== signature) {
+					progress.observations[cid] = { signature, lastProgressAt: now };
+				} else if (now - prev.lastProgressAt >= options.maxStallMs) {
+					stalledByProgress = true;
+				}
+			}, ctx);
+		}
+
+		if (looping || stalledByProgress) {
 			if (options.allowAbort && looping && observation.recentToolErrors >= options.maxToolErrors * 2) {
 				actions.push({
 					conversationId,
@@ -169,8 +214,16 @@ export async function runWatchdogPass(
 					kind: 'steer',
 					reason: looping
 						? `repeated tool errors (${observation.recentToolErrors})`
-						: `no tool progress (stall budget ${options.maxStallMs}ms)`,
+						: `no progress for over ${options.maxStallMs}ms (stall budget exceeded)`,
 				});
+			}
+			// 停滞触发干预后重置计时，避免下一轮立即重复 steer。
+			if (stalledByProgress && !looping) {
+				await harness.commit(async (tx) => {
+					const progress = await tx.doc(WatchdogProgressDoc);
+					const prev = progress.observations[String(conversationId)];
+					if (prev !== undefined) progress.observations[String(conversationId)] = { ...prev, lastProgressAt: now };
+				}, ctx);
 			}
 		}
 	}
@@ -186,14 +239,21 @@ async function scanFailedConversations(
 	context: Context,
 ): Promise<number[]> {
 	const failed: number[] = [];
-	// 会话 ID 从 1 递增：逐个探测。LiveDoc 只在会话有活动后才存在，
-	// 缺席既可能是会话不存在，也可能是从未运行——都跳过。
-	for (let id = 1; id <= 256; id++) {
-		const live = await harness.snapshot(LiveDoc, id as never, context).catch(() => undefined);
-		if (live?.runFailure !== undefined) {
-			failed.push(id);
-			into.add(id);
+	// 分页扫描全部会话（不再硬编码 ID 上限，高 ID 会话同样能被扫到）：
+	// LiveDoc 只在会话有活动后才存在，缺席即跳过。
+	let cursor: Cursor | undefined = undefined;
+	for (;;) {
+		const page = await harness.scanConversations({}, 256, cursor, context);
+		for (const record of page.items) {
+			const id = Number(record.id);
+			const live = await harness.snapshot(LiveDoc, id as never, context).catch(() => undefined);
+			if (live?.runFailure !== undefined) {
+				failed.push(id);
+				into.add(id);
+			}
 		}
+		if (page.next === undefined) break;
+		cursor = page.next;
 	}
 	return failed;
 }
