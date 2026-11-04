@@ -109,13 +109,12 @@ test('real botd join/start/wake, file management and missing-key failure', { tim
   await api(`/api/nodes/${identity.nodeId}/provider-logins/${nativeLogin.id}`, 'DELETE');
   assert.equal((await api(`/api/nodes/${identity.nodeId}/provider-logins/${nativeLogin.id}`)).status, 'cancelled');
   await api(`/api/bots/${bot.id}/memory`, 'PUT', { content: 'Persistent integration memory.' });
-  assert.equal(await readFile(path.join(dataDir, 'bots', bot.id, 'MEMORY.md'), 'utf8'), 'Persistent integration memory.');
+  assert.equal((await api<{ content: string }>(`/api/bots/${bot.id}/memory`)).content, 'Persistent integration memory.');
   await api(`/api/nodes/${identity.nodeId}/skills/integration`, 'PUT', { content: '# Integration Skill\nUse local CLI help.' });
-  assert.match(await readFile(path.join(dataDir, 'skills/integration/SKILL.md'), 'utf8'), /Integration Skill/);
+  assert.match((await api<{ content: string }>(`/api/nodes/${identity.nodeId}/skills/integration`)).content, /Integration Skill/);
 
-  // 1. Online extension CRUD via Hub API -> Node RPC
+  // 1. Online extension CRUD via Hub API (stored in Hub SQLite)
   await api(`/api/nodes/${identity.nodeId}/extensions/web-guard`, 'PUT', { content: 'export default function (pi) {}' });
-  assert.equal(await readFile(path.join(dataDir, 'extensions/web-guard/index.ts'), 'utf8'), 'export default function (pi) {}');
   assert.equal((await api(`/api/nodes/${identity.nodeId}/extensions/web-guard`)).content, 'export default function (pi) {}');
   assert((await api<NodeWithBots[]>('/api/nodes'))[0].extensions.includes('web-guard'));
 
