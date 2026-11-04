@@ -32,7 +32,6 @@ import type {
   UserRecord,
   AutomationEventRecord,
   NotificationOutboxRecord,
-  SubagentRunRecord,
   WorkspaceSpaceInfo,
 } from '@botd/protocol';
 
@@ -273,20 +272,6 @@ export const api = {
     );
   },
 
-  async syncSkillAcrossNodes(
-    sourceNodeId: string,
-    skillId: string,
-    targetNodeIds: string[]
-  ): Promise<{ ok: boolean; syncedNodeIds: string[]; failedNodeIds: string[] }> {
-    return request<{ ok: boolean; syncedNodeIds: string[]; failedNodeIds: string[] }>(
-      `/api/nodes/${encodeURIComponent(sourceNodeId)}/skills/${encodeURIComponent(skillId)}/sync`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ targetNodeIds }),
-      }
-    );
-  },
-
   // Extensions & Resource Installer
   async getExtension(nodeId: string, extId: string): Promise<{ content: string }> {
     return request<{ content: string }>(
@@ -499,33 +484,6 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({}),
     });
-  },
-
-  // 单独停掉某个运行中的子代理（按 runId），不中断主回合与其他并发子代理
-  async stopSubagent(sessionId: string, runId: string): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(runId)}/stop`,
-      { method: 'POST', body: JSON.stringify({}) }
-    );
-  },
-
-  // 向某个子代理发送 steer（运行中插话）或 resume（结束后追问，同一 runId 上下文继续）
-  async interactSubagent(
-    sessionId: string,
-    runId: string,
-    input: { message: string; mode: 'steer' | 'resume'; subagentId?: string }
-  ): Promise<{ ok: boolean; run?: SubagentRunRecord }> {
-    return request<{ ok: boolean; run?: SubagentRunRecord }>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(runId)}/interact`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          message: input.message,
-          mode: input.mode,
-          ...(input.subagentId ? { subagentId: input.subagentId } : {}),
-        }),
-      }
-    );
   },
 
   // 从指定消息（含）分叉出新会话：只读源会话并复制出新会话，原会话不受影响

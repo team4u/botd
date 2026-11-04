@@ -35,9 +35,8 @@ export const BotListSection: React.FC<BotListSectionProps> = ({
         <button
           type="button"
           onClick={() => onOpenCreateBot(node)}
-          disabled={!isOnline}
-          className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-          title={!isOnline ? '节点离线' : '在该节点上新建独立主 BOT（独立工作空间）'}
+          className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 cursor-pointer"
+          title="在该节点上新建独立主 BOT（独立工作空间，Hub 权威存储）"
         >
           <Plus className="w-3 h-3" />
           <span>新建主 BOT</span>
@@ -46,7 +45,7 @@ export const BotListSection: React.FC<BotListSectionProps> = ({
 
       {nodeBots.length === 0 ? (
         <p className="px-4 py-4 text-xs text-zinc-400 dark:text-zinc-500">
-          暂无智能体。{isOnline ? '点击右上角「新建主 BOT」创建。' : '节点恢复在线后可创建。'}
+          暂无智能体。点击右上角「新建主 BOT」创建（配置存于 Hub，节点离线也可管理）。
         </p>
       ) : (
         <div className="divide-y divide-zinc-100 dark:divide-zinc-800/60 border-t border-zinc-100 dark:border-zinc-800/60">
@@ -101,9 +100,8 @@ export const BotListSection: React.FC<BotListSectionProps> = ({
                           <button
                             type="button"
                             onClick={() => onOpenEditBot(node, bot)}
-                            disabled={!isOnline}
-                            className="p-1.5 text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 dark:text-zinc-500 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                            title={!isOnline ? '节点离线，无法编辑配置' : '智能体设置'}
+                            className="p-1.5 text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 dark:text-zinc-500 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
+                            title="智能体设置"
                             aria-label={`设置智能体 ${bot.name}`}
                           >
                             <Settings className="w-3.5 h-3.5" />
@@ -164,9 +162,8 @@ export const BotListSection: React.FC<BotListSectionProps> = ({
                           <button
                             type="button"
                             onClick={() => onOpenEditBot(node, bot)}
-                            disabled={!isOnline}
-                            className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                            title={!isOnline ? '节点离线，无法编辑配置' : '智能体设置'}
+                            className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 cursor-pointer"
+                            title="智能体设置"
                           >
                             <Settings className="w-3 h-3" />
                             <span>设置</span>
@@ -175,9 +172,8 @@ export const BotListSection: React.FC<BotListSectionProps> = ({
                           <button
                             type="button"
                             onClick={() => onOpenCreateSubagent(node, bot)}
-                            disabled={!isOnline}
-                            className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                            title={!isOnline ? '节点离线，无法新建子代理' : '在该主 BOT 下新建共享工作区的子代理'}
+                            className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors border border-zinc-200/80 dark:border-zinc-800/80 cursor-pointer"
+                            title="在该主 BOT 下新建共享工作区的子代理"
                           >
                             <Plus className="w-3 h-3 text-zinc-500" />
                             <span>新建子代理</span>
@@ -186,9 +182,9 @@ export const BotListSection: React.FC<BotListSectionProps> = ({
 
                         <button
                           onClick={() => onDeleteBot(bot)}
-                          disabled={!isOnline || isDeleting}
+                          disabled={isDeleting}
                           className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:text-zinc-500 dark:hover:text-rose-400 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                          title={!isOnline ? '节点离线，无法删除该智能体' : '删除该智能体'}
+                          title="删除该智能体"
                           aria-label="删除"
                         >
                           {isDeleting ? (
@@ -210,7 +206,6 @@ export const BotListSection: React.FC<BotListSectionProps> = ({
                               key={sub.id}
                               node={node}
                               sub={sub}
-                              isOnline={isOnline}
                               isDeleting={deletingBotId === sub.id}
                               onOpenEditBot={onOpenEditBot}
                               onDeleteBot={onDeleteBot}
@@ -248,9 +243,8 @@ export const BotListSection: React.FC<BotListSectionProps> = ({
                             <button
                               type="button"
                               onClick={() => onOpenEditBot(node, sub)}
-                              disabled={!isOnline}
-                              className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                              title={!isOnline ? '节点离线' : '子代理设置'}
+                              className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
+                              title="子代理设置"
                               aria-label={`子代理 ${sub.name} 设置`}
                             >
                               <Settings className="w-3 h-3" />
@@ -258,8 +252,8 @@ export const BotListSection: React.FC<BotListSectionProps> = ({
                             <button
                               type="button"
                               onClick={() => onDeleteBot(sub)}
-                              disabled={!isOnline || deletingBotId === sub.id}
-                              className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:text-zinc-500 dark:hover:text-rose-400 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
+                              disabled={deletingBotId === sub.id}
+                              className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:text-zinc-500 dark:hover:text-rose-400 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                               title="删除子代理"
                               aria-label={`删除子代理 ${sub.name}`}
                             >
@@ -287,14 +281,13 @@ export const BotListSection: React.FC<BotListSectionProps> = ({
 interface SubagentRowProps {
   node: NodeWithBots;
   sub: BotConfig;
-  isOnline: boolean;
   isDeleting: boolean;
   onOpenEditBot: (node: NodeWithBots, bot: BotConfig, tab?: 'basic' | 'system' | 'memory') => void;
   onDeleteBot: (bot: BotConfig) => void;
 }
 
 /** 主 BOT 卡片下挂的子代理行 */
-const SubagentRow: React.FC<SubagentRowProps> = ({ node, sub, isOnline, isDeleting, onOpenEditBot, onDeleteBot }) => (
+const SubagentRow: React.FC<SubagentRowProps> = ({ node, sub, isDeleting, onOpenEditBot, onDeleteBot }) => (
   <div className="p-2 bg-zinc-50/80 dark:bg-zinc-900/60 rounded-lg border border-zinc-200/70 dark:border-zinc-800/70 flex items-center justify-between gap-2">
     <div className="flex items-center gap-2 min-w-0 flex-wrap">
       <span className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 truncate">{sub.name}</span>
@@ -324,9 +317,8 @@ const SubagentRow: React.FC<SubagentRowProps> = ({ node, sub, isOnline, isDeleti
       <button
         type="button"
         onClick={() => onOpenEditBot(node, sub)}
-        disabled={!isOnline}
-        className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-        title={!isOnline ? '节点离线' : '子代理设置'}
+        className="p-1.5 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
+        title="子代理设置"
         aria-label={`子代理 ${sub.name} 设置`}
       >
         <Settings className="w-3 h-3" />
@@ -334,9 +326,9 @@ const SubagentRow: React.FC<SubagentRowProps> = ({ node, sub, isOnline, isDeleti
       <button
         type="button"
         onClick={() => onDeleteBot(sub)}
-        disabled={!isOnline || isDeleting}
+        disabled={isDeleting}
         className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 dark:text-zinc-500 dark:hover:text-rose-400 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-        title={!isOnline ? '节点离线' : '删除子代理'}
+        title="删除子代理"
         aria-label={`删除子代理 ${sub.name}`}
       >
         {isDeleting ? (
