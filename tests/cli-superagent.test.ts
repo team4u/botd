@@ -9,7 +9,7 @@
  *  3. asks list/respond 走 Hub 的 GroupRouter ask 协调器。
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -443,4 +443,91 @@ test('asks list/respond answers a pending ask via the Hub', { timeout: 30_000 },
 
   const answered = await askPromise;
   assert.equal(answered.answer, '发布');
+});
+
+// ---------------------------------------------------------------------------
+// 4. Node-less global ergonomics: skills / extensions / providers without nodeId
+// ---------------------------------------------------------------------------
+
+test('skills/extensions/providers operate on global Hub routes with no nodeId', { timeout: 30_000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'botd-cli-global-'));
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const hub = await startHub({
+    port: 0,
+    host: '127.0.0.1',
+    dbPath: path.join(dir, 'hub.sqlite'),
+    adminPassword: PASSWORD,
+  });
+  t.after(async () => {
+    (hub.server as any).closeAllConnections?.();
+    await hub.close();
+  });
+  const address = hub.server.address();
+  assert(address && typeof address !== 'string');
+  const hubUrl = `http://127.0.0.1:${address.port}`;
+
+  await HubClient.establish(hubUrl, 'admin', PASSWORD, { dataDir: dir });
+  const f: Fixture = { hubUrl, dataDir: dir, sessionId: 'unused' };
+
+  // --- skills：put → list → get → delete，全程不传 nodeId ---
+  const skillFile = path.join(dir, 'my-skill.md');
+  await writeFile(skillFile, '# My Skill\ncontent');
+
+  assert.deepEqual(
+    JSON.parse((await runCli(cliArgs(f, 'skills', 'put', 'my-skill', '--file', skillFile))).trim()),
+    { ok: true },
+  );
+
+  const skillList = JSON.parse((await runCli(cliArgs(f, 'skills', 'list'))).trim()) as Array<{ id: string }>;
+  assert.ok(skillList.some((s) => s.id === 'my-skill'), 'skills list must include my-skill');
+
+  assert.equal(
+    JSON.parse((await runCli(cliArgs(f, 'skills', 'get', 'my-skill'))).trim()).content,
+    '# My Skill\ncontent',
+  );
+
+  assert.deepEqual(
+    JSON.parse((await runCli(cliArgs(f, 'skills', 'delete', 'my-skill'))).trim()),
+    { ok: true },
+  );
+
+  // --- extensions：同构验证 ---
+  const extFile = path.join(dir, 'my-ext.md');
+  await writeFile(extFile, '# My Extension\ncontent');
+
+  assert.deepEqual(
+    JSON.parse((await runCli(cliArgs(f, 'extensions', 'put', 'my-ext', '--file', extFile))).trim()),
+    { ok: true },
+  );
+
+  const extList = JSON.parse((await runCli(cliArgs(f, 'extensions', 'list'))).trim()) as Array<{ id: string }>;
+  assert.ok(extList.some((e) => e.id === 'my-ext'), 'extensions list must include my-ext');
+
+  assert.equal(
+    JSON.parse((await runCli(cliArgs(f, 'extensions', 'get', 'my-ext'))).trim()).content,
+    '# My Extension\ncontent',
+  );
+
+  assert.deepEqual(
+    JSON.parse((await runCli(cliArgs(f, 'extensions', 'delete', 'my-ext'))).trim()),
+    { ok: true },
+  );
+
+  // --- providers：login → respond，免 nodeId 直连 Hub 全局路由 ---
+  const login = JSON.parse(
+    (await runCli(cliArgs(f, 'providers', 'login', 'anthropic', '--method', 'api_key'))).trim(),
+  );
+  assert.equal(login.status, 'pending');
+  assert.equal(login.prompt.id, 'api_key');
+
+  const respond = JSON.parse(
+    (
+      await runCli(cliArgs(f, 'providers', 'respond', login.id, '--prompt', 'api_key', '--value', 'sk-test'))
+    ).trim(),
+  );
+  assert.equal(respond.status, 'success');
+  assert.equal(respond.id, login.id);
 });

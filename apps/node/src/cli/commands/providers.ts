@@ -41,14 +41,26 @@ function renderLoginState(state: ProviderLoginState, json: boolean): void {
   }
   if (state.prompt) {
     console.log(`  prompt: ${state.prompt.message}`);
-    console.log(`  answer with: botd providers respond <nodeId> <loginId> --prompt ${state.prompt.id} [--value <answer>]`);
+    console.log(`  answer with: botd providers respond <loginId> --prompt ${state.prompt.id} [--value <answer>]`);
   }
 }
+
+/** 单参数视为全局 loginId，双参数视为节点维度 (nodeId, loginId)。 */
+const loginRoute = (loginIdOrNodeId: string, loginId: string | undefined, suffix = ''): string =>
+  loginId === undefined
+    ? `/api/provider-logins/${encodeURIComponent(loginIdOrNodeId)}${suffix}`
+    : `/api/nodes/${encodeURIComponent(loginIdOrNodeId)}/provider-logins/${encodeURIComponent(loginId)}${suffix}`;
+
+/** 单参数视为全局 providerId，双参数视为节点维度 (nodeId, providerId)。 */
+const providerRoute = (providerIdOrNodeId: string, providerId: string | undefined, suffix: string): string =>
+  providerId === undefined
+    ? `/api/providers/${encodeURIComponent(providerIdOrNodeId)}${suffix}`
+    : `/api/nodes/${encodeURIComponent(providerIdOrNodeId)}/providers/${encodeURIComponent(providerId)}${suffix}`;
 
 export function registerProvidersCommands(program: Command): void {
   const providers = program
     .command('providers')
-    .description('Manage provider authentication on a node');
+    .description('Manage Hub provider authentication');
 
   const methodOption = new Option('--method <method>', 'authentication method')
     .choices(['api_key', 'oauth'])
@@ -62,11 +74,11 @@ export function registerProvidersCommands(program: Command): void {
     .argParser((v: string | undefined) => (v === undefined ? 120 : Number(v)));
 
   providers
-    .command('login <nodeId> <providerId>')
-    .description('Start a provider login flow on a node')
+    .command('login <providerIdOrNodeId> [providerId]')
+    .description('Start a provider login flow (global, or node-scoped with nodeId prefix)')
     .addOption(methodOption)
     .addOption(waitOption)
-    .action((nodeId: string, providerId: string, options: Record<string, unknown>, command: Command) =>
+    .action((providerIdOrNodeId: string, providerId: string | undefined, options: Record<string, unknown>, command: Command) =>
       cliAction(async (_options, cmd) => {
         const g = readGlobals(cmd);
         const client = await HubClient.connect(g);
@@ -89,7 +101,7 @@ export function registerProvidersCommands(program: Command): void {
         }
 
         let state = await client.post<ProviderLoginState>(
-          `/api/nodes/${encodeURIComponent(nodeId)}/providers/${encodeURIComponent(providerId)}/login`,
+          providerRoute(providerIdOrNodeId, providerId, '/login'),
           { method },
         );
 
@@ -97,8 +109,11 @@ export function registerProvidersCommands(program: Command): void {
           const deadline = Date.now() + wait * 1000;
           while (Date.now() < deadline) {
             await sleep(2000);
+            // 轮询用登录会话自身 id；节点维度下保留 nodeId 前缀
             state = await client.get<ProviderLoginState>(
-              `/api/nodes/${encodeURIComponent(nodeId)}/provider-logins/${encodeURIComponent(state.id)}`,
+              providerId === undefined
+                ? loginRoute(state.id, undefined)
+                : loginRoute(providerIdOrNodeId, state.id),
             );
             if (state.status !== 'pending') break;
           }
@@ -114,25 +129,23 @@ export function registerProvidersCommands(program: Command): void {
     );
 
   providers
-    .command('status <nodeId> <loginId>')
-    .description('Get provider login status on a node')
-    .action((nodeId: string, loginId: string, options: Record<string, unknown>, command: Command) =>
+    .command('status <loginIdOrNodeId> [loginId]')
+    .description('Get provider login status (global, or node-scoped with nodeId prefix)')
+    .action((loginIdOrNodeId: string, loginId: string | undefined, options: Record<string, unknown>, command: Command) =>
       cliAction(async (_options, cmd) => {
         const g = readGlobals(cmd);
         const client = await HubClient.connect(g);
-        const state = await client.get<ProviderLoginState>(
-          `/api/nodes/${encodeURIComponent(nodeId)}/provider-logins/${encodeURIComponent(loginId)}`,
-        );
+        const state = await client.get<ProviderLoginState>(loginRoute(loginIdOrNodeId, loginId));
         renderLoginState(state, g.json);
       })(options, command),
     );
 
   providers
-    .command('respond <nodeId> <loginId>')
-    .description('Respond to a provider login prompt on a node')
+    .command('respond <loginIdOrNodeId> [loginId]')
+    .description('Respond to a provider login prompt (global, or node-scoped with nodeId prefix)')
     .requiredOption('--prompt <promptId>', 'prompt ID to respond to')
     .option('--value <value>', 'response value (reads from stdin if omitted)')
-    .action((nodeId: string, loginId: string, options: Record<string, unknown>, command: Command) =>
+    .action((loginIdOrNodeId: string, loginId: string | undefined, options: Record<string, unknown>, command: Command) =>
       cliAction(async (_options, cmd) => {
         const g = readGlobals(cmd);
         const client = await HubClient.connect(g);
@@ -142,7 +155,7 @@ export function registerProvidersCommands(program: Command): void {
             ? options.value
             : (await readInput()).replace(/\r?\n$/, '');
         const state = await client.post<ProviderLoginState>(
-          `/api/nodes/${encodeURIComponent(nodeId)}/provider-logins/${encodeURIComponent(loginId)}/respond`,
+          loginRoute(loginIdOrNodeId, loginId, '/respond'),
           { promptId, value },
         );
         renderLoginState(state, g.json);
@@ -150,28 +163,26 @@ export function registerProvidersCommands(program: Command): void {
     );
 
   providers
-    .command('cancel <nodeId> <loginId>')
-    .description('Cancel an in-progress provider login on a node')
-    .action((nodeId: string, loginId: string, options: Record<string, unknown>, command: Command) =>
+    .command('cancel <loginIdOrNodeId> [loginId]')
+    .description('Cancel an in-progress provider login (global, or node-scoped with nodeId prefix)')
+    .action((loginIdOrNodeId: string, loginId: string | undefined, options: Record<string, unknown>, command: Command) =>
       cliAction(async (_options, cmd) => {
         const g = readGlobals(cmd);
         const client = await HubClient.connect(g);
-        const result = await client.delete<{ ok: boolean }>(
-          `/api/nodes/${encodeURIComponent(nodeId)}/provider-logins/${encodeURIComponent(loginId)}`,
-        );
+        const result = await client.delete<{ ok: boolean }>(loginRoute(loginIdOrNodeId, loginId));
         printResult(result, g.json);
       })(options, command),
     );
 
   providers
-    .command('logout <nodeId> <providerId>')
-    .description('Log out a provider on a node')
-    .action((nodeId: string, providerId: string, options: Record<string, unknown>, command: Command) =>
+    .command('logout <providerIdOrNodeId> [providerId]')
+    .description('Log out a provider (global, or node-scoped with nodeId prefix)')
+    .action((providerIdOrNodeId: string, providerId: string | undefined, options: Record<string, unknown>, command: Command) =>
       cliAction(async (_options, cmd) => {
         const g = readGlobals(cmd);
         const client = await HubClient.connect(g);
         const result = await client.delete<{ ok: boolean }>(
-          `/api/nodes/${encodeURIComponent(nodeId)}/providers/${encodeURIComponent(providerId)}/auth`,
+          providerRoute(providerIdOrNodeId, providerId, '/auth'),
         );
         printResult(result, g.json);
       })(options, command),
