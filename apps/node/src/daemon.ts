@@ -38,8 +38,6 @@ import {
   buildBotShellEnv,
   ensureBotdBinWrapper,
 } from './runtime.js';
-import { getNodeModelCatalog } from './models.js';
-import { ProviderAuthManager } from './provider-auth.js';
 import { installResourceToNode } from './installer.js';
 import { ensureBuiltinSkill } from './builtin-skill.js';
 import { createNodeEnvRpcServer } from './env-rpc-server.js';
@@ -50,9 +48,7 @@ import {
   checkNodeUpgrade,
   performNodeUpgrade,
   filterRpcRegistryUrl,
-  startAutoUpgradeLoop as startAutoUpgradeLoopFactory,
   UpgradeRejectedError,
-  type AutoUpgradeLoopHandle,
 } from './upgrader.js';
 
 export interface DaemonHandle {
@@ -126,6 +122,8 @@ export interface ControlDeps {
   getHubRpc: () => BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null;
   syncRegistrationWithHub: () => Promise<void>;
   handleShutdown: () => void;
+  /** 在途 envExec（bash 命令）计数：升级排空等待的依据；缺省视为 0。 */
+  getActiveExecCount?: () => number;
 }
 
 function isValidIpcToken(presented: string | undefined, expected: string | null | undefined): boolean {
@@ -222,6 +220,8 @@ export function createDaemonControlServer(deps: ControlDeps): http.Server {
         targetVersion: body?.targetVersion,
         registryUrl: body?.registryUrl,
         force: body?.force,
+        // 排空保护：升级前等待在途 envExec（bash 命令）结束再拉起替换守护进程。
+        getActiveTurnsCount: deps.getActiveExecCount ?? (() => 0),
         onScheduleShutdown: () => {
           setTimeout(() => {
             deps.handleShutdown();
@@ -565,8 +565,6 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
   const startedAt = Date.now();
   const startedAtIso = new Date(startedAt).toISOString();
 
-  const authManager = new ProviderAuthManager(dataDir);
-
   // 远端执行环境 RPC 服务端（Brain in Hub, Hands on Node）：文件/shell/worktree
   // 能力在 Node 本机执行，流式输出经 onExecOutput 回传 Hub。
   // shellEnv 注入 botd CLI 包装器（~/.botd/bin → PATH 头部）与 BOTD_DATA_DIR，
@@ -592,21 +590,8 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
   let isStopping = false;
   let hubRpc: BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null = null;
   let heartbeatTimer: NodeJS.Timeout | null = null;
-  // 自动升级：默认关闭。开启后周期检查 registry，复用手动升级的排空/金丝雀/
-  // 回滚/封禁链路；升级成功即由 onScheduleShutdown 平滑替换本进程。
-  let autoUpgradeLoop: AutoUpgradeLoopHandle | null = null;
-  const startAutoUpgradeLoop = () => {
-    if (autoUpgradeLoop) return;
-    autoUpgradeLoop = startAutoUpgradeLoopFactory(dataDir, {
-      enabled: Boolean(process.env.BOTD_AUTO_UPGRADE),
-      shouldSkip: () => isStopping || restartRequested,
-      onScheduleShutdown: () => {
-        setTimeout(() => {
-          void handleShutdown();
-        }, 100).unref();
-      },
-    });
-  };
+  // 被动升级（Phase 7A）：Node 不再自轮询 npm registry；升级由 Hub 中心化
+  // 下发 upgradeDaemon RPC 或用户经 CLI/Web 显式触发。
   let rpcInstance: BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null = null;
   let rws: ReconnectingWebSocket;
   const syncRegistrationWithHub = async (targetRpc = hubRpc): Promise<void> => {
@@ -644,6 +629,7 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
     getHubRpc: () => hubRpc,
     syncRegistrationWithHub: () => syncRegistrationWithHub(),
     handleShutdown: () => handleShutdown(),
+    getActiveExecCount: () => envRpcServer.getActiveExecCount?.() ?? 0,
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -712,9 +698,12 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
         });
       },
       upgradeDaemon: async (opts) => {
+        // 排空保护：升级前等待在途 envExec（bash 命令）自然结束，避免拉起
+        // 替换守护进程时杀死运行中的命令（最多等待 drainTimeoutMs）。
         return await performNodeUpgrade(dataDir, {
           ...opts,
           registryUrl: filterRpcRegistryUrl(opts?.registryUrl),
+          getActiveTurnsCount: () => envRpcServer.getActiveExecCount?.() ?? 0,
           onScheduleShutdown: () => {
             setTimeout(() => {
               void handleShutdown();
@@ -730,22 +719,23 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
         return [];
       },
       getModelCatalog: async () => {
-        return await getNodeModelCatalog(dataDir);
+        // Phase 4A：模型目录已 100% 迁至 Hub SQLite；Node 不再维护目录。
+        throw new Error('Provider auth and model catalog moved to Hub');
       },
-      startProviderLogin: async (input) => {
-        return await authManager.start(input);
+      startProviderLogin: async () => {
+        throw new Error('Provider auth and model catalog moved to Hub');
       },
-      getProviderLogin: async (loginId) => {
-        return await authManager.get(loginId);
+      getProviderLogin: async () => {
+        throw new Error('Provider auth and model catalog moved to Hub');
       },
-      respondProviderLogin: async (input) => {
-        return await authManager.respond(input);
+      respondProviderLogin: async () => {
+        throw new Error('Provider auth and model catalog moved to Hub');
       },
-      cancelProviderLogin: async (loginId) => {
-        await authManager.cancel(loginId);
+      cancelProviderLogin: async () => {
+        throw new Error('Provider auth and model catalog moved to Hub');
       },
-      logoutProvider: async (providerId) => {
-        await authManager.logout(providerId);
+      logoutProvider: async () => {
+        throw new Error('Provider auth and model catalog moved to Hub');
       },
       saveBot: async (bot, systemMd) => {
         if (bot.nodeId !== identity.nodeId) {
@@ -835,10 +825,6 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
           }
         }
       }, 20_000);
-
-      // 自动升级定时器随守护进程启动一次即可，与 Hub 连接无关（registry 检查
-      // 不依赖 Hub），升级排空等待在本进程内完成。
-      startAutoUpgradeLoop();
     } catch (err) {
       console.error('Node registration failed:', err);
     }
@@ -870,14 +856,9 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
     }
-    if (autoUpgradeLoop) {
-      autoUpgradeLoop.stop();
-      autoUpgradeLoop = null;
-    }
     hubRpc = null;
 
     restartRequested = false;
-    await authManager.close();
 
     if (rpcInstance) {
       try {

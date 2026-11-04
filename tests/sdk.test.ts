@@ -1,14 +1,12 @@
 import assert from 'node:assert/strict';
-import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import test, { type TestContext } from 'node:test';
+import test from 'node:test';
 import { ensureBotdBinWrapper } from '../apps/node/src/runtime.js';
 import { createNodeEnvRpcServer } from '../apps/node/src/env-rpc-server.js';
-import { getNodeModelCatalog, configureProviderAuth, createIsolatedModelRuntime } from '../apps/node/src/models.js';
 import {
   deleteResource,
   getSkillSearchDirs,
@@ -21,19 +19,6 @@ import {
   writeSkill,
 } from '../apps/node/src/storage.js';
 import { installResourceToNode, parseGitSource } from '../apps/node/src/installer.js';
-
-/**
- * Inject a provider API key through the BOTD_API_KEY_<PROVIDER> environment override
- * (highest credential priority) and restore the previous value when the test ends.
- */
-const withProviderKey = (t: TestContext, variable: string, value: string) => {
-  const previous = process.env[variable];
-  process.env[variable] = value;
-  t.after(() => {
-    if (previous === undefined) delete process.env[variable];
-    else process.env[variable] = previous;
-  });
-};
 
 // ---------------------------------------------------------------------------
 // Hands on Node：env-rpc-server（NodeExecutionEnv + Git Worktree 隔离）
@@ -132,80 +117,8 @@ test('ensureBotdBinWrapper writes an executable wrapper and is idempotent', asyn
 });
 
 // ---------------------------------------------------------------------------
-// Node 模型目录：models.json 自定义 provider + BOTD_API_KEY 覆盖
-// ---------------------------------------------------------------------------
-
-test('getNodeModelCatalog includes models.json providers and credential configured flags without leaking secrets', async t => {
-  const dataDir = await mkdtemp(path.join(tmpdir(), 'botd-sdk-catalog-'));
-  t.after(async () => {
-    await rm(dataDir, { recursive: true, force: true });
-  });
-
-  await mkdir(path.join(dataDir, '.agent'), { recursive: true });
-  await writeFile(
-    path.join(dataDir, '.agent/models.json'),
-    JSON.stringify({
-      providers: {
-        'botd-test': {
-          baseUrl: 'http://127.0.0.1:9/v1',
-          api: 'openai-completions',
-          apiKey: 'registry-key-must-not-leak',
-          models: [{ id: 'local-model', reasoning: false, contextWindow: 8192, maxTokens: 1024 }],
-        },
-      },
-    }),
-  );
-  // 凭据沿用 Pi SDK 的 auth.json 结构
-  await writeFile(
-    path.join(dataDir, '.agent/auth.json'),
-    JSON.stringify({ mistral: { type: 'api_key', key: 'node-local-secret-key' } }),
-    'utf8',
-  );
-
-  const catalog = await getNodeModelCatalog(dataDir);
-  const mistral = catalog.providers.find((provider) => provider.id === 'mistral')!;
-  assert.equal(mistral.configured, true, 'stored credential must mark provider configured');
-  assert.equal(mistral.credentialType, 'api_key');
-  assert.equal(JSON.stringify(catalog).includes('node-local-secret-key'), false, 'stored keys must never leak through the catalog');
-  assert.equal(JSON.stringify(catalog).includes('registry-key-must-not-leak'), false, 'models.json api keys must never leak');
-
-  const local = catalog.providers.find((provider) => provider.id === 'botd-test')!;
-  assert(local, 'models.json provider must appear in catalog');
-  assert(local.models.some((model) => model.id === 'local-model'));
-  assert.equal(JSON.stringify(catalog).includes('http://127.0.0.1:9'), false, 'private baseUrls must not leak');
-});
-
-test('configureProviderAuth applies BOTD_API_KEY override above stored credentials', async t => {
-  const dataDir = await mkdtemp(path.join(tmpdir(), 'botd-sdk-auth-'));
-  t.after(async () => {
-    await rm(dataDir, { recursive: true, force: true });
-  });
-
-  await mkdir(path.join(dataDir, '.agent'), { recursive: true });
-  await writeFile(
-    path.join(dataDir, '.agent/models.json'),
-    JSON.stringify({
-      providers: {
-        'botd-test': {
-          baseUrl: 'http://127.0.0.1:9/v1',
-          api: 'openai-completions',
-          models: [{ id: 'local' }],
-        },
-      },
-    }),
-  );
-
-  const runtime = await createIsolatedModelRuntime(dataDir);
-  await assert.rejects(configureProviderAuth(runtime, 'botd-test'), /not configured/);
-
-  withProviderKey(t, 'BOTD_API_KEY_BOTD_TEST', 'override-key');
-  await configureProviderAuth(runtime, 'botd-test');
-  const credentials = await runtime.listCredentials();
-  assert(credentials.some((credential) => credential.providerId === 'botd-test' && credential.type === 'api_key'));
-});
-
-// ---------------------------------------------------------------------------
-// Storage / installer（保持原 sdk.test.ts 的资源管理覆盖）
+// Storage / installer（保持原 sdk.test.ts 的资源管理覆盖；
+// 模型目录与 Provider 认证已 100% 迁至 Hub，由 tests/hub.test.ts 覆盖）
 // ---------------------------------------------------------------------------
 
 test('skill discovery reads .agents/skills and .agent/skills with precedence and symlinks', async t => {

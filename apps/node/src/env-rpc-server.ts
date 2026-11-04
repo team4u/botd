@@ -15,12 +15,15 @@
  *
  * 说明：本文件的本地 RPC 类型是协议文件的结构镜像（协议包的 index 未导出 env-rpc，
  * 跨包源引用会破坏 rootDir），由 tests/remote-env-worktree.test.ts 做结构一致性校验。
+ *
+ * 执行环境使用同包 vendored 实现（./env/，仅依赖 Node 标准库），不引入
+ * pi-durable/chord —— @botd/node 保持轻量（Brain in Hub, Hands on Node）。
  */
 
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
-import { withCancel, type Context } from '@earendil-works/chord/context';
-import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
+import { BACKGROUND_CONTEXT, withCancel, type Context } from './env/index.js';
+import { NodeExecutionEnv } from './env/node.js';
 import {
   err,
   ok,
@@ -28,9 +31,10 @@ import {
   type DirReader,
   type ExecutionErrorCode,
   type FileErrorCode,
+  type LineScan,
   type Result,
   type TextLineReader,
-} from '@earendil-works/pi-durable/env';
+} from './env/index.js';
 
 // ---------------------------------------------------------------------------
 // 协议类型镜像（与 packages/protocol/src/env-rpc.ts 保持结构一致）
@@ -127,7 +131,7 @@ interface NodeEnvRpcFunctions {
   envOpenBinaryReader(input: { path: string; noFollow?: boolean; cwd?: string }): Promise<RpcResult<{ readerId: string }>>;
   envBinaryReaderInfo(input: { readerId: string }): Promise<RpcResult<RpcFileInfo>>;
   envBinaryReaderRead(input: { readerId: string; offset: number; length: number }): Promise<RpcResult<{ base64: string; byteLength: number }>>;
-  envBinaryReaderScanLines(input: { readerId: string; startLine: number; endLine?: number }): Promise<RpcResult<import('@earendil-works/pi-durable/env').LineScan>>;
+  envBinaryReaderScanLines(input: { readerId: string; startLine: number; endLine?: number }): Promise<RpcResult<LineScan>>;
   envBinaryReaderClose(input: { readerId: string }): Promise<RpcResult<null>>;
   envOpenDirReader(input: { path: string; cwd?: string }): Promise<RpcResult<{ readerId: string }>>;
   envDirReaderNext(input: { readerId: string; maxEntries: number }): Promise<RpcResult<{ entries: RpcFileInfo[]; done: boolean }>>;
@@ -137,6 +141,17 @@ interface NodeEnvRpcFunctions {
   envCleanup(cwd?: string): Promise<void>;
   envAcquireWorktree(input: EnvAcquireWorktreeInput): Promise<EnvAcquireWorktreeResult>;
   envReleaseWorktree(input: EnvReleaseWorktreeInput): Promise<{ ok: boolean }>;
+}
+
+/** NodeEnvRpcFunctions + 升级排空内省：在途 envExec 计数供 performNodeUpgrade 排空等待。 */
+export interface NodeEnvRpcServer extends NodeEnvRpcFunctions {
+  /**
+   * 当前仍在执行的 envExec（bash 命令）数量；升级前等待其归零。
+   *
+   * 类型上可选是为保持 `{ ..., ...envRpcServer } as NodeRpcFunctions` 这类
+   * 协议侧展开转型的可比性（协议类型不含本成员）；运行时始终存在。
+   */
+  getActiveExecCount?(): number;
 }
 
 // ---------------------------------------------------------------------------
@@ -157,12 +172,7 @@ const toRpcError = (error: unknown): RpcEnvError => {
 
 const rpcFail = <T>(error: unknown): RpcResult<T> => ({ ok: false, error: toRpcError(error) });
 
-const BACKGROUND: Context = {
-  abortSignal: undefined,
-  telemetry: undefined as unknown as Context['telemetry'],
-  value: () => undefined,
-  toString: () => 'botd-node-env-rpc',
-};
+const BACKGROUND: Context = BACKGROUND_CONTEXT;
 
 export interface NodeEnvRpcServerOptions {
   defaultCwd: string;
@@ -184,7 +194,7 @@ interface RunningExec {
  * 创建 Node 侧 env RPC 函数集。返回对象可直接挂到 birpc server 上：
  * `createNodeEnvRpcServer({ defaultCwd, onExecOutput: (e) => hubNotify.onEnvExecOutput(e) })`
  */
-export function createNodeEnvRpcServer(options: NodeEnvRpcServerOptions): NodeEnvRpcFunctions {
+export function createNodeEnvRpcServer(options: NodeEnvRpcServerOptions): NodeEnvRpcServer {
   const { defaultCwd, onExecOutput, shellEnv } = options;
 
   const envs = new Map<string, NodeExecutionEnv>();
@@ -213,6 +223,7 @@ export function createNodeEnvRpcServer(options: NodeEnvRpcServerOptions): NodeEn
   };
 
   const running = new Map<string, RunningExec>();
+  const inFlightExecs = new Set<string>();
 
   /** pi-durable Result -> RpcResult（void 结果归一为 null，便于 JSON 序列化）。 */
   const unwrap = async <T>(promise: Promise<Result<T, unknown>>): Promise<RpcResult<T extends void ? null : T>> => {
@@ -386,6 +397,7 @@ export function createNodeEnvRpcServer(options: NodeEnvRpcServerOptions): NodeEn
       const executionEnv = envFor(cwd);
       const { context, cancel } = withCancel(BACKGROUND);
       running.set(execId, { cancel });
+      inFlightExecs.add(execId);
       try {
         const result = await executionEnv.exec(
           command,
@@ -418,6 +430,7 @@ export function createNodeEnvRpcServer(options: NodeEnvRpcServerOptions): NodeEn
           : rpcFail(result.error);
       } finally {
         running.delete(execId);
+        inFlightExecs.delete(execId);
       }
     },
 
@@ -461,7 +474,9 @@ export function createNodeEnvRpcServer(options: NodeEnvRpcServerOptions): NodeEn
     },
   };
 
-  return rpc;
+  return Object.assign(rpc, {
+    getActiveExecCount: (): number => inFlightExecs.size,
+  }) as NodeEnvRpcServer;
 }
 
 /** 服务端内部 git 子进程执行（一次性，与 envExec 的流式通道无关）。 */

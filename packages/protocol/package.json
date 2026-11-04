@@ -11,6 +11,9 @@
   "files": [
     "dist"
   ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "exports": {
     ".": {
       "types": "./src/index.ts",
