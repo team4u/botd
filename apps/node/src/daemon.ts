@@ -170,6 +170,9 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
   let hubRpc: BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null = null;
   // 连接代数：每次 WS 断开 +1；回合发起与完成时对比代数即可判断发起连接是否已死
   let hubEpoch = 0;
+  // 语义：hubEpoch === 0 表示从未建立过连接；每次建立（含重连）与断开都递增，
+  // 保证健康连接的代数永不为 0（runTurnWithResilience 以 0 判定断开）。
+  let hasConnectedOnce = false;
   const isHubConnected = () => rws !== undefined && rws.readyState === ReconnectingWebSocket.OPEN;
   /** 动态 Hub 推流代理：每次访问转发到当前最新的 hubRpc（断连重连后推流自动切到新连接） */
   const dynamicHubRpc = new Proxy({} as BirpcReturn<HubRpcFunctions, NodeRpcFunctions>, {
@@ -370,7 +373,7 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
           bot,
           input,
           () => (isHubConnected() ? dynamicHubRpc : null),
-          () => (isHubConnected() ? hubEpoch : 0),
+          () => (isHubConnected() && hasConnectedOnce ? hubEpoch : 0),
         );
       },
       cancelTurn: async (sessionId, botId) => {
@@ -440,6 +443,8 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
 
   rws.addEventListener('open', async () => {
     if (isStopping) return;
+    hubEpoch++;
+    hasConnectedOnce = true;
     const connectedRpc = createNodeRpc();
     rpcInstance = connectedRpc;
     hubRpc = connectedRpc;
