@@ -67,6 +67,63 @@ const PREVIEW_LIMIT = 240;
 export const preview = (text: string, limit = PREVIEW_LIMIT): string =>
 	text.length <= limit ? text : `${text.slice(0, limit)}…`;
 
+/** The shared `ask_human` tool (mounted on both Router and Worker extensions). */
+export const askHumanTool = defineTool({
+	name: "ask_human",
+	description:
+		"Ask the human a question and record it as a pending ask. The hub UI (or test) resolves it; " +
+		"call `ask_human` again with the same prompt to poll its answer. Use previewType \"ui\" with a " +
+		"botd.v1 JSON spec in previewContent to render a rich form card (TextInput props.secret masks " +
+		"passwords and the answer is redacted into env vars, never stored in plaintext).",
+	parameters: obj({
+		prompt: str(),
+		options: opt(arr(str())),
+		previewType: opt(oneOf(["text", "code", "markdown", "ui"])),
+		previewContent: opt(str()),
+	}),
+	replay: "safe",
+	async execute(args, api, context) {
+		let askId = "";
+		const askedBy = String(api.taskId);
+		await api.commit(async (tx) => {
+			const doc = await tx.doc(AskDoc, api.conversationId);
+			// Replay-safe: the ask records its creating tool task.
+			const existing = Object.values(doc.asks).find((a) => a.askedBy === askedBy);
+			if (existing !== undefined) {
+				askId = existing.askId;
+				return;
+			}
+			askId = `ask-${api.conversationId}-${Object.keys(doc.asks).length + 1}`;
+			doc.asks[askId] = {
+				askId,
+				prompt: args.prompt,
+				options: args.options ?? [],
+				status: "pending",
+				createdAt: api.now(),
+				askedBy,
+				...(args.previewType === undefined ? {} : { previewType: args.previewType }),
+				...(args.previewContent === undefined ? {} : { previewContent: args.previewContent }),
+			};
+		}, context);
+		const doc = await api.snapshot(AskDoc, api.conversationId, context);
+		const ask = doc?.asks[askId];
+		if (ask === undefined) throw new Error("ask disappeared");
+		const optionsText =
+			ask.options.length > 0 ? `\nOptions: ${ask.options.join(" / ")}` : "";
+		return {
+			output: [
+				{
+					type: "text",
+					text:
+						ask.status === "answered"
+							? `Human answered: ${ask.answer}`
+							: `Asked the human [${ask.askId}]: ${ask.prompt}${optionsText} — status: ${ask.status}`,
+				},
+			],
+			};
+	},
+});
+
 const listWorkers = (registry: { workers: Record<string, WorkerEntry> }): WorkerEntry[] =>
 	Object.values(registry.workers).sort((a, b) => b.startedAt - a.startedAt);
 
@@ -457,55 +514,7 @@ export function createRouterExtension(options: {
 		},
 	});
 
-	const askHuman = defineTool({
-		name: "ask_human",
-		description:
-			"Ask the human a question and record it as a pending ask. The hub UI (or test) resolves it; " +
-			"call `ask_human` again with the same prompt to poll its answer.",
-		parameters: obj({
-			prompt: str(),
-			options: opt(arr(str())),
-		}),
-		replay: "safe",
-		async execute(args, api, context) {
-			let askId = "";
-			const askedBy = String(api.taskId);
-			await api.commit(async (tx) => {
-				const doc = await tx.doc(AskDoc, api.conversationId);
-				// Replay-safe: the ask records its creating tool task.
-				const existing = Object.values(doc.asks).find((a) => a.askedBy === askedBy);
-				if (existing !== undefined) {
-					askId = existing.askId;
-					return;
-				}
-				askId = `ask-${api.conversationId}-${Object.keys(doc.asks).length + 1}`;
-				doc.asks[askId] = {
-					askId,
-					prompt: args.prompt,
-					options: args.options ?? [],
-					status: "pending",
-					createdAt: api.now(),
-					askedBy,
-				};
-			}, context);
-			const doc = await api.snapshot(AskDoc, api.conversationId, context);
-			const ask = doc?.asks[askId];
-			if (ask === undefined) throw new Error("ask disappeared");
-			const optionsText =
-				ask.options.length > 0 ? `\nOptions: ${ask.options.join(" / ")}` : "";
-			return {
-				output: [
-					{
-						type: "text",
-						text:
-							ask.status === "answered"
-								? `Human answered: ${ask.answer}`
-								: `Asked the human [${ask.askId}]: ${ask.prompt}${optionsText} — status: ${ask.status}`,
-					},
-				],
-			};
-		},
-	});
+	const askHuman = askHumanTool;
 
 	return defineExtension({
 		name: ROUTER_EXTENSION,

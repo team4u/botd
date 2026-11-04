@@ -63,9 +63,10 @@ export const botdUiCatalog = defineCatalog(schema, {
         hint: z.string().optional(),
         multiline: z.boolean().optional(),
         rows: z.number().int().min(2).max(12).optional(),
+        secret: z.boolean().optional(),
       }),
       slots: [],
-      description: 'Single-line form input field with label and hint; multiline renders a textarea',
+      description: 'Single-line form input field with label and hint; multiline renders a textarea; secret masks as password',
     },
     Select: {
       props: z.object({

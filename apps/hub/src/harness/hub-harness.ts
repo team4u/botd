@@ -29,6 +29,7 @@ import {
 	type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { withSecretEnv } from "./secret-stash.js";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
@@ -101,6 +102,22 @@ function personaInstructions(persona: BotPersonaConfig): string {
 
 /** Session index: one main-session conversation id per bot persona (keyed by botId). */
 const SessionIndex = SessionIndexDoc;
+
+/**
+ * NodeExecutionEnv with SecretStash injection: every shell exec receives the
+ * active `BOTD_SECRET_*` env vars, so stashed secrets are consumable
+ * cross-platform via process.env without appearing in command lines or LLM
+ * context. Explicit per-call env entries win over the injected secrets.
+ */
+export class SecretInjectingEnv extends NodeExecutionEnv {
+	async exec(
+		command: string | readonly string[],
+		options: import("@earendil-works/pi-durable/env").ShellExecOptions | undefined,
+		context: Context,
+	): Promise<import("@earendil-works/pi-durable/env").Result<import("@earendil-works/pi-durable/env").ShellExecResult, import("@earendil-works/pi-durable/env").ExecutionError>> {
+		return super.exec(command, { ...options, env: withSecretEnv(options?.env) }, context);
+	}
+}
 
 export class HubDurableRuntime {
 	readonly harness: import("@earendil-works/pi-durable").Harness;
@@ -193,7 +210,7 @@ export class HubDurableRuntime {
 			registry,
 			env:
 				options.env === undefined
-					? ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? process.cwd() })
+					? ({ cwd }) => new SecretInjectingEnv({ cwd: cwd ?? process.cwd() })
 					: options.env,
 			...(options.onReport === undefined ? {} : { onReport: options.onReport as never }),
 		};

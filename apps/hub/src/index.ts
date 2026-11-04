@@ -6,8 +6,7 @@ import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels, type Models } from '@earendil-works/pi-ai';
-import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
-import type { UserRecord } from '@botd/protocol';
+import { UserRecord } from '@botd/protocol';
 import { HubDatabase } from './db.js';
 import { AuthManager } from './auth.js';
 import { SseHub } from './sse.js';
@@ -16,6 +15,7 @@ import { GroupRouter } from './group-router.js';
 import { createStaticMiddleware } from './static.js';
 import { ArtifactService } from './artifact-service.js';
 import { HubDurableRuntime, type BotPersonaConfig } from './harness/hub-harness.js';
+import { SecretInjectingEnv } from './harness/hub-harness.js';
 import { createHubCredentialStore } from './credential-store.js';
 import { loadDynamicDurableExtension } from './harness/dynamic-extension-loader.js';
 import { TargetDoc } from './harness/docs.js';
@@ -167,7 +167,7 @@ export function createHub(options?: HubOptions): HubInstance {
               if (nodeId !== undefined && connections.getNodeEnvRpc(nodeId) !== undefined) {
                 return connections.createRemoteEnv({ nodeId, cwd: cwd ?? process.cwd() });
               }
-              return new NodeExecutionEnv({ cwd: cwd ?? process.cwd() });
+              return new SecretInjectingEnv({ cwd: cwd ?? process.cwd() });
             },
           },
         );
