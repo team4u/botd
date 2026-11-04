@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .botd/
+.botd-worktrees/
 .env
 *.sqlite
 *.sqlite-shm
