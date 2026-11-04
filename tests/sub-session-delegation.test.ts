@@ -370,7 +370,7 @@ test('POST /api/sessions 透传 parentSessionId 与 updateSession 字段映射',
   assert.equal(subs[0].id, res.json.id);
 });
 
-test('CLI: botd sessions delegate 与 subsessions', async (t) => {
+test('CLI: botd sessions subsessions 列出子会话', async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-cli-del-'));
   const dbPath = path.join(dir, 'hub.sqlite');
   const password = 'cli-password-123';
@@ -414,7 +414,15 @@ test('CLI: botd sessions delegate 与 subsessions', async (t) => {
     ownerId: adminUser.id,
   });
 
-  // Test delegate CLI
+  // 种子一个子会话：CLI 的 sessions subsessions 应能列出它
+  const child = hub.db.createSession({
+    id: 'sess_cli_child',
+    title: '[子任务] CLI Child Session',
+    leadBotId: 'cli_bot',
+    ownerId: adminUser.id,
+    parentSessionId: parent.id,
+  });
+
   const program = buildProgram();
   program.exitOverride();
 
@@ -433,41 +441,6 @@ test('CLI: botd sessions delegate 与 subsessions', async (t) => {
       password,
       '--json',
       'sessions',
-      'delegate',
-      parent.id,
-      '--bot',
-      'cli_bot',
-      '--prompt',
-      'Task from CLI',
-      '--title',
-      'CLI Child Session',
-    ]);
-  } finally {
-    console.log = origLog;
-  }
-
-  const delegateOut = JSON.parse(stdout.trim());
-  assert.equal(delegateOut.parentSessionId, parent.id);
-  assert.equal(delegateOut.childSession.title, 'CLI Child Session');
-  assert.equal(delegateOut.childSession.leadBotId, 'cli_bot');
-
-  // Test subsessions CLI
-  stdout = '';
-  console.log = (...args: unknown[]) => {
-    stdout += args.map(String).join(' ') + '\n';
-  };
-  try {
-    const program2 = buildProgram();
-    program2.exitOverride();
-    await program2.parseAsync([
-      'node',
-      'cli',
-      '--hub',
-      hubUrl,
-      '--password',
-      password,
-      '--json',
-      'sessions',
       'subsessions',
       parent.id,
     ]);
@@ -478,7 +451,7 @@ test('CLI: botd sessions delegate 与 subsessions', async (t) => {
   const subsessionsOut = JSON.parse(stdout.trim());
   assert.ok(Array.isArray(subsessionsOut));
   assert.equal(subsessionsOut.length, 1);
-  assert.equal(subsessionsOut[0].id, delegateOut.childSession.id);
+  assert.equal(subsessionsOut[0].id, child.id);
   assert.equal(subsessionsOut[0].parentSessionId, parent.id);
 });
 

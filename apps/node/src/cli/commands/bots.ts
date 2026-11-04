@@ -3,7 +3,6 @@ import type {
   BotConfig,
   NodeWithBots,
   SaveBotInput,
-  SubagentToolScope as BotToolScope,
   ThinkingLevel,
 } from '@botd/protocol';
 import { cliAction, readGlobals } from '../context.js';
@@ -50,12 +49,9 @@ export function registerBotsCommands(program: Command): void {
   bots
     .command('create <botId>')
     .description('Create a new BOT configuration')
-    .requiredOption('--node <nodeId>', 'Node ID that owns this BOT')
+    .option('--node <nodeId>', 'Node ID that owns this BOT (default: BOTD_NODE_ID or "local")')
     .requiredOption('--name <name>', 'BOT display name')
-    .option(
-      '--model <provider/modelId>',
-      'Model in <provider>/<modelId> format (optional for subagents with --parent, which inherit parent model by default)',
-    )
+    .requiredOption('--model <provider/modelId>', 'Model in <provider>/<modelId> format (e.g. anthropic/claude-sonnet-4-5)')
     .option('--desc <description>', 'BOT description')
     .addOption(
       new Option('--thinking <level>', 'Thinking budget level')
@@ -65,58 +61,20 @@ export function registerBotsCommands(program: Command): void {
     .option('--skill <ids...>', 'Skill ID(s) to enable')
     .option('--extension <ids...>', 'Extension ID(s) to enable')
     .option('--system-file <path>', 'Path to SYSTEM.md file or - for stdin')
-    .option('--parent <parentBotId>', 'Parent primary BOT ID (creates a role subagent under that BOT)')
-    .option('--inherit-model', 'Inherit model from parent BOT (default true when --parent is set and --model is omitted)')
-    .option('--no-inherit-model', 'Use explicit --model instead of inheriting from parent BOT')
-    .option('--inherit-skills', 'Inherit enabled skills from parent BOT (default true for subagents)')
-    .option('--no-inherit-skills', 'Use explicit --skill list instead of inheriting from parent BOT')
-    .addOption(new Option('--tool-scope <scope>', 'Subagent tool permission scope').choices(['all', 'readonly', 'custom']))
-    .option('--custom-tools <tools...>', 'Allowed tool names when --tool-scope is custom')
+    .option('--workspace <dir>', 'Working directory for this BOT (its workers execute there)')
     .action((botId: string, options: Record<string, unknown>, command: Command) =>
       cliAction(async (options, command) => {
         const g = readGlobals(command);
         const client = await HubClient.connect(g);
 
-        const parentBotId = options.parent as string | undefined;
-        const modelStr = options.model as string | undefined;
-
-        let modelProvider: string;
-        let modelId: string;
-        let inheritModel: boolean | undefined;
-
-        if (modelStr) {
-          const parsed = parseModel(modelStr);
-          modelProvider = parsed.modelProvider;
-          modelId = parsed.modelId;
-          inheritModel = parentBotId ? (options.inheritModel === true ? true : false) : undefined;
-        } else {
-          if (!parentBotId) {
-            throw new CliError(
-              'Missing required option --model <provider/modelId> (or specify --parent <parentBotId> to create a subagent that inherits its parent model)',
-            );
-          }
-          const nodes = await client.get<NodeWithBots[]>('/api/nodes');
-          const parentBot = nodes.flatMap((n) => n.bots).find((b) => b.id === parentBotId);
-          modelProvider = parentBot?.modelProvider ?? 'anthropic';
-          modelId = parentBot?.modelId ?? 'claude-sonnet-4-5';
-          inheritModel = options.inheritModel !== false;
-        }
-
-        const inheritSkills =
-          parentBotId !== undefined
-            ? options.inheritSkills !== undefined
-              ? Boolean(options.inheritSkills)
-              : !(Array.isArray(options.skill) && options.skill.length > 0)
-            : undefined;
-        const toolScope = (options.toolScope as BotToolScope | undefined) ?? 'all';
-        const customTools = options.customTools as string[] | undefined;
+        const { modelProvider, modelId } = parseModel(options.model as string);
 
         const systemFile = options.systemFile as string | undefined;
         const systemMd = systemFile ? await readInput(systemFile) : '';
 
         const body: SaveBotInput = {
           id: botId,
-          nodeId: options.node as string,
+          nodeId: (options.node as string) || process.env.BOTD_NODE_ID || 'local',
           name: options.name as string,
           description: (options.desc as string | undefined) ?? '',
           modelProvider,
@@ -125,14 +83,8 @@ export function registerBotsCommands(program: Command): void {
           enabledSkills: (options.skill as string[] | undefined) ?? [],
           enabledExtensions: (options.extension as string[] | undefined) ?? [],
           systemMd,
-          ...(parentBotId
-            ? {
-                parentBotId,
-                inheritModel,
-                inheritSkills,
-                toolScope,
-                ...(toolScope === 'custom' && customTools ? { customTools } : {}),
-              }
+          ...(typeof options.workspace === 'string' && options.workspace.trim()
+            ? { workspaceDir: options.workspace.trim() }
             : {}),
         };
 
@@ -154,12 +106,7 @@ export function registerBotsCommands(program: Command): void {
     .option('--skill <ids...>', 'Skill ID(s) to enable')
     .option('--extension <ids...>', 'Extension ID(s) to enable')
     .option('--system-file <path>', 'Path to SYSTEM.md file or - for stdin')
-    .option('--inherit-model', 'Inherit model from parent BOT')
-    .option('--no-inherit-model', 'Use explicit model instead of inheriting')
-    .option('--inherit-skills', 'Inherit enabled skills from parent BOT')
-    .option('--no-inherit-skills', 'Do not inherit skills from parent BOT')
-    .addOption(new Option('--tool-scope <scope>', 'Subagent tool permission scope').choices(['all', 'readonly', 'custom']))
-    .option('--custom-tools <tools...>', 'Allowed tool names when --tool-scope is custom')
+    .option('--workspace <dir>', 'Working directory for this BOT (its workers execute there)')
     .action((botId: string, options: Record<string, unknown>, command: Command) =>
       cliAction(async (options, command) => {
         const g = readGlobals(command);
@@ -190,17 +137,8 @@ export function registerBotsCommands(program: Command): void {
         if (options.systemFile !== undefined) {
           body.systemMd = await readInput(options.systemFile as string);
         }
-        if (options.inheritModel !== undefined) {
-          body.inheritModel = Boolean(options.inheritModel);
-        }
-        if (options.inheritSkills !== undefined) {
-          body.inheritSkills = Boolean(options.inheritSkills);
-        }
-        if (options.toolScope !== undefined) {
-          body.toolScope = options.toolScope as BotToolScope;
-        }
-        if (options.customTools !== undefined) {
-          body.customTools = options.customTools as string[];
+        if (typeof options.workspace === 'string' && options.workspace.trim()) {
+          body.workspaceDir = options.workspace.trim();
         }
 
         const result = await client.put<BotConfig>(`/api/bots/${encodeURIComponent(botId)}`, body);
@@ -229,7 +167,7 @@ export function registerBotsCommands(program: Command): void {
       cliAction(async (_options, command) => {
         const g = readGlobals(command);
         const client = await HubClient.connect(g);
-        const result = await client.get<{ content: string }>(`/api/bots/${encodeURIComponent(botId)}/system`);
+        const result = await client.get<{ content: string }>(`/api/bots/${encodeURIComponent(botId)}/files/system`);
         printContent(result, g.json);
       })(options, command),
     );
@@ -243,7 +181,7 @@ export function registerBotsCommands(program: Command): void {
         const g = readGlobals(command);
         const client = await HubClient.connect(g);
         const content = await readInput(options.file as string | undefined);
-        const result = await client.put<{ ok: true }>(`/api/bots/${encodeURIComponent(botId)}/system`, { content });
+        const result = await client.put<{ ok: true }>(`/api/bots/${encodeURIComponent(botId)}/files/system`, { content });
         printResult(result, g.json);
       })(options, command),
     );
@@ -259,7 +197,7 @@ export function registerBotsCommands(program: Command): void {
       cliAction(async (_options, command) => {
         const g = readGlobals(command);
         const client = await HubClient.connect(g);
-        const result = await client.get<{ content: string }>(`/api/bots/${encodeURIComponent(botId)}/memory`);
+        const result = await client.get<{ content: string }>(`/api/bots/${encodeURIComponent(botId)}/files/memory`);
         printContent(result, g.json);
       })(options, command),
     );
@@ -273,7 +211,7 @@ export function registerBotsCommands(program: Command): void {
         const g = readGlobals(command);
         const client = await HubClient.connect(g);
         const content = await readInput(options.file as string | undefined);
-        const result = await client.put<{ ok: true }>(`/api/bots/${encodeURIComponent(botId)}/memory`, { content });
+        const result = await client.put<{ ok: true }>(`/api/bots/${encodeURIComponent(botId)}/files/memory`, { content });
         printResult(result, g.json);
       })(options, command),
     );

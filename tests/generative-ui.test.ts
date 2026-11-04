@@ -1,20 +1,14 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import os from 'node:os';
-import path from 'node:path';
 import { test } from 'node:test';
-import { createRequire } from 'node:module';
 import {
-  BOTD_UI_CATALOG_VERSION,
   BOTD_UI_COMPONENT_TYPES,
-  BOTD_UI_SCHEMA_DOC,
   MAX_UI_SPEC_BYTES,
   MAX_UI_TREE_DEPTH,
   validateUiSpec,
   type BotdUiSpec,
 } from '../packages/protocol/src/index.js';
 import { createLocalIpcServer } from '../apps/node/src/local-ipc.js';
-import { registerNodeCommands } from '../apps/node/src/cli/commands/node.js';
 import { BUILTIN_SKILL_MD, BUILTIN_SKILL_VERSION } from '../apps/node/src/builtin-skill.js';
 import { GroupRouter } from '../apps/hub/src/group-router.js';
 import { HubDatabase } from '../apps/hub/src/db.js';
@@ -720,39 +714,13 @@ test('Hub GroupRouter.requestHumanInput 校验 UI Spec：拒绝非法 Spec，放
 });
 
 // ---------------------------------------------------------------------------
-// 5. botd ask CLI: Options registration and --ui-schema documentation
+// 5. BUILTIN_SKILL_MD: Documentation and version bump
 // ---------------------------------------------------------------------------
 
-test('botd ask CLI: 验证 --ui 与 --ui-schema 选项已注册，--ui-schema 包含完整文档', async () => {
-  const requireFromNodeApp = createRequire(path.join(process.cwd(), 'apps/node', 'package.json'));
-  const commander = requireFromNodeApp('commander') as { Command: any };
-  const program = new commander.Command();
-  registerNodeCommands(program);
-
-  const askCmd = program.commands.find((c: { name: () => string }) => c.name() === 'ask');
-  assert.ok(askCmd, 'ask command must be registered');
-
-  const options: string[] = askCmd.options.map((o: { long: string }) => o.long);
-  assert.ok(options.includes('--ui'), 'must register --ui');
-  assert.ok(options.includes('--ui-schema'), 'must register --ui-schema');
-
-  // Verify schema doc content
-  assert.ok(BOTD_UI_SCHEMA_DOC.includes(BOTD_UI_CATALOG_VERSION));
-  for (const compType of BOTD_UI_COMPONENT_TYPES) {
-    assert.ok(BOTD_UI_SCHEMA_DOC.includes(compType), `Schema doc must include component ${compType}`);
-  }
-  assert.ok(BOTD_UI_SCHEMA_DOC.includes('$state'), 'Schema doc must describe state binding');
-});
-
-// ---------------------------------------------------------------------------
-// 6. BUILTIN_SKILL_MD: Documentation and version bump
-// ---------------------------------------------------------------------------
-
-test('BUILTIN_SKILL_MD: 版本升级为 7，包含 Generative UI 与 15 个组件说明', () => {
-  assert.ok(BUILTIN_SKILL_VERSION >= 7, 'BUILTIN_SKILL_VERSION must be at least 7');
+test('BUILTIN_SKILL_MD: v15 手册包含 Generative UI 与全部组件说明', () => {
+  assert.ok(BUILTIN_SKILL_VERSION >= 15, 'BUILTIN_SKILL_VERSION must be at least 15');
   assert.ok(BUILTIN_SKILL_MD.includes('Generative UI'), 'BUILTIN_SKILL_MD must include Generative UI section');
-  assert.ok(BUILTIN_SKILL_MD.includes('--ui'), 'BUILTIN_SKILL_MD must mention botd ask --ui');
-  assert.ok(BUILTIN_SKILL_MD.includes('botd ask --ui-schema'), 'BUILTIN_SKILL_MD must mention --ui-schema');
+  assert.ok(BUILTIN_SKILL_MD.includes('```ui'), 'BUILTIN_SKILL_MD must mention the ```ui fence');
 
   for (const compType of BOTD_UI_COMPONENT_TYPES) {
     assert.ok(

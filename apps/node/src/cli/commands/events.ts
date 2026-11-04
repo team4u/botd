@@ -1,0 +1,77 @@
+import type { Command } from 'commander';
+import { cliAction, readGlobals } from '../context.js';
+import { CliError } from '../errors.js';
+import { HubClient } from '../hub-client.js';
+import { printResult } from '../render.js';
+
+/**
+ * 事件摄入（EventRouter 管线）命令：把 GitHub/CI/自定义事件投递给
+ * Super-agent，由 threadKey 直通 Worker 或 Router 决定处理路径。
+ */
+export function registerEventsCommands(program: Command): void {
+  const events = program.command('events').description('Event ingestion for the Super-agent EventRouter');
+
+  events
+    .command('ingest')
+    .description('Ingest an external event (github / ci / custom ...) into the EventRouter pipeline')
+    .requiredOption('--source <source>', 'Event source (e.g. github, ci, custom)')
+    .requiredOption('--type <type>', 'Event type (e.g. check_suite.completed, issue_comment)')
+    .option('--content <content>', 'Event content/payload text')
+    .option('--file <path>', 'Read event content from a file (or - for stdin)')
+    .option('--title <title>', 'Event summary title (default: truncated content)')
+    .option('--sender <sender>', 'Event sender identity (default: anonymous)')
+    .option('--repo <repo>', 'Repository the event belongs to (e.g. owner/repo)')
+    .option('--pr <number>', 'Pull request number')
+    .option('--issue <number>', 'Issue number')
+    .option('--branch <branch>', 'Branch name the event belongs to')
+    .option('--session <sessionId>', 'Target botd session (routes to its Router conversation)')
+    .option('--bot <botId>', 'Default bot persona to route the event to')
+    .action(
+      cliAction(async (options, command) => {
+        const g = readGlobals(command);
+        const client = await HubClient.connect(g);
+
+        let content: string | undefined;
+        if (typeof options.content === 'string') {
+          content = options.content;
+        } else if (typeof options.file === 'string' && options.file) {
+          if (options.file === '-') {
+            if (process.stdin.isTTY) {
+              throw new CliError('No input provided. Pass --file <path> or pipe content through stdin.');
+            }
+            const chunks: Buffer[] = [];
+            for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+            content = Buffer.concat(chunks).toString('utf8');
+          } else {
+            const { readFile } = await import('node:fs/promises');
+            try {
+              content = await readFile(options.file, 'utf8');
+            } catch (err) {
+              throw new CliError(`Cannot read file ${options.file}: ${(err as Error).message}`);
+            }
+          }
+        }
+
+        const parseNumber = (value: unknown): number | undefined => {
+          if (value === undefined) return undefined;
+          const parsed = Number(value);
+          return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
+        };
+
+        const result = await client.post<Record<string, unknown>>('/api/events/ingest', {
+          source: String(options.source).trim(),
+          type: String(options.type).trim(),
+          ...(content !== undefined ? { content } : {}),
+          ...(typeof options.title === 'string' && options.title ? { title: options.title } : {}),
+          ...(typeof options.sender === 'string' && options.sender ? { sender: options.sender } : {}),
+          ...(typeof options.repo === 'string' && options.repo ? { repo: options.repo } : {}),
+          ...(typeof options.branch === 'string' && options.branch ? { branch: options.branch } : {}),
+          ...(parseNumber(options.pr) !== undefined ? { prNumber: parseNumber(options.pr) } : {}),
+          ...(parseNumber(options.issue) !== undefined ? { issueNumber: parseNumber(options.issue) } : {}),
+          ...(typeof options.session === 'string' && options.session ? { sessionId: options.session } : {}),
+          ...(typeof options.bot === 'string' && options.bot ? { botId: options.bot } : {}),
+        });
+        printResult(result, g.json);
+      }),
+    );
+}

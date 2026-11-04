@@ -119,9 +119,9 @@ test('real botd join/start/wake, file management and missing-key failure', { tim
   assert.equal((await api(`/api/nodes/${identity.nodeId}/extensions/web-guard`)).content, 'export default function (pi) {}');
   assert((await api<NodeWithBots[]>('/api/nodes'))[0].extensions.includes('web-guard'));
 
-  // 2. botd install CLI with local .ts file and live daemon /reload notification
+  // 2. botd nodes install CLI (Hub route -> node RPC) with a local .ts file and live daemon /reload notification
   await writeFile(path.join(dir, 'my-guard.ts'), 'export default function (pi) {}', 'utf8');
-  const installCli = command(['install', path.join(dir, 'my-guard.ts'), '--id', 'bash-guard'], env);
+  const installCli = command(['nodes', 'install', identity.nodeId, path.join(dir, 'my-guard.ts'), '--id', 'bash-guard'], env);
   processes.push(installCli.child);
   assert.equal((await installCli.done).code, 0);
   assert(existsSync(path.join(dataDir, 'extensions/bash-guard/index.ts')));

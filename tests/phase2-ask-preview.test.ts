@@ -5,7 +5,6 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { register } from 'node:module';
-import { registerNodeCommands } from '../apps/node/src/cli/commands/node.js';
 import { createLocalIpcServer, MAX_ASK_BODY_BYTES } from '../apps/node/src/local-ipc.js';
 import type { BgJobManager } from '../apps/node/src/bg-jobs.js';
 import type { SessionRecord } from '../packages/protocol/src/index.js';
@@ -155,25 +154,6 @@ test('Local IPC /ask 超过 512KB 载荷被拒绝（413）', async () => {
   } finally {
     server.close();
   }
-});
-
-// ---------------------------------------------------------------------------
-// botd ask CLI preview option wiring (command definitions)
-// ---------------------------------------------------------------------------
-test('botd ask 命令注册 --file/--diff/--stdin/--timeout 0 选项', async (t) => {
-  const { createRequire } = await import('node:module');
-  const requireFromNodeApp = createRequire(path.join(process.cwd(), 'apps/node', 'package.json'));
-  const commander = requireFromNodeApp('commander') as { Command: any };
-  const program = new commander.Command();
-  registerNodeCommands(program);
-  const askCmd = program.commands.find((c: { name: () => string }) => c.name() === 'ask');
-  assert.ok(askCmd, 'ask command must be registered');
-  const opts: string[] = askCmd.options.map((o: { long: string }) => o.long);
-  assert.ok(opts.includes('--file'));
-  assert.ok(opts.includes('--diff'));
-  assert.ok(opts.includes('--stdin'));
-  const timeoutOpt = askCmd.options.find((o: { long: string }) => o.long === '--timeout');
-  assert.match(timeoutOpt?.description ?? '', /0 for infinite/);
 });
 
 // ---------------------------------------------------------------------------

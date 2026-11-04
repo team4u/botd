@@ -8,196 +8,135 @@ import { readSkill, writeSkill, ensureDir } from './storage.js';
  * survive until the framework ships a newer version.
  *
  * Progressive disclosure: SKILL.md carries only the high-frequency discipline;
- * deep-dive material (subagent recipes, the 17 UI components, extension
+ * deep-dive material (worker recipes, the 17 UI components, extension
  * authoring) lives in references/*.md that the model reads on demand.
  */
 export const BUILTIN_SKILL_ID = 'botd-cli';
-export const BUILTIN_SKILL_VERSION = 14;
+export const BUILTIN_SKILL_VERSION = 15;
 const VERSION_MARKER = `<!-- botd-skill: ${BUILTIN_SKILL_ID} v${BUILTIN_SKILL_VERSION} -->`;
 
 export const BUILTIN_SKILL_MD = `${VERSION_MARKER}
-# botd CLI — this framework's control plane
+# botd — Multi-Persona Super-agent 控制平面
 
-You are running inside botd (a multi-node BOT platform). The \`botd\` command controls this machine's daemon and, after login, the Hub (nodes/bots/sessions/chat).
+你运行在 botd 上（Brain in Hub, Hands on Node）：每个 BOT 是 Hub 持久运行时里的一个 Router 分身；工具执行落在各节点的真实工作目录。\`botd\` 命令是这一切的一等公民 CLI（Web UI 与 CLI 同权）。
 
 ## Rules
 
-- ALWAYS pass \`--json\` when you plan to parse output; success → JSON on stdout, failure → \`error: <message>\` on stderr with a non-zero exit code.
-- Discover exact flags with \`botd <command> --help\` (works at every level). Do not guess option names.
-- Hub commands need a one-time \`botd login <hubUrl> --username <user> --password <pwd>\` (user defaults to admin; password also via \`BOTD_ADMIN_PASSWORD\`). Exception: once this machine's node is paired (\`~/.botd/node.json\` exists), Hub admin commands auto-authenticate with node credentials — no login needed. Node commands never need login.
+- 解析输出时 ALWAYS 加 \`--json\`：成功 → stdout JSON；失败 → stderr \`error: <message>\` + 非零退出码。
+- 用 \`botd <command> --help\`（任意层级）查询确切选项名，不要猜。
+- Hub 命令需要一次性 \`botd login <hubUrl> --username <user> --password <pwd>\`（用户默认 admin；密码也可用 \`BOTD_ADMIN_PASSWORD\`）。例外：本机节点已配对（\`~/.botd/node.json\` 存在）时，Hub 管理命令用节点凭据自动认证。节点命令从不需要登录。
 
-## Node commands (this machine, no login)
+## Super-agent 工具（Router 内置）
 
-- \`botd status\` — daemon pid, uptime, Hub connection state.
-- \`botd wake --session "$BOTD_SESSION_ID" --bot "$BOTD_BOT_ID" --message "<result>"\` — deliver a result later, from a detached background job. \`--delay <30s|15m|2h|1d>\` = persistent one-shot delayed wake (Hub-stored, survives daemon restarts); \`--no-turn\` = silent progress report consuming no LLM inference turn.
-- \`botd ask "<prompt>" [--options "确认,取消"] [--timeout 300] [--ui] [--file <path> | --stdin]\` — human-in-the-loop interactive card in Web chat; prints the selected option, text answer, or Generative UI form JSON to stdout. With \`--risk low|medium|high [--reason "<why>"] [--resource "<target>"] [--file <path>]\` it auto-builds a structured approval card (risk callout, resource list, diff accordion, 批准/拒绝 buttons); without \`--json\` the decision prints as plain text so \`choice=$(botd ask ... --risk high)\` works in shell scripts; custom \`--options\` or a hand-written \`--ui\` spec take precedence.
-- \`botd artifact put <filePath> [--message "<desc>"]\` / \`artifact pull <artifactId> [-o <path>]\` / \`artifact list\` — share files between this node, the session Web UI, and bots on other nodes.
-- \`botd install <source> [--bot "$BOTD_BOT_ID"]\` — install a skill/extension; the live daemon hot-reloads it. \`--bot\` also enables it on the given bot(s) immediately.
+你是 Router：前台回答用户，重活派后台 Worker，绝不让用户等。
 
-### Async pattern (long tasks)
+- **快速问答**：直接在会话里回答，绝不为短问题 spawn worker。
+- \`spawn_worker({ title, task, worktree?, threadKey? })\` — 派一个后台 Worker（多步编码/shell/调研），立刻返回 workerId；Worker 跑完自动汇报回来。\`worktree: true\` 给它独立 git worktree（多 Worker 并发改同一仓库时用）。
+- \`delegate_to_bot({ targetBotId, title, task })\` — 把任务委派给另一个 BOT 分身（它的模型与人设），后台运行。
+- Worker 运行期间继续对话：\`steer_worker({ workerId, message, mode: "steer" | "followUp" })\` 插话改向；\`stop_worker({ workerId })\` 中止；\`recall({ id })\`（Chain of Recall）随时取回任意节点（worker/trigger/artifact/thread）的完整内容与关联摘要。
+- \`ask_human({ prompt, options })\` — 问用户一个问题；再次调用同一 prompt 轮询答案。
+- **\`SubagentWorkflow({ script })\`** — 确定性多步流水线：脚本里用 \`agent()\` / \`pipeline()\` / \`parallel()\` / \`phase()\` / \`log()\`；每步产出写入 crash-safe \`api.memo\` 检查点，进程崩溃重开后已完成步骤 0ms 重放、不再调模型。完整写法（含 schema 校验与 gate 门禁）见 \`read\` 同目录下 \`references/subagents-and-workflows.md\`。
 
-Prefer \`botd bg run\` — the daemon-managed way (auto log capture + auto wake-up on exit):
+## botd CLI（一等公民）
+
+Super-agent 操作（workers / events / watchdog / asks）与 Web UI 完全同权：
 
 \`\`\`bash
-botd bg run --bot "$BOTD_BOT_ID" -- make test  # logs to <workspace>/.bg/<jobId>.log
-botd bg list                                   # job id / status / exit code
-botd bg logs bg_ab12cd34 --lines 50            # tail a job log
-botd bg kill bg_ab12cd34                       # stop a running job
+botd workers list <sessionId> --json                    # 会话的后台 Worker（含状态/摘要/threadKeys）
+botd workers spawn <sessionId> --title "重构" --task "..." [--bot <botId>] [--worktree] [--thread-key <key>]
+botd workers steer <sessionId> <workerId> "改用方案 B" [--mode followUp]
+botd workers stop <sessionId> <workerId>
+botd workers recall <sessionId> <workerId> --json       # Chain of Recall 节点 + transcript
+
+botd events ingest --source github --type check_suite.completed --file payload.json \
+  [--repo owner/repo] [--pr 42] [--session <sid>] [--bot <botId>]   # 外部事件 → EventRouter
+
+botd watchdog health [--run-pass] --json                # 系统健康诊断
+botd asks list <sessionId> --json                       # 待确认的人工请求
+botd asks respond <sessionId> <askId> 批准
 \`\`\`
 
-On exit the daemon reports the result (exit code + last ~20 log lines) back into the session; \`--no-turn\` delivers silently. Raw alternative (no management): \`(sleep 30 && botd wake --session "$BOTD_SESSION_ID" --bot "$BOTD_BOT_ID" --message "done") &\`.
+其余常用命令（全部支持 \`--json\`）：
+
+- \`botd sessions list|create|messages <id>|search <q>|cancel <id>|share <id>\` — 会话与消息。
+- \`botd chat send <sessionId> "<msg>" --wait 120\` — 向会话发消息并等回复（bot-to-bot）。
+- \`botd bots create <botId> --name <n> --model <provider/modelId> [--workspace <dir>]\` — 新建 BOT 分身（\`--node\` 默认 \`BOTD_NODE_ID\` 或 \`local\`）；\`botd bots env set <botId> KEY=VALUE\` 注入密钥。
+- \`botd artifact put <filePath>\` / \`artifact pull <id>\` / \`artifact list\` — 文件在节点、会话与 BOT 间共享。
+- \`botd triggers list|create|delete\` — webhook/cron/once 触发器。
+- \`botd nodes list\`、\`botd skills/extensions/providers/models ...\` — 节点、资源与模型管理面。
+
+### Node 命令（本机，无需登录）
+
+- \`botd status\` — daemon pid / uptime / Hub 连接状态。
+- \`botd wake --session "$BOTD_SESSION_ID" --bot "$BOTD_BOT_ID" --message "<result>"\` — 之后回投结果；\`--delay 30s|15m|2h|1d\` 持久化延迟唤醒；\`--no-turn\` 静默投递不消耗推理回合。
 
 ### Restart warning
 
-\`botd restart\` / \`botd stop\` kill the daemon AND every in-flight turn — including yours. Never run them mid-turn; if genuinely required, finish your reply and schedule it detached: \`(sleep 5 && botd restart -d & disown; exit 0)\`.
+\`botd restart\` / \`botd stop\` 会杀掉 daemon 与所有进行中的回合（包括你自己的）。绝不在回合中运行；确需重启，先完成回复再分离执行：\`(sleep 5 && botd restart -d & disown; exit 0)\`。
 
-## Subagents (子代理：创建、管理与并发调度)
+## Generative UI (botd.v1)
 
-Each primary BOT can have role subagents sharing its workspace, dispatched via the built-in \`Agent\` / \`SubagentWorkflow\` tools.
+1. 会话内展示：发一个 \`\`\`ui（或 \`\`\`json-render）围栏，内含合法 JSON Spec，Web 聊天原生渲染。
+2. Spec 顶层 \`{ root, elements, state }\`；表单值经 \`{ "$state": "/key" }\` 绑定 store；提交动作 \`{ action: 'submit', params }\`。
+3. 17 个组件：Stack, Card, Tabs, Accordion, MetricGrid, MetricCard, BarList, KeyValueList, Table, Callout, Steps, TextInput, Select, Switch, CheckboxGroup, ActionBar, Button。
+   各组件完整 Props 契约、槽位写法与表单状态绑定请用 \`read\` 查阅同目录下的 \`references/generative-ui.md\`。
 
-- **Ephemeral subagents (临时，默认推荐)** — one-shot roles (adversarial review, ad-hoc audits). Write \`$PI_CODING_AGENT_DIR/agents/tmp-<role>.md\` (e.g. \`tmp-skeptic\`) with YAML frontmatter (\`name\`/\`description\`/\`tools\`) + persona, then dispatch in the SAME turn via \`Agent(subagent_type: "tmp-skeptic")\` or \`SubagentWorkflow\`; the runtime 自动删除所有 \`tmp-*.md\` at turn end (even if aborted) — they never pollute the Web sidebar.
-- **Persistent subagents (正式持久化)** — long-term roles the user explicitly requested: created via \`botd bots create --parent "$BOTD_BOT_ID"\`, synced to the sidebar, invocable via \`Agent\` immediately.
-- **Dispatch**: ALWAYS use \`Agent\` / \`SubagentWorkflow\` (NOT \`@subId\` in text — that is group-chat turn handoff). Multiple \`Agent\` calls in one assistant turn run in parallel; omit \`isolation\` so subagents share your workspace (\`worktree\` only for concurrent same-repo edits).
-- **Control**: \`stop_subagent(agent_id)\` stops one; \`steer_subagent(agent_id, message)\` redirects mid-run; \`Agent(resume: "<agent_id>")\` continues a finished one with full context.
-- Cross-BOT delegation (\`Agent\` with \`subagent_type: "@<botId>"\`, \`botd sessions delegate\`) and multi-stage pipelines: 完整命令与跨节点 SubagentWorkflow 流水线写法请用 \`read\` 查阅同目录下的 \`references/subagents-and-workflows.md\`。
+## Self-Evolution: Skill Creator（AI 自举）
 
-## Generative UI (Dynamic Cards & Interactive Forms)
-
-1. In-chat display: emit a \`\`\`ui (or \`\`\`json-render) fence containing a valid JSON Spec — it renders natively in Web chat.
-2. Interactive forms / approvals: \`botd ask "<prompt>" --ui --stdin << 'EOF' ... EOF\` (outputs \`{ decision, state }\` JSON to stdout); \`botd ask --ui-schema\` prints the catalog.
-3. Spec shape: top-level \`{ root, elements, state }\`; form values bind to store keys via \`{ "$state": "/key" }\`.
-4. 17 components: Stack, Card, Tabs, Accordion, MetricGrid, MetricCard, BarList, KeyValueList, Table, Callout, Steps, TextInput, Select, Switch, CheckboxGroup, ActionBar, Button.
-   各组件的完整 Props 契约、槽位写法与表单状态绑定请用 \`read\` 查阅同目录下的 \`references/generative-ui.md\`。
-
-## Self-Evolution: Skill & Extension Creator (AI 自举开发)
-
-When the user asks to distill a workflow ("沉淀为技能") or you need new capabilities, build it yourself:
-
-- **Skill (纯提示词知识)** — reusable procedures, zero code: write \`~/.botd/skills/<id>/SKILL.md\` (frontmatter \`name\` + \`description\`; body: When to use / Steps / Gotchas, under ~80 lines, deep-dives in \`references/\`).
-- **Full-Stack Extension (代码能力)** — write \`~/.botd/extensions/<id>/index.ts\`: intercept hooks (\`pi.on\`), register model-callable tools (\`pi.registerTool\` + \`details.ui\` custom views), register \`/\` commands (\`pi.registerCommand\`), and drive the Web UI — dialogs \`ctx.ui.confirm/select/input/editor/custom(uiSpec)\`, widgets \`ctx.ui.setWidget(key, uiSpec)\`, streaming \`ctx.ui.notify/setStatus\`.
-- **Enable**: \`botd install <source> --bot "$BOTD_BOT_ID"\`, or write files then run \`botd reload\` and mount with \`botd bots update "$BOTD_BOT_ID" --extension <id>\`.
-- 编写 Skill 或全栈 Extension 前，请先用 \`read\` 查阅同目录下的 \`references/extension-and-skill-dev.md\` 获取完整 TypeScript 模板与 API 契约。
-
-## Hub commands (admin, require login)
-
-- \`botd nodes list --json\` — all nodes with their bots/status/pid.
-- \`botd sessions list/messages <id>/search <query> --json\` — inspect and search message history across all sessions.
-- \`botd sessions delegate <parentSessionId> --bot <botId> --prompt "<task>"\` — delegate a sub-task to a child session executed by the specified bot.
-- \`botd chat send <sessionId> "<message>" --wait 120 --json\` — message another session and wait for its BOTs to answer (bot-to-bot communication).
-- \`botd bots env list/set/unset <botId> ...\` — per-bot environment variables, injected into the bot's turns and background jobs on its node.
-- \`botd bots/skills/extensions/providers/models <subcommand>\` — full management surface, same capabilities as the Web UI. Use \`--help\` to explore.
+需要沉淀可复用流程时自己动手写 Skill（纯提示词知识，零代码）：写 \`~/.botd/skills/<skill-id>/SKILL.md\`（frontmatter \`name\` + \`description\`；正文 When to use / Steps / Gotchas，~80 行内，深挖内容放 \`references/\`），然后 \`botd reload\` 注册进 Hub。全栈 Extension（TypeScript 代码：hooks / 工具 / 命令 / Web UI 桥接）完整模板见 \`read\` 同目录下 \`references/extension-and-skill-dev.md\`。
 `;
 
 /** Reference docs shipped beside SKILL.md; loaded on demand by the model. */
 export const BUILTIN_SKILL_REFERENCES: Record<string, string> = {
   'subagents-and-workflows.md': `${VERSION_MARKER}
-# Subagents & Cross-Bot Workflows — 完整参考
+# Workers & SubagentWorkflow — 完整参考
 
-主文件: ../SKILL.md (## Subagents)。本文件收录完整创建命令、跨 Bot 委派与 SubagentWorkflow 流水线写法。
+主文件: ../SKILL.md (## Super-agent 工具)。本文件收录 Router 决策纪律、Worker 生命周期与 SubagentWorkflow 流水线完整写法。
 
-## 1. Ephemeral subagents (临时子代理 — 用完即焚，不进侧栏，默认推荐用于技能编排与一次性多视角任务)
+## 1. Router 决策纪律（何时派 Worker）
 
-当技能或任务需要临时角色人设（例如对抗审查小组、一次性专项审计）、且不应永久出现在 Web 侧栏或 Hub 数据库时，在调用 \`Agent\` 或 \`SubagentWorkflow\` 前，直接在同一回合内写入 \`$PI_CODING_AGENT_DIR/agents/tmp-<role>.md\`：
+- 短问题/短答案：直接回答，**绝不** spawn worker。
+- 多步编码、shell、调研、长任务：\`spawn_worker\` 并立刻告知用户 workerId。
+- 替别的 BOT 干活：\`delegate_to_bot\`（以目标 BOT 的模型+人设后台运行）。
+- Worker 运行期间保持可聊：\`steer_worker\` 改向、\`stop_worker\` 中止、\`recall({ id })\` 取结果。
+- Worker 完成会自动汇报；为用户总结其报告即可。
 
-\`\`\`markdown
----
-name: tmp-skeptic
-description: 红队挑刺审查员（一次性临时子代理）
-tools: read, grep, find, ls
----
-你是一名挑剔的红队审查专家，专注于证伪方案假设、寻找并发竞态与安全边界漏洞。
-\`\`\`
+\`spawn_worker\` 参数：\`{ title, task, forkContext? (default true), threadKey?, cwd?, worktree? }\`。\`worktree: true\` 时 Worker 在 \`<cwd>.botd-workers/<conversationId>\` 的独立 git worktree 里改代码（多 Worker 并发改同一仓库时必开）。\`threadKey\` 让 Worker 直接接收该线程上的后续事件（EventRouter 直通）。
 
-写完后在**同一回合**内立刻调度：\`Agent(subagent_type: "tmp-skeptic", ...)\` 或 \`SubagentWorkflow\`（\`agent("...", { agentType: "tmp-skeptic" })\`）。运行时在每次调度前重新加载 \`$PI_CODING_AGENT_DIR/agents/*.md\`，并在**回合结束时自动删除所有 \`tmp-*.md\` 文件**（即使回合被中止）。
+## 2. Worker 生命周期与状态
 
-## 2. Persistent subagents (正式子代理 — 持久化到侧栏，仅在用户明确要求创建长期角色时使用)
+- Worker 状态：\`running | completed | failed | aborted\`；完成后 registry 带 \`summary\`。
+- \`botd workers list <sessionId> --json\` 随时查状态/摘要/worktree 路径/threadKeys。
+- \`steer_worker\` 的 \`mode\`：\`"steer"\`（运行中插话改向，默认）/ \`"followUp"\`（排在当前 run 之后继续）。
+- \`recall\`（Chain of Recall）：\`recall({ id })\` 返回节点完整内容 + relatedIds 的一行摘要（多跳追溯）。
 
-当用户要求创建长期角色（可跨回合、跨会话复用、出现在 Web 侧栏）时，用 \`botd bots\`：
+## 3. SubagentWorkflow（确定性多步流水线，crash-safe）
 
-\`\`\`bash
-# List your current subagents
-botd bots list --parent "$BOTD_BOT_ID" --json
+\`SubagentWorkflow({ script })\`：脚本文本 \`export const meta = { name, description, phases }\` + 直接使用解构钩子的异步体。每步产出提交为 pi-durable task **memo** 检查点 —— 进程崩溃重开后同一脚本重跑，已完成步骤直接从 memo 命中（0ms、不再调模型），失败步骤续跑。
 
-# Create a subagent (inherits your model & skills by default; --tool-scope can be all | readonly | custom)
-botd bots create reviewer --node "$BOTD_NODE_ID" --parent "$BOTD_BOT_ID" \\
-  --name "代码审查员" --desc "负责审查代码缺陷、安全漏洞与边界条件" \\
-  --tool-scope readonly --system-file - << 'EOF'
-你是一名严谨的代码审查专家，专注于发现逻辑缺陷、并发竞态与安全隐患。
-EOF
+钩子：
 
-# Update a subagent's prompt or permissions
-botd bots update reviewer --desc "只读代码审计专家" --tool-scope readonly
-
-# Delete a subagent
-botd bots delete reviewer
-\`\`\`
-
-As soon as \`botd bots create\` returns, the subagent is synced to \`~/.botd/bots/<parentBotId>/agents/<subId>.md\` and can be invoked via \`Agent\` **immediately in the same turn**.
-
-## 3. Dispatch subagents (ALWAYS use \`Agent\` / \`SubagentWorkflow\` tools, NOT \`@\`)
-
-- **Single subagent task**: Call the \`Agent\` tool with \`subagent_type: "<subId>"\`, \`description: "<short title>"\`, \`prompt: "<detailed task>"\`, \`run_in_background: false\`.
-- **Parallel subagents (并发执行)**: Emit multiple \`Agent\` tool calls **in the same assistant turn** (with \`run_in_background: false\`). They run concurrently and return all results to you in the same turn so you can synthesize the final answer.
-- **Multi-stage pipeline / adversarial review loop**: Call the \`SubagentWorkflow\` tool with a workflow script using \`pipeline()\` or \`parallel()\`.
-- **Workspace & \`worktree\` isolation**: By default, omit \`isolation\` so subagents work directly in your shared workspace. ONLY pass \`isolation: "worktree"\` when multiple subagents concurrently edit files in the same Git repo or when the user explicitly asks for an isolated branch/worktree.
-- **Do NOT use \`@subId\` or \`-> (@sub1 @sub2)\` in your text reply to call your own subagents** — \`@\` / \`->\` is only for handing off the conversation turn in group chat. Use the \`Agent\` tool for subagent concurrency.
-
-## 4. Control running / finished subagents (stop · steer · resume)
-
-While a subagent runs (or after it finishes), the user may interrupt you mid-turn — e.g. "把 reviewer 停下", "告诉 coder 改用方案 B", "让 researcher 再查一下 X". Act on it immediately:
-
-- **Stop one subagent** (without aborting your turn or other subagents): call \`stop_subagent\` with \`agent_id: "<id>"\` (the Agent tool returned it; the handle/type also works).
-- **Mid-run redirect (steer)**: call \`steer_subagent\` with \`agent_id\` + \`message\`. The message is injected into the running subagent's conversation after its current tool execution.
-- **Continue a finished subagent (resume)**: call \`Agent\` again with \`resume: "<agent_id>"\` and the follow-up \`prompt\` — it reuses the SAME subagent context (no re-explaining needed).
-- When the user sends a new message while you are waiting for a foreground \`Agent\` call, the blocked wait is released automatically and the subagent keeps running in the background — read the user's new message and use the tools above as needed.
-
-## 5. Cross-Bot Orchestration (跨主 BOT 协同编排)
-
-Two delegation levels, pick by target:
-- **Same workspace subagents** (your own role subagents): use the \`Agent\` / \`SubagentWorkflow\` tools (\`subagent_type: "<subId>"\`) — they share your workspace and memory.
-- **Other primary BOTs** (across nodes, or isolated workspace/env/memory): also use the \`Agent\` tool (pass \`subagent_type: "@<botId>"\`, \`"bot:<botId>"\`, or \`"<botId>"\`) — the task runs in an isolated sub-session with zero-copy artifact sharing; delegate to \`@<botId>\` of any primary BOT that is not your own subagent.
-
-### Cross-bot delegation via \`Agent\`
-
-- **Inline wait (default)**: omit \`run_in_background\` (or set \`false\`) and pass \`subagent_type: "@<botId>"\`, \`prompt\`, optional \`title\` / \`artifact_ids\` / \`timeout_seconds\`. The call waits for the sub-session to finish and returns its reply plus any returned artifacts. Emit multiple \`Agent\` calls in the same assistant turn to run several BOTs in parallel.
-- **Background (long tasks)**: set \`run_in_background: true\`. The sub-session runs asynchronously; the parent session is woken up automatically once all active sub-sessions finish (all-settled barrier).
-- If the user sends a new message while you wait inline, the wait is released and the sub-session keeps running in the background — same handoff semantics as local subagents.
-
-### Using the CLI
-
-\`\`\`bash
-botd sessions delegate "$BOTD_SESSION_ID" --bot <botId> --prompt "<task>" [--wait 300] [--artifacts art_1,art_2]
-\`\`\`
-
-\`--wait <seconds>\` blocks until the sub-session finishes and prints its reply (plus returned artifacts); without it the command returns immediately after creating the sub-session. \`--artifacts\` restricts which session artifacts are shared (default: all).
-
-## 6. Cross-bot pipelines via \`SubagentWorkflow\` (跨 BOT 多阶段流水线与断点续跑)
-
-\`SubagentWorkflow\` can orchestrate multi-stage pipelines that mix local subagents AND cross-bot steps in one script:
-- \`agent("...", { agentType: "<subId>" })\` dispatches your local subagent (same workspace);
-- \`agent("...", { agentType: "@<botId>" })\` (or \`"bot:<botId>"\`) force-delegates that step to another primary BOT's isolated sub-session — even on another node. Use \`{ schema }\` to demand validated JSON from a bot step, and \`phase("...")\` to group stages.
+- \`agent(prompt, opts?)\` — 一步子代理。opts：\`{ label?, phase?, schema? (JSON Schema，校验失败判步失败), model?, effort?, agentType?, gate? (shell 门禁，非零退出判步失败) }\`。
+- \`phase(title)\` — 分组阶段（UI 时间线展示）。
+- \`log(message)\` — 追加日志行。
+- \`pipeline(items, ...stages)\` — 条目独立流过所有阶段，**阶段间无 barrier**（先到的条目先进下一阶段）。
+- \`parallel(thunks, concurrency = 4)\` — 并发上限执行；失败 thunk 解析为 null。
+- \`args\` — 工具入参透传给脚本。
 
 \`\`\`js
 export const meta = { name: "release-pipeline", description: "Build once, test on two platforms" }
 phase("Build")
 const build = await agent("produce the release", {
-  agentType: "@bot_builder",
   schema: { type: "object", properties: { version: { type: "string" } }, required: ["version"] },
-});
+})
 const reports = await parallel([
-  () => agent(\`test version \${build.version} on linux\`, { agentType: "@bot_tester_linux", phase: "Test" }),
-  () => agent(\`test version \${build.version} on mac\`, { agentType: "@bot_tester_mac", phase: "Test" }),
-]);
-return { version: build.version, reports: reports.filter(Boolean) };
+  () => agent(\`test version \${build.version} on linux\`, { phase: "Test" }),
+  () => agent(\`test version \${build.version} on mac\`, { phase: "Test" }),
+])
+return { version: build.version, reports: reports.filter(Boolean) }
 \`\`\`
 
-**Crash-safe resume**: every run persists its script copy and a \`.workflow.jsonl\` checkpoint journal under \`<workspace>/.workflows/\`. A failed run's result text includes its \`runId\` — fix the broken bot/script and resume WITHOUT re-running completed steps (they replay from the journal cache):
-
-\`\`\`
-SubagentWorkflow({ scriptPath: "<workspace>/.workflows/wf_xxx.mjs", resumeFromRunId: "wf_xxx" })
-\`\`\`
-
-Resume replays the unchanged leading steps (completed ones are never re-called) and re-runs live from the first failed/changed step onward.
+要点：run doc（SQLite 事务）记录 phases/logs/step journal，UI 经 details 实时观看进度；返回值必须是 JSON 可序列化的。
 `,
 
   'generative-ui.md': `${VERSION_MARKER}
@@ -239,7 +178,7 @@ Resume replays the unchanged leading steps (completed ones are never re-called) 
 
 ## State binding
 
-Bind form values to store keys via \`{ "$state": "/key" }\` (string for TextInput/Select, boolean for Switch, string[] for CheckboxGroup). On submit, form state and button params return as single-line JSON (\`botd ask --ui\` prints \`{ decision, state }\` to stdout).
+Bind form values to store keys via \`{ "$state": "/key" }\` (string for TextInput/Select, boolean for Switch, string[] for CheckboxGroup). On submit, form state and button params return as single-line JSON.
 
 ## Semantic icons
 
@@ -289,7 +228,7 @@ lightbulb, info, alert-triangle, alert-circle, check-circle, cpu, database, serv
    - Keep it under ~80 lines; put deep-dive material in \`references/*.md\` next to SKILL.md (渐进式披露：正文只留摘要 + \`read references/xxx.md\` 指引).
    - Distill from what you actually did this session — real commands that worked, real paths, real failure modes. No placeholders, no invented flags.
 3. Run \`botd reload\` so the daemon re-registers resources and the skill appears in the Web UI.
-4. Enable per bot: \`botd install <path> --bot "$BOTD_BOT_ID"\`, the Web bot editor, or \`botd bots update\`.
+4. Enable per bot: the Web bot editor, or \`botd bots update <botId> --skill <skillId>\`.
 
 ## Part 2: Full-Stack Extension Creator
 
@@ -427,13 +366,13 @@ export default function (pi: ExtensionAPI) {
 
 \`\`\`bash
 # 本地目录 / git / npm（兼容 Pi Package 生态：带 "pi" 字段的 package.json 原生识别）
-botd install ~/.botd/extensions/deploy-guard --bot "$BOTD_BOT_ID"
-botd install npm:@example/pi-tools@1.0.0 --bot "$BOTD_BOT_ID"
-botd install git:github.com/owner/repo@v1.0.0 --bot "$BOTD_BOT_ID"
+botd nodes install <nodeId> ~/.botd/extensions/deploy-guard
+botd nodes install <nodeId> npm:@example/pi-tools@1.0.0
+botd nodes install <nodeId> git:github.com/owner/repo@v1.0.0
 
 # 改完代码后热更新（daemon 重新加载资源清单并上报 Hub）
 botd reload
-botd bots update "$BOTD_BOT_ID" --extension deploy-guard
+botd bots update <botId> --extension <extId>
 \`\`\`
 `,
 };
