@@ -210,6 +210,8 @@ export function createRouterExtension(options: {
 					workerId = existing.workerId;
 					conversationId = existing.conversationId;
 					title = existing.title;
+					worktreePath = existing.worktreePath ?? "";
+					branchName = existing.branchName ?? "";
 					return;
 				}
 
@@ -377,6 +379,8 @@ export function createRouterExtension(options: {
 				if (existing !== undefined) {
 					workerId = existing.workerId;
 					conversationId = existing.conversationId;
+					worktreePath = existing.worktreePath ?? "";
+					branchName = existing.branchName ?? "";
 					return;
 				}
 

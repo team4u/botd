@@ -353,10 +353,17 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 					childId = resumed;
 				} else {
 					childId = await api.commit(async (tx) => {
-						// 崩溃重放：按 TargetDoc.title === key 命中本步已创建的子会话。
+						// 崩溃重放或跨重放 resume：按 TargetDoc.title 命中已创建的子会话。
 						// 不能只取第一个 —— 同一 workflow 的所有 step 和 parallel() 分支
 						// 共享 ownerTaskId，各自拥有独立子会话。
 						const owned = await tx.scanConversations({ ownerTaskId: api.taskId }, 256);
+						if (opts?.resume !== undefined) {
+							const suffix = `:${opts.resume}`;
+							for (const existing of owned.items) {
+								const existingTarget = await tx.doc(TargetDoc, existing.id);
+								if (existingTarget.title?.endsWith(suffix)) return existing.id;
+							}
+						}
 						for (const existing of owned.items) {
 							const existingTarget = await tx.doc(TargetDoc, existing.id);
 							if (existingTarget.title === key) return existing.id;
@@ -442,7 +449,7 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 					let gateCommand = opts.gate;
 					if (stepWorktreePath !== '') {
 						await ensureWorktree(stepWorktreePath, stepBranchName);
-						gateCommand = `cd "${stepWorktreePath}" && (${opts.gate})`;
+						gateCommand = `if [ -d "${stepWorktreePath}" ]; then cd "${stepWorktreePath}"; fi && (${opts.gate})`;
 					}
 					const gateResult = await env.exec(gateCommand, undefined, context);
 					if (!gateResult.ok || gateResult.value?.exitCode !== 0) {

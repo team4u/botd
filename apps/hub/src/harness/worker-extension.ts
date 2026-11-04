@@ -180,7 +180,12 @@ const subagentTool = defineTool({
 		const child = await api.commit(async (tx) => {
 			// The ownership index remembers the child, so a rerun reuses it.
 			const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
-			if (existing !== undefined) return existing.id;
+			if (existing !== undefined) {
+				const existingTarget = await tx.doc(TargetDoc, existing.id);
+				branchName = existingTarget.branchName ?? "";
+				worktreePath = existingTarget.worktreePath ?? "";
+				return existing.id;
+			}
 			let record;
 			if (args.forkContext === true) {
 				const latest = await tx.latestEntryId(api.conversationId);
