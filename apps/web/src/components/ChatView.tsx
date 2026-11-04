@@ -133,6 +133,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // Super-agent 全双工后台工作单元（Worker / Workflow / Speculative）：
   // 胶囊条常驻展示 + 检视抽屉干预（steer / followUp / stop），不打断前台对话
   const superAgent = useSuperAgentWorkers(session.id);
+  const { spawnBackgroundWorker } = superAgent;
+
+  // Watchdog 健康巡检：胶囊条与检视抽屉共用（runPass=1 先跑一轮巡检再出报告）
+  const runWatchdog = async (): Promise<{ healthy: boolean; summary: string } | null> => {
+    try {
+      const res = await api.getWatchdogHealth(true);
+      return {
+        healthy: ((res as { interventions?: unknown[] }).interventions?.length ?? 0) === 0,
+        summary: (res as { summary?: string }).summary || '巡检完成',
+      };
+    } catch {
+      return null;
+    }
+  };
 
   // 本会话主控智能体（提前声明：蓝点探测/SSE/设置等多处使用）
   // useMemo 稳定引用：下游 mentionableBots 等派生链不会每次 render 失稳
@@ -956,6 +970,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
           onStopWorker={(id) => {
             void superAgent.stopWorker(id);
           }}
+          onSpawnWorker={spawnBackgroundWorker}
+          onRunWatchdog={runWatchdog}
         />
       )}
 
@@ -1214,6 +1230,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onClose={() => superAgent.setSelectedWorkerId(null)}
         onSteer={superAgent.steerWorker}
         onStop={superAgent.stopWorker}
+        onRunWatchdog={runWatchdog}
       />
     </div>
   );

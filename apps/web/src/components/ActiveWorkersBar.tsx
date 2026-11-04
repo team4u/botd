@@ -1,5 +1,17 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle2, AlertTriangle, ChevronDown, ChevronUp, GitBranch, Link2, Loader2, Zap, X } from 'lucide-react';
+import {
+  CheckCircle2,
+  AlertTriangle,
+  ChevronDown,
+  ChevronUp,
+  GitBranch,
+  HeartPulse,
+  Link2,
+  Loader2,
+  Plus,
+  Zap,
+  X,
+} from 'lucide-react';
 import {
   formatWorkerElapsed,
   isWorkerActive,
@@ -9,7 +21,7 @@ import {
 /**
  * 全双工常驻胶囊条：置于 ChatView 顶部，当前会话的 Bot 人格有后台 Worker / Workflow
  * 运行（或近期完成）时展示。点击胶囊打开 WorkerInspectDrawer 检视；胶囊右侧 × 快速
- * 停止该后台任务，完全不打断前台对话。
+ * 停止该后台任务，完全不打断前台对话。头部提供「派发任务」与「Watchdog 巡检」入口。
  */
 export interface ActiveWorkersBarProps {
   workers: SuperAgentWorkerItem[];
@@ -17,6 +29,15 @@ export interface ActiveWorkersBarProps {
   stoppingWorkerIds?: ReadonlySet<string>;
   onSelectWorker: (workerId: string) => void;
   onStopWorker: (workerId: string) => void;
+  /** 手动派发后台 Worker（支持 Git Worktree 隔离与直通线程键） */
+  onSpawnWorker?: (input: {
+    title: string;
+    task: string;
+    worktree?: boolean;
+    threadKey?: string;
+  }) => Promise<boolean>;
+  /** 触发 Watchdog 健康巡检 */
+  onRunWatchdog?: () => Promise<{ healthy: boolean; summary: string } | null>;
 }
 
 const STATUS_ICON_CLASS: Record<SuperAgentWorkerItem['status'], string> = {
@@ -138,10 +159,21 @@ export const ActiveWorkersBar: React.FC<ActiveWorkersBarProps> = ({
   stoppingWorkerIds,
   onSelectWorker,
   onStopWorker,
+  onSpawnWorker,
+  onRunWatchdog,
 }) => {
   // 活跃任务走表计时（每秒推进，无活跃任务不启动定时器）
   const [now, setNow] = useState(() => Date.now());
   const [expanded, setExpanded] = useState(true);
+  // 手动派发表单与 Watchdog 巡检状态
+  const [showSpawnForm, setShowSpawnForm] = useState(false);
+  const [spawnTitle, setSpawnTitle] = useState('');
+  const [spawnTask, setSpawnTask] = useState('');
+  const [spawnWorktree, setSpawnWorktree] = useState(false);
+  const [spawnThreadKey, setSpawnThreadKey] = useState('');
+  const [spawning, setSpawning] = useState(false);
+  const [watchdogRunning, setWatchdogRunning] = useState(false);
+  const [watchdogSummary, setWatchdogSummary] = useState<string | null>(null);
   const hasActive = workers.some((worker) => isWorkerActive(worker.status));
 
   useEffect(() => {
@@ -155,7 +187,39 @@ export const ActiveWorkersBar: React.FC<ActiveWorkersBarProps> = ({
     if (hasActive) setExpanded(true);
   }, [hasActive]);
 
-  if (workers.length === 0) return null;
+  const handleRunWatchdog = async () => {
+    if (!onRunWatchdog || watchdogRunning) return;
+    setWatchdogRunning(true);
+    try {
+      const result = await onRunWatchdog();
+      setWatchdogSummary(result ? result.summary : '巡检请求失败');
+    } finally {
+      setWatchdogRunning(false);
+    }
+  };
+
+  const handleSpawn = async () => {
+    if (!onSpawnWorker || spawning) return;
+    const title = spawnTitle.trim();
+    const task = spawnTask.trim();
+    const threadKey = spawnThreadKey.trim();
+    if (!title || !task) return;
+    setSpawning(true);
+    try {
+      const ok = await onSpawnWorker({ title, task, worktree: spawnWorktree, ...(threadKey ? { threadKey } : {}) });
+      if (ok) {
+        setSpawnTitle('');
+        setSpawnTask('');
+        setSpawnWorktree(false);
+        setSpawnThreadKey('');
+        setShowSpawnForm(false);
+      }
+    } finally {
+      setSpawning(false);
+    }
+  };
+
+  if (workers.length === 0 && !showSpawnForm) return null;
 
   const activeWorkers = workers.filter((worker) => isWorkerActive(worker.status));
   const completedCount = workers.length - activeWorkers.length;
@@ -164,36 +228,155 @@ export const ActiveWorkersBar: React.FC<ActiveWorkersBarProps> = ({
   return (
     <div className="px-3 sm:px-4 pt-2.5 max-w-4xl w-full mx-auto shrink-0">
       <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-900/50 shadow-xs">
-        {/* 状态徽标行：全双工模式提示 / 完成摘要 + 展开-收起 */}
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="flex items-center justify-between gap-2 w-full px-3 py-1.5 text-xs cursor-pointer select-none"
-          aria-expanded={expanded}
-        >
-          <span
-            className={`inline-flex items-center gap-1.5 font-medium ${
-              hasActive ? 'text-blue-700 dark:text-blue-300' : 'text-emerald-700 dark:text-emerald-300'
-            }`}
+        {/* 状态徽标行：全双工模式提示 / 完成摘要 + 巡检 / 派发入口 + 展开-收起 */}
+        <div className="flex items-center justify-between gap-2 w-full px-3 py-1.5 text-xs select-none">
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer"
+            aria-expanded={expanded}
           >
-            {hasActive ? (
-              <>
-                <Zap className="w-3.5 h-3.5 shrink-0" />
-                <span>⚡ 全双工常驻 · {activeWorkers.length} 个后台任务运行中</span>
-              </>
-            ) : (
-              <>
-                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                <span>✓ {completedCount} 个后台任务已完成</span>
-              </>
+            <span
+              className={`inline-flex items-center gap-1.5 font-medium ${
+                hasActive ? 'text-blue-700 dark:text-blue-300' : 'text-emerald-700 dark:text-emerald-300'
+              }`}
+            >
+              {hasActive ? (
+                <>
+                  <Zap className="w-3.5 h-3.5 shrink-0" />
+                  <span>⚡ 全双工常驻 · {activeWorkers.length} 个后台任务运行中</span>
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>✓ {completedCount} 个后台任务已完成</span>
+                </>
+              )}
+            </span>
+          </button>
+
+          {/* 右侧紧凑动作：Watchdog 巡检 / 派发任务 / 展开-收起（点击不触发折叠） */}
+          <div className="flex items-center gap-1 shrink-0">
+            {onRunWatchdog && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleRunWatchdog();
+                }}
+                disabled={watchdogRunning}
+                title="运行 Watchdog 巡检"
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-zinc-200/80 dark:border-zinc-700/80 bg-white dark:bg-zinc-900 text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:border-blue-300 dark:hover:border-blue-700 disabled:opacity-50 transition-colors cursor-pointer"
+              >
+                {watchdogRunning ? (
+                  <Loader2 className="w-3 h-3 animate-spin-fast" />
+                ) : (
+                  <HeartPulse className="w-3 h-3" />
+                )}
+                <span>巡检</span>
+              </button>
             )}
-          </span>
-          {expanded ? (
-            <ChevronUp className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 shrink-0" />
-          ) : (
-            <ChevronDown className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 shrink-0" />
-          )}
-        </button>
+            {onSpawnWorker && (
+              <button
+                type="button"
+                aria-label="派发后台 Worker"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowSpawnForm((v) => !v);
+                }}
+                title="手动派发后台 Worker"
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-zinc-200/80 dark:border-zinc-700/80 bg-white dark:bg-zinc-900 text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:border-blue-300 dark:hover:border-blue-700 transition-colors cursor-pointer"
+              >
+                <Plus className="w-3 h-3" />
+                <span>派发任务</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              aria-label={expanded ? '收起后台任务列表' : '展开后台任务列表'}
+              className="inline-flex items-center justify-center w-5 h-5 rounded text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors cursor-pointer"
+            >
+              {expanded ? (
+                <ChevronUp className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5" />
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Watchdog 巡检结果摘要胶囊 */}
+        {watchdogSummary && (
+          <div className="px-3 pb-1.5">
+            <span
+              title={watchdogSummary}
+              className="inline-flex items-center gap-1 max-w-full px-2 py-0.5 rounded-full border border-blue-200/60 dark:border-blue-800/60 bg-blue-50 dark:bg-blue-950/50 text-[10px] font-medium text-blue-600 dark:text-blue-300"
+            >
+              <HeartPulse className="w-2.5 h-2.5 shrink-0" />
+              <span className="truncate">{watchdogSummary}</span>
+            </span>
+          </div>
+        )}
+
+        {/* 手动派发表单：标题 / 任务指令 / worktree 隔离 / 直通线程键 */}
+        {showSpawnForm && (
+          <div className="px-3 pb-2.5 space-y-1.5 border-b border-zinc-200/70 dark:border-zinc-800/70">
+            <input
+              type="text"
+              value={spawnTitle}
+              onChange={(e) => setSpawnTitle(e.target.value)}
+              placeholder="任务标题（如：修复鉴权模块）"
+              aria-label="任务标题"
+              className="w-full h-8 px-2.5 text-xs rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-blue-500 dark:focus:border-blue-400 transition-colors"
+            />
+            <textarea
+              value={spawnTask}
+              onChange={(e) => setSpawnTask(e.target.value)}
+              placeholder="后台任务指令..."
+              aria-label="后台任务指令"
+              rows={2}
+              className="w-full px-2.5 py-1.5 text-xs rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-blue-500 dark:focus:border-blue-400 transition-colors resize-y"
+            />
+            <div className="flex items-center gap-2 flex-wrap">
+              <label className="inline-flex items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={spawnWorktree}
+                  onChange={(e) => setSpawnWorktree(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-zinc-300 dark:border-zinc-600 accent-blue-600 cursor-pointer"
+                />
+                Git Worktree 隔离
+              </label>
+              <input
+                type="text"
+                value={spawnThreadKey}
+                onChange={(e) => setSpawnThreadKey(e.target.value)}
+                placeholder="直通线程键（可选，如 github:pr#42）"
+                aria-label="直通线程键"
+                className="flex-1 min-w-[160px] h-8 px-2.5 text-xs rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-blue-500 dark:focus:border-blue-400 transition-colors"
+              />
+            </div>
+            <div className="flex items-center justify-end gap-1.5">
+              <button
+                type="button"
+                onClick={() => setShowSpawnForm(false)}
+                className="h-8 px-2.5 rounded-lg text-xs text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSpawn()}
+                disabled={spawning || !spawnTitle.trim() || !spawnTask.trim()}
+                className="inline-flex items-center gap-1 h-8 px-3 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-medium transition-colors cursor-pointer"
+              >
+                {spawning ? <Loader2 className="w-3.5 h-3.5 animate-spin-fast" /> : <Zap className="w-3.5 h-3.5" />}
+                <span>立即派发</span>
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* 胶囊列表：横向滚动，点击检视 / × 快速停止 */}
         {expanded && (

@@ -692,13 +692,13 @@ export interface NodeSessionRpcFunctions {
   restartDaemon(): Promise<{ ok: true; pid: number }>;
   checkUpgrade?(options?: { registryUrl?: string }): Promise<NodeUpgradeCheckResult>;
   upgradeDaemon?(options?: { targetVersion?: string; registryUrl?: string }): Promise<NodeUpgradeResult>;
-  getModelCatalog(): Promise<ModelCatalog>;
-  getCommands(botId: string): Promise<ChatCommand[]>;
-  startProviderLogin(input: { providerId: string; method: ProviderAuthType }): Promise<ProviderLoginState>;
-  getProviderLogin(loginId: string): Promise<ProviderLoginState>;
-  respondProviderLogin(input: { loginId: string; promptId: string; value: string }): Promise<ProviderLoginState>;
-  cancelProviderLogin(loginId: string): Promise<void>;
-  logoutProvider(providerId: string): Promise<void>;
+  getModelCatalog?(): Promise<ModelCatalog>;
+  getCommands?(botId: string): Promise<ChatCommand[]>;
+  startProviderLogin?(input: { providerId: string; method: ProviderAuthType }): Promise<ProviderLoginState>;
+  getProviderLogin?(loginId: string): Promise<ProviderLoginState>;
+  respondProviderLogin?(input: { loginId: string; promptId: string; value: string }): Promise<ProviderLoginState>;
+  cancelProviderLogin?(loginId: string): Promise<void>;
+  logoutProvider?(providerId: string): Promise<void>;
   saveBot(bot: BotConfig, systemMd: string): Promise<void>;
   deleteBot(botId: string): Promise<void>;
   readFile(target: { kind: 'system' | 'memory' | 'env' | 'skill' | 'extension'; botId?: string; id: string }): Promise<string>;
@@ -739,26 +739,8 @@ export interface NodeSessionRpcFunctions {
     aborted?: boolean;
   }>;
   cancelTurn(sessionId: string, botId: string): Promise<void>;
-  /** 当主会话正在运行（特别是等待子代理执行）时，注入用户新消息并将正在阻塞等待的子代理切为后台，让主 Bot 立即接管响应 */
-  steerBotTurn?(sessionId: string, botId: string, message: string): Promise<{ accepted: boolean }>;
-  /** 单独停止某一个正在运行的子代理（按 runId） */
-  stopSubagent?(sessionId: string, botId: string, runId: string): Promise<{ ok: boolean; error?: string }>;
-  /** 直接向某个子代理发送 steer（运行中插话）或 resume（结束后继续追问） */
-  interactSubagent?(input: {
-    sessionId: string;
-    botId: string;
-    runId: string;
-    subagentId?: string;
-    message: string;
-    mode: 'steer' | 'resume';
-  }): Promise<{ ok: boolean; run?: SubagentRunRecord; error?: string }>;
   /** 删除该 BOT 在指定会话的本地 Pi 会话文件（.jsonl），下一回合将从 Hub 历史全量重建上下文 */
   resetSession(sessionId: string, botId: string): Promise<void>;
-  listBgJobs?(filter?: { sessionId?: string; botId?: string }): Promise<BgJobRecord[]>;
-  getBgJobLogs?(jobId: string, tailLines?: number): Promise<{ job: BgJobRecord; logs: string }>;
-  killBgJob?(jobId: string): Promise<BgJobRecord>;
-  /** 查询 BOT 工作区的 Git 净变更（或会话触碰文件），供前端「代码变更」抽屉展示 */
-  getWorkspaceDiff?(input: { botId: string; sessionId?: string; workspaceDir?: string }): Promise<WorkspaceDiffResult>;
   /** 扫描节点上可绑定的项目 Space（真实项目目录 + Git 分支信息） */
   listSpaces?(): Promise<WorkspaceSpaceInfo[]>;
   /** 工作区文件模糊检索（前端 # 文件补全）：返回相对路径列表 */
@@ -769,13 +751,6 @@ export interface NodeSessionRpcFunctions {
     query?: string;
     limit?: number;
   }): Promise<string[]>;
-  /** 单文件一键回滚：已跟踪文件 checkout HEAD，未跟踪文件删除 */
-  revertWorkspaceFile?(input: {
-    botId: string;
-    sessionId?: string;
-    workspaceDir?: string;
-    filePath: string;
-  }): Promise<{ ok: boolean; error?: string }>;
 }
 
 /** Node 侧 RPC：既有回合/资源函数 + 远端执行环境函数（birpc 双向通道的 Node 端；env 方法可选以兼容旧连接/测试 mock）。 */

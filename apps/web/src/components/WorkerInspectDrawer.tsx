@@ -8,6 +8,7 @@ import {
   CircleStop,
   CornerDownRight,
   GitBranch,
+  HeartPulse,
   Link2,
   Loader2,
   Send,
@@ -39,6 +40,8 @@ export interface WorkerInspectDrawerProps {
   onStop: (workerId: string) => void;
   /** 停止请求进行中（按钮转圈禁用） */
   stopping?: boolean;
+  /** 触发 Watchdog 健康巡检（检视台内也可直接发起） */
+  onRunWatchdog?: () => Promise<{ healthy: boolean; summary: string } | null>;
 }
 
 const STATUS_LABEL: Record<SuperAgentWorkerItem['status'], string> = {
@@ -198,9 +201,12 @@ export const WorkerInspectDrawer: React.FC<WorkerInspectDrawerProps> = ({
   onSteer,
   onStop,
   stopping = false,
+  onRunWatchdog,
 }) => {
   const [inputValue, setInputValue] = useState('');
   const [sending, setSending] = useState(false);
+  const [watchdogRunning, setWatchdogRunning] = useState(false);
+  const [watchdogSummary, setWatchdogSummary] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
 
@@ -252,6 +258,17 @@ export const WorkerInspectDrawer: React.FC<WorkerInspectDrawerProps> = ({
     }
   };
 
+  const handleRunWatchdog = async () => {
+    if (!onRunWatchdog || watchdogRunning) return;
+    setWatchdogRunning(true);
+    try {
+      const result = await onRunWatchdog();
+      setWatchdogSummary(result ? result.summary : '巡检请求失败');
+    } finally {
+      setWatchdogRunning(false);
+    }
+  };
+
   if (!isOpen || !worker) return null;
 
   // 合成时间线：blocks（交错思考/工具/文本）> toolCalls > summary 兜底
@@ -299,6 +316,22 @@ export const WorkerInspectDrawer: React.FC<WorkerInspectDrawerProps> = ({
             </div>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
+            {onRunWatchdog && (
+              <button
+                type="button"
+                onClick={() => void handleRunWatchdog()}
+                disabled={watchdogRunning}
+                title="运行 Watchdog 巡检"
+                className="inline-flex items-center gap-1 h-8 px-2.5 rounded-lg border border-zinc-200/80 dark:border-zinc-700/80 bg-white dark:bg-zinc-900 hover:border-blue-300 dark:hover:border-blue-700 disabled:opacity-50 text-zinc-600 dark:text-zinc-300 text-xs font-medium transition-colors cursor-pointer"
+              >
+                {watchdogRunning ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin-fast" />
+                ) : (
+                  <HeartPulse className="w-3.5 h-3.5" />
+                )}
+                <span className="hidden sm:inline">Watchdog 巡检</span>
+              </button>
+            )}
             <span
               className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-medium ${STATUS_BADGE_CLASS[worker.status]}`}
             >
@@ -405,6 +438,15 @@ export const WorkerInspectDrawer: React.FC<WorkerInspectDrawerProps> = ({
               <span className="truncate font-mono">{key}</span>
             </span>
           ))}
+          {watchdogSummary && (
+            <span
+              title={watchdogSummary}
+              className="inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-blue-50 dark:bg-blue-950/50 border border-blue-200/60 dark:border-blue-800/60 text-[10px] font-medium text-blue-600 dark:text-blue-300 max-w-[320px]"
+            >
+              <HeartPulse className="w-2.5 h-2.5 shrink-0" />
+              <span className="truncate">Watchdog：{watchdogSummary}</span>
+            </span>
+          )}
           {worker.conversationId && (
             <span
               title={`独立子会话：${worker.conversationId}`}
