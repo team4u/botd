@@ -24,7 +24,7 @@ import { promisify } from 'node:util';
 
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai';
-import { MemoryStorage } from '@earendil-works/pi-durable';
+import { MemoryStorage, type ConversationId } from '@earendil-works/pi-durable';
 
 import { startHub } from '../apps/hub/src/index.js';
 import { HubDurableRuntime, type BotPersonaConfig } from '../apps/hub/src/harness/hub-harness.js';
@@ -59,6 +59,13 @@ async function waitFor<T>(
 }
 
 /** 脚本化 faux：按最后一条用户消息的语义应答，router/worker 竞争同一队列也可预测。 */
+/** Whether a tool result follows the last user message (this turn already ran its tool round). */
+const toolResultThisTurn = (messages: readonly { role: string; content: unknown }[]): boolean => {
+  const reversed = [...messages].reverse();
+  const lastUser = reversed.findIndex((m) => m.role === 'user');
+  return lastUser >= 0 && reversed.slice(0, lastUser).some((m) => m.role === 'toolResult');
+};
+
 const scriptRouter = (
   faux: ReturnType<typeof fauxProvider>,
   step: (ctx: { messages: readonly { role: string; content: unknown }[] }) => ReturnType<typeof fauxAssistantMessage>,
@@ -376,4 +383,338 @@ test('3. startHub seeds builtin skill botd-cli for every persona', { timeout: 60
     toolResults.some((m) => JSON.stringify(m.content).includes('botd-skill: botd-cli')),
     'load_skill must return the seeded SKILL.md',
   );
+});
+
+// ---------------------------------------------------------------------------
+// 4. spawn_worker({ isolation: 'worktree' }) / delegate_to_bot({ worktree: true })
+// ---------------------------------------------------------------------------
+
+test('4. spawn_worker isolation alias and delegate_to_bot worktree populate worktreePath + branchName', { timeout: 60_000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'botd-alias-'));
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  });
+  await run('git', ['init', '-q', dir]);
+  await run('git', ['-C', dir, 'config', 'user.email', 'botd@test']);
+  await run('git', ['-C', dir, 'config', 'user.name', 'botd-test']);
+  await writeFile(path.join(dir, 'README.md'), '# repo\n');
+  await run('git', ['-C', dir, 'add', '.']);
+  await run('git', ['-C', dir, 'commit', '-q', '-m', 'init']);
+
+  const faux = fauxProvider({ models: [{ id: 'main' }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const runtime = await HubDurableRuntime.open({ storage: new MemoryStorage(), models });
+  t.after(async () => {
+    await runtime.close();
+  });
+  runtime.registerPersona(persona('assistant', 'Assistant', 'You are the assistant.', dir));
+  runtime.registerPersona(persona('architect', 'Architect', 'You design systems.', dir));
+
+  const router = await runtime.ensureBotMainSession('assistant');
+  scriptRouter(faux, (ctx) => {
+    const text = lastUserText(ctx.messages);
+    if (/Run the isolated probe/.test(text)) return fauxAssistantMessage('Isolated probe finished.');
+    if (/Write branch docs/.test(text)) return fauxAssistantMessage('Branch docs written.');
+    if (/\[Worker Completed:/.test(text)) return fauxAssistantMessage('Noted the completion.');
+    const toolResultSeen = ctx.messages.some((m) => m.role === 'toolResult');
+    if (/spawn isolated workers/.test(text) && !toolResultSeen) {
+      return fauxAssistantMessage(
+        [
+          fauxToolCall('spawn_worker', {
+            title: 'isolated probe',
+            task: 'Run the isolated probe.',
+            isolation: 'worktree',
+          }),
+          fauxToolCall('delegate_to_bot', {
+            targetBotId: 'architect',
+            title: 'branch docs',
+            task: 'Write branch docs.',
+            worktree: true,
+          }),
+        ],
+        { stopReason: 'toolUse' },
+      );
+    }
+    return fauxAssistantMessage('ok');
+  });
+
+  await (await runtime.submitUserMessage(String(router.id), 'spawn isolated workers')).wait(BACKGROUND_CONTEXT);
+  const workers = await waitFor(
+    async () => await runtime.getActiveWorkers(String(router.id)),
+    (list) => list.length === 2,
+    'both workers registered',
+  );
+  const spawned = workers.find((w) => w.title === 'isolated probe');
+  const delegated = workers.find((w) => w.title === 'branch docs');
+  assert.ok(spawned, 'spawn_worker worker must exist');
+  assert.ok(delegated, 'delegate_to_bot worker must exist');
+
+  // spawn_worker({ isolation: 'worktree' }): TargetDoc / registry / recall 三处落位
+  const spawnedTarget = await runtime.harness.snapshot(
+    TargetDoc,
+    Number(spawned.conversationId) as ConversationId,
+    BACKGROUND_CONTEXT,
+  );
+  assert.equal(spawnedTarget?.branchName, `botd/${spawned.workerId}`);
+  assert.ok(spawnedTarget?.worktreePath?.endsWith(`.botd-worktrees/${spawned.workerId}`));
+  assert.equal(spawned.worktreePath, spawnedTarget?.worktreePath);
+  assert.equal(spawned.branchName, `botd/${spawned.workerId}`);
+  const recallSpawned = await runtime.recall(spawned.workerId, BACKGROUND_CONTEXT);
+  const recallData = (recallSpawned as unknown as { data?: { node?: { worktreePath?: string } } }).data;
+  assert.equal(recallData?.node?.worktreePath, spawnedTarget?.worktreePath, 'recall node must carry worktree data');
+
+  // delegate_to_bot({ worktree: true }): 同样三处落位
+  const delegatedTarget = await runtime.harness.snapshot(
+    TargetDoc,
+    Number(delegated.conversationId) as ConversationId,
+    BACKGROUND_CONTEXT,
+  );
+  assert.equal(delegatedTarget?.branchName, `botd/${delegated.workerId}`);
+  assert.ok(delegatedTarget?.worktreePath?.endsWith(`.botd-worktrees/${delegated.workerId}`));
+  assert.equal(delegated.worktreePath, delegatedTarget?.worktreePath);
+
+  // 回执文本带 [worktree: ...] 注记（从 router transcript 的 toolResult 中提取）
+  const routerEntries = await router.entries({ order: 'ascending' }, 100, undefined, BACKGROUND_CONTEXT);
+  const toolResultText = routerEntries.items
+    .map((e) => e.model?.[0])
+    .filter((m) => m !== undefined && m.role === 'toolResult')
+    .map((m) => JSON.stringify((m as { content?: unknown }).content))
+    .join('\n');
+  assert.match(toolResultText, /\[worktree: botd\/w-\d+-\d+ at [^\]]+\]/, 'tool receipts must mention the worktree');
+
+  // 等 Worker 完成回报（Worktree: 行出现在通知里）
+  const doneWorkers = await waitFor(
+    async () => await runtime.getActiveWorkers(String(router.id)),
+    (list) => list.every((w) => w.status === 'completed'),
+    'both workers completed',
+  );
+  const doneSpawned = doneWorkers.find((w) => w.workerId === spawned.workerId);
+  assert.equal(doneSpawned?.status, 'completed');
+});
+
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 5. Worker 的 subagent 工具：isolation: 'worktree' 独立分支 / 默认继承父 worktree
+// ---------------------------------------------------------------------------
+
+test('5. worker subagent isolation: worktree gets its own branch; default inherits the parent worktree', { timeout: 60_000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'botd-subagent-wt-'));
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  });
+  await run('git', ['init', '-q', dir]);
+  await run('git', ['-C', dir, 'config', 'user.email', 'botd@test']);
+  await run('git', ['-C', dir, 'config', 'user.name', 'botd-test']);
+  await writeFile(path.join(dir, 'README.md'), '# repo\n');
+  await run('git', ['-C', dir, 'add', '.']);
+  await run('git', ['-C', dir, 'commit', '-q', '-m', 'init']);
+
+  const faux = fauxProvider({ models: [{ id: 'main' }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const runtime = await HubDurableRuntime.open({ storage: new MemoryStorage(), models });
+  t.after(async () => {
+    await runtime.close();
+  });
+  runtime.registerPersona(persona('coder', 'Coder', 'You implement coding tasks.', dir));
+
+  const router = await runtime.ensureBotMainSession('coder');
+  scriptRouter(faux, (ctx) => {
+    const text = lastUserText(ctx.messages);
+    // 子代理回合：把当前分支写入 marker 文件（落在自己 cwd = 各自 worktree 里）
+    const subMarker = text.match(/probe your branch into (\w+)/)?.[1];
+    if (subMarker !== undefined) {
+      const ranTools = toolResultThisTurn(ctx.messages);
+      return ranTools
+        ? fauxAssistantMessage(`branch probe ${subMarker} done`)
+        : fauxAssistantMessage(
+            [fauxToolCall('bash', { command: `git rev-parse --abbrev-ref HEAD > branch-probe-${subMarker}.txt` })],
+            { stopReason: 'toolUse' },
+          );
+    }
+    // Worker 回合：一次发两个 subagent 调用（isolation + 默认继承）
+    if (/dispatch two subagents/.test(text)) {
+      const ranTools = toolResultThisTurn(ctx.messages);
+      if (!ranTools) {
+        return fauxAssistantMessage(
+          [
+            fauxToolCall('subagent', { task: 'probe your branch into ISO', isolation: 'worktree' }),
+            fauxToolCall('subagent', { task: 'probe your branch into INH' }),
+          ],
+          { stopReason: 'toolUse' },
+        );
+      }
+      return fauxAssistantMessage('subagents dispatched');
+    }
+    if (/\[Worker Completed:/.test(text)) return fauxAssistantMessage('Subagent branches received.');
+    const toolResultSeen = toolResultThisTurn(ctx.messages);
+    if (/run the subagent dispatch/.test(text) && !toolResultSeen) {
+      return fauxAssistantMessage(
+        [fauxToolCall('spawn_worker', {
+          title: 'subagent dispatch',
+          task: 'dispatch two subagents',
+          worktree: true,
+        })],
+        { stopReason: 'toolUse' },
+      );
+    }
+    return fauxAssistantMessage('ok');
+  });
+
+  await (await runtime.submitUserMessage(String(router.id), 'run the subagent dispatch')).wait(BACKGROUND_CONTEXT);
+  const worker = await waitFor(
+    async () => (await runtime.getActiveWorkers(String(router.id)))[0],
+    (w) => w?.status === 'completed',
+    'dispatch worker completion',
+  );
+  const workerTarget = await runtime.harness.snapshot(
+    TargetDoc,
+    Number(worker.conversationId) as ConversationId,
+    BACKGROUND_CONTEXT,
+  );
+  assert.ok(workerTarget?.worktreePath, 'worker must run in a worktree');
+
+  // 找到该 worker 派生的两个 subagent 子会话（MemoryStorage 下 id 顺序紧随 worker）
+  const subs: { id: number; target: NonNullable<typeof workerTarget> }[] = [];
+  for (let id = Number(worker.conversationId) + 1; id <= Number(worker.conversationId) + 40 && subs.length < 2; id++) {
+    const target = await runtime.harness.snapshot(TargetDoc, id as ConversationId, BACKGROUND_CONTEXT);
+    if (target?.role === 'subagent' && target.parentConversationId === worker.conversationId) {
+      subs.push({ id, target });
+    }
+  }
+  assert.equal(subs.length, 2, 'worker must have spawned two subagent conversations');
+  const iso = subs.find((s) => s.target.worktreePath?.includes(`/sub-${s.id}`));
+  const inherited = subs.find((s) => s !== iso);
+  assert.ok(iso, 'the isolation subagent must own its own worktree path');
+  assert.ok(inherited, 'the default subagent must exist');
+
+  // isolation: 'worktree' → 独立分支 botd/sub-<id>
+  assert.equal(iso.target.branchName, `botd/sub-${iso.id}`);
+  assert.ok(iso.target.worktreePath?.endsWith(`.botd-worktrees/sub-${iso.id}`));
+  // 不传 isolation → 继承父 Worker 的 worktreePath + branchName
+  assert.equal(inherited.target.worktreePath, workerTarget?.worktreePath);
+  assert.equal(inherited.target.branchName, workerTarget?.branchName);
+
+  // 真实执行隔离：每个子代理的 bash 落在各自 cwd（隔离 worktree）里
+  const isoProbe = await readFile(path.join(iso.target.worktreePath!, 'branch-probe-ISO.txt'), 'utf8');
+  assert.match(isoProbe.trim(), new RegExp(`^botd/sub-${iso.id}$`), 'isolated subagent must execute on its own branch');
+  const inhProbe = await readFile(path.join(workerTarget!.worktreePath!, 'branch-probe-INH.txt'), 'utf8');
+  assert.equal(inhProbe.trim(), workerTarget?.branchName, 'default subagent must execute on the inherited worker branch');
+
+  // subagent 返回正文 + worktree 注记都出现在 worker transcript 的工具结果里
+  const workerConversation = await runtime.conversation(worker.conversationId);
+  assert.ok(workerConversation);
+  const page = await workerConversation.entries({ order: 'ascending' }, 200, undefined, BACKGROUND_CONTEXT);
+  const subagentResults = page.items
+    .map((e) => e.model?.[0])
+    .filter((m): m is NonNullable<typeof m> => m !== undefined && m.role === 'toolResult')
+    .map((m) => JSON.stringify((m as { content?: unknown }).content));
+  const isoResult = subagentResults.find((r) => r.includes('branch probe ISO done'));
+  assert.ok(isoResult, 'isolated subagent answer must surface in the worker transcript');
+  assert.match(isoResult, /\[worktree: botd\/sub-\d+ at [^\]]+\]/, 'subagent result must append the worktree note');
+});
+
+// ---------------------------------------------------------------------------
+// 6. SubagentWorkflow：parallel() 并发 worktree 隔离 + resume(label) 复用子会话
+// ---------------------------------------------------------------------------
+
+test('6. SubagentWorkflow parallel worktree steps get independent branches; resume reuses the labeled conversation', { timeout: 90_000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'botd-wf-worktree-'));
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  });
+  await run('git', ['init', '-q', dir]);
+  await run('git', ['-C', dir, 'config', 'user.email', 'botd@test']);
+  await run('git', ['-C', dir, 'config', 'user.name', 'botd-test']);
+  await writeFile(path.join(dir, 'README.md'), '# repo\n');
+  await run('git', ['-C', dir, 'add', '.']);
+  await run('git', ['-C', dir, 'commit', '-q', '-m', 'init']);
+
+  const faux = fauxProvider({ models: [{ id: 'main' }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const runtime = await HubDurableRuntime.open({ storage: new MemoryStorage(), models });
+  t.after(async () => {
+    await runtime.close();
+  });
+  runtime.registerPersona(persona('lead', 'Lead', 'You orchestrate workflows.', dir));
+  const router = await runtime.ensureBotMainSession('lead');
+
+  const WORKFLOW_SCRIPT = `
+export const meta = { name: "wt-parallel", description: "parallel isolated probes", phases: ["Probe"] }
+const results = await parallel([
+  () => agent("probe branch into LEFT", { label: "left", isolation: "worktree" }),
+  () => agent("probe branch into RIGHT", { label: "right", isolation: "worktree" }),
+])
+const follow = await agent("probe branch into FOLLOW", { resume: "left" })
+return { results: results.filter(Boolean), follow }
+`;
+
+  scriptRouter(faux, (ctx) => {
+    const text = lastUserText(ctx.messages);
+    // 工作流子代理回合：把当前分支写入 marker 文件（cwd = 步骤自己的 worktree）
+    const wfMarker = text.match(/probe branch into (\w+)/)?.[1];
+    if (wfMarker !== undefined) {
+      const ranTools = toolResultThisTurn(ctx.messages);
+      return ranTools
+        ? fauxAssistantMessage(`probe ${wfMarker} done`)
+        : fauxAssistantMessage(
+            [fauxToolCall('bash', { command: `git rev-parse --abbrev-ref HEAD > branch-probe-${wfMarker}.txt` })],
+            { stopReason: 'toolUse' },
+          );
+    }
+    if (/run the parallel workflow/.test(text) && !toolResultThisTurn(ctx.messages)) {
+      return fauxAssistantMessage([fauxToolCall('SubagentWorkflow', { script: WORKFLOW_SCRIPT })], { stopReason: 'toolUse' });
+    }
+    return fauxAssistantMessage('workflow finished');
+  });
+
+  const settled = await (await runtime.submitUserMessage(String(router.id), 'run the parallel workflow')).wait(BACKGROUND_CONTEXT);
+  assert.equal(settled.status, 'done', 'router turn must finish');
+
+  // 找到本 workflow 派生的子会话：title 形如 step:N:left / step:N:right
+  const wfChildren: { id: number; title: string; worktreePath?: string; branchName?: string }[] = [];
+  for (let id = Number(router.id) + 1; id <= Number(router.id) + 60; id++) {
+    const target = await runtime.harness.snapshot(TargetDoc, id as ConversationId, BACKGROUND_CONTEXT);
+    if (target?.role === 'subagent' && target.parentConversationId === String(router.id) && (target.title ?? '').startsWith('step:')) {
+      wfChildren.push({ id, title: target.title ?? '', worktreePath: target.worktreePath, branchName: target.branchName });
+    }
+  }
+  assert.equal(
+    wfChildren.length, 2,
+    `parallel steps must create exactly two child conversations (got ${wfChildren.length}: ${wfChildren.map((c) => c.title).join(', ')})`,
+  );
+  const left = wfChildren.find((c) => c.title.endsWith(':left'));
+  const right = wfChildren.find((c) => c.title.endsWith(':right'));
+  assert.ok(left && right, 'both labeled child conversations must exist');
+
+  // 独立子会话 + 独立 worktree 分支，互不干扰
+  assert.notEqual(left.id, right.id);
+  assert.notEqual(left.branchName, right.branchName);
+  assert.equal(left.branchName, `botd/wf-${left.id}`);
+  assert.equal(right.branchName, `botd/wf-${right.id}`);
+  assert.ok(left.worktreePath?.endsWith(`.botd-worktrees/wf-${left.id}`));
+  assert.ok(right.worktreePath?.endsWith(`.botd-worktrees/wf-${right.id}`));
+
+  // 子代理真实在各自 worktree 分支下执行
+  const leftProbe = await readFile(path.join(left.worktreePath!, 'branch-probe-LEFT.txt'), 'utf8');
+  assert.equal(leftProbe.trim(), `botd/wf-${left.id}`, 'left step must execute on its own branch');
+  const rightProbe = await readFile(path.join(right.worktreePath!, 'branch-probe-RIGHT.txt'), 'utf8');
+  assert.equal(rightProbe.trim(), `botd/wf-${right.id}`, 'right step must execute on its own branch');
+  // resume 的 follow-up 落在 left 的 worktree 分支上
+  const followProbe = await readFile(path.join(left.worktreePath!, 'branch-probe-FOLLOW.txt'), 'utf8');
+  assert.equal(followProbe.trim(), `botd/wf-${left.id}`, 'resumed follow-up must run on the left branch');
+
+  // resume: "left" 复用 label=left 的子会话（同一会话收到第二条输入）
+  const leftConversation = await runtime.conversation(String(left.id));
+  assert.ok(leftConversation);
+  const leftEntries = await leftConversation.entries({ order: 'ascending' }, 50, undefined, BACKGROUND_CONTEXT);
+  const leftInputs = leftEntries.items
+    .map((e) => e.model?.[0])
+    .filter((m): m is NonNullable<typeof m> => m !== undefined && m.role === 'user')
+    .map((m) => (typeof (m as { content?: unknown }).content === 'string' ? (m as { content: string }).content : ''));
+  assert.ok(leftInputs.some((c) => c.includes('probe branch into LEFT')), 'left conversation must hold the first step input');
+  assert.ok(leftInputs.some((c) => c.includes('probe branch into FOLLOW')), 'resume must reuse the left conversation for the follow-up');
 });

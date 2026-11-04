@@ -13,7 +13,7 @@
  *   conversation. The report-back task uses a deterministic
  *   `requestId: "worker-report:<taskId>"` so restarts never double-report.
  */
-import { obj, str } from "@earendil-works/pi-schema";
+import { bool, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import {
 	AssistantEntry,
 	defineExtension,
@@ -72,6 +72,8 @@ interface WorkerReportInput {
 	parentConversationId: string;
 	title: string;
 	answer: string;
+	worktreePath?: string;
+	branchName?: string;
 }
 
 const WorkerReportTask = defineTask<WorkerReportInput, { phase: "report" }, { reported: boolean }>({
@@ -88,6 +90,7 @@ const WorkerReportTask = defineTask<WorkerReportInput, { phase: "report" }, { re
 			const notification =
 				`[Worker Completed: ${input.workerId} | ${input.title}]\n` +
 				`Summary: ${summary}\n` +
+				(input.worktreePath === undefined ? "" : `Worktree: ${input.branchName ?? "worktree"} (${input.worktreePath})\n`) +
 				`(Use recall({ id: "${input.workerId}" }) for full transcript & details)`;
 
 			// Acquire the parent handle BEFORE the commit: `runtime.conversation()` is a
@@ -116,13 +119,15 @@ const WorkerReportTask = defineTask<WorkerReportInput, { phase: "report" }, { re
 					};
 				}
 
-				// 2. Mark the worker completed in the parent Router's registry.
+				// 2. Mark the worker completed in the parent Router's registry. A worker
+				// woken by a follow-up/steer runs a second round after "completed"; keep
+				// the fresh summary instead of discarding it (an explicit abort still wins).
 				const registry = await tx.doc(WorkerRegistryDoc, parentId);
 				const entry = registry.workers[input.workerId];
-				if (entry !== undefined && entry.status === "running") {
+				if (entry !== undefined && entry.status !== "aborted") {
 					entry.status = "completed";
-				entry.finishedAt = runtime.now();
-				entry.summary = summary;
+					entry.finishedAt = runtime.now();
+					entry.summary = summary;
 				}
 
 				// 3. Post the compact notification back to the Router (follow-up input;
@@ -158,28 +163,62 @@ const subagentTool = defineTool({
 	name: "subagent",
 	description:
 		"Delegate a self-contained sub-task to an isolated child agent conversation and get its answer back. " +
-		"The child is owned by this tool call (aborted with it) and is replay-safe across crashes.",
-	parameters: obj({ task: str({ description: "Complete instructions for the sub-agent" }) }),
+		"The child is owned by this tool call (aborted with it) and is replay-safe across crashes. " +
+		"Pass worktree: true (or isolation: 'worktree') to run it in an isolated git worktree; " +
+		"by default a child inherits the parent's worktree when the parent runs in one.",
+	parameters: obj({
+		task: str({ description: "Complete instructions for the sub-agent" }),
+		worktree: opt(bool({ description: "Give the subagent an isolated git worktree" })),
+		isolation: opt(oneOf(["off", "worktree"])),
+		forkContext: opt(bool({ description: "Fork this conversation's context into the subagent (default false)" })),
+	}),
 	replay: "safe",
 	async execute(args, api, context) {
+		const useWorktree = args.worktree === true || args.isolation === "worktree";
+		let branchName = "";
+		let worktreePath = "";
 		const child = await api.commit(async (tx) => {
 			// The ownership index remembers the child, so a rerun reuses it.
 			const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
 			if (existing !== undefined) return existing.id;
-			const created = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
+			let record;
+			if (args.forkContext === true) {
+				const latest = await tx.latestEntryId(api.conversationId);
+				record =
+					latest === undefined
+					? await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } })
+					: await tx.forkConversation(api.conversationId, latest, {
+							ownership: { kind: "task", taskId: api.taskId },
+						});
+			} else {
+				record = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
+			}
 			// Mark it as a subagent in its target doc.
-			const workerTarget = await tx.doc(TargetDoc, created.id);
+			const workerTarget = await tx.doc(TargetDoc, record.id);
 			const self = await tx.doc(TargetDoc, api.conversationId);
+			if (useWorktree) {
+				const baseCwd = self.cwd || process.cwd();
+				const subId = `sub-${record.id}`;
+				branchName = `botd/${subId}`;
+				worktreePath = `${baseCwd}/.botd-worktrees/${subId}`;
+			} else if (args.isolation !== "off" && self.worktreePath) {
+				// Inherit the parent's worktree: a Worker already isolated in one must
+				// not have its children bounce back to the main checkout.
+				branchName = self.branchName ?? "";
+				worktreePath = self.worktreePath;
+			}
 			Object.assign(workerTarget, {
 				botId: self.botId,
 				role: "subagent" as const,
 				parentConversationId: conversationIdToString(api.conversationId),
 				nodeId: self.nodeId,
 				cwd: self.cwd,
+				...(self.sessionId ? { sessionId: self.sessionId } : {}),
+				...(worktreePath ? { worktreePath, branchName } : {}),
 				threadKeys: [],
 				title: args.task.slice(0, 80),
 			});
-			return created.id;
+			return record.id;
 		}, context);
 
 		await api.details({ conversationId: child }, context);
@@ -191,7 +230,17 @@ const subagentTool = defineTool({
 		const conversation = await api.conversation(child, context);
 		if (conversation === undefined) throw new Error("subagent conversation is gone");
 		const settled = await (await conversation.submit(request, context)).wait(context);
-		return { output: [{ type: "text", text: settled.status }] };
+		let text: string = settled.status;
+		if (settled.status === "done" && settled.type === "input") {
+			// ToolExecutionApi has no entry(); read the answer entry inside a commit.
+			const answerEntry = await api.commit(
+				(tx) => tx.entry(AssistantEntry, settled.answer),
+				context,
+			);
+			text = assistantText(answerEntry) || settled.status;
+		}
+		if (useWorktree) text += `\n[worktree: ${branchName} at ${worktreePath}]`;
+		return { output: [{ type: "text", text }] };
 	},
 });
 
@@ -238,6 +287,8 @@ export function createWorkerExtension(): Extension {
 								parentConversationId: target.parentConversationId,
 								title,
 								answer,
+								...(target.worktreePath === undefined ? {} : { worktreePath: target.worktreePath }),
+								...(target.branchName === undefined ? {} : { branchName: target.branchName }),
 							}),
 						],
 					};

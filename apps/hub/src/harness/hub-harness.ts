@@ -33,6 +33,11 @@ import {
 	type UserInput,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import path from "node:path";
+import { promisify } from "node:util";
 import { withSecretEnv } from "./secret-stash.js";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -133,6 +138,36 @@ export class SecretInjectingEnv extends NodeExecutionEnv {
 	}
 }
 
+/**
+ * 惰性幂等的本地 worktree 挂载：目录已存在则复用；否则 `git worktree add -B
+ * <branchName> <worktreePath> HEAD`。非 git 仓库或任何失败回退 baseCwd。
+ */
+async function acquireLocalWorktree(
+	baseCwd: string,
+	worktreePath: string,
+	branchName: string,
+): Promise<string> {
+	try {
+		if (existsSync(worktreePath)) return worktreePath;
+		const probe = await promisify(execFile)("git", ["-C", baseCwd, "rev-parse", "--is-inside-work-tree"]);
+		if (probe.stdout.trim() !== "true") return baseCwd;
+		await mkdir(path.dirname(worktreePath), { recursive: true });
+		await promisify(execFile)("git", [
+			"-C",
+			baseCwd,
+			"worktree",
+			"add",
+			"-B",
+			branchName,
+			worktreePath,
+			"HEAD",
+		]);
+		return worktreePath;
+	} catch {
+		return baseCwd;
+	}
+}
+
 export class HubDurableRuntime {
 	readonly harness: import("@earendil-works/pi-durable").Harness;
 	readonly registry: Registry;
@@ -169,6 +204,8 @@ export class HubDurableRuntime {
 	}
 
 	static async open(options: HubRuntimeOptions = {}, context: Context = BACKGROUND_CONTEXT): Promise<HubDurableRuntime> {
+		/** conversationId -> mounted worktree path: each conversation acquires once. */
+		const acquiredWorktrees = new Map<string, string>();
 		const storage =
 			options.storage ??
 			(options.dbPath !== undefined
@@ -233,9 +270,30 @@ export class HubDurableRuntime {
 							// Persona env vars ride along as the conversation's shell env (merged over the process env).
 							const targetState = await target.read.snapshot(TargetDoc, target.conversationId, context);
 							const personaEnv = personas.get(targetState?.botId ?? "")?.env;
+							const shellEnv: Record<string, string> = { ...(personaEnv ?? {}) };
+							if (targetState?.botId) shellEnv.BOTD_BOT_ID = targetState.botId;
+							if (targetState?.sessionId) shellEnv.BOTD_SESSION_ID = targetState.sessionId;
+							// A target with a worktreePath executes in its isolated git worktree:
+							// lazily mounted once per conversation (idempotent), falling back to
+							// the base cwd outside a git repo or on failure.
+							let cwd = target.cwd ?? process.cwd();
+							if (targetState?.worktreePath) {
+								const cached = acquiredWorktrees.get(String(target.conversationId));
+								if (cached !== undefined) {
+									cwd = cached;
+								} else {
+									const baseCwd = targetState.cwd || target.cwd || process.cwd();
+									cwd = await acquireLocalWorktree(
+										baseCwd,
+										targetState.worktreePath,
+										targetState.branchName ?? `botd/w-${target.conversationId}`,
+									);
+									acquiredWorktrees.set(String(target.conversationId), cwd);
+								}
+							}
 							return new SecretInjectingEnv({
-								cwd: target.cwd ?? process.cwd(),
-								...(personaEnv === undefined ? {} : { shellEnv: personaEnv }),
+								cwd,
+								...(Object.keys(shellEnv).length === 0 ? {} : { shellEnv }),
 							});
 					}
 					: options.env,

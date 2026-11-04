@@ -187,13 +187,17 @@ export function createRouterExtension(options: {
 			threadKey: opt(str({ description: "Channel thread key the worker feeds" })),
 			cwd: opt(str({ description: "Working directory for the worker" })),
 			worktree: opt(bool({ description: "Give the worker an isolated git worktree" })),
+			isolation: opt(oneOf(["off", "worktree"])),
 		}),
 		replay: "safe",
 		async execute(args, api, context) {
 			const forkContext = args.forkContext !== false;
+			const useWorktree = args.worktree === true || args.isolation === "worktree";
 			let workerId = "";
 			let conversationId = "";
 			let title = args.title;
+			let worktreePath = "";
+			let branchName = "";
 
 			const spawnedBy = String(api.taskId);
 			await api.commit(async (tx) => {
@@ -238,8 +242,8 @@ export function createRouterExtension(options: {
 				}
 				conversationId = conversationIdToString(record.id);
 				workerId = `w-${seq}-${record.id}`;
-				const branchName = `botd/${workerId}`;
-				const worktreePath = `${cwd}/.botd-worktrees/${workerId}`;
+				branchName = `botd/${workerId}`;
+				worktreePath = `${cwd}/.botd-worktrees/${workerId}`;
 
 				// 2. Worker agent: the worker extension (which brings CodingTools at the
 				//    host level) instead of the router extension.
@@ -254,7 +258,7 @@ export function createRouterExtension(options: {
 					nodeId: target.nodeId,
 					cwd,
 					...(target.sessionId ? { sessionId: target.sessionId } : {}),
-					...(args.worktree === true ? { worktreePath, branchName } : {}),
+					...(useWorktree ? { worktreePath, branchName } : {}),
 					threadKeys: args.threadKey === undefined ? [] : [args.threadKey],
 					title: args.title,
 				});
@@ -269,7 +273,7 @@ export function createRouterExtension(options: {
 					threadKeys: args.threadKey === undefined ? [] : [args.threadKey],
 					nodeId: target.nodeId,
 					cwd,
-					...(args.worktree === true ? { worktreePath, branchName } : {}),
+					...(useWorktree ? { worktreePath, branchName } : {}),
 					startedAt: api.now(),
 					spawnedBy,
 				};
@@ -286,7 +290,7 @@ export function createRouterExtension(options: {
 					relatedIds: [],
 					createdAt: api.now(),
 				};
-				if (args.worktree === true) {
+				if (useWorktree) {
 					(recall.nodes[workerId] as unknown as Record<string, unknown>).data = { node: { worktreePath, branchName } };
 				}
 
@@ -306,11 +310,13 @@ export function createRouterExtension(options: {
 				);
 			}
 
+			const worktreeNote = useWorktree ? `\n[worktree: ${branchName} at ${worktreePath}]` : "";
 			return {
 				output: [
 					{
 						type: "text",
-						text: `Worker started: ${workerId} (${title}). It runs in the background and will report back here when finished. Keep chatting with me meanwhile.`,
+						text:
+							`Worker started: ${workerId} (${title}). It runs in the background and will report back here when finished. Keep chatting with me meanwhile.${worktreeNote}`,
 					},
 				],
 			};
@@ -327,6 +333,8 @@ export function createRouterExtension(options: {
 			title: str({ description: "Short task title" }),
 			task: str({ description: "Full task instructions" }),
 			threadKey: opt(str({ description: "Channel thread key the result feeds" })),
+			worktree: opt(bool({ description: "Give the delegated worker an isolated git worktree" })),
+			isolation: opt(oneOf(["off", "worktree"])),
 		}),
 		replay: "safe",
 		async execute(args, api, context) {
@@ -337,8 +345,11 @@ export function createRouterExtension(options: {
 					output: [{ type: "text", text: `Unknown bot persona: ${args.targetBotId}` }],
 				};
 			}
+			const useWorktree = args.worktree === true || args.isolation === "worktree";
 			let workerId = "";
 			let conversationId = "";
+			let branchName = "";
+			let worktreePath = "";
 			// The full worker stack (CodingTools + WORKER_EXTENSION + persona skills +
 			// codemode + thinkingLevel) comes from the host's workerAgent factory, so a
 			// delegated bot reports back through the same afterRun machinery. Delegation
@@ -374,6 +385,11 @@ export function createRouterExtension(options: {
 				conversationId = conversationIdToString(record.id);
 				await configure(tx, record.id, delegateAgent);
 
+				const seq = Object.keys(registryBefore.workers).length + 1;
+				workerId = `w-${seq}-${record.id}`;
+				branchName = `botd/${workerId}`;
+				worktreePath = `${persona.cwd}/.botd-worktrees/${workerId}`;
+
 				const workerTarget = await tx.doc(TargetDoc, record.id);
 				Object.assign(workerTarget, {
 					botId: args.targetBotId,
@@ -382,12 +398,11 @@ export function createRouterExtension(options: {
 					nodeId: persona.nodeId,
 					cwd: persona.cwd,
 					...(target.sessionId ? { sessionId: target.sessionId } : {}),
+					...(useWorktree ? { worktreePath, branchName } : {}),
 					threadKeys: args.threadKey === undefined ? [] : [args.threadKey],
 					title: args.title,
 				});
 
-				const seq = Object.keys(registryBefore.workers).length + 1;
-				workerId = `w-${seq}-${record.id}`;
 				registryBefore.workers[workerId] = {
 					workerId,
 					conversationId,
@@ -397,6 +412,7 @@ export function createRouterExtension(options: {
 					threadKeys: args.threadKey === undefined ? [] : [args.threadKey],
 					nodeId: persona.nodeId,
 					cwd: persona.cwd,
+					...(useWorktree ? { worktreePath, branchName } : {}),
 					startedAt: api.now(),
 					spawnedBy,
 				};
@@ -412,6 +428,9 @@ export function createRouterExtension(options: {
 					relatedIds: [],
 					createdAt: api.now(),
 				};
+				if (useWorktree) {
+					(recall.nodes[workerId] as unknown as Record<string, unknown>).data = { node: { worktreePath, branchName } };
+				}
 
 			}, context);
 
@@ -428,8 +447,9 @@ export function createRouterExtension(options: {
 				);
 			}
 
+			const worktreeNote = useWorktree ? `\n[worktree: ${branchName} at ${worktreePath}]` : "";
 			return {
-				output: [{ type: "text", text: `Delegated to ${args.targetBotId}: worker ${workerId} started.` }],
+				output: [{ type: "text", text: `Delegated to ${args.targetBotId}: worker ${workerId} started.${worktreeNote}` }],
 			};
 		},
 	});
@@ -452,6 +472,16 @@ export function createRouterExtension(options: {
 			if (worker === undefined) {
 				return { isError: true, output: [{ type: "text", text: `Worker conversation missing: ${args.workerId}` }] };
 			}
+			// A steer on a finished worker wakes it for another round: reset its
+			// registry status so the second round's report-back is accepted again.
+			await api.commit(async (tx) => {
+				const doc = await tx.doc(WorkerRegistryDoc, api.conversationId);
+				const record = doc.workers[args.workerId];
+				if (record !== undefined && (record.status === "completed" || record.status === "failed")) {
+					record.status = "running";
+					delete record.finishedAt;
+				}
+			}, context);
 			await worker.submit(
 				{
 					type: "input",

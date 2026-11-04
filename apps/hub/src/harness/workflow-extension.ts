@@ -7,6 +7,10 @@
  * 未完成步骤继续在 task 拥有的子 Conversation 上执行。WorkflowRunDoc 以 SQLite
  * 事务记录 phases / logs / step journal，UI 通过 api.details 实时观看进度。
  */
+import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import {
 	configure,
 	defineDocFamily,
@@ -15,6 +19,7 @@ import {
 } from '@earendil-works/pi-durable';
 import type {
 	AgentChange,
+	ConversationId,
 	Extension,
 	SettledSubmissionRecord,
 	ToolExecutionApi,
@@ -27,6 +32,7 @@ import {
 	parseWorkflowScript,
 	type WorkflowScriptModule,
 } from './workflow-script.js';
+import { TargetDoc } from './docs.js';
 
 export { extractWorkflowJson, parseWorkflowScript };
 export type { WorkflowScriptModule };
@@ -89,7 +95,8 @@ export interface WorkflowAgentOptions {
 	schema?: object;
 	model?: string;
 	effort?: string;
-	isolation?: 'worktree';
+	isolation?: 'off' | 'worktree';
+	worktree?: boolean;
 	agentType?: string;
 	gate?: string;
 	resume?: string;
@@ -262,6 +269,8 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 			const parsed = parseWorkflowScript(args.script);
 			const meta = 'error' in parsed ? { name: args.name ?? 'workflow' } : parsed.meta;
 
+			// 标签 → 子会话：同一次执行内 resume(label) 直接复用对应子会话。
+			const labelConversations = new Map<string, ConversationId>();
 			const state: WorkflowRunDocState = {
 				name: meta.name,
 				status: 'running',
@@ -336,18 +345,74 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 				}
 
 				const requestId = `${api.taskId}:${key}`;
-				const childId = await api.commit(async (tx) => {
-					const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
-					if (existing !== undefined) return existing.id;
-					const created = await tx.createConversation({ ownership: { kind: 'task', taskId: api.taskId } });
-					const change: { model?: AgentChange['model']; thinkingLevel?: AgentChange['thinkingLevel']; instructions?: string } = {};
-					const modelRef = opts?.model !== undefined ? parseModelRef(opts.model) : null;
-					if (modelRef !== null) change.model = modelRef;
-					if (opts?.effort !== undefined) change.thinkingLevel = opts.effort as AgentChange['thinkingLevel'];
-					if (opts?.agentType !== undefined) change.instructions = `You are a "${opts.agentType}" subagent.`;
-					if (Object.keys(change).length > 0) await configure(tx, created.id, change);
-					return created.id;
-				}, context);
+				let stepWorktreePath = '';
+				let stepBranchName = '';
+				let childId: ConversationId;
+				const resumed = opts?.resume !== undefined ? labelConversations.get(opts.resume) : undefined;
+				if (resumed !== undefined) {
+					childId = resumed;
+				} else {
+					childId = await api.commit(async (tx) => {
+						// 崩溃重放：按 TargetDoc.title === key 命中本步已创建的子会话。
+						// 不能只取第一个 —— 同一 workflow 的所有 step 和 parallel() 分支
+						// 共享 ownerTaskId，各自拥有独立子会话。
+						const owned = await tx.scanConversations({ ownerTaskId: api.taskId }, 256);
+						for (const existing of owned.items) {
+							const existingTarget = await tx.doc(TargetDoc, existing.id);
+							if (existingTarget.title === key) return existing.id;
+						}
+						const created = await tx.createConversation({ ownership: { kind: 'task', taskId: api.taskId } });
+						const change: { model?: AgentChange['model']; thinkingLevel?: AgentChange['thinkingLevel']; instructions?: string } = {};
+						const modelRef = opts?.model !== undefined ? parseModelRef(opts.model) : null;
+						if (modelRef !== null) change.model = modelRef;
+						if (opts?.effort !== undefined) change.thinkingLevel = opts.effort as AgentChange['thinkingLevel'];
+						if (opts?.agentType !== undefined) change.instructions = `You are a "${opts.agentType}" subagent.`;
+						// 步骤子代理是干活的全能子代理：清空父会话可能携带的模型工具过滤器
+						//（Router 剥掉了编码工具，子代理必须拿回来）。
+						await configure(tx, created.id, { ...change, modelTools: null });
+
+						// 隔离：显式 worktree 建独立分支；否则继承父会话的 worktree（若有）。
+						const parentTarget = await tx.doc(TargetDoc, api.conversationId);
+						const useWorktree = opts?.isolation === 'worktree' || opts?.worktree === true;
+						let worktreePath = '';
+						let branchName = '';
+						if (useWorktree) {
+							const baseCwd = parentTarget.cwd || process.cwd();
+							const wfId = `wf-${created.id}`;
+							worktreePath = `${baseCwd}/.botd-worktrees/${wfId}`;
+							branchName = `botd/${wfId}`;
+						} else if (opts?.isolation !== 'off' && parentTarget.worktreePath) {
+							worktreePath = parentTarget.worktreePath;
+							branchName = parentTarget.branchName ?? '';
+						}
+						const childTarget = await tx.doc(TargetDoc, created.id);
+						Object.assign(childTarget, {
+							botId: parentTarget.botId,
+							role: 'subagent' as const,
+							parentConversationId: String(api.conversationId),
+							nodeId: parentTarget.nodeId,
+							cwd: parentTarget.cwd,
+							...(parentTarget.sessionId ? { sessionId: parentTarget.sessionId } : {}),
+							...(worktreePath ? { worktreePath, branchName } : {}),
+							threadKeys: [],
+							title: key,
+						});
+						if (worktreePath !== '') {
+							stepWorktreePath = worktreePath;
+							stepBranchName = branchName;
+						}
+						return created.id;
+					}, context);
+				}
+				if (opts?.label !== undefined) labelConversations.set(opts.label, childId);
+				// resume 命中已存在子会话时也要拿到其 worktree 供 gate 使用。
+				if (stepWorktreePath === '') {
+					const childTarget = await api.snapshot(TargetDoc, childId, context);
+					if (childTarget?.worktreePath !== undefined) {
+						stepWorktreePath = childTarget.worktreePath;
+						stepBranchName = childTarget.branchName ?? '';
+					}
+				}
 
 				await api.details({ conversationId: childId } as unknown as WorkflowRunDetails, context);
 
@@ -369,11 +434,17 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 
 				const text = await answerText(settled);
 
-				// gate：shell 门禁；非零退出码或执行错误判步失败
+				// gate：shell 门禁；非零退出码或执行错误判步失败。本步在独立 worktree
+				// 中时，gate 必须在同一 worktree 目录下运行（先确保挂载，再 cd 进去执行）。
 				if (opts?.gate !== undefined) {
 					const env = await apiEnv(api, context);
 					if (env === undefined) throw new Error('workflow gate requires an execution env');
-					const gateResult = await env.exec(opts.gate, undefined, context);
+					let gateCommand = opts.gate;
+					if (stepWorktreePath !== '') {
+						await ensureWorktree(stepWorktreePath, stepBranchName);
+						gateCommand = `cd "${stepWorktreePath}" && (${opts.gate})`;
+					}
+					const gateResult = await env.exec(gateCommand, undefined, context);
 					if (!gateResult.ok || gateResult.value?.exitCode !== 0) {
 						const detail = gateResult.ok ? `exit ${gateResult.value?.exitCode}` : (gateResult.error?.message ?? 'exec failed');
 						const outcome: WorkflowStepOutcome = { text: `gate failed: ${opts.gate} (${detail})`, value: null, ok: false };
@@ -516,6 +587,23 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 	});
 
 	return defineExtension({ name: 'subagent-workflow', tools: [SubagentWorkflow] });
+}
+
+/** 惰性幂等的本地 worktree 挂载：目录已存在则复用，否则从基准仓库创建；失败静默（gate 回退原目录）。 */
+async function ensureWorktree(worktreePath: string, branchName: string): Promise<void> {
+	try {
+		if (existsSync(worktreePath)) return;
+		const repoDir = dirname(dirname(worktreePath));
+		await mkdir(dirname(worktreePath), { recursive: true });
+		await new Promise<void>((resolve, reject) => {
+			execFile('git', ['-C', repoDir, 'worktree', 'add', '-B', branchName, worktreePath, 'HEAD'], (error) => {
+				if (error !== null && error !== undefined) reject(error);
+				else resolve();
+			});
+		});
+	} catch {
+		// 非 git 仓库或创建失败：保持现状，gate 的 cd 会在同一命令里失败并给出可读错误。
+	}
 }
 
 /** api.env 是 ToolExecutionApi 上的同步属性（可能为 undefined）。 */
