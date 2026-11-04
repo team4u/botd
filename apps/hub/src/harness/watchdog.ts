@@ -182,7 +182,7 @@ export async function runWatchdogPass(
 			const signature = [
 				`turns:${live?.run?.turns ?? 0}`,
 				`inputs:${live?.run?.inputs?.length ?? 0}`,
-				`tools:${(live?.tools ?? []).map((t) => `${t.id}:${t.status}:${t.output?.length ?? 0}`).join(',')}`,
+				`tools:${(live?.tools ?? []).map((t) => `${t.callId}:${t.name}:${t.status}:${t.output?.length ?? 0}`).join(',')}`,
 				`gen:${live?.generation?.message ? JSON.stringify(live.generation.message).length : 0}`,
 			].join('|');
 			await harness.commit(async (tx) => {
@@ -240,20 +240,23 @@ async function scanFailedConversations(
 ): Promise<number[]> {
 	const failed: number[] = [];
 	// 分页扫描全部会话（不再硬编码 ID 上限，高 ID 会话同样能被扫到）：
-	// LiveDoc 只在会话有活动后才存在，缺席即跳过。
-	let cursor: Cursor | undefined = undefined;
-	for (;;) {
-		const page = await harness.scanConversations({}, 256, cursor, context);
-		for (const record of page.items) {
-			const id = Number(record.id);
-			const live = await harness.snapshot(LiveDoc, id as never, context).catch(() => undefined);
-			if (live?.runFailure !== undefined) {
-				failed.push(id);
-				into.add(id);
-			}
+	// LiveDoc 只在会话有活动后才存在，缺席即跳过。扫描只能走事务接口。
+	const allConversationIds: number[] = [];
+	await harness.commit(async (tx) => {
+		let cursor: Cursor | undefined;
+		for (;;) {
+			const page = await tx.scanConversations({}, 256, cursor);
+			for (const record of page.items) allConversationIds.push(Number(record.id));
+			if (page.next === undefined) break;
+			cursor = page.next;
 		}
-		if (page.next === undefined) break;
-		cursor = page.next;
+	}, context);
+	for (const id of allConversationIds) {
+		const live = await harness.snapshot(LiveDoc, id as never, context).catch(() => undefined);
+		if (live?.runFailure !== undefined) {
+			failed.push(id);
+			into.add(id);
+		}
 	}
 	return failed;
 }
