@@ -1,133 +1,187 @@
-# 工作区指南（Space 与代码变更）
+# 工作区与远端执行环境
 
 [文档目录](README.md)
 
-Space 是会话或主 BOT 绑定的项目工作目录（`workspaceDir`）。绑定后，智能体在你的真实仓库里执行命令、加载项目约定、产生代码变更。本文说明 Space 的绑定方式、绑定后的行为，以及代码变更抽屉的用法。日常操作概览见[用户指南](user-guide.md)，内部机制见[架构说明](architecture.md)。
+本文档说明工作区隔离机制、脑手分离架构与临时工作树生命周期。
 
-## Space 是什么
+## 架构原理
 
-一个 Space 就是一个目录。优先级从高到低：
+系统采用脑手分离架构。
 
-| 优先级 | 来源 | 说明 |
-| --- | --- | --- |
-| 1 | 会话 `workspaceDir` | 会话顶栏可随时换绑，只影响本会话 |
-| 2 | 主 BOT `workspaceDir` | Bot 编辑器的 Space Path，对该 BOT 的所有会话生效 |
-| 3 | 默认目录 | 节点数据目录下 `bots/<botId>/workspace/`，与真实项目无关 |
+Hub 承担大脑职责。Hub 托管 Harness 调度器、任务状态机与 SQLite 事务存储。
 
-子代理的工作区跟随主 BOT 的解析结果：会话绑定了就用会话的，否则用主 BOT 的。
+Node 承担远端手职责。Node 作为无状态守护进程，提供真实文件系统与 Shell 环境。
 
-## 绑定与换绑
+Hub 与 Node 通过 WebSocket 连接通信。底层 RPC 采用 birpc 双向通道。
 
-三个入口，均即时生效：
+```mermaid
+flowchart LR
+    subgraph Hub["Hub（大脑）"]
+        Harness["Harness 调度器"]
+        REnv["RemoteExecutionEnv"]
+        Doc[("TargetDoc 状态")]
+    end
 
-| 入口 | 操作 | 适用 |
-| --- | --- | --- |
-| 创建会话快选 | 新建会话时从扫描结果中点选芯片 | 一次性任务，开箱即用 |
-| Bot 编辑器 Space Path | 编辑 BOT 时填写默认工作区目录 | 主 BOT 专属，长期项目 |
-| 会话顶栏文件夹徽标 | 点击徽标输入目录，留空即解绑 | 会话中途换绑/解绑 |
+    subgraph Node["Node（远端手）"]
+        Server["NodeEnvRpcServer"]
+        WT[".botd-worktrees/ 隔离区"]
+        Git["Git 仓库主工作区"]
+    end
 
-快选列表扫描节点上的项目目录：扫描根为环境变量 `BOTD_CODE_DIR`（默认 `~/code`），Git 仓库会附带当前分支名。手动输入任意绝对路径也有效，`~/` 前缀会展开为用户主目录。
+    Harness --> REnv
+    REnv <-->|"WebSocket + birpc"| Server
+    Server --> WT
+    Server --> Git
+```
 
-解绑后，回合回落到下一优先级的目录；会话级解绑后回落到主 BOT 的 Space（若有），再回落到默认目录。
+### RemoteExecutionEnv 契约
 
-## 绑定后发生了什么
+Hub 在 `apps/hub/src/harness/remote-env.ts` 中实现 `RemoteExecutionEnv`。
 
-### 每回合在工作区内执行
+该类实现 `ExecutionEnv` 接口。
 
-回合的工作目录（`cwd`）设为工作区，`bash`、`read`、`edit` 等工具默认在此目录下运行。附件仍落盘到工作区的 `inbox/` 子目录。
+每次工具调用时，Harness 从会话的 `TargetDoc` 读取 `nodeId` 与 `cwd`。
 
-### AGENTS.md 自动注入
+Harness 据此构造 `RemoteExecutionEnv` 实例。
 
-工作区根目录存在 `AGENTS.md` 时，内容自动注入系统提示。把项目约定、构建命令、目录结构写在里面，智能体每回合都能看到，无需重复粘贴。
+实例标识固定为 `remote:<nodeId>`。
 
-### 子代理 worktree 隔离
+系统对同一节点同一路径的文件写入自动排队，消除并发写入冲突。
 
-子代理默认与主 BOT 共享工作区目录。调用 `Agent` 工具传 `isolation: "worktree"` 时，基于绑定仓库创建 Git worktree，适合多个子代理并发修改同一仓库的场景。
+### 节点离线等待与恢复
 
-### `#` 文件补全
+BYOM 模式支持节点临时离线。
 
-输入框中空格后键入 `#` 触发工作区文件补全。匹配策略按优先级分四级：
+当目标节点离线时，`RemoteExecutionEnv` 调用 `waitForNodeOnline`。
 
-| 级别 | 策略 | 示例 |
-| --- | --- | --- |
-| 1 | 文件名精确 / 前缀 | `read` 匹配 `read.ts` |
-| 2 | 文件名驼峰 / 分隔符缩写 | `wdd` 匹配 `WorkspaceDiffDrawer.tsx`，`ci` 匹配 `ChatInput.tsx` |
-| 3 | 路径子串包含 | `protocol` 匹配 `packages/protocol/src/index.ts` |
-| 4 | 字符顺序子序列 | `pk/i` 匹配 `packages/protocol/index.ts` |
+调用挂起并等待节点重新创建连接。
 
-选中后插入 `` `relative/path` ``（反引号包裹的相对路径）。最多展示 12 条，同层级按路径长度升序。文件列表按 `(nodeId, botId, sessionId)` 缓存，同一会话只拉取一次；非 Git 工作区回退为浅层扫描。
+等待过程监听 Chord 的 `Context` 取消信号。
 
-### 同目录回合互斥
+用户取消任务时，环境立即返回终止错误。
 
-同一工作区目录上的回合跨会话串行执行（`runRegistry.acquireWorkspace`）：先到先跑，后到按 FIFO 排队，排队中被取消会立即退出。不同 Space 之间互不阻塞。这是为了防止两个会话同时改同一个仓库。
+节点重新上线后，挂起的操作继续执行。
 
-### 工作区内的运行时文件
+## 文件系统与 Shell 执行
 
-| 路径 | 内容 |
-| --- | --- |
-| `inbox/` | 回合附件与上游产物落盘 |
-| `.bg/<jobId>.log` | 后台任务输出（见 [CLI 参考](cli.md) 的 `botd bg`） |
-| `.workflows/*.jsonl` | 跨 BOT 工作流断点日志与脚本副本，供断点续跑 |
+Node 端在 `apps/node/src/env-rpc-server.ts` 中启动 `createNodeEnvRpcServer`。
 
-## 代码变更抽屉
+Node 封装 `NodeExecutionEnv`，按目录缓存执行环境。
 
-会话内按 `Ctrl/Cmd+.`（或点击顶栏文件 diff 图标）打开。展示工作区的 Git 净变更，来源为 `getWorkspaceDiff`。
+### 文件系统操作
 
-### 文件卡
+Hub 将文件操作转化为 RPC 请求发送给 Node：
 
-每个变更文件一张卡：状态徽标、路径、增删行统计，点击展开或折叠完整 diff。
+- `envReadTextFile` 与 `envWriteFile`：读写文本文件。
+- `envReadBinaryFile`：读写二进制文件，数据通过 Base64 传输。
+- `envOpenTextLineReader`：打开流式行读取器句柄。
+- `envOpenBinaryReader`：打开二进制按需分块读取器句柄。
+- `envFileInfo` 与 `envListFiles`：读取文件元信息与目录树。
 
-| 徽标 | 含义 |
-| --- | --- |
-| `M` | 修改 |
-| `A` | 新增（含未跟踪文件） |
-| `D` | 删除 |
-| `R` | 重命名 |
-| `U` | 合并冲突未解决 |
+### Shell 命令执行与流式传输
 
-### 引用与行级引用
+Worker 调用 `bash` 工具时触发 `envExec` RPC。
 
-- 文件卡上的「引用」按钮把 `` `path` `` 插入输入框。
-- 悬停 diff 行行首出现的 `+` 号，或直接点击行，插入行级引用 `` `path` (+line) ``。
+Node 收到请求后执行命令：
 
-### 单文件回滚
+1. Node 为每个命令分配唯一的 `execId`。
+2. Node 使用 `withCancel` 派生独立的取消上下文。
+3. Node 子进程将输出分块推入 `onEnvExecOutput` 回调。
+4. Hub 侧 `ExecOutputHub` 按 `execId` 分发输出，实时推送到 Web 界面。
+5. 进程超时或用户终止任务时，Hub 调用 `envAbortExec` 销毁进程树。
 
-文件卡上的回滚按钮为两段式确认：第一次点击进入确认态，3 秒内再次点击才执行，超时自动复位。已跟踪文件执行 `git checkout HEAD -- <path>`，未跟踪文件直接删除。该操作不可撤销。
+Node 启动环境将 `~/.botd/bin` 放入 `PATH` 首位。
 
-### Pin 双栏
+Worker 在脚本中可直接调用 `botd` 命令行工具。
 
-宽屏（`lg` 及以上）可点 Pin 将抽屉固定为右侧分栏，与左侧对话并排、互不遮挡。偏好记忆在浏览器 `localStorage`。右栏同一时刻只放一个抽屉：代码变更优先于子代理运行详情。Pin 状态下左栏消息或工具变化会静默刷新 diff 内容。
+## Git Worktree 并发隔离
 
-### 非 Git 工作区与边界情况
+旧架构使用全局工作区互斥锁。
 
-| 情况 | 表现 |
-| --- | --- |
-| 非 Git 目录 | 回退展示本会话工具调用触碰过的文件列表，无回滚能力 |
-| Git 仓库 | 顶栏显示当前分支徽标 |
-| 单文件 diff 过长 | 截断并提示「diff 过长已截断，完整内容请在工作区查看」 |
-| 变更文件过多 | 截断并提示「变更文件过多已截断」 |
+同一目录上的任务必须串行排队。
 
-## 常见问题
+新架构采用 Git Worktree 隔离机制，支持并发修改。
 
-**工作区不是 Git 仓库，能用吗？**
-能。命令执行、AGENTS.md 注入、`#` 补全（浅层扫描）均可用；Diff 抽屉回退为会话触碰文件列表，回滚不可用。
+```mermaid
+sequenceDiagram
+    participant R as Router 会话
+    participant W as 后台 Worker
+    participant H as Hub RemoteEnv
+    participant N as Node Git 隔离器
 
-**为什么我的回合在排队？**
-另一个会话的回合正在同一工作区目录上执行。同目录串行、不同 Space 并行，排队按 FIFO。等待中可随时取消。
+    R->>W: spawn_worker(worktree: true)
+    W->>H: 初始化执行环境
+    H->>N: envAcquireWorktree(repoDir, workerId)
+    N->>N: git worktree add -B botd/worker-1 .botd-worktrees/worker-1
+    N-->>H: 返回 worktreePath 与分支名
+    H-->>W: 挂载独立工作树目录
+    W->>N: 执行代码修改与测试
+    W->>R: afterRun 汇报执行完成
+    R->>H: 任务结束触发清理
+    H->>N: envReleaseWorktree(worktreePath)
+    N->>N: git worktree remove --force && git worktree prune
+    N-->>H: 清理完成确认
+```
 
-**换绑 Space 立即生效吗？**
-立即生效。正在执行的回合仍用旧目录跑完，下一个回合起用新目录。
+### 并发安全机制
 
-**回滚会动我的暂存区吗？**
-回滚针对工作区文件相对 `HEAD` 的变更，执行 `git checkout HEAD -- <path>`，未提交且未推送的修改会丢失。确认前看清楚两段式确认提示。
+当 Router 派发后台任务时，传入 `worktree: true` 参数。
 
-## API 一览
+Hub 向 Node 发送 `envAcquireWorktree` 请求：
 
-| 端点 | 用途 |
-| --- | --- |
-| `GET /api/nodes/:nodeId/spaces` | 扫描节点可绑定的项目 Space（含 Git 分支） |
-| `GET /api/nodes/:nodeId/bots/:botId/files?q=` | 工作区文件模糊检索（`#` 补全后端） |
-| `GET /api/nodes/:nodeId/bots/:botId/diff` | 工作区 Git 净变更 |
-| `POST /api/nodes/:nodeId/bots/:botId/diff/revert` | 单文件回滚 |
+- Node 检查目标目录是否为 Git 仓库。
+- 若目标目录非 Git 仓库，Node 返回原目录并标记 `isGitRepo: false`。
+- 若目标目录为 Git 仓库，Node 创建独立工作树。
 
-契约细节见 [API 参考](api.md)。会话换绑走 `PATCH /api/sessions/:id`（`workspaceDir` 字段）。
+工作树路径规则：`<repoDir>/.botd-worktrees/<workerId>`。
+
+对应分支规则：`botd/<workerId>`。
+
+两个 Worker 同时修改同名文件时，各自在独立的工作树中读写。
+
+Worker 之间的修改互不覆盖，不需要互斥等待。
+
+## 临时工作树生命周期管理
+
+### 创建阶段
+
+Node 接收 `envAcquireWorktree` 请求。
+
+Node 先执行清理动作，保障幂等性：
+
+```bash
+git worktree remove --force <worktreePath>
+git worktree prune
+```
+
+接着 Node 执行工作树创建命令：
+
+```bash
+git worktree add -B botd/<workerId> <worktreePath> HEAD
+```
+
+Hub 将创建的 `worktreePath` 存储到 Worker 的 `TargetDoc`。
+
+Worker 后续所有文件读写和 Shell 命令均在该目录下执行。
+
+### 释放与清理阶段
+
+Worker 结束执行后，生命周期钩子触发释放流程：
+
+1. Hub 发送 `envReleaseWorktree` RPC 请求。
+2. Node 强制删除临时工作树目录：
+   ```bash
+   git worktree remove --force <worktreePath>
+   ```
+3. Node 修剪过期的工作树索引记录：
+   ```bash
+   git worktree prune
+   ```
+4. 若指定 `deleteBranch: true`，Node 同时删除临时分支：
+   ```bash
+   git branch -D botd/<workerId>
+   ```
+
+Node 进程重启或收到清理信号时，调用 `envCleanup`。
+
+Node 扫描并清理所有残留的临时工作树。

@@ -1,266 +1,177 @@
-# 模型与供应商
+# 模型供应商与代码执行沙箱
 
 [文档目录](README.md)
 
-本文说明如何为节点配置模型供应商凭据，以及如何查看和扩展模型目录。
+本文档说明模型供应商支持、BYOM 机制、集中式凭据管理与 QuickJS 沙箱执行原理。
 
-凭据以节点为单位保存。Bot 通过 `provider/modelId` 引用模型。同一个 Hub 下的不同节点可以使用不同账户。
+## 概述
 
-Provider 鉴权有两条通道：
+系统依托 `@earendil-works/pi-ai` 统一抽象层对接模型供应商。
 
-1. **API Key 注入**：在节点进程环境设置 `BOTD_API_KEY_<PROVIDER>`，见[使用环境变量注入 Key](#使用环境变量注入-key)。
-2. **交互式登录**：Web 设置界面（按节点作用域选择）或 `botd providers login`，凭据写入节点 `~/.botd/.agent/auth.json`。交互过程支持 OAuth 跳转、设备码、手动粘贴回调、选择账号四种提示类型。
+Hub 集中托管模型目录与调用凭据。
 
-只支持 OAuth 的供应商不能只配 Key；botd 不借用宿主机 `~/.agent/auth.json` 之外的密钥。
+每个角色分身可独立绑定适合的模型。
 
-## 使用网页配置
+后台 Worker 默认挂载 QuickJS 沙箱，安全执行复杂数据变换。
 
-1. 确认目标节点在线。
-2. 打开左下角「模型与凭据设置」。
-3. 在「模型与服务商设置」面板选择自己拥有的节点。
-4. 搜索供应商，选择它支持的登录方式。
-5. 按弹窗提示完成 API Key、OAuth 或设备码交互。
-6. 编辑 Bot，选择该供应商和模型。
+## 模型供应商支持
 
-面板打开时自动选中第一个在线节点。模型目录按节点读取；未指定节点时，Hub 返回内置目录且所有供应商 `configured:false`。节点目录获取失败时，页面回退到内置目录并给出提示。
+系统内置支持主流商业模型与开源生态模型。
 
-### 登录方式
+模型目录由 `packages/models/src/index.ts` 的 `buildModelCatalog` 统一构建。
 
-供应商只展示它声明支持的登录方式：
+系统支持的供应商列表如下：
 
-- `api_key`：按提示输入 Key。部分供应商还会询问账户、区域或端点。
-- `oauth`：按提示打开授权链接、输入设备码，或粘贴回调结果。
+| 供应商 ID | 名称 | 认证方式 | 典型模型 |
+| :--- | :--- | :--- | :--- |
+| `anthropic` | Anthropic | `api_key` | `claude-3-7-sonnet`, `claude-3-5-haiku` |
+| `openai` | OpenAI | `api_key` | `gpt-4o`, `gpt-4o-mini`, `o1`, `o3-mini` |
+| `google` | Google Gemini | `api_key` | `gemini-2.5-pro`, `gemini-2.5-flash` |
+| `deepseek` | DeepSeek | `api_key` | `deepseek-chat`, `deepseek-reasoner` |
+| `mistral` | Mistral AI | `api_key` | `mistral-large`, `codestral` |
+| `groq` | Groq | `api_key` | `llama-3.3-70b-versatile` |
+| `moonshotai` | Moonshot Kimi | `api_key` | `moonshot-v1-auto` |
+| `minimax` | MiniMax | `api_key` | `MiniMax-Text-01` |
+| `openrouter` | OpenRouter | `api_key` | 聚合各大开源与商业模型 |
 
-只支持 OAuth 的供应商没有通用 Key 输入项。
+### 模型元数据与能力
 
-登录成功后，凭据写入该节点的 `~/.botd/.agent/auth.json`。凭据配置成功不代表账户有权调用目录中的每个模型。实际权限、配额和费用由供应商决定。
+模型目录向前端投递标准化元数据：
 
-节点的默认 Bot 使用 `anthropic/claude-sonnet-4-5`。添加其他供应商后，需要修改 Bot 的模型选择。
+- `id` 与 `name`：模型标识与名称。
+- `reasoning`：是否具备显式推理能力。
+- `thinkingLevels`：支持的思考深度等级。
+- `input`：输入模态支持范围（包含 `text` 或 `image`）。
+- `contextWindow` 与 `maxTokens`：上下文窗口大小与最大输出长度。
 
-### OAuth 与远程回调
+## BYOM 机制
 
-授权过程可能要求打开链接、输入设备码，或粘贴回调结果。
+BYOM 即 Bring Your Own Model。
 
-浏览器和节点在不同机器时，浏览器回调地址可能无法到达节点。若页面提供手动输入框，请粘贴地址栏中的完整回调 URL 或授权码。
+系统支持用户输入自有 API Key。
 
-不要把授权链接、验证码和回调结果发到公共会话。
+用户接入自建兼接口或第三方网关。
 
-### 取消与清除
+### 角色分身独立模型配置
 
-取消登录会终止当前登录交互。清除凭据会调用节点上的登出逻辑，删除该供应商保存的凭据。
-
-清除本地记录不会撤销供应商侧的账户授权，也不会移除 Node Agent 进程环境中的 Key。需要撤销时，还应到供应商侧处理。
-
-## 使用 CLI 配置
-
-以下命令都在仓库根目录执行，通过 Hub 转发到节点。全局选项 `--json` 输出机器可读结果。
-
-### providers login
-
-```bash
-pnpm node providers login <nodeId> <providerId> --method <api_key|oauth> [--wait [seconds]]
-```
-
-- `--method` 必填，取值 `api_key` 或 `oauth`。
-- `--wait` 缺省等待 120 秒，可指定其他秒数。省略该选项时立即返回。
-- 等待期间每 2 秒轮询一次登录状态。
-- 超时仍未完成时，命令以退出码 1 结束并输出警告。
-
-命令输出登录事件：
-
-- `info`：提示消息，可能附带链接。
-- `auth_url`：需要打开的授权链接。
-- `device_code`：设备码和验证网址。
-- `progress`：进行中消息。
-
-登录过程出现输入提示时，输出中会给出应答命令。
-
-### providers respond
-
-```bash
-pnpm node providers respond <nodeId> <loginId> --prompt <promptId> [--value <value>]
-```
-
-- `--prompt` 必填，填入提示输出中的 prompt ID。
-- `--value` 省略时从 stdin 读取应答值，并去掉行尾换行。
-
-提示有四种类型：`text` 输入文本，`secret` 输入密钥，`manual_code` 粘贴回调 URL 或授权码，`select` 选择选项。单条应答不超过 65536 字符。
-
-### providers status
-
-```bash
-pnpm node providers status <nodeId> <loginId>
-```
-
-查询一次登录的状态和事件历史。
-
-### providers cancel
-
-```bash
-pnpm node providers cancel <nodeId> <loginId>
-```
-
-取消一个进行中的登录。
-
-### providers logout
-
-```bash
-pnpm node providers logout <nodeId> <providerId>
-```
-
-登出节点上的一个供应商，删除该供应商保存的凭据。
-
-### 登录的时限与并发限制
-
-- 登录超过 10 分钟未完成时自动过期，需要重新发起。
-- 同一供应商同时只允许一个进行中的登录。
-- 单节点最多 64 个进行中的登录。
-- 单次登录最多保留 100 条事件。
-- 密钥类应答值不会回显到状态输出，错误消息中以 `[redacted]` 脱敏。
-
-## 使用环境变量注入 Key
-
-在启动 Node Agent 的终端配置：
-
-```bash
-export BOTD_API_KEY_ANTHROPIC='replace-with-your-api-key'
-pnpm node start
-```
-
-变量名规则：供应商标识转大写，非字母数字字符替换为下划线。取值首尾空白会被去掉，空白值视为未设置。
-
-| 供应商标识 | 环境变量 |
-| --- | --- |
-| `anthropic` | `BOTD_API_KEY_ANTHROPIC` |
-| `openai` | `BOTD_API_KEY_OPENAI` |
-| `openrouter` | `BOTD_API_KEY_OPENROUTER` |
-| `zai-coding-cn` | `BOTD_API_KEY_ZAI_CODING_CN` |
-
-`.env.example` 列出了 `BOTD_API_KEY_ANTHROPIC`、`BOTD_API_KEY_OPENAI`、`BOTD_API_KEY_DEEPSEEK`、`BOTD_API_KEY_GOOGLE`、`BOTD_API_KEY_OPENROUTER` 的示例。Compose 模板会把这些变量传给 cloud-node 容器。源码命令不自动加载 `.env` 文件，请先在进程环境中 `export`。
-
-已经运行的 Node Agent 不会读取另一个终端新设置的变量。系统服务也不会自动继承交互终端的环境。
-
-鉴权优先级如下：
-
-1. Node Agent 进程中的 `BOTD_API_KEY_<PROVIDER>`。
-2. 节点 `.agent/auth.json` 中保存的 SDK 凭据。
-3. 两者都缺少时，调用报配置错误。
-
-模型鉴权不回退到 `OPENAI_API_KEY` 等宿主变量，也不读取宿主机的 Pi 登录状态。
-
-只支持 OAuth 的供应商会拒绝 Key 覆盖，调用报错 `Provider "<id>" requires OAuth login rather than an API key`。
-
-网页目录中的「已配置」状态来自节点保存的 SDK 凭据，不检测环境变量是否生效。
-
-## 凭据存在哪里
-
-默认位置为 `~/.botd/.agent/auth.json`。自定义节点数据目录时，位置跟随 `BOTD_DATA_DIR` 或 `--data-dir`。
-
-文件权限为 `0600`。文件内容不加密，请保护节点账户、文件权限和备份。
-
-网页和 CLI 的登录输入先经过 Hub，再转发到节点。Hub 只转发登录状态，不保存模型凭据。
-
-Bot 的 `env.json` 用于工具环境，不是模型凭据库。详细边界见[安全说明](security.md)。
-
-## 模型目录的来源与更新
-
-模型目录有三层来源：
-
-1. **内置目录**：来自 `@botd/models` 包，底层是锁定版本（1.5.0）的 pi-ai 内置供应商，覆盖 anthropic、openai、google、azure、bedrock、deepseek、openrouter、moonshot、qwen、groq、xai、zai、xiaomi、minimax、mistral、github-copilot 等 40 余家。目录元数据带 `source: 'pi'` 和 `sdkVersion`。升级依赖才会更新内置目录。
-2. **节点自定义模型**：节点数据目录下 `.agent/models.json` 中声明的兼容端点模型。
-3. **扩展注册的供应商**：节点安装的扩展可调用运行时 `registerProvider(name, { baseUrl, apiKey, headers, models })` 注册自定义网关供应商。读取节点目录时，Node Agent 按需激活扩展池，把注册项合入目录。扩展损坏或注册项非法时跳过，不影响内置目录。
-
-节点读取目录时，只对扩展注册的供应商发起在线刷新。刷新带 8 秒超时。刷新成功的结果写入 `.agent/models-store.json`，之后的目录读取和 Bot 调用直接复用，不再联网。刷新失败时回退到已保存的目录。
-
-Bot 会话使用的运行时禁止模型网络访问，启动时不刷新目录。仅当所选模型不在目录中且供应商存在时，运行时对该供应商做一次 8 秒在线刷新，仍找不到才报错。
-
-目录只输出公开元数据：供应商 `id`、`name`、`authMethods`，模型的 `id`、`name`、`reasoning`、`thinkingLevels`、`input`、`contextWindow`、`maxTokens`。自定义端点的 `baseUrl`、`apiKey` 和私有 headers 不会出现在目录中。
-
-## 思考档位
-
-思考档位共七级：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。目录为每个模型输出 `thinkingLevels`，Web 端只展示该模型实际支持的档位；Bot 已选档位不再受支持时，自动钳制到最近的档位（优先更深，其次更浅）。Bot 默认 `medium`。
-
-## 查看模型目录
-
-不带参数时查看 Hub 缓存的内置目录：
-
-```bash
-pnpm node models catalog
-```
-
-指定节点时查看该节点的实际目录：
-
-```bash
-pnpm node models catalog --node <nodeId>
-```
-
-查询节点要求拥有它，且它在线。离线时 Hub 返回 `Node is offline`。
-
-命令输出示例：
-
-```text
-source: pi  sdk: 1.5.0
-anthropic               Anthropic  auth=[api_key,oauth]  configured=false  models=17
-  claude-sonnet-4-5  (Claude Sonnet 4.5 (latest), reasoning)
-```
-
-内置目录中所有供应商显示 `configured=false`。节点目录中，保存了凭据的供应商显示 `configured=true` 和凭据类型。
-
-## 配置兼容模型端点
-
-自定义目录位于节点 `.agent/models.json`。以下结构与仓库测试使用的兼容端点配置一致：
+每个 Bot Persona 拥有独立的配置：
 
 ```json
 {
-  "providers": {
-    "local-gateway": {
-      "baseUrl": "http://127.0.0.1:8000/v1",
-      "api": "openai-completions",
-      "apiKey": "configured-through-botd",
-      "models": [
-        {
-          "id": "your-model-id",
-          "reasoning": false,
-          "contextWindow": 8192,
-          "maxTokens": 1024
-        }
-      ]
-    }
+  "botId": "architect",
+  "name": "架构师",
+  "model": {
+    "provider": "anthropic",
+    "modelId": "claude-3-7-sonnet"
   }
 }
 ```
 
-替换端点、模型 ID 和能力参数。窗口大小只是结构示例，必须按实际模型填写。
+### 双层会话差异化模型策略
 
-`apiKey` 是模型目录字段。botd 的鉴权检查不读取它，仍要求环境变量或保存的 SDK 凭据。
+系统采用分层调度策略：
 
-例如，在启动节点前设置：
+- 前台 Router：配置低延迟模型（例如 `gemini-2.5-flash` 或 `gpt-4o-mini`），毫秒级响应用户。
+- 后台 Worker：配置高逻辑模型（例如 `claude-3-7-sonnet` 或 `deepseek-reasoner`），处理代码开发。
 
-```bash
-export BOTD_API_KEY_LOCAL_GATEWAY='replace-with-your-gateway-key'
-pnpm node start
+跨角色委派时，任务自动切换至目标角色指定的模型。
+
+## 集中式凭据管理
+
+旧版本将凭据分散存储在各个 Node 节点。
+
+新架构采用集中式凭据管理。
+
+所有凭据统一存储在 Hub SQLite 的 `provider_credentials` 表中。
+
+```sql
+CREATE TABLE IF NOT EXISTS provider_credentials (
+  provider_id TEXT PRIMARY KEY,
+  auth_type TEXT NOT NULL,
+  api_key TEXT,
+  oauth_json TEXT,
+  updated_at TEXT NOT NULL
+);
 ```
 
-随后刷新节点模型目录，为 Bot 选择 `local-gateway` 和对应模型。模型不存在于目录时，运行时会报错，不会猜测接口。
+### 集中凭据的安全机制
 
-示例使用的协议标识为 `openai-completions`。其他端点按所用 pi-ai 支持的协议配置。
+- 凭据仅由 Hub 统一持久化，Node 端不持有密钥明文。
+- API 接口向前端返回目录时，只指示 `configured: true`。
+- Hub 绝向前端回显 API Key 原始内容。
+- 环境变量支持通过 `BOTD_API_KEY_<PROVIDER>` 预置密钥。
 
-### 手输自定义服务商标识
+## 凭据配置流程
 
-目录中找不到目标供应商时，在 Bot 编辑器的服务商下拉选择「自定义服务商...」，手输 provider 标识（保存时转小写），再选择或手输模型型号。该路径配合上一节的自定义端点或扩展注册的供应商使用。
+用户可通过 Web 管理面板或 HTTP API 配置模型凭据。
 
-## 常见问题
+### Web 界面配置
 
-| 现象 | 检查方法 |
-| --- | --- |
-| 不能选择节点登录 | 确认节点在线，并且属于当前用户 |
-| Key 已配置但仍提示缺少凭据 | 检查 Bot 的供应商、节点数据目录和进程环境 |
-| 清除凭据后仍能调用 | 检查 `BOTD_API_KEY_*` 是否仍存在 |
-| 环境变量 Key 被拒绝 | 该供应商只支持 OAuth，改用网页或 CLI 登录 |
-| 登录超时失败 | 登录超过 10 分钟自动过期，重新发起 |
-| 同一供应商无法再次登录 | 该供应商已有进行中的登录，先取消或等待完成 |
-| 模型不在下拉列表 | 检查节点目录、自定义配置和扩展加载结果 |
-| 目录有条目，但调用被拒绝 | 检查供应商权限、配额和端点网络 |
-| 远程 OAuth 卡在回调 | 按页面提示使用手动回调或设备码流程 |
+1. 打开 Web 管理界面左下角「模型与服务商配置」。
+2. 浏览支持的供应商列表。
+3. 选择目标供应商并点击「配置凭据」。
+4. 输入该供应商的有效 API Key。
+5. 点击提交完成配置。
 
-模型加载与凭据解析代码见 [models.ts](../apps/node/src/models.ts)，登录交互见 [provider-auth.ts](../apps/node/src/provider-auth.ts)，目录构建见 [packages/models](../packages/models/src/index.ts)。
+### HTTP API 交互协议
+
+凭据配置通过 `apps/hub/src/providers.ts` 路由处理：
+
+1. 客户端发起登录请求：
+   ```bash
+   POST /api/providers/login
+   {"providerId": "deepseek", "method": "api_key"}
+   ```
+2. Hub 创建待处理会话并返回交互提示：
+   ```json
+   {
+     "ok": true,
+     "state": {
+       "id": "login_uuid",
+       "status": "pending",
+       "prompt": { "id": "api_key", "type": "secret" }
+     }
+   }
+   ```
+3. 客户端应答凭据：
+   ```bash
+   POST /api/providers/respond
+   {"loginId": "login_uuid", "promptId": "api_key", "value": "sk-xxxxxx"}
+   ```
+4. Hub 校验输入非空后写入 SQLite，立即标记配置成功。
+
+## Worker QuickJS codemode 沙箱
+
+后台 Worker 处理多步骤任务时，经常面临数据筛选与逻辑组合需求。
+
+若直接在 Shell 中执行 Node.js，存在启动开销与权限逃逸风险。
+
+系统引入 QuickJS 沙箱提供代码执行模式。
+
+### 沙箱架构设计
+
+Hub 依赖 `@earendil-works/pi-codemode` 与 `@earendil-works/pi-durable/codemode`。
+
+```mermaid
+flowchart TD
+    subgraph Hub["Hub 运行时"]
+        Worker["后台 Worker 会话"]
+        Tool["codemode 工具"]
+        Sandbox["CodemodeSandbox (QuickJS 引擎)"]
+        Memory[("独立隔离内存堆")]
+    end
+
+    Worker -->|"调用工具"| Tool
+    Tool -->|"提交代码片段"| Sandbox
+    Sandbox --> Memory
+    Sandbox -->>|"返回安全 JSON 结果"| Tool
+    Tool -->>|"投递工具执行产物"| Worker
+```
+
+### Codemode 机制与优势
+
+- 轻量启动：QuickJS 内存开销极低，微秒级创建执行上下文。
+- 内存安全：代码在独立的 JavaScript 虚拟机内执行，禁止直接访问宿主操作系统的底层资源。
+- 自动化集成：`HubDurableRuntime` 初始化时创建共享 `CodemodeSandbox`。
+- 自动挂载扩展：Worker 启动时，系统自动挂载 `codemodeExtension`。
+- 生命周期同存：Hub 进程关闭时，自动执行 `codemodeSandbox.close()` 释放内存。
