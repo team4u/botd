@@ -68,7 +68,7 @@ const toListItem = (entry: WorkerEntry, sessionId: string): WorkerListItem => ({
 });
 
 /** 读取（或懒建）会话对应的 Router 会话 id。 */
-async function ensureRouterConversationId(
+export async function ensureRouterConversationId(
   runtime: HubDurableRuntime,
   sessionId: string,
   botId: string,
@@ -403,4 +403,149 @@ async function transcriptOf(conversation: NonNullable<Awaited<ReturnType<HubDura
       text: (entry.model ?? []).map(messageText).filter(Boolean).join('\n'),
     };
   });
+}
+
+// --- Durable 会话 → botd 会话消息镜像（SSE 桥） ---------------------------
+
+/** 提取 EntryRecord.model 中 assistant 文本。 */
+function assistantEntryText(entry: { model?: readonly unknown[] }): string | undefined {
+  const first = entry.model?.[0] as { role?: string; content?: unknown } | undefined;
+  if (first === undefined || first.role !== 'assistant') return undefined;
+  const content = first.content;
+  if (typeof content === 'string') return content || undefined;
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .map((block) =>
+      block !== null && typeof block === 'object' && typeof (block as { text?: unknown }).text === 'string'
+        ? (block as { text: string }).text
+        : '',
+    )
+    .filter(Boolean)
+    .join('\n');
+  return text || undefined;
+}
+
+/** worker 完成通知（以 UserMessage 提交给 Router）：透传以 [Worker Completed: 开头的文本。 */
+function workerReportText(entry: { model?: readonly unknown[] }): string | undefined {
+  const first = entry.model?.[0] as { role?: string; content?: unknown } | undefined;
+  if (first === undefined || first.role !== 'user') return undefined;
+  const content = first.content;
+  if (typeof content !== 'string') return undefined;
+  return content.startsWith('[Worker Completed:') ? content : undefined;
+}
+
+/** durable Router 会话的镜像器：把新 assistant 回复 / worker 完成通知同步回 botd 会话。 */
+export interface DurableSessionMirror {
+  /** 确保 sessionId 的 Router 会话已建立 watch（幂等）。 */
+  ensure: (sessionId: string) => Promise<void>;
+  /** 停止全部 watch（Hub 关闭时调用）。 */
+  close: () => void;
+}
+
+/**
+ * Durable Router 会话 → botd 会话消息镜像：`HubDurableRuntime` 产生新的 assistant
+ * 回复或 worker 完成通知时落库 `db.createMessage({ role: 'assistant' })` 并广播
+ * `message_created`，前端时间线自动更新。
+ *
+ * - 每个 Router 会话一个 watch，按已镜像的最大 entry id 增量推进；
+ * - message id 确定性（`msg_dur_<sessionId>_<entryId>`），重启重放幂等（主键冲突吞掉）；
+ * - worker 完成后 `GET /api/sessions/:id/workers` 直接可查 completed 状态与 summary。
+ */
+export function createDurableSessionMirror(
+  ctx: Pick<HubContext, 'db' | 'sseHub'> & { durableRuntime?: HubDurableRuntime },
+): DurableSessionMirror {
+  const { db, sseHub } = ctx;
+  const watches = new Map<string, { unwatch: () => Promise<void>; lastMirrored: number }>();
+  let closed = false;
+
+  const mirror = (sessionId: string, botId: string, entry: { id: unknown; kind: string; model?: readonly unknown[] }): void => {
+    if (closed) return;
+    const text = entry.kind === 'botd.worker-report' ? workerReportText(entry) : assistantEntryText(entry);
+    if (text === undefined) return;
+    let message;
+    try {
+      message = db.createMessage({
+        id: `msg_dur_${sessionId}_${Number(entry.id)}`,
+        sessionId,
+        role: 'assistant',
+        senderBotId: botId,
+        content: text,
+      });
+    } catch {
+      return; // 主键冲突：重启重放，该条已落库
+    }
+    sseHub.broadcast(sessionId, { type: 'message_created', message: message.message });
+  };
+
+  const attach = async (sessionId: string, conversationId: string): Promise<void> => {
+    if (closed || watches.has(conversationId)) return;
+    const botId = db.getSession(sessionId)?.leadBotId;
+    if (botId === undefined) return;
+    const state: { unwatch: () => Promise<void>; lastMirrored: number } = {
+      unwatch: async () => undefined,
+      lastMirrored: 0,
+    };
+    watches.set(conversationId, state);
+    try {
+      const unwatch = await ctx.durableRuntime!.watchConversationView(conversationId, (view) => {
+        const current = watches.get(conversationId);
+        if (current === undefined) return;
+        const entries = view.entries as unknown as Array<{ id: unknown; kind: string; model?: readonly unknown[] }>;
+        for (const entry of entries) {
+          const entryId = Number(entry.id);
+          if (!Number.isInteger(entryId) || entryId <= current.lastMirrored) continue;
+          current.lastMirrored = entryId;
+          mirror(sessionId, botId, entry);
+        }
+      });
+      if (closed) {
+        watches.delete(conversationId);
+        await unwatch().catch(() => undefined);
+        return;
+      }
+      state.unwatch = unwatch;
+    } catch {
+      watches.delete(conversationId); // watch 失败（会话缺失等）：下次提交重试
+    }
+  };
+
+  return {
+    ensure: async (sessionId) => {
+      const rt = ctx.durableRuntime;
+      if (rt === undefined || closed) return;
+      const conversationId = await findRouterConversationId(rt, sessionId);
+      if (conversationId !== undefined) await attach(sessionId, conversationId);
+    },
+    close: () => {
+      closed = true;
+      for (const state of watches.values()) void state.unwatch().catch(() => undefined);
+      watches.clear();
+    },
+  };
+}
+
+/**
+ * 用户消息 → Durable Router 会话提交（全双工：`whenBusy: "steer"`）：
+ * 确保 Router 会话存在（懒建）并提交用户消息，镜像先行挂接。
+ * 无 durable runtime 时返回 undefined，调用方继续走原 GroupRouter 路径。
+ */
+export async function submitSessionMessageToDurable(
+  ctx: Pick<HubContext, 'db' | 'sseHub'> & {
+    durableRuntime?: HubDurableRuntime;
+    getDurableRuntime?: () => Promise<HubDurableRuntime>;
+  },
+  sessionId: string,
+  botId: string,
+  content: string,
+  mirror?: DurableSessionMirror,
+): Promise<string | undefined> {
+  const rt = ctx.durableRuntime ?? (ctx.getDurableRuntime ? await ctx.getDurableRuntime() : undefined);
+  if (rt === undefined) return undefined;
+  const routerId = await ensureRouterConversationId(rt, sessionId, botId);
+  await mirror?.ensure(sessionId);
+  await rt.submitUserMessage(routerId, content, {
+    requestId: `hub-msg:${sessionId}:${Date.now()}`,
+    whenBusy: 'steer',
+  });
+  return routerId;
 }
