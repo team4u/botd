@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
+import type { Models } from '@earendil-works/pi-ai';
 import type { UserRecord } from '@botd/protocol';
 import { HubDatabase } from './db.js';
 import { AuthManager } from './auth.js';
@@ -12,6 +13,7 @@ import { NodeConnectionManager } from './ws-hub.js';
 import { GroupRouter } from './group-router.js';
 import { createStaticMiddleware } from './static.js';
 import { ArtifactService } from './artifact-service.js';
+import { HubDurableRuntime, type BotPersonaConfig } from './harness/hub-harness.js';
 import { registerProviderRoutes } from './providers.js';
 import { registerArtifactRoutes } from './artifacts.js';
 import { registerShareRoutes } from './share.js';
@@ -27,6 +29,7 @@ import { registerBotRoutes } from './routes/bots.js';
 import { registerSessionRoutes } from './routes/sessions.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { registerEventRoutes } from './routes/events.js';
+import { registerWorkerRoutes } from './routes/workers.js';
 import type { HubApp } from './routes/context.js';
 
 export interface HubOptions {
@@ -34,6 +37,10 @@ export interface HubOptions {
   adminPassword?: string;
   webDir?: string;
   artifactsDir?: string;
+  /** 直接注入 Super-agent 持久运行时（测试用）；缺省时懒创建。 */
+  durableRuntime?: HubDurableRuntime;
+  /** 懒创建 Super-agent 持久运行时使用的模型配置（测试注入 faux provider）。 */
+  durableModels?: Models;
 }
 
 export interface StartHubOptions extends HubOptions {
@@ -47,6 +54,10 @@ export interface HubInstance {
   connections: NodeConnectionManager;
   router: GroupRouter;
   sseHub: SseHub;
+  /** Super-agent 持久运行时；仅当通过 HubOptions 注入时存在。 */
+  durableRuntime?: HubDurableRuntime;
+  /** 取（或懒创建）Super-agent 持久运行时；同一 Hub 生命周期内复用同一实例。 */
+  ensureDurableRuntime: () => Promise<HubDurableRuntime>;
   drain: (timeoutMs?: number) => Promise<{ drained: boolean; remaining: number }>;
   close: () => Promise<void>;
 }
@@ -102,6 +113,44 @@ export function createHub(options?: HubOptions): HubInstance {
   app.notFound(c => c.json({ error: 'Not found' }, 404));
 
   const ctx = { db, auth, connections, router, sseHub, artifacts };
+
+  // Super-agent 持久运行时：懒创建（createHub 保持同步，不破坏既有调用方）。
+  // 首次使用时打开 HubDurableRuntime（dbPath 存在时用 SQLite，否则 MemoryStorage），
+  // 并把 Hub 数据库里的全部 Bot 同步为持久分身。
+  let durableRuntime: HubDurableRuntime | undefined = options?.durableRuntime;
+  let durableRuntimeOpening: Promise<HubDurableRuntime> | undefined;
+  const ensureDurableRuntime = async (): Promise<HubDurableRuntime> => {
+    if (durableRuntime !== undefined) return durableRuntime;
+    if (durableRuntimeOpening === undefined) {
+      durableRuntimeOpening = (async () => {
+        const runtime = await HubDurableRuntime.open(
+          options?.dbPath
+            ? { dbPath: `${options.dbPath}.durable.sqlite`, ...(options?.durableModels ? { models: options.durableModels } : {}) }
+            : { ...(options?.durableModels ? { models: options.durableModels } : {}) },
+        );
+        runtime.harness.resume();
+        syncBotPersonas(runtime);
+        durableRuntime = runtime;
+        return runtime;
+      })();
+    }
+    return durableRuntimeOpening;
+  };
+  /** Hub 数据库 Bot → 持久分身（模型/工作目录来自 Bot 配置）。 */
+  const syncBotPersonas = (runtime: HubDurableRuntime): void => {
+    for (const bot of db.getAllBots()) {
+      const persona: BotPersonaConfig = {
+        botId: bot.id,
+        name: bot.name,
+        model: { provider: bot.modelProvider, modelId: bot.modelId },
+        instructions: `You are "${bot.name}", the lead bot of this hub.${bot.description ? ` ${bot.description}` : ''}`,
+        nodeId: bot.nodeId,
+        cwd: bot.workspaceDir?.trim() || process.cwd(),
+      };
+      runtime.registerPersona(persona);
+    }
+  };
+
   registerCoreMiddleware(app, ctx); // health/bodyLimit/auth，注册顺序即执行顺序
   registerAuthRoutes(app, ctx);
   registerNodeRoutes(app, ctx);
@@ -117,6 +166,7 @@ export function createHub(options?: HubOptions): HubInstance {
   registerSkillSyncAndAskRoutes(app, db, connections, router);
   registerDelegationRoutes(app, db, router, sseHub);
   const unsubscribeChannels = registerChannelRoutes(app, db, router, sseHub);
+  registerWorkerRoutes(app, { ...ctx, getDurableRuntime: ensureDurableRuntime, ...(durableRuntime ? { durableRuntime } : {}) });
 
   // 静态 Web 文件 & SPA fallback
   app.use('*', createStaticMiddleware(options?.webDir));
@@ -133,6 +183,12 @@ export function createHub(options?: HubOptions): HubInstance {
     router.close();
     connections.close();
     sseHub.close();
+    // 懒创建的运行时随 Hub 一起关闭（含正在打开中的）；外部注入的运行时由注入方负责
+    if (options?.durableRuntime === undefined) {
+      await durableRuntimeOpening?.then((rt) => rt.close()).catch(() => undefined);
+      if (durableRuntime !== undefined) await durableRuntime.close().catch(() => undefined);
+      durableRuntime = undefined;
+    }
     db.close();
   };
 
@@ -142,6 +198,8 @@ export function createHub(options?: HubOptions): HubInstance {
     connections,
     router,
     sseHub,
+    ...(durableRuntime ? { durableRuntime } : {}),
+    ensureDurableRuntime,
     drain,
     close,
   };

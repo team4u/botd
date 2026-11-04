@@ -33,6 +33,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { createRouterExtension, type PersonaResolver, ROUTER_EXTENSION, type WorkerAgentFactory, WORKER_EXTENSION } from "./router-extension.js";
 import { createWorkerExtension, WORKER_EXTENSION_NAME } from "./worker-extension.js";
+import { createWorkflowExtension } from "./workflow-extension.js";
 import { RecallIndexDoc, SessionIndexDoc, TargetDoc, WorkerRegistryDoc, type WorkerEntry } from "./docs.js";
 
 /** Configuration of one Bot persona. */
@@ -60,6 +61,8 @@ export interface HubRuntimeOptions {
 	extensions?: Extension[];
 	/** Resolve worker agent overrides; default keeps the host default selection (CodingTools + botd-worker). */
 	workerAgent?: WorkerAgentFactory;
+	/** Builds a conversation's execution env; defaults to a NodeExecutionEnv on the target cwd. */
+	env?: HarnessOptions["env"];
 	onReport?: (report: unknown) => void;
 }
 
@@ -94,15 +97,21 @@ export class HubDurableRuntime {
 	readonly models: Models;
 	private readonly personas = new Map<string, BotPersonaConfig>();
 	private readonly mainSessions = new Map<string, Conversation>();
+	private readonly routerExtension: Extension;
+	private readonly workerExtension: Extension;
 
 	private constructor(
 		harness: import("@earendil-works/pi-durable").Harness,
 		registry: Registry,
 		models: Models,
+		routerExtension: Extension,
+		workerExtension: Extension,
 	) {
 		this.harness = harness;
 		this.registry = registry;
 		this.models = models;
+		this.routerExtension = routerExtension;
+		this.workerExtension = workerExtension;
 	}
 
 	static async open(options: HubRuntimeOptions = {}, context: Context = BACKGROUND_CONTEXT): Promise<HubDurableRuntime> {
@@ -116,6 +125,9 @@ export class HubDurableRuntime {
 		registry.install(CodingTools);
 		const workerExtension = createWorkerExtension();
 		registry.install(workerExtension);
+		// SubagentWorkflow is a session-wide capability: every Router and Worker
+		// conversation can run deterministic crash-resumable multi-step workflows.
+		registry.install(createWorkflowExtension());
 		const personas = new Map<string, BotPersonaConfig>();
 		const routerExtension = createRouterExtension({
 			resolvePersona: (botId) => {
@@ -137,11 +149,14 @@ export class HubDurableRuntime {
 		const harnessOptions: HarnessOptions = {
 			models,
 			registry,
-			env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? process.cwd() }),
+			env:
+				options.env === undefined
+					? ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? process.cwd() })
+					: options.env,
 			...(options.onReport === undefined ? {} : { onReport: options.onReport as never }),
 		};
 		const harness = await Harness.open(storage, harnessOptions, context);
-		const runtime = new HubDurableRuntime(harness, registry, models);
+		const runtime = new HubDurableRuntime(harness, registry, models, routerExtension, workerExtension);
 		// Persona lookups from tools run through this map (set via registerPersona).
 		(runtime as unknown as { personas: Map<string, BotPersonaConfig> }).personas === personas; // keep reference alive
 		runtime.#personaSource = personas;
@@ -168,12 +183,19 @@ export class HubDurableRuntime {
 		return [...this.personas.values()];
 	}
 
-	/** The router agent for a bot: persona model + botd-router extension + coding tools. */
+	/**
+	 * The router agent for a bot: persona model + persona instructions + the
+	 * `botd-router` extension, with the raw coding tools (`read`/`write`/`edit`/
+	 * `bash`) stripped from the model's tool surface — the foreground Router only
+	 * answers, recalls, and dispatches; any hands-on work belongs to a worker.
+	 */
 	routerAgent(persona: BotPersonaConfig): AgentChange {
 		return {
 			model: persona.model,
 			instructions: personaInstructions(persona),
 			cwd: persona.cwd,
+			extensions: { add: [this.routerExtension] },
+			modelTools: { remove: [...(CodingTools.tools ?? [])] },
 		};
 	}
 
@@ -327,12 +349,19 @@ export class HubDurableRuntime {
 		return { workerId, conversation, ...({ submission } as object) } as { workerId: string; conversation: Conversation };
 	}
 
-	/** Worker agent: persona model, worker extension, coding tools. */
+	/**
+	 * Worker agent: persona model + the `botd-worker` extension. CodingTools and
+	 * SubagentWorkflow are installed host-wide, so the worker's default selection
+	 * (all installed extensions) already carries them. `modelTools: null` clears
+	 * any filter a forked parent carried: a worker always gets the coding tools back.
+	 */
 	workerAgentFor(persona: BotPersonaConfig): AgentChange {
 		return {
 			model: persona.model,
 			instructions: personaInstructions(persona),
 			cwd: persona.cwd,
+			extensions: { add: [this.workerExtension] },
+			modelTools: null,
 		};
 	}
 
@@ -401,6 +430,87 @@ export class HubDurableRuntime {
 		return async () => {
 			await watch.stop();
 		};
+	}
+
+	/**
+	 * Steer (or follow up on) a worker registered under a Router conversation.
+	 * Returns false when the worker or its conversation is unknown.
+	 */
+	async steerWorker(
+		routerConversationId: string,
+		workerId: string,
+		message: string,
+		mode: "steer" | "followUp" = "steer",
+		context: Context = BACKGROUND_CONTEXT,
+	): Promise<boolean> {
+		const entry = await this.findWorkerEntry(routerConversationId, workerId, context);
+		if (entry === undefined) return false;
+		const conversation = await this.harness.conversation(stringToConversationId(entry.conversationId), context);
+		if (conversation === undefined) return false;
+		await conversation.submit(
+			{
+				type: "input",
+				content: message,
+				whenBusy: mode,
+				requestId: `steer:${workerId}:${Date.now()}`,
+			},
+			context,
+		);
+		return true;
+	}
+
+	/**
+	 * Abort a worker registered under a Router conversation and mark it aborted.
+	 * Returns false when the worker is unknown (an already-finished worker still
+	 * aborts its conversation idempotently).
+	 */
+	async stopWorker(
+		routerConversationId: string,
+		workerId: string,
+		context: Context = BACKGROUND_CONTEXT,
+	): Promise<boolean> {
+		const entry = await this.findWorkerEntry(routerConversationId, workerId, context);
+		if (entry === undefined) return false;
+		// Mark first, then abort: an explicit stop wins over a completion report
+		// that lands while the abort is in flight (same ordering as stop_worker).
+		await this.harness.commit(async (tx) => {
+			const doc = await tx.doc(WorkerRegistryDoc, stringToConversationId(routerConversationId));
+			const record = doc.workers[workerId];
+			if (record !== undefined && record.status === "running") {
+				record.status = "aborted";
+				record.finishedAt = Date.now();
+			}
+		}, context);
+		const conversation = await this.harness.conversation(stringToConversationId(entry.conversationId), context);
+		if (conversation !== undefined) await conversation.abort(context, { background: true }).catch(() => undefined);
+		await this.harness.commit(async (tx) => {
+			const doc = await tx.doc(WorkerRegistryDoc, stringToConversationId(routerConversationId));
+			const record = doc.workers[workerId];
+			if (record !== undefined && record.status === "running") {
+				record.status = "aborted";
+				record.finishedAt = Date.now();
+			}
+		}, context);
+		return true;
+	}
+
+	/** Chain of Recall lookup by node id (worker, spill, thread, ...). */
+	async recall(id: string, context: Context = BACKGROUND_CONTEXT): Promise<unknown> {
+		const index = await this.harness.snapshot(RecallIndexDoc, context);
+		return index?.nodes[id];
+	}
+
+	private async findWorkerEntry(
+		routerConversationId: string,
+		workerId: string,
+		context: Context,
+	): Promise<WorkerEntry | undefined> {
+		const registry = await this.harness.snapshot(
+			WorkerRegistryDoc,
+			stringToConversationId(routerConversationId),
+			context,
+		);
+		return registry?.workers[workerId];
 	}
 
 	/** Session-wide recall index. */
