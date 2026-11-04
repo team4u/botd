@@ -403,6 +403,10 @@ export class HubDurableRuntime {
 			title: string;
 			task: string;
 			threadKey?: string;
+			threadKeys?: string[];
+			worktree?: boolean;
+			cwd?: string;
+			sessionId?: string;
 			forkContext?: boolean;
 		},
 		context: Context = BACKGROUND_CONTEXT,
@@ -415,6 +419,14 @@ export class HubDurableRuntime {
 		let workerId = "";
 		let conversationId = "";
 		await this.harness.commit(async (tx) => {
+			// Parent target first: the worker inherits its cwd / sessionId unless the
+			// caller overrides them explicitly.
+			const parentTarget = await tx.doc(TargetDoc, stringToConversationId(sessionId));
+			const effectiveCwd = options.cwd || parentTarget.cwd || persona.cwd;
+			// 上下文会话链：显式 sessionId > 父 target 继承 > 父会话本身
+			//（Router 主会话未显式落 sessionId 时，worker 以父会话为上下文根）。
+			const effectiveSessionId = options.sessionId || parentTarget.sessionId || sessionId;
+			const threadKeys = options.threadKeys?.length ? options.threadKeys : (options.threadKey ? [options.threadKey] : []);
 			const fork = options.forkContext !== false;
 			const latest = await tx.latestEntryId(stringToConversationId(sessionId));
 			const record =
@@ -422,28 +434,33 @@ export class HubDurableRuntime {
 					? await tx.forkConversation(stringToConversationId(sessionId), latest, { ownership: { kind: "ownerless" } })
 					: await tx.createConversation({ ownership: { kind: "ownerless" } });
 			conversationId = conversationIdToString(record.id);
-			await configure(tx, record.id, this.workerAgentFor(persona));
+			await configure(tx, record.id, { ...this.workerAgentFor(persona), cwd: effectiveCwd });
+			const registry = await tx.doc(WorkerRegistryDoc, stringToConversationId(sessionId));
+			workerId = `w-${Object.keys(registry.workers).length + 1}-${record.id}`;
+			const branchName = `botd/${workerId}`;
+			const worktreePath = `${effectiveCwd}/.botd-worktrees/${workerId}`;
 			const target = await tx.doc(TargetDoc, record.id);
 			Object.assign(target, {
 				botId: options.botId,
 				role: "worker" as const,
 				parentConversationId: sessionId,
 				nodeId: persona.nodeId,
-				cwd: persona.cwd,
-				threadKeys: options.threadKey === undefined ? [] : [options.threadKey],
+				cwd: effectiveCwd,
+				...(effectiveSessionId ? { sessionId: effectiveSessionId } : {}),
+				...(options.worktree === true ? { worktreePath, branchName } : {}),
+				threadKeys,
 				title: options.title,
 			});
-			const registry = await tx.doc(WorkerRegistryDoc, stringToConversationId(sessionId));
-			workerId = `w-${Object.keys(registry.workers).length + 1}-${record.id}`;
 			registry.workers[workerId] = {
 				workerId,
 				conversationId,
 				botId: options.botId,
 				title: options.title,
 				status: "running",
-				threadKeys: options.threadKey === undefined ? [] : [options.threadKey],
+				threadKeys,
 				nodeId: persona.nodeId,
-				cwd: persona.cwd,
+				cwd: effectiveCwd,
+				...(options.worktree === true ? { worktreePath, branchName } : {}),
 				startedAt: Date.now(),
 			};
 			const recall = await tx.doc(RecallIndexDoc);
@@ -457,6 +474,9 @@ export class HubDurableRuntime {
 				relatedIds: [],
 				createdAt: Date.now(),
 			};
+			if (options.worktree === true) {
+					(recall.nodes[workerId] as unknown as Record<string, unknown>).data = { node: { worktreePath, branchName } };
+				}
 		}, context);
 
 		const conversation = (await this.harness.conversation(stringToConversationId(conversationId), context))!;

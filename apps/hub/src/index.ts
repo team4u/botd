@@ -1,7 +1,10 @@
 import { randomBytes } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import type { Server } from 'node:http';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
@@ -14,8 +17,7 @@ import { NodeConnectionManager } from './ws-hub.js';
 import { GroupRouter } from './group-router.js';
 import { createStaticMiddleware } from './static.js';
 import { ArtifactService } from './artifact-service.js';
-import { HubDurableRuntime, type BotPersonaConfig } from './harness/hub-harness.js';
-import { SecretInjectingEnv } from './harness/hub-harness.js';
+import { HubDurableRuntime, SecretInjectingEnv, type BotPersonaConfig } from './harness/hub-harness.js';
 import { createHubCredentialStore } from './credential-store.js';
 import { loadDynamicDurableExtension } from './harness/dynamic-extension-loader.js';
 import { TargetDoc } from './harness/docs.js';
@@ -33,6 +35,7 @@ import { registerMessageRoutes } from './routes/messages.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerWorkerRoutes, createDurableSessionMirror, type DurableSessionMirror } from './routes/workers.js';
 import { runWatchdogPass } from './harness/watchdog.js';
+import { seedBuiltinSkillInHub } from './builtin-skill-seed.js';
 import type { HubApp, HubContext } from './routes/context.js';
 
 export interface HubOptions {
@@ -75,6 +78,8 @@ export interface StartHubResult extends HubInstance {
 export function createHub(options?: HubOptions): HubInstance {
   // DB 与密钥自举
   const db = new HubDatabase({ dbPath: options?.dbPath });
+  // 内置技能 botd-cli 种子化：零节点连接时每个分身仍可 load_skill（幂等，版本标记控制重写）
+  seedBuiltinSkillInHub(db);
   const savedSecret = db.getSetting<string>('auth_secret');
   const auth = new AuthManager(savedSecret);
   if (!savedSecret) {
@@ -192,11 +197,16 @@ export function createHub(options?: HubOptions): HubInstance {
             // RemoteExecutionEnv；否则退回本地 NodeExecutionEnv（自动合并分身 env）。
             env: async ({ conversationId, cwd }) => {
               const targetInfo = await remoteTargetFor(String(conversationId), cwd);
+              const finalCwd = targetInfo.effectiveCwd ?? cwd ?? process.cwd();
               if (targetInfo.nodeId !== undefined && connections.getNodeEnvRpc(targetInfo.nodeId) !== undefined) {
-                return connections.createRemoteEnv({ nodeId: targetInfo.nodeId, cwd: cwd ?? process.cwd() });
+                return connections.createRemoteEnv({
+                  nodeId: targetInfo.nodeId,
+                  cwd: finalCwd,
+                  ...(targetInfo.shellEnv ? { shellEnv: targetInfo.shellEnv } : {}),
+                });
               }
               return new SecretInjectingEnv({
-                cwd: cwd ?? process.cwd(),
+                cwd: finalCwd,
                 ...(targetInfo.shellEnv ? { shellEnv: targetInfo.shellEnv } : {}),
               });
             },
@@ -216,6 +226,27 @@ export function createHub(options?: HubOptions): HubInstance {
     }
     return durableRuntimeOpening;
   };
+  /** 会话 → 已挂载 worktree 路径缓存：每个 conversation 只幂等获取一次。 */
+  const acquiredWorktrees = new Map<string, string>();
+  const runGit = promisify(execFile);
+
+  /**
+   * 本地 git worktree 挂载：非 git 仓库降级返回 repoDir；preferredPath 已存在则
+   * 复用；否则 `git worktree add -B botd/<workerId> <path> HEAD`。任何失败回退 repoDir。
+   */
+  async function acquireLocalWorktree(repoDir: string, workerId: string, preferredPath: string): Promise<string> {
+    try {
+      const probe = await runGit('git', ['-C', repoDir, 'rev-parse', '--is-inside-work-tree']);
+      if (probe.stdout.trim() !== 'true') return repoDir;
+      if (fs.existsSync(preferredPath)) return preferredPath;
+      await fs.promises.mkdir(path.dirname(preferredPath), { recursive: true });
+      await runGit('git', ['-C', repoDir, 'worktree', 'add', '-B', `botd/${workerId}`, preferredPath, 'HEAD']);
+      return preferredPath;
+    } catch {
+      return repoDir;
+    }
+  }
+
   /** 解析 Bot 的自定义环境变量（存储在 Hub SQLite bot_files.env）。 */
   const readBotEnvMap = (botId: string): Record<string, string> | undefined => {
     const raw = db.getBotFile(botId, 'env').trim();
@@ -234,13 +265,16 @@ export function createHub(options?: HubOptions): HubInstance {
   };
 
   /**
-   * 解析会话应使用的目标节点与分身环境变量：优先读 durable 侧 `botd.target` 文档（Router/
-   * Worker 会话记录了 botId 与 nodeId），否则按 Bot 的 workspaceDir 匹配 cwd。
+   * 解析会话应使用的目标节点、分身环境变量与实际执行 cwd：优先读 durable 侧
+   * `botd.target` 文档（Router/Worker 会话记录了 botId 与 nodeId），否则按
+   * Bot 的 workspaceDir 匹配 cwd。`BOTD_SESSION_ID` / `BOTD_BOT_ID` 上下文
+   * 环境变量随 shellEnv 注入；目标带 worktreePath 时首问幂等挂载隔离工作树
+   * （远端节点走 envAcquireWorktree RPC，本地走 acquireLocalWorktree）。
    */
   const remoteTargetFor = async (
     conversationId: string,
     cwd?: string,
-  ): Promise<{ nodeId?: string; shellEnv?: Record<string, string> }> => {
+  ): Promise<{ nodeId?: string; shellEnv?: Record<string, string>; effectiveCwd?: string }> => {
     if (durableRuntime !== undefined) {
       try {
         const numeric = Number(conversationId);
@@ -251,9 +285,30 @@ export function createHub(options?: HubOptions): HubInstance {
             BACKGROUND_CONTEXT,
           );
           if (target !== undefined) {
-            const shellEnv = target.botId ? readBotEnvMap(target.botId) : undefined;
-            if (target.nodeId !== '') return { nodeId: target.nodeId, ...(shellEnv ? { shellEnv } : {}) };
-            if (shellEnv) return { shellEnv };
+            const shellEnv: Record<string, string> = {
+              ...(readBotEnvMap(target.botId) ?? {}),
+              ...(target.botId ? { BOTD_BOT_ID: target.botId } : {}),
+              ...(target.sessionId ? { BOTD_SESSION_ID: target.sessionId } : {}),
+            };
+            let effectiveCwd = target.cwd || cwd || process.cwd();
+            if (target.worktreePath) {
+              const cached = acquiredWorktrees.get(conversationId);
+              if (cached !== undefined) {
+                effectiveCwd = cached;
+              } else {
+                const workerId = path.basename(target.worktreePath) || `w-${conversationId}`;
+                const envRpc = target.nodeId ? connections.getNodeEnvRpc(target.nodeId) : undefined;
+                if (envRpc?.envAcquireWorktree) {
+                  const res = await envRpc.envAcquireWorktree({ repoDir: effectiveCwd, workerId });
+                  effectiveCwd = res.worktreePath || effectiveCwd;
+                } else {
+                  effectiveCwd = await acquireLocalWorktree(effectiveCwd, workerId, target.worktreePath);
+                }
+                acquiredWorktrees.set(conversationId, effectiveCwd);
+              }
+            }
+            if (target.nodeId !== '') return { nodeId: target.nodeId, shellEnv, effectiveCwd };
+            return { shellEnv, effectiveCwd };
           }
         }
       } catch {
@@ -278,6 +333,8 @@ export function createHub(options?: HubOptions): HubInstance {
         bot.inheritSkills && parent
           ? (parent.enabledSkills ?? bot.enabledSkills ?? [])
           : (bot.enabledSkills ?? []);
+      // 内置技能 botd-cli 始终可用（Hub SQLite 已种子化），不受 Bot 配置影响
+      const effectiveSkillsWithBuiltin = Array.from(new Set(['botd-cli', ...effectiveSkills]));
       const systemMd = db.getBotFile(bot.id, 'system').trim();
       const memoryMd = db.getBotFile(bot.id, 'memory').trim();
       const botEnv = readBotEnvMap(bot.id);
@@ -290,7 +347,7 @@ export function createHub(options?: HubOptions): HubInstance {
           systemMd ||
           `You are "${bot.name}", the lead bot of this hub.${bot.description ? ` ${bot.description}` : ''}`,
         ...(memoryMd ? { memory: memoryMd } : {}),
-        enabledSkills: effectiveSkills,
+        enabledSkills: effectiveSkillsWithBuiltin,
         enabledExtensions: bot.enabledExtensions,
         ...(botEnv ? { env: botEnv } : {}),
         nodeId: bot.nodeId,

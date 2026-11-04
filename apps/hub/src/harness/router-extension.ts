@@ -211,6 +211,9 @@ export function createRouterExtension(options: {
 
 				const target = await tx.doc(TargetDoc, api.conversationId);
 				const cwd = args.cwd ?? target.cwd;
+				// Compute seq up front so the workerTarget, registry entry, and recall
+				// node below all agree on the same worktreePath / branchName.
+				const seq = Object.keys(registryBefore.workers).length + 1;
 				const agent = workerAgent({
 					botId: target.botId,
 					cwd: cwd === "" ? undefined : cwd,
@@ -234,6 +237,9 @@ export function createRouterExtension(options: {
 					record = await tx.createConversation({ ownership: { kind: "ownerless" } });
 				}
 				conversationId = conversationIdToString(record.id);
+				workerId = `w-${seq}-${record.id}`;
+				const branchName = `botd/${workerId}`;
+				const worktreePath = `${cwd}/.botd-worktrees/${workerId}`;
 
 				// 2. Worker agent: the worker extension (which brings CodingTools at the
 				//    host level) instead of the router extension.
@@ -247,14 +253,13 @@ export function createRouterExtension(options: {
 					parentConversationId: conversationIdToString(api.conversationId),
 					nodeId: target.nodeId,
 					cwd,
-					...(args.worktree === true ? { worktreePath: `${cwd}.botd-workers/${record.id}` } : {}),
+					...(target.sessionId ? { sessionId: target.sessionId } : {}),
+					...(args.worktree === true ? { worktreePath, branchName } : {}),
 					threadKeys: args.threadKey === undefined ? [] : [args.threadKey],
 					title: args.title,
 				});
 
 				// 4. Register in the router's worker registry.
-				const seq = Object.keys(registryBefore.workers).length + 1;
-				workerId = `w-${seq}-${record.id}`;
 				registryBefore.workers[workerId] = {
 					workerId,
 					conversationId,
@@ -264,7 +269,7 @@ export function createRouterExtension(options: {
 					threadKeys: args.threadKey === undefined ? [] : [args.threadKey],
 					nodeId: target.nodeId,
 					cwd,
-					...(args.worktree === true ? { worktreePath: `${cwd}.botd-workers/${record.id}` } : {}),
+					...(args.worktree === true ? { worktreePath, branchName } : {}),
 					startedAt: api.now(),
 					spawnedBy,
 				};
@@ -281,6 +286,9 @@ export function createRouterExtension(options: {
 					relatedIds: [],
 					createdAt: api.now(),
 				};
+				if (args.worktree === true) {
+					(recall.nodes[workerId] as unknown as Record<string, unknown>).data = { node: { worktreePath, branchName } };
+				}
 
 			}, context);
 
@@ -331,10 +339,24 @@ export function createRouterExtension(options: {
 			}
 			let workerId = "";
 			let conversationId = "";
+			// The full worker stack (CodingTools + WORKER_EXTENSION + persona skills +
+			// codemode + thinkingLevel) comes from the host's workerAgent factory, so a
+			// delegated bot reports back through the same afterRun machinery. Delegation
+			// targets another persona, so the factory change is layered over the target
+			// persona's identity (model / instructions / cwd): a factory that leaves a
+			// field unset falls back to the persona's, never to an unset model.
+			const factoryChange: AgentChange = options.workerAgent
+				? options.workerAgent({
+						botId: args.targetBotId,
+						cwd: persona.cwd === "" ? undefined : persona.cwd,
+						threadKey: args.threadKey,
+					})
+				: {};
 			const delegateAgent: AgentChange = {
-				model: persona.model,
-				instructions: persona.instructions,
-				...(persona.cwd === "" ? {} : { cwd: persona.cwd }),
+				...factoryChange,
+				...(factoryChange.model === undefined ? { model: persona.model } : {}),
+				...(factoryChange.instructions === undefined ? { instructions: persona.instructions } : {}),
+				...(factoryChange.cwd === undefined && persona.cwd !== "" ? { cwd: persona.cwd } : {}),
 			};
 
 			const spawnedBy = `delegate:${api.taskId}`;
@@ -347,6 +369,7 @@ export function createRouterExtension(options: {
 					return;
 				}
 
+				const target = await tx.doc(TargetDoc, api.conversationId);
 				const record = await tx.createConversation({ ownership: { kind: "ownerless" } });
 				conversationId = conversationIdToString(record.id);
 				await configure(tx, record.id, delegateAgent);
@@ -358,6 +381,7 @@ export function createRouterExtension(options: {
 					parentConversationId: conversationIdToString(api.conversationId),
 					nodeId: persona.nodeId,
 					cwd: persona.cwd,
+					...(target.sessionId ? { sessionId: target.sessionId } : {}),
 					threadKeys: args.threadKey === undefined ? [] : [args.threadKey],
 					title: args.title,
 				});
