@@ -3,7 +3,7 @@
  *
  * 1. 依赖引擎校验：@botd/node 公开运行时依赖的 engines 必须覆盖 >=20.0.0，
  *    并拒绝 commander@>=15（要求 >=22.12）这类破坏 Node 20 承诺的版本；
- * 2. 打包产物语法校验：dist/**/*.js 在 --check 下只允许已 shipped 的语法
+ * 2. 打包产物语法校验：dist 目录全部 .js 在 --check 下只允许已 shipped 的语法
  *    （import attributes 在最早的 20.x 上不可用）；
  * 3. 真实执行冒烟（条件触发）：当环境提供 BOTD_NODE20_BIN（CI 的 Node 20
  *    job 注入；本机可指向任意 Node 20 二进制）且存在已构建的 tarball 时，
@@ -13,7 +13,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

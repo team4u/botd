@@ -19,7 +19,7 @@ import { registerWorkersCommands } from './commands/workers.js';
 
 export function buildProgram(): Command {
   const program = new Command();
-  // createRequire 读 JSON：import attributes（with { type: 'json' }）在最早的
+  // createRequire 读 JSON：import attributes（with 语法）在最早的
   // Node 20 上不可用，而 @botd/node 承诺 engines >=20.0.0。
   const pkg = createRequire(import.meta.url)('../../package.json') as { version: string };
 
