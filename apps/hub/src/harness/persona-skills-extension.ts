@@ -4,7 +4,8 @@
  * Mounted on every Bot persona's Router and Worker conversations, it exposes
  * Hub-hosted capabilities as durable tools:
  *
- * - `load_skill`: reads a Hub skill's full SKILL.md (`hub_skills` in Hub SQLite);
+ * - `load_skill`: reads a Hub skill's SKILL.md — or any file inside the
+ *   skill directory via `path` — from the Hub filesystem skill store;
  * - `update_memory`: replaces or appends to the persona's MEMORY.md
  *   (`bot_files` kind `memory`) directly from tool execution;
  * - a prompt section advertising the persona's enabled skills (id + brief
@@ -20,10 +21,12 @@ import { TargetDoc } from "./docs.js";
 export const PERSONA_SKILLS_EXTENSION = "botd-persona-skills";
 
 export interface PersonaSkillsOptions {
-	/** Skills enabled for a bot persona (id + content), read from Hub SQLite. */
+	/** Skills enabled for a bot persona (id + content), resolved from the Hub filesystem store. */
 	getBotEnabledSkills?: (botId: string) => Array<{ id: string; content: string }>;
-	/** Full SKILL.md content of a skill id. */
-	getSkillContent?: (skillId: string) => string | undefined;
+	/** Content of one file inside a skill directory (default `SKILL.md`). */
+	getSkillContent?: (skillId: string, relativePath?: string, botId?: string) => string | undefined;
+	/** All files inside a skill directory, as relative POSIX paths. */
+	listSkillFiles?: (skillId: string, botId?: string) => string[];
 	/** The persona's current MEMORY.md content. */
 	getBotMemory?: (botId: string) => string;
 	/** Persists the persona's MEMORY.md content. */
@@ -63,17 +66,43 @@ export function createPersonaSkillsExtension(options: PersonaSkillsOptions = {})
 	const loadSkill = defineTool({
 		name: "load_skill",
 		description:
-			"Load the full SKILL.md instructions of a Hub-hosted skill by id. " +
+			"Load a Hub-hosted skill by id: defaults to its SKILL.md instructions, or pass " +
+			"path to read another file (e.g. 'references/cli.md') from the skill directory. " +
 			"Call this when a task matches one of the skills listed in the Available Skills section.",
 		parameters: obj({
 			skillId: str({ description: "The skill id from the Available Skills section" }),
+			path: opt(str({
+				description:
+					"Optional relative file path inside the skill directory (e.g. 'references/cli.md'). Defaults to 'SKILL.md'.",
+			})),
 		}),
-		async execute(input) {
-			const content = options.getSkillContent?.(input.skillId);
+		async execute(input, api) {
+			const botId = await personaBotIdOf(api);
+			const relPath = input.path?.trim() || "SKILL.md";
+			const content = options.getSkillContent?.(input.skillId, relPath, botId);
 			if (content === undefined || content === "") {
-				return { isError: true, output: [{ type: "text", text: `Skill not found: ${input.skillId}` }] };
+				return {
+					isError: true,
+					output: [
+						{
+							type: "text",
+							text:
+								relPath === "SKILL.md"
+									? `Skill not found: ${input.skillId}`
+									: `Skill file not found: ${input.skillId}/${relPath}`,
+						},
+					],
+				};
 			}
-			return { output: [{ type: "text", text: content }] };
+			if (relPath !== "SKILL.md" || options.listSkillFiles === undefined) {
+				return { output: [{ type: "text", text: content }] };
+			}
+			const files = (options.listSkillFiles(input.skillId, botId) ?? []).filter((f) => f !== "SKILL.md");
+			if (files.length === 0) return { output: [{ type: "text", text: content }] };
+			const footer =
+				`\n\n---\nSkill directory files (use load_skill with { skillId: "${input.skillId}", path: "<file>" } to read):\n` +
+				files.map((f) => `- ${f}`).join("\n");
+			return { output: [{ type: "text", text: content + footer }] };
 		},
 	});
 

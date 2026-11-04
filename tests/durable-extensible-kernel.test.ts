@@ -15,7 +15,7 @@
  *     references and loads through the dynamic loader.
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
@@ -28,7 +28,11 @@ import { MemoryStorage } from '@earendil-works/pi-durable';
 import { HubDurableRuntime, type BotPersonaConfig } from '../apps/hub/src/harness/hub-harness.js';
 import { TargetDoc } from '../apps/hub/src/harness/docs.js';
 import { createPersonaSkillsExtension } from '../apps/hub/src/harness/persona-skills-extension.js';
-import { formatUiSpecBlock, loadDynamicDurableExtension } from '../apps/hub/src/harness/dynamic-extension-loader.js';
+import {
+  formatUiSpecBlock,
+  loadDynamicDurableExtension,
+  loadDynamicDurableExtensionFromDir,
+} from '../apps/hub/src/harness/dynamic-extension-loader.js';
 import type { Extension } from '@earendil-works/pi-durable';
 import { HubDatabase } from '../apps/hub/src/db.js';
 import { createHub } from '../apps/hub/src/index.js';
@@ -113,7 +117,7 @@ export default defineExtension({
 });
 `;
 
-/** Open a runtime whose persona-skills callbacks read/write the given Hub DB. */
+/** Open a runtime whose persona-skills callbacks read/write the given Hub DB (multi-file aware). */
 async function openRuntimeWithDb(db: HubDatabase): Promise<{ runtime: HubDurableRuntime; faux: ReturnType<typeof fauxProvider> }> {
   const faux = fauxProvider({ models: [{ id: 'main' }] });
   const models = createModels();
@@ -122,11 +126,40 @@ async function openRuntimeWithDb(db: HubDatabase): Promise<{ runtime: HubDurable
     storage: new MemoryStorage(),
     models,
     skills: {
-      getBotEnabledSkills: (botId) =>
-        db.getBot(botId)?.enabledSkills.map((skillId) => ({ id: skillId, content: db.getSkillContent(skillId) })) ?? [],
-      getSkillContent: (skillId) => {
-        const content = db.getSkillContent(skillId);
+      getBotEnabledSkills: (botId) => {
+        const bot = db.getBot(botId);
+        if (!bot) return [];
+        const extraDirs = bot.workspaceDir ? [bot.workspaceDir] : [];
+        const seen = new Set<string>();
+        const skills: Array<{ id: string; content: string }> = [];
+        for (const skillId of bot.enabledSkills ?? []) {
+          if (seen.has(skillId)) continue;
+          const content = db.getSkillContent(skillId, 'SKILL.md', extraDirs);
+          if (content !== '') {
+            seen.add(skillId);
+            skills.push({ id: skillId, content });
+          }
+        }
+        for (const skill of db.listSkills(extraDirs)) {
+          if (seen.has(skill.id) || skill.source !== 'agent-dir') continue;
+          const content = db.getSkillContent(skill.id, 'SKILL.md', extraDirs);
+          if (content !== '') {
+            seen.add(skill.id);
+            skills.push({ id: skill.id, content });
+          }
+        }
+        return skills;
+      },
+      getSkillContent: (skillId, relPath, botId) => {
+        const bot = botId ? db.getBot(botId) : undefined;
+        const extra = bot?.workspaceDir ? [bot.workspaceDir] : [];
+        const content = db.getSkillContent(skillId, relPath ?? 'SKILL.md', extra);
         return content === '' ? undefined : content;
+      },
+      listSkillFiles: (skillId, botId) => {
+        const bot = botId ? db.getBot(botId) : undefined;
+        const extra = bot?.workspaceDir ? [bot.workspaceDir] : [];
+        return db.listSkillFiles(skillId, extra);
       },
       getBotMemory: (botId) => db.getBotFile(botId, 'memory'),
       setBotMemory: (botId, content) => db.setBotFile(botId, 'memory', content),
@@ -441,4 +474,340 @@ test('5. createHub wires skills callbacks into the durable runtime', async () =>
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+const MULTI_FILE_SKILL_MD = `---
+name: ops-runbook
+description: 生产环境运维手册与 CLI 参考
+---
+
+# Ops Runbook
+
+主文档见 SKILL.md，CLI 细节见 references/cli.md。
+`;
+
+const MULTI_FILE_EXTENSION_FILES: Record<string, string> = {
+  'index.ts': `import { defineExtension, defineTool } from '@earendil-works/pi-durable';
+import { formatLabel } from './helper';
+import { buildCard } from './sub/format';
+
+export default defineExtension({
+  name: 'multi-file-ext',
+  tools: [
+    defineTool({
+      name: 'render_multi_card',
+      description: '多文件扩展演示：跨文件导入 helper 与子目录模块',
+      parameters: {
+        type: 'object',
+        properties: { title: { type: 'string' }, value: { type: 'string' } },
+        required: ['title', 'value'],
+      },
+      async execute(input) {
+        const spec = buildCard(formatLabel(input.title), input.value);
+        const fence = String.fromCharCode(96, 96, 96);
+        return {
+          output: [{
+            type: 'text',
+            text: fence + 'ui' + String.fromCharCode(10) + JSON.stringify(spec, null, 2) + String.fromCharCode(10) + fence,
+          }],
+        };
+      },
+    }),
+  ],
+});
+`,
+  'helper.ts': `export function formatLabel(raw: string): string {
+  return \`label:\${raw}\`;
+}
+`,
+  'sub/format.ts': `export function buildCard(label: string, value: string) {
+  return {
+    root: 'card',
+    elements: {
+      card: { type: 'MetricCard', props: { label, value, status: 'ok', icon: 'sparkles' } },
+    },
+  };
+}
+`,
+};
+
+test('6. multi-file extension: db.saveExtensionFiles + PUT /api/extensions load and execute end-to-end', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'botd-multi-ext-'));
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const db = new HubDatabase({ dbPath: path.join(dir, 'hub.sqlite') });
+  // SQLite 不再存储 Skill/Extension 内容：旧表已彻底移除
+  const tables = db.db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('hub_skills', 'hub_extensions')")
+    .all() as { name: string }[];
+  assert.deepEqual(tables, [], 'hub_skills / hub_extensions tables must not exist');
+
+  db.saveExtensionFiles('multi-file-ext', MULTI_FILE_EXTENSION_FILES);
+  assert.deepEqual(db.listExtensionFiles('multi-file-ext'), ['helper.ts', 'index.ts', 'sub/format.ts']);
+  assert.ok(db.getExtensionContent('multi-file-ext', 'helper.ts').includes('formatLabel'));
+  assert.deepEqual(
+    db.listExtensions().map((e) => e.id),
+    ['multi-file-ext'],
+  );
+
+  // Directory package loader: relative imports across files resolve naturally.
+  const ext = await loadDynamicDurableExtensionFromDir('multi-file-ext', db.getExtensionDir('multi-file-ext'));
+  assert.equal(ext.name, 'multi-file-ext');
+  const tool = (ext.tools ?? []).find((x) => x.name === 'render_multi_card')!;
+  const result = await tool.execute(
+    { title: 'CPU', value: '42%' },
+    { conversationId: 0 as never, snapshot: async () => ({}) } as never,
+    undefined as never,
+  );
+  const text = String((result.output as { type: string; text: string }[])[0]?.text ?? '');
+  assert.ok(text.startsWith('```ui'));
+  const spec = JSON.parse(text.slice(text.indexOf('\n') + 1, text.lastIndexOf('```')).trim());
+  assert.equal(spec.elements.card.props.label, 'label:CPU', 'helper.ts import must take effect');
+
+  // { files } input through the same loader (staging path).
+  const viaFiles = await loadDynamicDurableExtension('multi-file-ext', { files: MULTI_FILE_EXTENSION_FILES });
+  assert.equal(viaFiles.name, 'multi-file-ext');
+
+  // HTTP route: PUT /api/extensions/:extId with files, GET with ?path=
+  const faux = fauxProvider({ models: [{ id: 'main' }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const hub = createHub({
+    dbPath: path.join(dir, 'hub2.sqlite'),
+    adminPassword: '{{SECRET_ab12cd34}}',
+    durableModels: models,
+  });
+  t.after(async () => {
+    await hub.close();
+  });
+  const login = await hub.app.request('/api/auth/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: '{{SECRET_ab12cd34}}' }),
+  });
+  const cookie = login.headers.get('set-cookie')!.split(';')[0];
+  const put = await hub.app.request('/api/extensions/multi-file-ext', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ files: MULTI_FILE_EXTENSION_FILES }),
+  });
+  assert.equal(put.status, 200);
+  const got = await hub.app.request('/api/extensions/multi-file-ext?path=helper.ts', { headers: { cookie } });
+  const payload = (await got.json()) as { content: string; files: string[] };
+  assert.ok(payload.content.includes('formatLabel'));
+  assert.deepEqual(payload.files, ['helper.ts', 'index.ts', 'sub/format.ts']);
+
+  // Single-file content PUT with custom path still works.
+  const putContent = await hub.app.request('/api/extensions/single-ext', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ content: MULTI_FILE_EXTENSION_FILES['index.ts'], path: 'index.ts' }),
+  });
+  assert.equal(putContent.status, 200);
+  assert.ok(hub.db.getExtensionContent('single-ext').includes('multi-file-ext'));
+});
+
+test('7. multi-file skill: saveSkillFiles, load_skill path reads, and traversal rejection', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'botd-multi-skill-'));
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const db = new HubDatabase({ dbPath: path.join(dir, 'hub.sqlite') });
+  db.saveSkillFiles('ops-runbook', {
+    'SKILL.md': MULTI_FILE_SKILL_MD,
+    'references/cli.md': '# CLI Reference\n\nRun `botd ops check` before rollout.\n',
+    'scripts/check.sh': '#!/bin/sh\nbotd ops check\n',
+  });
+  assert.deepEqual(db.listSkillFiles('ops-runbook'), [
+    'SKILL.md',
+    'references/cli.md',
+    'scripts/check.sh',
+  ]);
+  assert.ok(db.getSkillContent('ops-runbook', 'references/cli.md').includes('botd ops check'));
+  assert.equal(db.getSkillContent('ops-runbook', '../hub.sqlite'), '');
+  assert.throws(() => db.saveSkillFiles('evil', { '../escape.txt': 'x' }));
+
+  // Direct tool execution against the same callbacks production wires.
+  const personaExt = createPersonaSkillsExtension({
+    getSkillContent: (skillId, relPath) => {
+      const content = db.getSkillContent(skillId, relPath ?? 'SKILL.md');
+      return content === '' ? undefined : content;
+    },
+    listSkillFiles: (skillId) => db.listSkillFiles(skillId),
+  });
+  const loadSkill = (personaExt.tools ?? []).find((x) => x.name === 'load_skill')!;
+
+  const root = await loadSkill.execute(
+    { skillId: 'ops-runbook' },
+    { conversationId: 0 as never, snapshot: async () => ({}) } as never,
+    undefined as never,
+  );
+  const rootText = String((root.output as { type: string; text: string }[])[0]?.text ?? '');
+  assert.ok(rootText.includes('Ops Runbook'));
+  assert.ok(rootText.includes('references/cli.md'));
+  assert.ok(rootText.includes('Skill directory files'));
+
+  const ref = await loadSkill.execute(
+    { skillId: 'ops-runbook', path: 'references/cli.md' },
+    { conversationId: 0 as never, snapshot: async () => ({}) } as never,
+    undefined as never,
+  );
+  const refText = String((ref.output as { type: string; text: string }[])[0]?.text ?? '');
+  assert.equal(refText, '# CLI Reference\n\nRun `botd ops check` before rollout.\n');
+
+  const missing = await loadSkill.execute(
+    { skillId: 'ops-runbook', path: 'references/missing.md' },
+    { conversationId: 0 as never, snapshot: async () => ({}) } as never,
+    undefined as never,
+  );
+  assert.equal(missing.isError, true);
+  assert.match(
+    String((missing.output as { type: string; text: string }[])[0]?.text ?? ''),
+    /Skill file not found: ops-runbook\/references\/missing\.md/,
+  );
+
+  const traversal = await loadSkill.execute(
+    { skillId: 'ops-runbook', path: '../hub.sqlite' },
+    { conversationId: 0 as never, snapshot: async () => ({}) } as never,
+    undefined as never,
+  );
+  assert.equal(traversal.isError, true, 'path traversal must be rejected');
+
+  // HTTP: PUT with files + GET with ?path= through the hub app.
+  const faux = fauxProvider({ models: [{ id: 'main' }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const hub = createHub({
+    dbPath: path.join(dir, 'hub2.sqlite'),
+    adminPassword: '{{SECRET_ab12cd34}}',
+    durableModels: models,
+  });
+  t.after(async () => {
+    await hub.close();
+  });
+  const login = await hub.app.request('/api/auth/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: '{{SECRET_ab12cd34}}' }),
+  });
+  const cookie = login.headers.get('set-cookie')!.split(';')[0];
+  const put = await hub.app.request('/api/skills/ops-runbook', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({
+      files: {
+        'SKILL.md': MULTI_FILE_SKILL_MD,
+        'references/cli.md': '# CLI Reference\n\nRun `botd ops check` before rollout.\n',
+      },
+    }),
+  });
+  assert.equal(put.status, 200);
+  const got = await hub.app.request('/api/skills/ops-runbook?path=references/cli.md', { headers: { cookie } });
+  const payload = (await got.json()) as { content: string; files: string[] };
+  assert.ok(payload.content.includes('botd ops check'));
+  assert.deepEqual(payload.files, ['SKILL.md', 'references/cli.md', 'scripts/check.sh']);
+});
+
+test('8. .agents/skills and .agent/skills discovery: workspace skills auto-available to the bot persona', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'botd-agent-skills-'));
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const workspace = path.join(dir, 'workspace');
+  await mkdir(path.join(workspace, '.agents', 'skills', 'agent-guide'), { recursive: true });
+  await writeFile(
+    path.join(workspace, '.agents', 'skills', 'agent-guide', 'SKILL.md'),
+    '---\nname: agent-guide\ndescription: 工作区级技能指南\n---\n\n# Agent Guide\n\nSee references/guide.md for details.\n',
+  );
+  await mkdir(path.join(workspace, '.agents', 'skills', 'agent-guide', 'references'), { recursive: true });
+  await writeFile(
+    path.join(workspace, '.agents', 'skills', 'agent-guide', 'references', 'guide.md'),
+    '# Guide Details\n\nStep 1: discovery works.\n',
+  );
+  await mkdir(path.join(workspace, '.agent', 'skills', 'legacy-guide'), { recursive: true });
+  await writeFile(
+    path.join(workspace, '.agent', 'skills', 'legacy-guide', 'SKILL.md'),
+    '---\nname: legacy-guide\ndescription: 旧版 .agent 目录技能\n---\n\n# Legacy Guide\n',
+  );
+
+  const db = new HubDatabase({ dbPath: path.join(dir, 'hub.sqlite') });
+  db.saveBot({
+    id: 'architect',
+    nodeId: 'node-1',
+    name: 'Architect',
+    description: '',
+    modelProvider: 'faux',
+    modelId: 'main',
+    thinkingLevel: 'medium',
+    enabledSkills: [],
+    updatedAt: new Date().toISOString(),
+    workspaceDir: workspace,
+  });
+
+  // extraDirs scanning discovers both .agents/skills and .agent/skills entries.
+  const discovered = db.listSkills([workspace]).map((s) => s.id);
+  assert.ok(discovered.includes('agent-guide'), `agent-guide must be discovered: ${discovered.join(',')}`);
+  assert.ok(discovered.includes('legacy-guide'), `legacy-guide must be discovered: ${discovered.join(',')}`);
+  assert.equal(db.getSkillContent('agent-guide', 'references/guide.md', [workspace]), '# Guide Details\n\nStep 1: discovery works.\n');
+
+  // End-to-end via createHub: the persona auto-discovers workspace skills and
+  // load_skill can read both SKILL.md and nested reference files.
+  const faux = fauxProvider({ models: [{ id: 'main' }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const hub = createHub({
+    dbPath: path.join(dir, 'hub2.sqlite'),
+    adminPassword: '{{SECRET_ab12cd34}}',
+    durableModels: models,
+  });
+  t.after(async () => {
+    await hub.close();
+  });
+  const hubDb = hub.db;
+  hubDb.saveBot({
+    id: 'architect',
+    nodeId: 'node-1',
+    name: 'Architect',
+    description: '',
+    modelProvider: 'faux',
+    modelId: 'main',
+    thinkingLevel: 'medium',
+    enabledSkills: [],
+    updatedAt: new Date().toISOString(),
+    workspaceDir: workspace,
+  });
+
+  const runtime = await hub.ensureDurableRuntime();
+  const router = await runtime.ensureBotMainSession('architect');
+  const target = await runtime.harness.snapshot(TargetDoc, router.id, BACKGROUND_CONTEXT);
+  assert.equal(target?.botId, 'architect');
+
+  const personaSkillsExt = runtime.registry.snapshot().extension('botd-persona-skills')!;
+  const loadSkill = (personaSkillsExt.tools ?? []).find((x) => x.name === 'load_skill')!;
+  const apiStub = {
+    conversationId: router.id as never,
+    snapshot: async () => ({ botId: 'architect' }),
+  } as never;
+
+  const root = await loadSkill.execute({ skillId: 'agent-guide' }, apiStub, undefined as never);
+  const rootText = String((root.output as { type: string; text: string }[])[0]?.text ?? '');
+  assert.ok(rootText.includes('Agent Guide'));
+  assert.ok(rootText.includes('references/guide.md'));
+
+  const ref = await loadSkill.execute(
+    { skillId: 'agent-guide', path: 'references/guide.md' },
+    apiStub,
+    undefined as never,
+  );
+  const refText = String((ref.output as { type: string; text: string }[])[0]?.text ?? '');
+  assert.ok(refText.includes('discovery works'));
+
+  const legacy = await loadSkill.execute({ skillId: 'legacy-guide' }, apiStub, undefined as never);
+  assert.ok(
+    String((legacy.output as { type: string; text: string }[])[0]?.text ?? '').includes('Legacy Guide'),
+  );
 });

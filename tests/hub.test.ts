@@ -440,14 +440,14 @@ test('file management and offline nodes preserve metadata', async t => {
   assert.equal((await f.request('/api/bots/bot/memory', 'PUT', null)).status, 400);
   assert.deepEqual(await f.json('/api/bots/bot/memory'), { content: 'Remember this.' }, 'Malformed writes must preserve the previous file');
   await f.json(`/api/nodes/${node.identity.nodeId}/skills/new-skill`, 'PUT', { content: '# CLI skill' });
-  assert.deepEqual(await f.json(`/api/nodes/${node.identity.nodeId}/skills/new-skill`), { content: '# CLI skill' });
+  assert.deepEqual(await f.json(`/api/nodes/${node.identity.nodeId}/skills/new-skill`), { content: '# CLI skill', files: ['SKILL.md'] });
   // 全局 Skill 路由与节点维度路由同一 Hub 存储
-  assert.deepEqual(await f.json('/api/skills/new-skill'), { content: '# CLI skill' });
+  assert.deepEqual(await f.json('/api/skills/new-skill'), { content: '# CLI skill', files: ['SKILL.md'] });
   assert.ok((await f.json('/api/skills')).some((s: any) => s.id === 'new-skill'));
 
   await f.json(`/api/nodes/${node.identity.nodeId}/extensions/bash-guard`, 'PUT', { content: 'export default function(pi) {}' });
-  assert.deepEqual(await f.json(`/api/nodes/${node.identity.nodeId}/extensions/bash-guard`), { content: 'export default function(pi) {}' });
-  assert.deepEqual(await f.json('/api/extensions/bash-guard'), { content: 'export default function(pi) {}' });
+  assert.deepEqual(await f.json(`/api/nodes/${node.identity.nodeId}/extensions/bash-guard`), { content: 'export default function(pi) {}', files: ['index.ts'] });
+  assert.deepEqual(await f.json('/api/extensions/bash-guard'), { content: 'export default function(pi) {}', files: ['index.ts'] });
   assert((await f.json('/api/nodes'))[0].extensions.includes('bash-guard'));
 
   await f.json(`/api/nodes/${node.identity.nodeId}/install`, 'POST', { source: 'https://github.com/example/ext', kind: 'extension', customId: 'git-ext' });
@@ -461,7 +461,7 @@ test('file management and offline nodes preserve metadata', async t => {
   const nodesAfterDelete = await f.json('/api/nodes');
   assert.equal(nodesAfterDelete[0].extensions.includes('git-ext'), false);
   assert.equal(nodesAfterDelete[0].skills.includes('new-skill'), false);
-  assert.deepEqual(await f.json('/api/skills/new-skill'), { content: '' }, 'deleted skill content is gone');
+  assert.deepEqual(await f.json('/api/skills/new-skill'), { content: '', files: [] }, 'deleted skill content is gone');
 
   node.socket.close();
   await once(node.socket, 'close');
@@ -1282,9 +1282,9 @@ test('Hub full ownership: Bot CRUD, SYSTEM/MEMORY, env, skills, extensions and p
 
   // 2. Skills & extensions on global Hub routes
   await f.json('/api/skills/review-skill', 'PUT', { content: '# Review skill' });
-  assert.deepEqual(await f.json('/api/skills/review-skill'), { content: '# Review skill' });
+  assert.deepEqual(await f.json('/api/skills/review-skill'), { content: '# Review skill', files: ['SKILL.md'] });
   await f.json('/api/extensions/lint-ext', 'PUT', { content: 'export default 1' });
-  assert.deepEqual(await f.json('/api/extensions/lint-ext'), { content: 'export default 1' });
+  assert.deepEqual(await f.json('/api/extensions/lint-ext'), { content: 'export default 1', files: ['index.ts'] });
 
   // 3. Provider api_key login with zero nodes
   const login = await f.json('/api/providers/openai/login', 'POST', { method: 'api_key' });
