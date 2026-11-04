@@ -27,6 +27,7 @@ import {
 } from "@earendil-works/pi-durable";
 
 import { RecallIndexDoc, TargetDoc, WorkerRegistryDoc } from "./docs.js";
+import { askHumanTool } from "./router-extension.js";
 
 export const WORKER_EXTENSION_NAME = "botd-worker";
 
@@ -198,7 +199,7 @@ export function createWorkerExtension(): Extension {
 	return defineExtension({
 		name: WORKER_EXTENSION_NAME,
 		tasks: [WorkerReportTask],
-		tools: [subagentTool],
+		tools: [subagentTool, askHumanTool],
 		sections: [],
 		hooks: [
 			hook(GenerationTask, {

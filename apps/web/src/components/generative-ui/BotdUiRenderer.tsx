@@ -21,6 +21,8 @@ import {
   Code,
   Cpu,
   Database,
+  Eye,
+  EyeOff,
   FileText,
   GitBranch,
   Globe,
@@ -286,6 +288,7 @@ const TextInputComponent: React.FC<
     hint?: string;
     multiline?: boolean;
     rows?: number;
+    secret?: boolean;
   }>
 > = (ctx) => {
   const props = ctx.props ?? (ctx as any).element?.props ?? {};
@@ -296,11 +299,16 @@ const TextInputComponent: React.FC<
   const store = useStateStore();
   const [, setBoundVal] = useBoundProp<string>(props.value, statePath);
   const [localVal, setLocalVal] = useState<string>(typeof props.value === 'string' ? props.value : '');
+  const [showSecret, setShowSecret] = useState(false);
 
+  const isSecret = props.secret === true && !props.multiline;
   const val = statePath
     ? ((store.get(statePath) as string | undefined) ?? (typeof props.value === 'string' ? props.value : ''))
     : localVal;
   const isDisabled = disabled || mode === 'display';
+  // Secrets never re-render in cleartext once the ask is resolved: mask the
+  // displayed value instead (the hub already redacted the underlying answer).
+  const displayVal = isDisabled && props.secret && val ? '••••••••' : val;
   const sharedInputClass =
     'w-full px-2.5 text-xs rounded-lg bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50';
 
@@ -325,6 +333,27 @@ const TextInputComponent: React.FC<
           onChange={(e) => handleChange(e.target.value)}
           className={`${sharedInputClass} py-2 leading-relaxed resize-y font-mono`}
         />
+      ) : isSecret ? (
+        <div className="relative w-full">
+          <input
+            type={showSecret ? 'text' : 'password'}
+            value={displayVal ?? ''}
+            placeholder={props.placeholder}
+            disabled={isDisabled}
+            onChange={(e) => handleChange(e.target.value)}
+            autoComplete="off"
+            className={`h-8 ${sharedInputClass} pr-9 font-mono`}
+          />
+          <button
+            type="button"
+            onClick={() => setShowSecret((v) => !v)}
+            disabled={isDisabled && Boolean(displayVal)}
+            aria-label={showSecret ? '隐藏密码' : '显示密码'}
+            className="absolute right-1.5 top-1/2 -translate-y-1/2 h-6 w-6 inline-flex items-center justify-center rounded-md text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+          >
+            {showSecret ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+          </button>
+        </div>
       ) : (
         <input
           type="text"

@@ -14,6 +14,7 @@ import type { MessageAttachment, PendingAskRecord, ToolCallRecord, TurnUsage } f
 import { stringToConversationId, type HubDurableRuntime } from '../harness/hub-harness.js';
 import { AskDoc, type AskEntry } from '../harness/docs.js';
 import type { WorkerEntry } from '../harness/docs.js';
+import { redactSecretAskAnswer } from '../harness/secret-stash.js';
 import {
   EventDropped,
   EventRouter,
@@ -207,6 +208,8 @@ export async function getDurablePendingAsks(
           options: ask.options ?? [],
           status: 'pending' as const,
           createdAt: new Date(ask.createdAt).toISOString(),
+          ...(ask.previewType ? { previewType: ask.previewType as PendingAskRecord['previewType'] } : {}),
+          ...(ask.previewContent ? { previewContent: ask.previewContent } : {}),
         });
       }
     } catch {
@@ -235,7 +238,29 @@ export async function respondToDurableAsk(input: {
   for (const conversationId of await askConversations(rt, routerId)) {
     const numeric = Number(conversationId);
     if (!Number.isInteger(numeric)) continue;
+    // 先只读快照定位 pending ask 与其预览（doc 代理在事务外不可读）。
     let prompt: string | undefined;
+    let previewType: string | undefined;
+    let previewContent: string | undefined;
+    try {
+      const doc = await rt.harness.snapshot(
+        AskDoc,
+        numeric as import('@earendil-works/pi-durable').ConversationId,
+        BACKGROUND_CONTEXT,
+      );
+      const ask = doc?.asks[askId];
+      if (ask === undefined || ask.status !== 'pending') continue;
+      prompt = String(ask.prompt);
+      previewType = ask.previewType;
+      previewContent = ask.previewContent;
+    } catch {
+      continue;
+    }
+    if (prompt === undefined) continue;
+    // 机密表单字段只 stash 一次：明文进内存 SecretStash，落库/广播/上下文只留
+    // [REDACTED:$BOTD_SECRET_...] 占位符。
+    const { redactedAnswer, stashedEnvKeys } = redactSecretAskAnswer(answer, previewType, previewContent);
+    let answered = false;
     try {
       await rt.harness.commit(async (tx) => {
         const doc = await tx.doc(
@@ -245,22 +270,31 @@ export async function respondToDurableAsk(input: {
         const ask = doc.asks[askId];
         if (ask !== undefined && ask.status === 'pending') {
           ask.status = 'answered';
-          ask.answer = answer;
+          ask.answer = redactedAnswer;
           ask.answeredAt = Date.now();
-          // doc 代理在 commit 结算后不可读：所需字段在事务内拷出。
-          prompt = String(ask.prompt);
+          answered = true;
         }
       }, BACKGROUND_CONTEXT);
     } catch {
       continue;
     }
-    if (prompt === undefined) continue;
-    sseHub.broadcast(sessionId, { type: 'interaction_resolved', sessionId, askId, answer });
-    // 唤醒提问方：答案以用户消息 steer 回去，等待中的回合继续推进。
+    if (!answered) continue;
+    sseHub.broadcast(sessionId, { type: 'interaction_resolved', sessionId, askId, answer: redactedAnswer });
+    // 唤醒提问方：答案以用户消息 steer 回去，等待中的回合继续推进；带机密时附
+    // 跨平台消费说明（明文永不出现在命令行或上下文里）。
+    const firstEnvKey = Object.values(stashedEnvKeys)[0];
+    const secretNote =
+      firstEnvKey === undefined
+        ? ''
+        : '\n[Secret Stash]: Sensitive input(s) were securely stashed as environment variable(s): ' +
+          `${Object.entries(stashedEnvKeys)
+            .map(([p, k]) => `${p} -> ${k}`)
+            .join(', ')}.` +
+          `\nCross-platform usage (Windows/macOS/Linux): node -e "process.stdout.write(process.env.${firstEnvKey} || '')" | <command>`;
     await rt
       .submitUserMessage(
         String(conversationId),
-        `[Human Response to Ask "${prompt}"]: ${answer}`,
+        `[Human Response to Ask "${prompt}"]: ${redactedAnswer}${secretNote}`,
         { requestId: `ask-reply:${askId}`, whenBusy: 'steer' },
       )
       .catch(() => undefined);
@@ -271,7 +305,7 @@ export async function respondToDurableAsk(input: {
       prompt,
       options: [],
       status: 'answered',
-      answer,
+      answer: redactedAnswer,
       createdAt: new Date().toISOString(),
     };
   }
@@ -783,6 +817,8 @@ export function createDurableSessionMirror(
             options: ask.options ?? [],
             status: 'pending' as const,
             createdAt: new Date(ask.createdAt).toISOString(),
+            ...(ask.previewType ? { previewType: ask.previewType as PendingAskRecord['previewType'] } : {}),
+            ...(ask.previewContent ? { previewContent: ask.previewContent } : {}),
           },
         });
       }

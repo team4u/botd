@@ -72,6 +72,8 @@ export interface TextInputElementProps {
   multiline?: boolean;
   /** Textarea visible line count (2-12), only used when multiline is true. */
   rows?: number;
+  /** Mask the value as a password input; hub-side answers get redacted into the SecretStash. */
+  secret?: boolean;
 }
 
 export interface SelectOptionItem {
@@ -336,6 +338,9 @@ function validateTextInputProps(id: string, props: Record<string, any>): string[
     (typeof props.rows !== 'number' || !Number.isInteger(props.rows) || props.rows < 2 || props.rows > 12)
   ) {
     errors.push(`Element "${id}" (TextInput) props.rows must be an integer between 2 and 12`);
+  }
+  if (props.secret !== undefined && typeof props.secret !== 'boolean') {
+    errors.push(`Element "${id}" (TextInput) props.secret must be a boolean`);
   }
   return errors;
 }
@@ -931,8 +936,8 @@ Max Bytes: ${MAX_UI_SPEC_BYTES} (64KB) | Max Elements: ${MAX_UI_ELEMENTS} | Max 
     - props: { items: Array<{ title: string, description?: string, status?: "done" | "current" | "pending", icon?: string, badge?: string }> }
 
 ### 4. Interactive Forms & Actions
-12. TextInput (Single-line input, or multi-line textarea when multiline is true)
-    - props: { label: string, value?: string | { "$state": "/key" }, placeholder?: string, hint?: string, multiline?: boolean, rows?: number (2-12) }
+12. TextInput (Single-line input, or multi-line textarea when multiline is true; secret masks as password)
+    - props: { label: string, value?: string | { "$state": "/key" }, placeholder?: string, hint?: string, multiline?: boolean, rows?: number (2-12), secret?: boolean }
 
 13. Select (Dropdown selector)
     - props: { label: string, value?: string | { "$state": "/key" }, options: Array<{ value: string, label: string }> }
@@ -955,3 +960,41 @@ Max Bytes: ${MAX_UI_SPEC_BYTES} (64KB) | Max Elements: ${MAX_UI_ELEMENTS} | Max 
 Available semantic icon names:
 lightbulb, info, alert-triangle, alert-circle, check-circle, cpu, database, server, hard-drive, activity, layers, terminal, code, git-branch, workflow, shield, lock, key, globe, zap, clock, sparkles, book-open, file-text, box, help-circle, trending-up, trending-down, bar-chart, refresh.
 `;
+
+// --- secret extraction -------------------------------------------------------
+
+/**
+ * Extract the state binding paths of every `TextInput` marked `secret: true`.
+ *
+ * The Hub uses these JSON pointer paths (e.g. `/credentials/password`) to find
+ * the plaintext secret fields inside an answered UI form state, stash them
+ * into the in-memory SecretStash, and replace the values with
+ * `[REDACTED:$BOTD_SECRET_...]` before the answer is persisted or broadcast.
+ * Accepts a raw JSON string or an already-parsed spec object; an invalid spec
+ * yields no paths (the answer is then treated as non-secret).
+ */
+export function extractSecretStatePaths(specOrJson: string | BotdUiSpec): string[] {
+  let spec: BotdUiSpec | undefined;
+  if (typeof specOrJson === 'string') {
+    try {
+      spec = JSON.parse(specOrJson) as BotdUiSpec;
+    } catch {
+      return [];
+    }
+  } else {
+    spec = specOrJson;
+  }
+  if (spec === null || typeof spec !== 'object' || spec.elements === undefined) return [];
+  const paths: string[] = [];
+  for (const el of Object.values(spec.elements)) {
+    if (!el || el.type !== 'TextInput') continue;
+    const props = el.props as TextInputElementProps | undefined;
+    if (props === null || typeof props !== 'object' || (props as { secret?: unknown }).secret !== true) continue;
+    const value = props.value as UiStateBinding | string | undefined;
+    if (value === null || typeof value !== 'object') continue;
+    const binding = value as { $state?: unknown; $bindState?: unknown };
+    if (typeof binding.$state === 'string' && binding.$state) paths.push(binding.$state);
+    else if (typeof binding.$bindState === 'string' && binding.$bindState) paths.push(binding.$bindState);
+  }
+  return [...new Set(paths)];
+}

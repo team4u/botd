@@ -15,6 +15,7 @@
  */
 
 import type { Context } from '@earendil-works/chord/context';
+import { withSecretEnv } from './secret-stash.js';
 import {
   ExecutionError,
   FileError,
@@ -417,7 +418,8 @@ export class RemoteExecutionEnv implements ExecutionEnv {
         execId,
         command,
         ...(this.cwd === undefined ? {} : { cwd: this.cwd }),
-        ...(options?.env === undefined ? {} : { env: options.env }),
+        // SecretStash：机密以环境变量注入远端子进程（明文不进命令行/上下文）。
+        env: withSecretEnv(options?.env),
         ...(options?.inheritEnv === undefined ? {} : { inheritEnv: options.inheritEnv }),
         ...(options?.timeout === undefined ? {} : { timeout: options.timeout }),
         ...(options?.spill === undefined ? {} : { spill: options.spill }),

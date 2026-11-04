@@ -114,6 +114,10 @@ export interface AskEntry {
 	createdAt: number;
 	/** Idempotency: the tool task that asked. */
 	askedBy?: string;
+	/** Generative UI preview kind; "ui" renders previewContent as a botd.v1 spec. */
+	previewType?: "text" | "code" | "markdown" | "ui";
+	/** Preview body: raw text or the JSON of a botd.v1 UI spec (previewType "ui"). */
+	previewContent?: string;
 }
 
 /** State of a conversation's `botd.asks` document. */

@@ -33,6 +33,7 @@ import {
 	type UserInput,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { withSecretEnv } from "./secret-stash.js";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
@@ -115,6 +116,22 @@ function thinkingLevelFor(persona: BotPersonaConfig): ModelThinkingLevel | undef
 
 /** Session index: one main-session conversation id per bot persona (keyed by botId). */
 const SessionIndex = SessionIndexDoc;
+
+/**
+ * NodeExecutionEnv with SecretStash injection: every shell exec receives the
+ * active `BOTD_SECRET_*` env vars, so stashed secrets are consumable
+ * cross-platform via process.env without appearing in command lines or LLM
+ * context. Explicit per-call env entries win over the injected secrets.
+ */
+export class SecretInjectingEnv extends NodeExecutionEnv {
+	async exec(
+		command: string | readonly string[],
+		options: import("@earendil-works/pi-durable/env").ShellExecOptions | undefined,
+		context: Context,
+	): Promise<import("@earendil-works/pi-durable/env").Result<import("@earendil-works/pi-durable/env").ShellExecResult, import("@earendil-works/pi-durable/env").ExecutionError>> {
+		return super.exec(command, { ...options, env: withSecretEnv(options?.env) }, context);
+	}
+}
 
 export class HubDurableRuntime {
 	readonly harness: import("@earendil-works/pi-durable").Harness;
@@ -205,13 +222,13 @@ export class HubDurableRuntime {
 		const harnessOptions: HarnessOptions = {
 			models,
 			registry,
-			env:
-				options.env === undefined
+				env:
+					options.env === undefined
 					? async (target, context) => {
 							// Persona env vars ride along as the conversation's shell env (merged over the process env).
 							const targetState = await target.read.snapshot(TargetDoc, target.conversationId, context);
 							const personaEnv = personas.get(targetState?.botId ?? "")?.env;
-							return new NodeExecutionEnv({
+							return new SecretInjectingEnv({
 								cwd: target.cwd ?? process.cwd(),
 								...(personaEnv === undefined ? {} : { shellEnv: personaEnv }),
 							});
