@@ -1111,26 +1111,6 @@ function formatAttachedFilesContext(
 }
 
 /**
- * 附件上下文块：把磁盘产物清单（文件名 / 类型 / 大小 / 绝对路径）拼进用户消息，
- * 让模型知道用户附了什么文件、能从哪里读到它（read / CLI 工具均可消费该路径）。
- */
-function formatAttachedFilesContext(
-  attachments: readonly MessageAttachment[] | undefined,
-  db?: Pick<HubContext['db'], 'getArtifactWithStoragePath'>,
-): string {
-  if (!Array.isArray(attachments) || attachments.length === 0) return '';
-  const lines: string[] = [];
-  for (const att of attachments) {
-    if (!att) continue;
-    const disk = resolveDiskArtifact(att, db);
-    if (!disk) continue;
-    lines.push(`- ${disk.filename} (${disk.mimeType}, ${disk.sizeBytes} bytes) -> path: ${disk.storagePath}`);
-  }
-  if (lines.length === 0) return '';
-  return `[Attached Files]:\n${lines.join('\n')}`;
-}
-
-/**
  * 用户消息 → Durable Router 会话提交（全双工：`whenBusy: "steer"`）：
  * - 支持内置斜杠原语：`/compact [instructions]` 直接触发 `pi-durable` 原生非阻塞上下文压缩，
  *   `/new [handoff]` 直接触发 `pi-durable` 原生 `pi.reset` 开启新上下文；
@@ -1196,6 +1176,7 @@ export async function submitSessionMessageToDurable(
   const images = extractImageAttachments(options?.attachments, ctx.db);
   // 附件清单拼进消息文本：模型得以感知非图片附件（csv/pdf/zip…）及其磁盘路径；
   // 纯附件（空文本）消息也不至于提交空字符串。
+  const attachedFiles = formatAttachedFilesContext(options?.attachments, ctx.db);
   if (attachedFiles) {
     finalContent = finalContent.trim() ? `${finalContent}\n\n${attachedFiles}` : attachedFiles;
   }
