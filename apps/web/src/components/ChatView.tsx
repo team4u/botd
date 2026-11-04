@@ -46,6 +46,9 @@ import { ShareSessionModal } from './ShareSessionModal';
 import { BotHistoryDrawer } from './BotHistoryDrawer';
 import { SubagentRunDrawer } from './SubagentRunDrawer';
 import { SubSessionDrawer } from './SubSessionDrawer';
+import { ActiveWorkersBar } from './ActiveWorkersBar';
+import { WorkerInspectDrawer } from './WorkerInspectDrawer';
+import { useSuperAgentWorkers } from '../hooks/useSuperAgentWorkers';
 import { BotEditorModal } from './BotEditorModal';
 import { BotdUiRenderer } from './generative-ui/BotdUiRenderer';
 import { api } from '../api';
@@ -182,6 +185,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
   highlightMessageId = null,
 }) => {
   const keyboardInset = useKeyboardInset();
+
+  // Super-agent 全双工后台工作单元（Worker / Workflow / Speculative）：
+  // 胶囊条常驻展示 + 检视抽屉干预（steer / followUp / stop），不打断前台对话
+  const superAgent = useSuperAgentWorkers(session.id);
 
   // 本会话主控智能体（提前声明：蓝点探测/SSE/设置等多处使用）
   // useMemo 稳定引用：下游 memberNodeIds/fetchBgJobs 等依赖链才不会每次 render 失稳
@@ -1277,6 +1284,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       </header>
 
+      {/* Super-agent 全双工常驻胶囊条：后台 Worker / Workflow 运行（或近期完成）时展示，
+          点击胶囊打开检视抽屉，× 快速停止单个后台任务，完全不影响前台输入 */}
+      {superAgent.workers.length > 0 && (
+        <ActiveWorkersBar
+          workers={superAgent.workers}
+          onSelectWorker={(id) => superAgent.setSelectedWorkerId(id)}
+          onStopWorker={(id) => {
+            void superAgent.stopWorker(id);
+          }}
+        />
+      )}
+
       {/* 子会话模式返回父会话横幅 */}
       {session.parentSessionId && (
         <div className="mx-3 sm:mx-4 mt-2.5 px-3 py-1.5 bg-blue-50/80 dark:bg-blue-950/40 border border-blue-200/80 dark:border-blue-900/60 rounded-lg flex items-center justify-between gap-2 text-xs text-blue-800 dark:text-blue-300 shrink-0">
@@ -1644,6 +1663,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
           onToast={(type, message) => onAddToast?.(type, message)}
         />
       )}
+
+      {/* Super-agent 后台 Worker 检视抽屉：实时执行时间线 + Steer / Follow-up / Abort 全双工干预台 */}
+      <WorkerInspectDrawer
+        isOpen={Boolean(superAgent.selectedWorker)}
+        worker={superAgent.selectedWorker}
+        botMap={botMap}
+        nodeMap={nodeMap}
+        onClose={() => superAgent.setSelectedWorkerId(null)}
+        onSteer={superAgent.steerWorker}
+        onStop={superAgent.stopWorker}
+      />
 
       {/* 跨 BOT 子会话内联检视抽屉：不离开父会话就地查看/插话子任务 */}
       <SubSessionDrawer
