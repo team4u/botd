@@ -6,13 +6,11 @@ import { onGlobalEvent } from '../events';
 /**
  * Super-agent 全双工后台工作单元（Worker / Workflow / Speculative）状态管理。
  *
- * 数据来源按优先级合并：
+ * 数据来源：
  * 1. 专用 workers 端点（GET /api/sessions/:id/workers，权威数据源）
- * 2. 既有 subagents 列表端点 / 最近已落库消息中的 subagentRuns（优雅回退）
- * 3. SSE `subagent_status` 实时事件（与 1/2 以 workerId 对齐热更新）
- *
- * 控制指令（steer / stop / spawn）先打专用 workers 端点，失败时回退到
- * 既有 subagents 的 interact / stop 端点，保证新旧后端都能驱动。
+ * 2. SSE `subagent_status` 实时事件（以 workerId 对齐热更新）
+ * 3. 选中检视时经 /workers/:workerId/recall 拉取 Chain of Recall 节点与
+ *    Durable transcript，转换为 blocks 驱动检视抽屉的实时时间线
  */
 
 /** 后台工作单元类型：worker（常驻工作器）/ workflow（工作流）/ speculative（投机预执行） */
@@ -81,6 +79,43 @@ export interface UseSuperAgentWorkersResult {
   ) => Promise<boolean>;
   stopWorker: (workerId: string) => Promise<boolean>;
   spawnBackgroundWorker: (input: SpawnBackgroundWorkerInput) => Promise<boolean>;
+}
+
+/** Durable 会话 transcript 条目（/workers/:workerId/recall 返回的最小摘录） */
+export interface WorkerTranscriptEntry {
+  id: string;
+  kind: string;
+  role?: string;
+  text: string;
+}
+
+/** /workers/:workerId/recall 响应：Chain of Recall 节点 + 最近 transcript 摘录 */
+interface WorkerRecallPayload {
+  node?: { summary?: unknown } | null;
+  transcript?: unknown;
+}
+
+/**
+ * Durable transcript → TurnBlock[]：把 /recall 返回的最近会话摘录转换为
+ * 检视抽屉可渲染的交错时间线（工具结果 → tool 块；assistant/user 文本 → text 块）。
+ */
+export function transcriptToTurnBlocks(transcript: WorkerTranscriptEntry[]): TurnBlock[] {
+  const blocks: TurnBlock[] = [];
+  for (const item of transcript) {
+    if (!item || typeof item !== 'object' || typeof item.text !== 'string' || item.text === '') continue;
+    if (item.kind === 'pi.tool-result') {
+      blocks.push({
+        type: 'tool',
+        id: item.id,
+        name: 'tool-result',
+        status: 'done',
+        outputPreview: item.text,
+      });
+    } else if (item.kind === 'pi.assistant' || item.kind === 'pi.user') {
+      blocks.push({ type: 'text', text: item.text });
+    }
+  }
+  return blocks;
 }
 
 /** pending / running / waiting 视为活跃（计入全双工运行中徽标与轮询加速） */
@@ -272,8 +307,7 @@ export function useSuperAgentWorkers(sessionId: string | null): UseSuperAgentWor
   }, []);
 
   /**
-   * 刷新工作单元列表（三级回退）：
-   * 专用 /workers → 既有 /subagents 列表 → 最近已落库消息的 subagentRuns。
+   * 刷新工作单元列表：专用 /workers 端点 → 最近已落库消息的 subagentRuns 兑底。
    */
   const refresh = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -289,18 +323,13 @@ export function useSuperAgentWorkers(sessionId: string | null): UseSuperAgentWor
     if (dedicated.ok) {
       extractList(dedicated.data, 'workers').forEach(ingest);
     } else {
-      const legacy = await jsonRequest(`/api/sessions/${encodeURIComponent(sid)}/subagents`);
-      if (legacy.ok) {
-        extractList(legacy.data, 'runs').forEach(ingest);
-      } else {
-        try {
-          const page = await api.getSessionMessagesPage(sid, { limit: 30 });
-          for (const message of page.messages) {
-            (message.subagentRuns ?? []).forEach(ingest);
-          }
-        } catch {
-          // 拉取失败保持现状，等待下一轮轮询 / SSE 事件
+      try {
+        const page = await api.getSessionMessagesPage(sid, { limit: 30 });
+        for (const message of page.messages) {
+          (message.subagentRuns ?? []).forEach(ingest);
         }
+      } catch {
+        // 拉取失败保持现状，等待下一轮轮询 / SSE 事件
       }
     }
 
@@ -346,6 +375,65 @@ export function useSuperAgentWorkers(sessionId: string | null): UseSuperAgentWor
     return () => window.clearInterval(timer);
   }, [sessionId, activeCount > 0]);
 
+  /**
+   * Chain of Recall 水合：选中某个工作单元时拉取 /workers/:workerId/recall，
+   * 把 recall 节点 summary 与 Durable transcript 转换的 blocks 合入该 worker，
+   * 驱动检视抽屉的实时时间线；选中目标活跃期间持续刷新。
+   */
+  const selectedWorkerActive = selectedWorkerId
+    ? isWorkerActive(workersMap.get(selectedWorkerId)?.status ?? 'completed')
+    : false;
+  useEffect(() => {
+    if (!sessionId || !selectedWorkerId) return;
+
+    let cancelled = false;
+    const hydrate = async () => {
+      const sid = sessionIdRef.current;
+      if (!sid || cancelled) return;
+      const res = await jsonRequest(
+        `/api/sessions/${encodeURIComponent(sid)}/workers/${encodeURIComponent(selectedWorkerId)}/recall`
+      );
+      if (!res.ok || cancelled) return;
+
+      const payload = (res.data ?? {}) as WorkerRecallPayload;
+      const transcript = Array.isArray(payload.transcript)
+        ? (payload.transcript as WorkerTranscriptEntry[]).filter(
+            (item): item is WorkerTranscriptEntry =>
+              Boolean(item) && typeof item === 'object' && typeof item.text === 'string'
+          )
+        : [];
+      const nodeSummary =
+        payload.node && typeof (payload.node as { summary?: unknown }).summary === 'string'
+          ? (payload.node as { summary?: string }).summary || undefined
+          : undefined;
+      const blocks = transcriptToTurnBlocks(transcript);
+      if (blocks.length === 0 && nodeSummary === undefined) return;
+
+      setWorkersMap((prev) => {
+        const existing = prev.get(selectedWorkerId);
+        if (!existing) return prev;
+        const next = new Map(prev);
+        next.set(selectedWorkerId, {
+          ...existing,
+          ...(nodeSummary !== undefined ? { summary: nodeSummary } : {}),
+          ...(blocks.length > 0 ? { blocks } : {}),
+        });
+        return next;
+      });
+    };
+
+    void hydrate();
+    if (!selectedWorkerActive) return;
+    const timer = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      void hydrate();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [sessionId, selectedWorkerId, selectedWorkerActive]);
+
   /** 本地追加人工指令记录（后端 SSE 确认前先乐观展示） */
   const appendLocalSteer = useCallback((workerId: string, message: string) => {
     setWorkersMap((prev) => {
@@ -379,7 +467,6 @@ export function useSuperAgentWorkers(sessionId: string | null): UseSuperAgentWor
   /**
    * 向后台工作单元发送指令：
    * 运行中默认 steer（插话，不打断执行），已结束默认 followUp（同一上下文继续）。
-   * 专用 /workers/:id/steer 失败时回退既有 /subagents/:id/interact。
    */
   const steerWorker = useCallback(
     async (workerId: string, message: string, mode?: SuperAgentWorkerSteerMode): Promise<boolean> => {
@@ -399,22 +486,12 @@ export function useSuperAgentWorkers(sessionId: string | null): UseSuperAgentWor
         appendLocalSteer(workerId, text);
         return true;
       }
-
-      try {
-        await api.interactSubagent(sid, workerId, {
-          message: text,
-          mode: effectiveMode === 'followUp' ? 'resume' : 'steer',
-        });
-        appendLocalSteer(workerId, text);
-        return true;
-      } catch {
-        return false;
-      }
+      return false;
     },
     [appendLocalSteer]
   );
 
-  /** 中止单个后台工作单元（不影响前台对话）。专用端点失败时回退既有 /subagents/:id/stop */
+  /** 中止单个后台工作单元（不影响前台对话）。 */
   const stopWorker = useCallback(
     async (workerId: string): Promise<boolean> => {
       const sid = sessionIdRef.current;
@@ -428,14 +505,7 @@ export function useSuperAgentWorkers(sessionId: string | null): UseSuperAgentWor
         markAborted(workerId);
         return true;
       }
-
-      try {
-        await api.stopSubagent(sid, workerId);
-        markAborted(workerId);
-        return true;
-      } catch {
-        return false;
-      }
+      return false;
     },
     [markAborted]
   );

@@ -8,6 +8,7 @@ import {
   RotateCw,
   PowerOff,
   ArrowUpCircle,
+  Bot,
 } from 'lucide-react';
 import type { NodeWithBots, BotConfig, NodeUpgradeCheckResult } from '@botd/protocol';
 
@@ -59,9 +60,6 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
 
   // Deleting bot ID tracking
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
-
-  // Syncing skill tracking (key: `${nodeId}:${skillId}`)
-  const [syncingSkillKey, setSyncingSkillKey] = useState<string | null>(null);
 
   // Bot pending deletion (confirm dialog)
   const [botToDelete, setBotToDelete] = useState<BotConfig | null>(null);
@@ -417,25 +415,6 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
     }
   };
 
-  const handleSyncSkill = async (nodeId: string, skillId: string) => {
-    const otherOnlineNodes = nodes.filter((n) => n.id !== nodeId && n.status === 'online');
-    if (otherOnlineNodes.length === 0) return;
-
-    const key = `${nodeId}:${skillId}`;
-    setSyncingSkillKey(key);
-    try {
-      const otherNodeIds = otherOnlineNodes.map((n) => n.id);
-      const res = await api.syncSkillAcrossNodes(nodeId, skillId, otherNodeIds);
-      const count = res.syncedNodeIds?.length ?? otherNodeIds.length;
-      onAddToast('success', `已将技能 ${skillId} 同步到 ${count} 个在线节点`);
-      await onRefresh();
-    } catch (err: any) {
-      onAddToast('error', err?.message || '同步技能失败');
-    } finally {
-      setSyncingSkillKey(null);
-    }
-  };
-
   const togglePool = (key: string) => {
     setExpandedPools((prev) => {
       const next = new Set(prev);
@@ -470,8 +449,8 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
             <Server className="w-9 h-9 text-zinc-300 dark:text-zinc-600 mx-auto mb-2" />
             <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 mb-1">暂无已连接的计算节点</h3>
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4 max-w-md mx-auto">
-              请点击右上角「配对节点」，并在目标计算设备或服务器终端执行配对命令完成接入。
-              智能体、技能与扩展都归属于节点，接入后即可创建。
+              可配对计算节点接入，也可以直接在 Hub 本地新建智能体：智能体、技能与扩展均由 Hub SQLite
+              权威存储，节点接入后自动同步。
             </p>
             <button
               onClick={() => setPairingOpen(true)}
@@ -479,6 +458,26 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
             >
               <Terminal className="w-3.5 h-3.5" />
               <span>配对新节点</span>
+            </button>
+            <button
+              onClick={() =>
+                handleOpenCreateBot({
+                  id: 'local',
+                  name: 'Local Hub',
+                  platform: 'linux',
+                  status: 'online',
+                  lastSeenAt: new Date().toISOString(),
+                  createdAt: new Date().toISOString(),
+                  bots: [],
+                  skills: [],
+                  extensions: [],
+                })
+              }
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 ml-2 bg-white hover:bg-zinc-50 dark:bg-zinc-900 dark:hover:bg-zinc-800 text-zinc-800 dark:text-zinc-200 border border-zinc-200 dark:border-zinc-700 rounded-lg text-xs font-medium shadow-xs transition-colors cursor-pointer"
+              title="在 Hub 本地直接新建智能体（配置存于 Hub SQLite，节点接入后即可调度）"
+            >
+              <Bot className="w-3.5 h-3.5" />
+              <span>直接新建智能体 (Hub 本地)</span>
             </button>
           </div>
         ) : (
@@ -490,8 +489,6 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
             const isRemovingNode = deletingNodeId === node.id;
             const uptimeText = node.startedAt ? formatUptime(node.startedAt) : '';
             const nodeBots = node.bots || [];
-            const otherOnlineNodes = nodes.filter((n) => n.id !== node.id && n.status === 'online');
-            const hasOtherOnlineNodes = isOnline && otherOnlineNodes.length > 0;
 
             return (
               <section
@@ -615,12 +612,12 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                   </div>
                 </div>
 
-                {/* Offline banner: bots on this node are visible but read-only */}
+                {/* Offline banner: bots on this node can't chat but stay editable in Hub */}
                 {!isOnline && nodeBots.length > 0 && (
                   <div className="mx-4 mb-3 p-2.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 rounded-lg text-[11px] text-amber-800 dark:text-amber-300 flex items-center gap-2">
                     <PowerOff className="w-3.5 h-3.5 shrink-0" />
                     <span>
-                      节点离线：以下 {nodeBots.length} 个智能体暂不可用（无法对话与编辑），配置为上次在线时的缓存。
+                      节点离线：以下 {nodeBots.length} 个智能体暂不可对话（配置存于 Hub SQLite，仍可正常编辑，节点恢复后自动生效）。
                     </span>
                   </div>
                 )}
@@ -639,20 +636,15 @@ export const NodesBotsView: React.FC<NodesBotsViewProps> = ({
                 {/* 3. Skills pool */}
                 <SkillsPoolSection
                   node={node}
-                  isOnline={isOnline}
-                  hasOtherOnlineNodes={hasOtherOnlineNodes}
                   expandedPools={expandedPools}
                   onTogglePool={togglePool}
-                  syncingSkillKey={syncingSkillKey}
                   onOpenNewSkill={handleOpenNewSkill}
                   onOpenEditSkill={handleOpenEditSkill}
-                  onSyncSkill={handleSyncSkill}
                 />
 
                 {/* 4. Extensions pool */}
                 <ExtensionsPoolSection
                   node={node}
-                  isOnline={isOnline}
                   expandedPools={expandedPools}
                   onTogglePool={togglePool}
                   onOpenNewExtension={handleOpenNewExtension}

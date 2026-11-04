@@ -189,11 +189,11 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       setLoadingFiles(true);
       setSystemMd('');
       setMemoryMd('');
-      // Load env vars (secrets) when node is online; env panel edits are best-effort
+      // Load env vars (secrets) from Hub SQLite (Hub 权威存储，节点离线也可读写)
       setEnvPairs([]);
       setEnvLoaded(false);
       const envPromise =
-        !bot.parentBotId && node && node.status === 'online'
+        !bot.parentBotId && bot.id
           ? api
               .getBotEnv(bot.id)
               .then((res) => {
@@ -208,7 +208,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                 setEnvLoaded(true);
               })
               .catch(() => {
-                // env endpoint unavailable (node offline / older node): keep empty list
+                // env endpoint unavailable (older hub): keep empty list
               })
           : Promise.resolve();
       Promise.all([api.getBotSystem(bot.id), api.getBotMemory(bot.id), envPromise])
@@ -652,13 +652,9 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                     <EnvEditorSection
                       envPairs={envPairs}
                       setEnvPairs={setEnvPairs}
-                      apiDelete={
-                        isEditing && bot?.id && node?.status === 'online'
-                          ? { botId: bot.id }
-                          : null
-                      }
+                      apiDelete={isEditing && bot?.id ? { botId: bot.id } : null}
                       onError={(message) => setError(message)}
-                      showOfflineHint={isEditing && node?.status !== 'online'}
+                      showOfflineHint={false}
                     />
                   )}
 
