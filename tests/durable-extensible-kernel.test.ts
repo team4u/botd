@@ -452,7 +452,8 @@ test('5. createHub wires skills callbacks into the durable runtime', async () =>
       assert.match(persona.instructions, /SYSTEM\.md/);
       assert.match(persona.instructions, /architect from SYSTEM/);
       assert.equal(persona.memory, 'Remember: ship on Thursday.');
-      assert.deepEqual(persona.enabledSkills, ['deploy-helper']);
+      // 内置技能 botd-cli 由 syncBotPersonas 强制前置（Hub SQLite 已种子化）
+      assert.deepEqual(persona.enabledSkills, ['botd-cli', 'deploy-helper']);
 
       // The persona-skills extension is mounted on the persona's router agent.
       const agent = runtime.routerAgent(persona);

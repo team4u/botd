@@ -603,8 +603,8 @@ export class NodeConnectionManager {
     });
   }
 
-  /** 为 nodeId 构造远端执行环境（Brain in Hub, Hands on Node）。 */
-  createRemoteEnv(options: { nodeId: string; cwd: string }): RemoteExecutionEnv {
+  /** 为 nodeId 构造远端执行环境（Brain in Hub, Hands on Node）；shellEnv 随会话上下文注入远端子进程。 */
+  createRemoteEnv(options: { nodeId: string; cwd: string; shellEnv?: Record<string, string> }): RemoteExecutionEnv {
     return new RemoteExecutionEnv(
       {
         getNodeEnvRpc: (nodeId: string) => this.getNodeEnvRpc(nodeId),

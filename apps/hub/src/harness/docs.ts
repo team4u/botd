@@ -27,6 +27,10 @@ export interface TargetState {
 	nodeId: string;
 	/** Working directory for tool execution. */
 	cwd: string;
+	/** Owning durable session id (conversation id string) for context env injection. */
+	sessionId?: string;
+	/** Branch of the isolated git worktree (`botd/<workerId>` when a worktree is in use). */
+	branchName?: string;
 	/** Optional isolated git worktree path for write-isolated workers. */
 	worktreePath?: string;
 	/** Channel thread keys this conversation feeds (IM threads, triggers, etc.). */
@@ -70,6 +74,8 @@ export interface WorkerEntry {
 	threadKeys: string[];
 	nodeId: string;
 	cwd: string;
+	/** Branch of the isolated git worktree, when the worker runs in one. */
+	branchName?: string;
 	worktreePath?: string;
 	startedAt: number;
 	finishedAt?: number;

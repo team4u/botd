@@ -128,6 +128,19 @@ interface NodeEnvRpcFunctions {
   envExec(input: EnvExecInput): Promise<RpcResult<EnvExecOk>>;
   envAbortExec(execId: string): Promise<void>;
   envCleanup(cwd?: string): Promise<void>;
+  /** Git Worktree 并发隔离：为 worker 在 <repoDir>/.botd-worktrees/<workerId> 下创建隔离工作树（非 git 仓库时降级返回 repoDir）。 */
+  envAcquireWorktree?(input: {
+    repoDir: string;
+    workerId: string;
+    baseRef?: string;
+  }): Promise<{ worktreePath: string; branchName: string; isGitRepo: boolean }>;
+  /** 释放并清理 worktree（--force 移除 + prune）；非 git 仓库时为幂等 no-op。 */
+  envReleaseWorktree?(input: {
+    repoDir: string;
+    worktreePath: string;
+    branchName?: string;
+    deleteBranch?: boolean;
+  }): Promise<{ ok: boolean }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +155,8 @@ export interface NodeRpcResolver {
 export interface RemoteExecutionEnvOptions {
   nodeId: string;
   cwd: string;
+  /** 附加 shell 环境变量（会话/分身上下文注入，如 BOTD_SESSION_ID / BOTD_BOT_ID），逐调用 env 可覆盖。 */
+  shellEnv?: Record<string, string>;
 }
 
 /**
@@ -190,6 +205,7 @@ export class RemoteExecutionEnv implements ExecutionEnv {
   readonly #resolver: NodeRpcResolver;
   readonly #outputHub: ExecOutputHub;
   readonly #nodeIdValue: string;
+  readonly #shellEnv?: Record<string, string>;
 
   constructor(resolver: NodeRpcResolver, options: RemoteExecutionEnvOptions, outputHub = new ExecOutputHub()) {
     this.#resolver = resolver;
@@ -197,6 +213,7 @@ export class RemoteExecutionEnv implements ExecutionEnv {
     this.id = `remote:${options.nodeId}`;
     this.#nodeIdValue = options.nodeId;
     this.#outputHub = outputHub;
+    this.#shellEnv = options.shellEnv;
   }
 
   /** Node 侧流式回调入口（转发给内部 ExecOutputHub）。 */
@@ -414,12 +431,17 @@ export class RemoteExecutionEnv implements ExecutionEnv {
       });
     }
     try {
+      // 会话 shellEnv 与逐调用 env 合并（逐调用优先），再叠加 SecretStash 机密注入。
+      const mergedEnv =
+        this.#shellEnv !== undefined || options?.env !== undefined
+          ? { ...(this.#shellEnv ?? {}), ...(options?.env ?? {}) }
+          : undefined;
       const result = await rpc.envExec({
         execId,
         command,
         ...(this.cwd === undefined ? {} : { cwd: this.cwd }),
         // SecretStash：机密以环境变量注入远端子进程（明文不进命令行/上下文）。
-        env: withSecretEnv(options?.env),
+        env: withSecretEnv(mergedEnv),
         ...(options?.inheritEnv === undefined ? {} : { inheritEnv: options.inheritEnv }),
         ...(options?.timeout === undefined ? {} : { timeout: options.timeout }),
         ...(options?.spill === undefined ? {} : { spill: options.spill }),
