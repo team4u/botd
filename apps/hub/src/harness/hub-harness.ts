@@ -183,6 +183,7 @@ export class HubDurableRuntime {
 		// conversation can run deterministic crash-resumable multi-step workflows.
 		registry.install(createWorkflowExtension());
 		const personas = new Map<string, BotPersonaConfig>();
+		let runtime: HubDurableRuntime | undefined;
 		const routerExtension = createRouterExtension({
 			resolvePersona: (botId) => {
 				const persona = personas.get(botId);
@@ -195,7 +196,11 @@ export class HubDurableRuntime {
 					cwd: persona.cwd,
 				};
 			},
-			workerAgent: options.workerAgent,
+			workerAgent: options.workerAgent ?? (({ botId, cwd }) => {
+				const persona = personas.get(botId);
+				if (persona === undefined || runtime === undefined) throw new Error(`unknown persona: ${botId}`);
+				return { ...runtime.workerAgentFor(persona), cwd: cwd ?? persona.cwd };
+			}),
 		});
 		registry.install(routerExtension);
 		// Persona skills & memory: every Router and Worker conversation can call
@@ -237,7 +242,7 @@ export class HubDurableRuntime {
 			...(options.onReport === undefined ? {} : { onReport: options.onReport as never }),
 		};
 		const harness = await Harness.open(storage, harnessOptions, context);
-		const runtime = new HubDurableRuntime(
+		runtime = new HubDurableRuntime(
 			harness,
 			registry,
 			models,
@@ -475,8 +480,8 @@ export class HubDurableRuntime {
 				createdAt: Date.now(),
 			};
 			if (options.worktree === true) {
-					(recall.nodes[workerId] as unknown as Record<string, unknown>).data = { node: { worktreePath, branchName } };
-				}
+				(recall.nodes[workerId] as unknown as Record<string, unknown>).data = { node: { worktreePath, branchName } };
+			}
 		}, context);
 
 		const conversation = (await this.harness.conversation(stringToConversationId(conversationId), context))!;

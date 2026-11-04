@@ -108,7 +108,7 @@ test('1. delegate_to_bot runs the full worker stack and reports back completed',
   const runtime = await HubDurableRuntime.open({ storage: new MemoryStorage(), models });
   try {
     runtime.registerPersona(persona('assistant', 'Assistant', 'You are the personal assistant.', dir));
-    runtime.registerPersona(persona('architect', 'Architect', 'You design systems.', dir));
+    runtime.registerPersona({ ...persona('architect', 'Architect', 'You design systems.', dir), thinkingLevel: 'high' });
 
     const assistant = await runtime.ensureBotMainSession('assistant');
 
@@ -142,6 +142,9 @@ test('1. delegate_to_bot runs the full worker stack and reports back completed',
     const workers = await runtime.getActiveWorkers(String(assistant.id));
     assert.equal(workers.length, 1);
     assert.equal(workers[0].botId, 'architect', 'worker must run as the target persona');
+    const delegated = await runtime.conversation(workers[0].conversationId);
+    assert.ok(delegated);
+    assert.equal((await delegated.agent(BACKGROUND_CONTEXT)).thinkingLevel, 'high', 'delegate uses the target persona worker configuration');
 
     // 完成回报：registry 翻转 completed + 父 Router transcript 收到 worker-report。
     const completed = await waitFor(
@@ -161,6 +164,41 @@ test('1. delegate_to_bot runs the full worker stack and reports back completed',
   } finally {
     await runtime.close();
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('spawn_worker restores coding tools removed from the parent Router', { timeout: 30_000 }, async () => {
+  const faux = fauxProvider({ models: [{ id: 'main' }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const runtime = await HubDurableRuntime.open({ storage: new MemoryStorage(), models, codemode: false });
+  try {
+    runtime.registerPersona(persona('coder', 'Coder', 'Implement coding tasks.', process.cwd()));
+    const router = await runtime.ensureBotMainSession('coder');
+    assert.ok(!(await router.agent(BACKGROUND_CONTEXT)).tools.some((tool) => tool.name === 'bash'));
+    scriptRouter(faux, (ctx) => {
+      const text = lastUserText(ctx.messages);
+      if (text === 'Inspect the coding task') return fauxAssistantMessage('Coding task inspected.');
+      if (text === 'Start a coding worker' && !ctx.messages.some((m) => m.role === 'toolResult')) {
+        return fauxAssistantMessage([fauxToolCall('spawn_worker', {
+          title: 'coding tools',
+          task: 'Inspect the coding task',
+        })], { stopReason: 'toolUse' });
+      }
+      return fauxAssistantMessage('Worker acknowledged.');
+    });
+    await (await runtime.submitUserMessage(String(router.id), 'Start a coding worker')).wait(BACKGROUND_CONTEXT);
+    const worker = await waitFor(
+      async () => (await runtime.getActiveWorkers(String(router.id)))[0],
+      (entry) => entry?.status === 'completed',
+      'coding worker completion',
+    );
+    const conversation = await runtime.conversation(worker.conversationId);
+    assert.ok(conversation);
+    const tools = (await conversation.agent(BACKGROUND_CONTEXT)).tools.map((tool) => tool.name);
+    for (const name of ['read', 'write', 'edit', 'bash']) assert.ok(tools.includes(name), `${name} must be offered to the worker`);
+  } finally {
+    await runtime.close();
   }
 });
 
