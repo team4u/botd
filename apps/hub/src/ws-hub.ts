@@ -34,6 +34,17 @@ export interface GroupRouterDelegate {
     replyToBotId?: string,
     options?: { noTurn?: boolean }
   ): Promise<void>;
+  /**
+   * Durable 主线唤醒接管（可选）：返回 true 表示唤醒回合已提交给持久运行时，
+   * 调用方不再走 handleWakeup 的 runTurn 路径（节点已不再提供 runTurn RPC）。
+   */
+  handleDurableWakeup?(input: {
+    sessionId: string;
+    botId: string;
+    wakeupMessage: string;
+    replyToBotId?: string;
+    noTurn?: boolean;
+  }): Promise<boolean>;
   getActiveBotId(sessionId: string): string | undefined;
   isBotActiveInSession?(sessionId: string, botId: string): boolean;
   canRunBot(sessionId: string, botId: string): boolean;
@@ -414,6 +425,17 @@ export class NodeConnectionManager {
               enabled: true,
             });
             return { ok: true as const, scheduledTriggerId: trigger.id };
+          }
+          // Durable 主线优先：唤醒回合提交给持久运行时（Hub 侧模型驱动），
+          // 只有未接管时才退回 GroupRouter 的节点 runTurn 路径。
+          if (!input.noTurn && this.router?.handleDurableWakeup) {
+            const handled = await this.router.handleDurableWakeup({
+              sessionId: input.sessionId,
+              botId: input.botId,
+              wakeupMessage: input.wakeupMessage,
+              ...(input.replyToBotId !== undefined ? { replyToBotId: input.replyToBotId } : {}),
+            });
+            if (handled) return { ok: true as const };
           }
           await this.router.handleWakeup(input.sessionId, input.botId, input.wakeupMessage, input.replyToBotId, {
             noTurn: input.noTurn,

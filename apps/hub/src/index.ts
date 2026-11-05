@@ -33,7 +33,7 @@ import { registerBotRoutes } from './routes/bots.js';
 import { registerSessionRoutes } from './routes/sessions.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { registerEventRoutes } from './routes/events.js';
-import { registerWorkerRoutes, createDurableSessionMirror, type DurableSessionMirror } from './routes/workers.js';
+import { registerWorkerRoutes, createDurableSessionMirror, submitSessionMessageToDurable, type DurableSessionMirror } from './routes/workers.js';
 import { runWatchdogPass } from './harness/watchdog.js';
 import { seedBuiltinSkillInHub } from './builtin-skill-seed.js';
 import type { HubApp, HubContext } from './routes/context.js';
@@ -162,7 +162,10 @@ export function createHub(options?: HubOptions): HubInstance {
       durableRuntimeOpening = (async () => {
         const runtime = await HubDurableRuntime.open(
           {
-            ...(options?.dbPath ? { dbPath: `${options.dbPath}.durable.sqlite` } : {}),
+            // 与 HubDatabase 同源：只要主库落在磁盘（options.dbPath / BOTD_DB_PATH /
+            // 默认 ~/.botd/hub.sqlite），持久运行时同样落盘到 <主库>.durable.sqlite，
+            // 绝不静默退回 MemoryStorage 丢掉全部会话状态。
+            ...(db.dbPath && db.dbPath !== ':memory:' ? { dbPath: `${db.dbPath}.durable.sqlite` } : {}),
             // 凭据来自 Hub SQLite（provider_credentials）+ `.agent/auth.json`；
             // magpie 等动态 provider 的缓存模型来自 `.agent/models-store.json`
             models: options?.durableModels ?? createDefaultModels(),
@@ -491,12 +494,65 @@ export function createHub(options?: HubOptions): HubInstance {
     });
   }
 
+  // 延时唤醒与静默唤醒（noTurn）仍走 GroupRouter（once 触发器 / 纯 callback 落库）；
+  // 真正需要推理回合的唤醒在 Durable 主线启用时改提交 Router 会话（见 handleDurableWakeup），
+  // 避免向已不再提供 runTurn 的节点下发 RPC。
+  ;(router as GroupRouter & { handleDurableWakeup?: (input: {
+    sessionId: string;
+    botId: string;
+    wakeupMessage: string;
+    replyToBotId?: string;
+    noTurn?: boolean;
+  }) => Promise<boolean> }).handleDurableWakeup = async (input): Promise<boolean> => {
+    if (input.noTurn === true) return false; // 静默唤醒：仅落 callback，由 handleWakeup 直接处理
+    // 主线切流门槛与 messages.ts 一致：runtime 显式注入，或已配置任一 Provider 凭据。
+    if (options?.durableRuntime === undefined && listEffectiveProviderCredentials(db).length === 0) {
+      return false;
+    }
+    // 1. 先以 noTurn 语义落库并广播 [Wake-up] callback 消息（保留原公屏行为）
+    await router.handleWakeup(input.sessionId, input.botId, input.wakeupMessage, input.replyToBotId, {
+      noTurn: true,
+    });
+    // 2. 唤醒正文提交给会话的 Durable Router 会话（whenBusy: steer），由 Hub 侧模型驱动回合
+    const rt = await ensureDurableRuntime();
+    await submitSessionMessageToDurable(
+      { db, sseHub, durableRuntime: rt, getDurableRuntime: ensureDurableRuntime },
+      input.sessionId,
+      input.botId,
+      `[Wake-up] ${input.wakeupMessage}`,
+      durableMirror,
+    );
+    return true;
+  };
+
   // 静态 Web 文件 & SPA fallback
   app.use('*', createStaticMiddleware(options?.webDir));
 
   let isClosed = false;
-  const drain = async (timeoutMs?: number): Promise<{ drained: boolean; remaining: number }> => {
-    return router.drain(timeoutMs);
+  /** Durable 运行时中仍在执行的任务数（排除 Hub 托管的后台 watchdog 巡检与 blocked 任务）。 */
+  const getActiveDurableTaskCount = async (): Promise<number> => {
+    if (durableRuntime === undefined) return 0;
+    try {
+      const inspection = await durableRuntime.harness.inspect(BACKGROUND_CONTEXT);
+      // record.kind 即任务定义名（pi.generation / pi.tool / botd.watchdog…）；
+      // blocked 任务无注册定义可接管，不构成活跃工作。
+      return inspection.tasks.filter(
+        (task) => task.record.kind !== 'botd.watchdog' && task.state.kind !== 'blocked',
+      ).length;
+    } catch {
+      return 0;
+    }
+  };
+  const drain = async (timeoutMs = 30_000): Promise<{ drained: boolean; remaining: number }> => {
+    // 先让 GroupRouter 完成自身的排空准备（清空队列、置 draining 标记）
+    await router.drain(timeoutMs);
+    const start = Date.now();
+    for (;;) {
+      const remaining = router.getActiveTurnCount() + (await getActiveDurableTaskCount());
+      if (remaining === 0) return { drained: true, remaining: 0 };
+      if (Date.now() - start >= timeoutMs) return { drained: false, remaining };
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
   };
   const close = async (): Promise<void> => {
     if (isClosed) return;
