@@ -537,7 +537,6 @@ export class HubDatabase {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
-      CREATE INDEX IF NOT EXISTS idx_messages_durable_entry ON messages(session_id, durable_entry_id);
 
       CREATE TABLE IF NOT EXISTS artifacts (
         id TEXT PRIMARY KEY,
@@ -625,6 +624,9 @@ export class HubDatabase {
     // 旧列清理（bare ALTER 时代的历史遗留；新装库的 CREATE TABLE 已是最新结构）。
     this.dropColumnIfPresent('sessions', 'cursor_map_json');
     this.dropColumnIfPresent('messages', 'subagent_runs_json');
+    // 存量库补齐 durable_entry_id（新装库 CREATE TABLE 已含）；必须先于其索引创建。
+    this.ensureColumnPresent('messages', 'durable_entry_id', 'INTEGER');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_durable_entry ON messages(session_id, durable_entry_id)');
 
     // 自举管理员固定 id 为 user_admin：存量 nodes/sessions 归属回填
     this.db.exec(`UPDATE nodes SET owner_id = 'user_admin' WHERE owner_id IS NULL`);
@@ -644,6 +646,13 @@ export class HubDatabase {
     } catch {
       // DROP COLUMN 不可用时保留该列：读取路径已不再引用，无功能影响。
     }
+  }
+
+  private ensureColumnPresent(table: string, column: string, ddlType: string): void {
+    const exists = this.db.prepare(
+      `SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`
+    ).get(column);
+    if (!exists) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddlType}`);
   }
 
   // --- Artifact Cleanup Pending ---
