@@ -268,7 +268,19 @@ test("3. recall follows the pointer: spill file, then worker transcript fallback
 
 		// The router's recall tool result (via the router transcript) holds the full
 		// body from the spill file — not the 800-char catalog preview.
-		const ctx = await router.context(BACKGROUND_CONTEXT);
+		// Poll until the recall turn settles: under concurrent test load the
+		// report-triggered round may still be mid-flight (its toolCall shows up as a
+		// synthesized "Tool result unavailable" placeholder), so an immediate read races.
+		const ctx = await waitFor(
+			() => router.context(BACKGROUND_CONTEXT),
+			(view) =>
+				view.messages.some(
+					(m) =>
+						m.role === "assistant" &&
+						JSON.stringify(m.content).includes("RECALL-ACKED"),
+			),
+			"router recall round to settle",
+		);
 		const toolResultText = ctx.messages
 			.filter((m) => m.role === "toolResult")
 			.map((m) => JSON.stringify(m.content))
