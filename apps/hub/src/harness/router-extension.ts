@@ -18,6 +18,7 @@ import {
 	type AgentChange,
 	type ConversationId,
 	type Extension,
+	type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import {
 	AskDoc,
@@ -28,7 +29,11 @@ import {
 	WorkerRegistryDoc,
 	type WorkerEntry,
 } from "./docs.js";
-import { capRecallContent, resolveRecallBody } from "./recall-content.js";
+import { SpillStoreDoc, ThreadSubscriptionsDoc } from "./event-router.js";
+import {
+	capRecallContent,
+	resolveRecallBody,
+} from "./recall-content.js";
 
 export const ROUTER_EXTENSION = "botd-router";
 export const WORKER_EXTENSION = "botd-worker";
@@ -86,14 +91,43 @@ const PREVIEW_LIMIT = 240;
 export const preview = (text: string, limit = PREVIEW_LIMIT): string =>
 	text.length <= limit ? text : `${text.slice(0, limit)}…`;
 
-/** The shared `ask_human` tool (mounted on both Router and Worker extensions). */
+/**
+ * Best-effort release of a locally-mounted git worktree: `git worktree remove
+ * --force` + `prune`. Never throws — a non-git cwd, an already-gone or
+ * unmounted worktree must not fail the stop that cleans it up.
+ */
+export async function releaseLocalWorktree(
+	baseCwd: string,
+	worktreePath: string,
+	_branchName?: string,
+): Promise<void> {
+	try {
+		const { execFile } = await import("node:child_process");
+		const { promisify } = await import("node:util");
+		const run = promisify(execFile);
+		await run("git", ["-C", baseCwd, "worktree", "remove", "--force", worktreePath]);
+	} catch {
+		// already removed / not a git repo / unmounted: prune below still runs
+	}
+	try {
+		const { execFile } = await import("node:child_process");
+		const { promisify } = await import("node:util");
+		const run = promisify(execFile);
+		await run("git", ["-C", baseCwd, "worktree", "prune"]);
+	} catch {
+		// ignore: never fail the caller on cleanup
+	}
+}
+
+/** The shared `ask_human` tool (mounted on Router, Worker and any subagent extension). */
 export const askHumanTool = defineTool({
 	name: "ask_human",
 	description:
-		"Ask the human a question and record it as a pending ask. The hub UI (or test) resolves it; " +
-		"call `ask_human` again with the same prompt to poll its answer. Use previewType \"ui\" with a " +
-		"botd.v1 JSON spec in previewContent to render a rich form card (TextInput props.secret masks " +
-		"passwords and the answer is redacted into env vars, never stored in plaintext).",
+		"Ask the human a question and record it as a pending ask. The hub UI (or test) resolves it; once recorded, " +
+		"finish your turn and wait for the human's response to arrive as a message (or if already answered in this " +
+		"conversation, returns the answer). Use previewType \"ui\" with a botd.v1 JSON spec in previewContent to render " +
+		"a rich form card (TextInput props.secret masks passwords and the answer is redacted into env vars, never " +
+		"stored in plaintext).",
 	parameters: obj({
 		prompt: str(),
 		options: opt(arr(str())),
@@ -110,6 +144,16 @@ export const askHumanTool = defineTool({
 			const existing = Object.values(doc.asks).find((a) => a.askedBy === askedBy);
 			if (existing !== undefined) {
 				askId = existing.askId;
+				return;
+			}
+			// Same-prompt dedup: a repeated ask with an identical prompt reuses the
+			// recorded ask instead of piling up duplicate pending asks (polling or
+			// re-asking the same question returns the same askId, answered or not).
+			const byPrompt = Object.values(doc.asks).find(
+				(a) => a.prompt === args.prompt && (a.status === "pending" || a.status === "answered"),
+			);
+			if (byPrompt !== undefined) {
+				askId = byPrompt.askId;
 				return;
 			}
 			askId = `ask-${api.conversationId}-${Object.keys(doc.asks).length + 1}`;
@@ -145,6 +189,120 @@ export const askHumanTool = defineTool({
 
 const listWorkers = (registry: { workers: Record<string, WorkerEntry> }): WorkerEntry[] =>
 	Object.values(registry.workers).sort((a, b) => b.startedAt - a.startedAt);
+
+/**
+ * Register a worker conversation under its threadKeys in the session-wide
+ * passthrough subscription table (`ThreadSubscriptionsDoc`), so later events
+ * on those threads bypass the Router LLM and reach the worker directly.
+ * Idempotent; call inside the spawning commit.
+ */
+async function subscribeWorkerThreads(
+	tx: Parameters<Parameters<import("@earendil-works/pi-durable").ToolExecutionApi["commit"]>[0]>[0],
+	conversationId: string,
+	threadKeys: readonly string[],
+): Promise<void> {
+	if (threadKeys.length === 0) return;
+	const subsDoc = await tx.doc(ThreadSubscriptionsDoc);
+	for (const key of threadKeys) {
+		const list = subsDoc.subs[key] ?? [];
+		if (!list.includes(conversationId)) list.push(conversationId);
+		subsDoc.subs[key] = list;
+	}
+}
+
+/**
+ * Remove a worker conversation from the passthrough subscription table
+ * (stopping a worker must stop its thread feed); empty lists are deleted.
+ * Call inside the stopping commit.
+ */
+async function unsubscribeWorkerThreads(
+	tx: Parameters<Parameters<import("@earendil-works/pi-durable").ToolExecutionApi["commit"]>[0]>[0],
+	conversationId: string,
+	threadKeys: readonly string[],
+): Promise<void> {
+	if (threadKeys.length === 0) return;
+	const subsDoc = await tx.doc(ThreadSubscriptionsDoc);
+	for (const key of threadKeys) {
+		const list = subsDoc.subs[key];
+		if (list === undefined) continue;
+		const next = list.filter((id) => id !== conversationId);
+		if (next.length === 0) delete subsDoc.subs[key];
+		else subsDoc.subs[key] = next;
+	}
+}
+
+/** The shared `recall` tool (mounted on both Router and Worker extensions). */
+export const recallTool: ToolRegistration = defineTool({
+	name: "recall",
+	description:
+		"Chain of Recall lookup: load a worker/trigger/entry/artifact/thread node by id (or a spilled payload id `spill_xxx`), " +
+		"with its full content and one-line summaries of related nodes for multi-hop recall.",
+	parameters: obj({
+		id: str({ description: "Node id: a workerId, a spill id (spill_xxx), or any id registered in the recall index" }),
+	}),
+	async execute(args, api, context) {
+		const snapshot = await api.snapshot(RecallIndexDoc, context);
+		const nodes: RecallIndexState["nodes"] = snapshot?.nodes ?? {};
+		const node = nodes[args.id];
+		if (node === undefined) {
+			// Unknown to the index: a spilled event payload lives directly in the
+			// SpillStore (formatEventInlineAndSpill tells the model `recall({ id: "spill_xxx" })`).
+			const spill = await api.snapshot(SpillStoreDoc, args.id, context);
+			if (spill !== undefined) {
+				return {
+					output: [
+						{
+							type: "text",
+							text: [
+								`# ${spill.spillId} — spilled content`,
+								...(spill.threadKey === null ? [] : [`thread: ${spill.threadKey}`]),
+								`content: ${capRecallContent(spill.fullContent, { id: spill.spillId, kind: "entry", title: spill.spillId, summary: "spilled payload", contentPreview: "", relatedIds: [], createdAt: spill.createdAt })}`,
+							].join("\n"),
+						},
+					],
+				};
+			}
+			return { isError: true, output: [{ type: "text", text: `No recall node: ${args.id}` }] };
+		}
+		// The index is a pure pointer store: follow it to the real body — the
+		// spill file, else the worker conversation's last assistant entry, else
+		// the catalog preview. A spilled worker report also lives in the
+		// SpillStore under its workerId: on an unreadable spill file (remote
+		// Node cwd) it beats degrading to the truncated preview.
+		let body = await resolveRecallBody(node as RecallNode, (query, limit) =>
+			api.commit((tx) => tx.scanEntries(query, limit), context),
+		);
+		if (body.source === "preview" || body.notice !== undefined) {
+			const spill = await api.snapshot(SpillStoreDoc, args.id, context);
+			if (spill !== undefined && spill.fullContent !== "") {
+				// Keep the unreadable-file notice: the pointer is still broken even
+			// though the durable copy serves the body.
+				body = {
+					content: spill.fullContent,
+					source: "spill-file",
+					...(body.notice === undefined ? {} : { notice: body.notice }),
+				};
+			}
+		}
+		const content = capRecallContent(body.content, node);
+		// Multi-hop: one-line summaries of the next-hop nodes.
+		const related = node.relatedIds
+			.map((id) => nodes[id])
+			.filter((next): next is NonNullable<typeof next> => next !== undefined)
+			.map((next) => `- ${next.id} (${next.kind}): ${preview(next.summary, 100)}`);
+		const lines = [
+			`# ${node.id} — ${node.title}`,
+			`kind: ${node.kind}  created: ${new Date(node.createdAt).toISOString()}`,
+			`summary: ${node.summary}`,
+			...(body.notice === undefined ? [] : [body.notice]),
+			`content: ${content}`,
+		];
+		if (related.length > 0) lines.push("related (next hops):", ...related);
+		return {
+			output: [{ type: "text", text: lines.join("\n") }],
+		};
+	},
+});
 
 /** A Router's persona prompt, rendered from its TargetDoc + persona config. */
 function renderPersona(
@@ -406,6 +564,13 @@ export function createRouterExtension(options: {
 					(recall.nodes[workerId] as unknown as Record<string, unknown>).data = { node: { worktreePath, branchName } };
 				}
 
+				// 6. Subscribe the worker to its threadKeys (event passthrough).
+				await subscribeWorkerThreads(
+					tx,
+					conversationId,
+					args.threadKey === undefined ? [] : [args.threadKey],
+				);
+
 			}, context);
 
 			// 6. Submit the task without waiting for the worker to finish. A resumed
@@ -550,6 +715,13 @@ export function createRouterExtension(options: {
 					(recall.nodes[workerId] as unknown as Record<string, unknown>).data = { node: { worktreePath, branchName } };
 				}
 
+				// Subscribe the delegated worker to its threadKeys (event passthrough).
+				await subscribeWorkerThreads(
+					tx,
+					conversationId,
+					args.threadKey === undefined ? [] : [args.threadKey],
+				);
+
 			}, context);
 
 			const worker = await api.conversation(stringToConversationId(conversationId), context);
@@ -642,6 +814,11 @@ export function createRouterExtension(options: {
 					record.status = "aborted";
 					record.finishedAt = api.now();
 				}
+				// A stopped worker stops feeding its threads: drop its passthrough
+				// subscriptions whatever the status (stop on a finished worker too).
+				if (record !== undefined) {
+					await unsubscribeWorkerThreads(tx, record.conversationId, record.threadKeys ?? []);
+				}
 			}, context);
 			const worker = await api.conversation(stringToConversationId(entry.conversationId), context);
 			if (worker !== undefined) await worker.abort(context, { background: true }).catch(() => undefined);
@@ -654,50 +831,19 @@ export function createRouterExtension(options: {
 					record.status = "aborted";
 					record.finishedAt = api.now();
 				}
+				if (record !== undefined) {
+					await unsubscribeWorkerThreads(tx, record.conversationId, record.threadKeys ?? []);
+				}
 			}, context);
+			// An explicitly aborted worktree worker is nobody's to inspect: release its
+			// git worktree so `.botd-worktrees/` does not accumulate dead checkouts.
+			// (A completed worker's worktree survives: its branch may be merged later.)
+			if (entry.worktreePath !== undefined && entry.worktreePath !== "") {
+				const baseCwd = entry.cwd === "" ? process.cwd() : entry.cwd;
+				await releaseLocalWorktree(baseCwd, entry.worktreePath, entry.branchName).catch(() => undefined);
+			}
 			return {
 				output: [{ type: "text", text: `Worker ${args.workerId} aborted.` }],
-			};
-		},
-	});
-
-	const recall = defineTool({
-		name: "recall",
-		description:
-			"Chain of Recall lookup: load a worker/trigger/entry/artifact/thread node by id, with its full content " +
-			"and one-line summaries of related nodes for multi-hop recall.",
-		parameters: obj({
-			id: str({ description: "Node id: a workerId, or any id registered in the recall index" }),
-		}),
-		async execute(args, api, context) {
-			const snapshot = await api.snapshot(RecallIndexDoc, context);
-			const nodes: RecallIndexState["nodes"] = snapshot?.nodes ?? {};
-			const node = nodes[args.id];
-			if (node === undefined) {
-				return { isError: true, output: [{ type: "text", text: `No recall node: ${args.id}` }] };
-			}
-			// The index is a pure pointer store: follow it to the real body — the
-			// spill file, else the worker conversation's last assistant entry, else
-			// the catalog preview.
-			const body = await resolveRecallBody(node as RecallNode, (query, limit) =>
-				api.commit((tx) => tx.scanEntries(query, limit), context),
-			);
-			const content = capRecallContent(body.content, node);
-			// Multi-hop: one-line summaries of the next-hop nodes.
-			const related = node.relatedIds
-				.map((id) => nodes[id])
-				.filter((next): next is NonNullable<typeof next> => next !== undefined)
-				.map((next) => `- ${next.id} (${next.kind}): ${preview(next.summary, 100)}`);
-			const lines = [
-				`# ${node.id} — ${node.title}`,
-				`kind: ${node.kind}  created: ${new Date(node.createdAt).toISOString()}`,
-				`summary: ${node.summary}`,
-				...(body.notice === undefined ? [] : [body.notice]),
-				`content: ${content}`,
-			];
-			if (related.length > 0) lines.push("related (next hops):", ...related);
-			return {
-				output: [{ type: "text", text: lines.join("\n") }],
 			};
 		},
 	});
@@ -718,6 +864,6 @@ export function createRouterExtension(options: {
 				return renderWorkers(registry);
 			}),
 		],
-		tools: [spawnWorker, delegateToBot, steerWorker, stopWorker, recall, askHuman],
+		tools: [spawnWorker, delegateToBot, steerWorker, stopWorker, recallTool, askHuman],
 	});
 }

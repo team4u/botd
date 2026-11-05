@@ -22,14 +22,18 @@ import {
 	GenerationTask,
 	hook,
 	runEndTask,
+	section,
 	type ConversationId,
 	type Extension,
 } from "@earendil-works/pi-durable";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { RecallIndexDoc, TargetDoc, WorkerRegistryDoc } from "./docs.js";
-import { askHumanTool } from "./router-extension.js";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+
+import { RecallIndexDoc, TargetDoc, WorkerRegistryDoc, type TargetState } from "./docs.js";
+import { SpillStoreDoc } from "./event-router.js";
+import { askHumanTool, recallTool, type PersonaListing } from "./router-extension.js";
 import { assistantEntryText } from "./recall-content.js";
 import { configure, type AgentChange } from "@earendil-works/pi-durable";
 
@@ -95,9 +99,11 @@ const WorkerReportTask = defineTask<WorkerReportInput, { phase: "report" }, { re
 
 			// Length-based routing (Chain of Recall Inline & Spill): short answers ride
 			// inline in full so the Router reads them with zero extra tool calls; long
-			// ones spill to `<cwd>/.botd/recall/<workerId>.md` and the notification
-			// carries a preview plus a pointer. A spill failure degrades to inline —
-			// never drop a report because the disk refused it.
+			// ones spill to `<cwd>/.botd/recall/<workerId>.md` AND into the durable
+			// SpillStore (keyed by workerId) — the disk file may be unreachable when
+			// the worker ran on a remote Node, but the SpillStore copy is always
+			// recallable via `recall({ id: workerId })`. A spill failure degrades to
+			// inline — never drop a report because the disk refused it.
 			let body = "";
 			let spillPath: string | undefined;
 			let spillBytes: number | undefined;
@@ -132,6 +138,19 @@ const WorkerReportTask = defineTask<WorkerReportInput, { phase: "report" }, { re
 			const router = await runtime.conversation(parentId, context);
 
 			await runtime.commit(async (tx) => {
+				// 0. Durable spill copy: the full answer also lives in the SpillStore
+				//    under the workerId, so `recall({ id: workerId })` resolves even when
+				//    the spill file is gone or was written on another machine.
+				if (input.answer.length > INLINE_LIMIT) {
+					const spillDoc = await tx.doc(
+						SpillStoreDoc,
+						input.workerId,
+						{ spillId: input.workerId, fullContent: input.answer },
+					);
+					spillDoc.fullContent = input.answer;
+					spillDoc.createdAt = runtime.now();
+				}
+
 				// 1. Index into the session-wide Chain of Recall. The doc stays a pure
 				//    index: one-line summary + 800-char catalog preview (+ spill pointer
 				//    when the body went to disk) — never a full-body copy.
@@ -302,14 +321,45 @@ const subagentToolFor = (resolveSubagentChange: SubagentChangeResolver | undefin
 		},
 	});
 
+/** Renders the worker's subagent roster: children of the worker's own bot persona. */
+function renderWorkerSubagents(target: TargetState, personas: ReadonlyArray<PersonaListing>): string | undefined {
+	const subagents = personas.filter((p) => p.parentBotId === target.botId);
+	if (subagents.length === 0) return undefined;
+	const lines = [
+		"## Your Subagents (same workspace)",
+		"Dispatch a subagent with `subagent({ agentType: \"<subagentId\", task })` " +
+			"or inside a SubagentWorkflow script via `agent(prompt, { agentType: \"<subagentId>\" })`. " +
+			"A subagent runs with its own model, instructions and toolScope while sharing this workspace cwd.",
+	];
+	for (const sub of subagents) {
+		const bits = [
+			`model ${sub.model.provider}/${sub.model.modelId}`,
+			...(sub.toolScope === undefined ? [] : [`toolScope ${sub.toolScope}`]),
+		];
+		lines.push(`- ${sub.botId}${sub.name === undefined ? "" : ` (${sub.name})`}: ${sub.description ?? "(no description)"} [${bits.join(", ")}]`);
+	}
+	return lines.join("\n");
+}
+
 export function createWorkerExtension(
-	options: { resolveSubagentChange?: SubagentChangeResolver } = {},
+	options: {
+		resolveSubagentChange?: SubagentChangeResolver;
+		/** All registered personas, so a Worker whose bot has children can list them (subagents) in its prompt. */
+		listPersonas?: () => ReadonlyArray<PersonaListing>;
+	} = {},
 ): Extension {
 	return defineExtension({
 		name: WORKER_EXTENSION_NAME,
 		tasks: [WorkerReportTask],
-		tools: [subagentToolFor(options.resolveSubagentChange), askHumanTool],
-		sections: [],
+		tools: [subagentToolFor(options.resolveSubagentChange), askHumanTool, recallTool],
+		sections: [
+			section("subagents", async (input) => {
+				if (options.listPersonas === undefined) return undefined;
+				const target = await input.read.snapshot(TargetDoc, input.conversationId, BACKGROUND_CONTEXT);
+				if (target === undefined || target.role !== "worker") return undefined;
+				return renderWorkerSubagents(target, options.listPersonas());
+			}),
+		],
 		hooks: [
 			hook(GenerationTask, {
 				afterRun: async (run, api, context) => {
