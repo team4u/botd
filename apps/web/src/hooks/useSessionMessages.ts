@@ -616,6 +616,13 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
       return;
     }
 
+    // /clear 命令：原地清空当前会话消息与上下文（不归档、不换会话，保留后台运行中的 Worker）
+    if (content.trim() === '/clear') {
+      const sid = activeSessionIdRef.current;
+      if (sid) await handleClearMessages(sid, { keepWorkers: true });
+      return;
+    }
+
     const targetSessionId = activeSessionIdRef.current;
     if (!targetSessionId) return;
 
@@ -716,9 +723,9 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
     }
   };
 
-  const handleClearMessages = async (sessionId: string) => {
+  const handleClearMessages = async (sessionId: string, options?: { keepWorkers?: boolean }) => {
     try {
-      await api.clearSessionMessages(sessionId);
+      await api.clearSessionMessages(sessionId, options);
       if (sessionId === activeSessionIdRef.current) {
         snapshotSeqRef.current++;
         setMessages([]);

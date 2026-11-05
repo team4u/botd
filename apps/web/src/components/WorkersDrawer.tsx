@@ -11,11 +11,9 @@ import {
   HeartPulse,
   Link2,
   Loader2,
-  Plus,
   Send,
   Wrench,
   X,
-  Zap,
 } from 'lucide-react';
 import type { BotConfig, NodeRecord, ToolCallRecord } from '@botd/protocol';
 import { AssistantTurnContent } from './MessageItem';
@@ -31,8 +29,8 @@ import {
  * 后台子任务抽屉（列表 ⇄ 详情一体）：取代原顶栏横栏与独立检视抽屉的统一入口。
  *
  * 列表视图：失败置顶 → 活跃走表（计时/当前工具/行内中止）→ 终态折叠分组；
- * 顶栏提供「+ 派发」内联表单与 Watchdog 巡检。详情视图：Bot 徽标/状态/计时 +
- * 元信息徽标行 + AssistantTurnContent 实时时间线 + Steer / Follow-up / Abort 全双工干预。
+ * 任务由对话中自然语言派发，抽屉只做检视与干预，顶栏提供 Watchdog 巡检。
+ * 详情视图：Bot 徽标/状态/计时 + 元信息徽标行 + AssistantTurnContent 实时时间线 + Steer / Follow-up / Abort 全双工干预。
  */
 export interface WorkersDrawerProps {
   isOpen: boolean;
@@ -45,13 +43,6 @@ export interface WorkersDrawerProps {
   initialWorkerId?: string;
   onSelectWorker: (workerId: string) => void;
   onStopWorker: (workerId: string) => void;
-  /** 手动派发后台 Worker（支持 Git Worktree 隔离与直通线程键） */
-  onSpawnWorker?: (input: {
-    title: string;
-    task: string;
-    worktree?: boolean;
-    threadKey?: string;
-  }) => Promise<boolean>;
   /** 触发 Watchdog 健康巡检 */
   onRunWatchdog?: () => Promise<{ healthy: boolean; summary: string } | null>;
   /** 向 worker 发送指令（运行中 Steer 插话 / 结束后 Follow-up 继续） */
@@ -600,7 +591,6 @@ export const WorkersDrawer: React.FC<WorkersDrawerProps> = ({
   initialWorkerId,
   onSelectWorker,
   onStopWorker,
-  onSpawnWorker,
   onRunWatchdog,
   onSteer,
   onClose,
@@ -609,13 +599,7 @@ export const WorkersDrawer: React.FC<WorkersDrawerProps> = ({
   const [view, setView] = useState<'list' | 'detail'>(() => (initialWorkerId ? 'detail' : 'list'));
   const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(() => initialWorkerId ?? null);
 
-  // 手动派发表单与 Watchdog 巡检状态（列表视图持有；详情视图另有独立巡检状态）
-  const [showSpawnForm, setShowSpawnForm] = useState(false);
-  const [spawnTitle, setSpawnTitle] = useState('');
-  const [spawnTask, setSpawnTask] = useState('');
-  const [spawnWorktree, setSpawnWorktree] = useState(false);
-  const [spawnThreadKey, setSpawnThreadKey] = useState('');
-  const [spawning, setSpawning] = useState(false);
+  // Watchdog 巡检状态（列表视图持有；详情视图另有独立巡检状态）
   const [watchdogRunning, setWatchdogRunning] = useState(false);
   const [watchdogSummary, setWatchdogSummary] = useState<string | null>(null);
 
@@ -642,11 +626,6 @@ export const WorkersDrawer: React.FC<WorkersDrawerProps> = ({
       setSelectedWorkerId(null);
     }
   }, [isOpen, initialWorkerId]);
-
-  // 零 Worker 打开时默认展开派发表单，落地即可填写
-  useEffect(() => {
-    if (isOpen && workers.length === 0 && onSpawnWorker) setShowSpawnForm(true);
-  }, [isOpen, workers.length, onSpawnWorker]);
 
   // 选中目标已不存在（会话切换 / 列表刷新）：回落列表。
   // 但首次加载中（workers 为空）或刚传入 initialWorkerId 定位时不得回落，
@@ -688,27 +667,6 @@ export const WorkersDrawer: React.FC<WorkersDrawerProps> = ({
       setWatchdogSummary(result ? result.summary : '巡检请求失败');
     } finally {
       setWatchdogRunning(false);
-    }
-  };
-
-  const handleSpawn = async () => {
-    if (!onSpawnWorker || spawning) return;
-    const title = spawnTitle.trim();
-    const task = spawnTask.trim();
-    const threadKey = spawnThreadKey.trim();
-    if (!title || !task) return;
-    setSpawning(true);
-    try {
-      const ok = await onSpawnWorker({ title, task, worktree: spawnWorktree, ...(threadKey ? { threadKey } : {}) });
-      if (ok) {
-        setSpawnTitle('');
-        setSpawnTask('');
-        setSpawnWorktree(false);
-        setSpawnThreadKey('');
-        setShowSpawnForm(false);
-      }
-    } finally {
-      setSpawning(false);
     }
   };
 
@@ -785,7 +743,7 @@ export const WorkersDrawer: React.FC<WorkersDrawerProps> = ({
           />
         ) : (
           <>
-            {/* 列表顶栏：标题 + 计数摘要 + 巡检 + 派发 + 关闭 */}
+            {/* 列表顶栏：标题 + 计数摘要 + 巡检 + 关闭 */}
             <div className="flex items-center justify-between gap-2 px-4 h-14 border-b border-zinc-200/80 dark:border-zinc-800/80 shrink-0">
               <div className="flex items-center gap-2 min-w-0">
                 <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 whitespace-nowrap">
@@ -808,18 +766,6 @@ export const WorkersDrawer: React.FC<WorkersDrawerProps> = ({
                       <HeartPulse className="w-3.5 h-3.5" />
                     )}
                     <span className="whitespace-nowrap">巡检</span>
-                  </button>
-                )}
-                {onSpawnWorker && (
-                  <button
-                    type="button"
-                    aria-label="派发后台 Worker"
-                    onClick={() => setShowSpawnForm((v) => !v)}
-                    title="手动派发后台 Worker"
-                    className="inline-flex items-center gap-1 h-8 px-2 rounded-lg border border-zinc-200/80 dark:border-zinc-700/80 bg-white dark:bg-zinc-900 hover:border-blue-300 dark:hover:border-blue-700 text-zinc-600 dark:text-zinc-300 text-xs font-medium transition-colors cursor-pointer"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span className="whitespace-nowrap">派发</span>
                   </button>
                 )}
                 <button
@@ -847,72 +793,13 @@ export const WorkersDrawer: React.FC<WorkersDrawerProps> = ({
               </div>
             )}
 
-            {/* 手动派发表单：标题 / 任务指令 / worktree 隔离 / 直通线程键 */}
-            {showSpawnForm && (
-              <div className="px-4 py-3 border-b border-zinc-100 dark:border-zinc-900 space-y-1.5 shrink-0">
-                <input
-                  type="text"
-                  value={spawnTitle}
-                  onChange={(e) => setSpawnTitle(e.target.value)}
-                  placeholder="任务标题（如：修复鉴权模块）"
-                  aria-label="任务标题"
-                  className="w-full h-8 px-2.5 text-xs rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-blue-500 dark:focus:border-blue-400 transition-colors"
-                />
-                <textarea
-                  value={spawnTask}
-                  onChange={(e) => setSpawnTask(e.target.value)}
-                  placeholder="后台任务指令..."
-                  aria-label="后台任务指令"
-                  rows={2}
-                  className="w-full px-2.5 py-1.5 text-xs rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-blue-500 dark:focus:border-blue-400 transition-colors resize-y"
-                />
-                <div className="flex items-center gap-2 flex-wrap">
-                  <label className="inline-flex items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-300 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={spawnWorktree}
-                      onChange={(e) => setSpawnWorktree(e.target.checked)}
-                      className="w-3.5 h-3.5 rounded border-zinc-300 dark:border-zinc-600 accent-blue-600 cursor-pointer"
-                    />
-                    Git Worktree 隔离
-                  </label>
-                  <input
-                    type="text"
-                    value={spawnThreadKey}
-                    onChange={(e) => setSpawnThreadKey(e.target.value)}
-                    placeholder="直通线程键（可选，如 github:pr#42）"
-                    aria-label="直通线程键"
-                    className="flex-1 min-w-[160px] h-8 px-2.5 text-xs rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-blue-500 dark:focus:border-blue-400 transition-colors"
-                  />
-                </div>
-                <div className="flex items-center justify-end gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => setShowSpawnForm(false)}
-                    className="h-8 px-2.5 rounded-lg text-xs text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-                  >
-                    取消
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleSpawn()}
-                    disabled={spawning || !spawnTitle.trim() || !spawnTask.trim()}
-                    className="inline-flex items-center gap-1 h-8 px-3 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-medium transition-colors cursor-pointer"
-                  >
-                    {spawning ? <Loader2 className="w-3.5 h-3.5 animate-spin-fast" /> : <Zap className="w-3.5 h-3.5" />}
-                    <span>立即派发</span>
-                  </button>
-                </div>
-              </div>
-            )}
-
             {/* 列表主体：失败置顶 → 活跃 → 终态折叠分组 */}
             <div className="flex-1 min-h-0 overflow-y-auto p-2">
               {workers.length === 0 ? (
-                <div className="py-16 flex flex-col items-center justify-center gap-2 text-zinc-400 dark:text-zinc-500 text-center px-4">
-                  <Zap className="w-8 h-8" />
-                  <p className="text-xs leading-relaxed">
-                    暂无后台任务。点击右上角「派发」即可在不打断当前对话的情况下派生后台子任务。
+                <div className="py-10 text-center">
+                  <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">暂无后台任务</p>
+                  <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
+                    在对话中用自然语言交代复杂任务，智能体会自动在后台并行执行
                   </p>
                 </div>
               ) : (

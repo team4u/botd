@@ -117,6 +117,8 @@ interface ChatViewProps {
   }) => Promise<void> | void;
   /** 会话被服务端更新（如绑定/解绑项目目录）后回调，供父层同步全局列表 */
   onSessionUpdated?: (updated: SessionRecord) => void;
+  /** 外部（如侧边栏中枢）请求打开指定后台 Worker 详情抽屉 */
+  inspectWorkerRequest?: { workerId: string | null; seq: number } | null;
 }
 
 export const ChatView: React.FC<ChatViewProps> = ({
@@ -156,13 +158,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onSetArchived,
   onCreateParallelTopic,
   onSessionUpdated,
+  inspectWorkerRequest,
 }) => {
   const keyboardInset = useKeyboardInset();
 
   // Super-agent 全双工后台工作单元（Worker / Workflow / Speculative）：
   // 顶栏 ⚡ 角标入口 + 子任务抽屉（列表⇄详情）干预（steer / followUp / stop），不打断前台对话
+  // 任务由对话中自然语言派发，抽屉只做检视与干预
   const superAgent = useSuperAgentWorkers(session.id);
-  const { spawnBackgroundWorker } = superAgent;
 
   // 后台子任务抽屉：initialWorkerId 非空时直接定位到该 worker 详情
   const [workersDrawerOpen, setWorkersDrawerOpen] = useState(false);
@@ -175,6 +178,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setWorkersDrawerOpen(false);
     superAgent.setSelectedWorkerId(null);
   }, [superAgent]);
+
+  // 外部（如侧边栏点击 Worker）请求检视：直接打开抽屉并定位到该 Worker 详情
+  useEffect(() => {
+    if (!inspectWorkerRequest) return;
+    openWorkersDrawer(inspectWorkerRequest.workerId);
+  }, [inspectWorkerRequest, openWorkersDrawer]);
 
   // Watchdog 健康巡检：列表与详情视图共用（runPass=1 先跑一轮巡检再出报告）
   const runWatchdog = async (): Promise<{ healthy: boolean; summary: string } | null> => {
@@ -984,7 +993,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
                 >
                   <Zap className="w-3.5 h-3.5" />
-                  <span className="whitespace-nowrap">派发后台任务 / 巡检</span>
+                  <span className="whitespace-nowrap">后台任务 / 巡检</span>
                 </button>
 
                 {onCreateParallelTopic && !isPureAssistantChat && (
@@ -1546,7 +1555,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onStopWorker={(workerId) => {
           void superAgent.stopWorker(workerId);
         }}
-        onSpawnWorker={spawnBackgroundWorker}
         onRunWatchdog={runWatchdog}
         onSteer={superAgent.steerWorker}
         onClose={closeWorkersDrawer}
