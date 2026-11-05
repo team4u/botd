@@ -1,6 +1,7 @@
 import { isBotConfig, isValidBotEnvKey } from '@botd/protocol';
 import type { BotConfig, ChatCommand, SaveBotInput } from '@botd/protocol';
 import { ensureNodeOwned, resolveOwnedBot } from '../http-helpers.js';
+import { HUB_ROUTER_BOT_ID } from '../harness/router-extension.js';
 import type { BotFileKind } from '../db.js';
 import type { HubApp, HubContext } from './context.js';
 
@@ -256,6 +257,16 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
   // --- Bot 命令列表：Hub SQLite 直出（零节点在线可用），节点在线时追加其自定义命令 ---
   app.get('/api/bots/:botId/commands', async (c) => {
     const botId = c.req.param('botId');
+    // 内置中枢总管：无 SQLite bot 行，直出全部全局技能命令。
+    if (botId === HUB_ROUTER_BOT_ID) {
+      return c.json(
+        db.listSkills().map((s) => ({
+          name: s.id,
+          description: skillDescription(s.id),
+          source: 'skill' as const,
+        })),
+      );
+    }
     const botRes = resolveOwnedBot(c, db, botId);
     if (!botRes.ok) return botRes.response;
 

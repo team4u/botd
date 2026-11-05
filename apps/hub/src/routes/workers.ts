@@ -21,6 +21,7 @@ import {
   type RouteOutcome,
 } from '../harness/event-router.js';
 import { diagnoseSystemHealth, runWatchdogPass } from '../harness/watchdog.js';
+import { HUB_ROUTER_BOT_ID as ROUTER_EXTENSION_HUB_ROUTER_BOT_ID } from '../harness/router-extension.js';
 import {
   ensureRouterConversationId,
   findRouterConversationId,
@@ -28,6 +29,39 @@ import {
   respondToDurableAsk,
 } from '../harness/session-bridge.js';
 import type { HubApp, HubContext } from './context.js';
+
+// 系统内置「⚡ 中枢总管」Router 分身 id（与 harness/router-extension 同源）。
+export const HUB_ROUTER_BOT_ID = ROUTER_EXTENSION_HUB_ROUTER_BOT_ID;
+
+/**
+ * 构造系统内置「⚡ 中枢总管」（hub-router）虚拟分身配置：
+ * - 不写入 SQLite bots 表，绝不污染用户的业务分身列表与「个人助理」通讯录；
+ * - 默认模型取首个已配置模型的主分身；
+ * - 默认节点取配置分身所在节点（兜底 'local'）。
+ */
+export function resolveHubRouterBotConfig(db: HubContext['db']): import('@botd/protocol').BotConfig {
+  const allBots = db.getAllBots();
+  const configuredBot =
+    allBots.find(
+      (b) =>
+        (!b.parentBotId || !allBots.some((p) => p.id === b.parentBotId)) &&
+        b.modelProvider?.trim() &&
+        b.modelId?.trim(),
+    ) ?? allBots.find((b) => b.modelProvider?.trim() && b.modelId?.trim());
+  // 节点解析：配置分身所在节点优先（用户意图最明确），否则兜底 'local'。
+  return {
+    id: HUB_ROUTER_BOT_ID,
+    name: '中枢总管',
+    description: '系统内置全局调度总管（自然语言派发跨项目与跨分身后台任务）',
+    nodeId: configuredBot?.nodeId ?? 'local',
+    modelProvider: configuredBot?.modelProvider ?? '',
+    modelId: configuredBot?.modelId ?? '',
+    thinkingLevel: configuredBot?.thinkingLevel ?? 'medium',
+    enabledSkills: db.listSkills().map((s) => s.id),
+    enabledExtensions: [],
+    updatedAt: new Date().toISOString(),
+  };
+}
 
 // 会话桥接核心逻辑已迁至 harness/session-bridge.ts；此处重导出保持既有导入路径
 // （index.ts / messages.ts / sessions.ts / ask-token.ts / trigger-service.ts）不变。
@@ -357,7 +391,11 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
     }
 
     const botId = typeof body.botId === 'string' && body.botId ? body.botId : session.leadBotId;
-    if (!db.getBot(botId)) return c.json({ error: `Bot ${botId} not found` }, 400);
+    if (botId !== HUB_ROUTER_BOT_ID && !db.getBot(botId)) return c.json({ error: `Bot ${botId} not found` }, 400);
+    // hub-router：可能尚未经 syncBotPersonas 注册（懒打开/直连），先确保分身存在。
+    if (botId === HUB_ROUTER_BOT_ID && rt.getPersona(botId) === undefined) {
+      await ensureRouterConversationId(rt, id, HUB_ROUTER_BOT_ID);
+    }
     if (rt.getPersona(botId) === undefined) {
       return c.json({ error: `Bot ${botId} has no durable persona registered` }, 400);
     }
