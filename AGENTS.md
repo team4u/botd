@@ -37,6 +37,14 @@ pnpm dev:web
 - 单元测试单个用例最长 60s：写新用例一律显式声明 `{ timeout: 60_000 }`（runner 为 `tsx --test`），避免 await 挂起导致死锁卡死整个测试进程。
 - 纯逻辑单测应在毫秒级完成；确需等待异步（真实子进程、SSE 流等）才允许逼近上限。
 
+## API 与 CLI 同权（重要，新增接口必同步）
+
+botd 的 `botd` CLI 是一等公民，与 Web UI 完全同权（`Web UI 与 CLI 同权`）：**Hub 新增或变更任何用户面向的 HTTP 接口时，必须在同一次改动中同步补齐 CLI 映射**（`apps/node/src/cli/commands/`），否则即视为功能不完整。
+
+- 同步范围：新增路由 → 对应 `botd <domain> <action>` 子命令（含 `--json` 输出）；入参变更 → 同步 CLI 选项；内置技能手册（`apps/node/src/builtin-skill.ts`）中的 CLI 速查同步更新。
+- 旧例：`GET /api/workers`（全局 Worker 聚合）→ `botd workers list [sessionId]`（省略 sessionId 即全局）；`DELETE /api/sessions/:id/messages?keepWorkers=1` → `botd sessions clear <id> --keep-workers`。
+- 委派子代理开发时，把该条写进任务提示词（如“新增 API 需同步 CLI”），避免并行开发中单独漏掉 CLI 侧。
+
 ## 前端组件导出规范（保 Fast Refresh）
 
 - `.tsx` 组件文件**只导出组件**：不得混合导出函数、常量等非组件内容，否则 React Fast Refresh 失效（`Could not Fast Refresh ... export is incompatible`），热更新退化为整树 remount，所有页面状态丢失（弹窗关闭、输入清空），体感即「每次改代码都刷新」。
