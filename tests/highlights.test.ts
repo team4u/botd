@@ -130,7 +130,7 @@ async function fixture(t: TestContext) {
 
 // --- 1. Tool execution trace & token usage persistence ---
 
-test('runTurn toolCalls and usage persist on the assistant MessageRecord', async t => {
+test('runTurn toolCalls and usage persist on the assistant MessageRecord', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const calls: Parameters<NodeRpcFunctions['runTurn']>[0][] = [];
   await f.addNode(['worker'], async input => {
@@ -161,7 +161,7 @@ test('runTurn toolCalls and usage persist on the assistant MessageRecord', async
 
 // --- 2. Cross-node artifact pipe + message attachments forwarding ---
 
-test('artifacts upload/download/list over HTTP and node RPC, attachments forwarded to runTurn', async t => {
+test('artifacts upload/download/list over HTTP and node RPC, attachments forwarded to runTurn', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const turns: Parameters<NodeRpcFunctions['runTurn']>[0][] = [];
   const node = await f.addNode(['writer'], async input => {
@@ -244,7 +244,7 @@ test('artifacts upload/download/list over HTTP and node RPC, attachments forward
 
 // --- 3. botd ask: interactive human-in-the-loop card ---
 
-test('requestHumanInput surfaces a pending ask, resolves on respond and expires on timeout', async t => {
+test('requestHumanInput surfaces a pending ask, resolves on respond and expires on timeout', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   let expectTimeout = false;
   const nodeHolder: { rpc?: HubRpcFunctions } = {};
@@ -304,7 +304,7 @@ test('requestHumanInput surfaces a pending ask, resolves on respond and expires 
 
 // --- 4. Mention relay workflow ---
 
-test('user @mentions route to lead with dispatch prompt and no cascading relay', async t => {
+test('user @mentions route to lead with dispatch prompt and no cascading relay', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const events: string[] = [];
   const turns = new Map<string, Parameters<NodeRpcFunctions['runTurn']>[0]>();
@@ -335,7 +335,7 @@ test('user @mentions route to lead with dispatch prompt and no cascading relay',
 
 // --- 5. Triggers: incoming webhook + scheduled trigger CRUD ---
 
-test('cron expression helpers validate, match and describe 5-field expressions', () => {
+test('cron expression helpers validate, match and describe 5-field expressions', { timeout: 60_000 }, () => {
   // Validation: common valid forms
   for (const valid of ['*/5 * * * *', '30 9 * * *', '0 9 * * 1-5', '15,45 8-18 * * 2']) {
     assert.equal(isValidCronExpr(valid), true, `${valid} should be valid`);
@@ -363,7 +363,7 @@ test('cron expression helpers validate, match and describe 5-field expressions',
   assert.equal(describeCronExpr('15,45 8-18 * * 2'), '15,45 8-18 * * 2', 'unknown patterns fall through verbatim');
 });
 
-test('webhook trigger fires an unauthenticated wakeup turn; trigger CRUD validates input', async t => {
+test('webhook trigger fires an unauthenticated wakeup turn; trigger CRUD validates input', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const calls: Parameters<NodeRpcFunctions['runTurn']>[0][] = [];
   await f.addNode(['watcher'], async input => {
@@ -436,7 +436,7 @@ test('webhook trigger fires an unauthenticated wakeup turn; trigger CRUD validat
 
 // --- 6. Skills are Hub-owned（跨节点同步已无必要：技能内容全局存储） ---
 
-test('skills live in Hub storage shared across nodes without any sync endpoint', async t => {
+test('skills live in Hub storage shared across nodes without any sync endpoint', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const nodeA = await f.addNode(['author']);
   const nodeB = await f.addNode(['reader']);
@@ -464,7 +464,7 @@ test('skills live in Hub storage shared across nodes without any sync endpoint',
 
 // --- 7. Builtin skill creator meta-skill ---
 
-test('builtin skill documents the Super-agent architecture and CLI at v16', () => {
+test('builtin skill documents the Super-agent architecture and CLI at v16', { timeout: 60_000 }, () => {
   // v16：Super-agent 工具面（Brain in Hub, Hands on Node）
   assert.equal(BUILTIN_SKILL_VERSION, 16, 'version marker bumped to v16');
   assert.match(BUILTIN_SKILL_MD, /spawn_worker/);
@@ -509,7 +509,7 @@ test('builtin skill documents the Super-agent architecture and CLI at v16', () =
 
 // --- 8. Atomic primitives: no-turn wake, delayed wake / once trigger, bot env secrets, bg jobs, search & node-credential proxy ---
 
-test('parseDelayDuration parses duration strings and rejects invalid inputs', () => {
+test('parseDelayDuration parses duration strings and rejects invalid inputs', { timeout: 60_000 }, () => {
   assert.equal(parseDelayDuration(45), 45);
   assert.equal(parseDelayDuration('30s'), 30);
   assert.equal(parseDelayDuration('15m'), 900);
@@ -521,7 +521,7 @@ test('parseDelayDuration parses duration strings and rejects invalid inputs', ()
   assert.equal(parseDelayDuration('abc'), null);
 });
 
-test('requestWakeupTurn supports noTurn silent callback and delaySeconds one-shot scheduling', async t => {
+test('requestWakeupTurn supports noTurn silent callback and delaySeconds one-shot scheduling', { timeout: 60_000 }, async t => {
   const prevPoll = process.env.BOTD_TRIGGER_POLL_MS;
   process.env.BOTD_TRIGGER_POLL_MS = '200';
   t.after(() => {
@@ -580,7 +580,7 @@ test('requestWakeupTurn supports noTurn silent callback and delaySeconds one-sho
   assert(triggersAfter[0].lastTriggeredAt, 'lastTriggeredAt is recorded');
 });
 
-test('bot env secrets CRUD, reserved key guard, and local storage isolation', async t => {
+test('bot env secrets CRUD, reserved key guard, and local storage isolation', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   await f.addNode(['coder']);
 
@@ -620,7 +620,7 @@ test('bot env secrets CRUD, reserved key guard, and local storage isolation', as
   assert.deepEqual(await readBotEnv(tmpData, 'coder'), { DB_PASS: 's3cr3t' });
 });
 
-test('global message search and passwordless node-credential HubClient proxy', async t => {
+test('global message search and passwordless node-credential HubClient proxy', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const node = await f.addNode(['alpha']);
   const s1 = await f.session(['alpha'], 'direct', { title: '数据库迁移方案' });

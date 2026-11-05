@@ -188,7 +188,7 @@ async function createMeshFixture(t: TestContext) {
   return { hub, base, request, json, createUser, addNode, connectNode, adminCookie };
 }
 
-test('Task 2.1 & 2.2: pending_asks with previewType, previewContent, timeoutSeconds: 0 and session asks API', async (t) => {
+test('Task 2.1 & 2.2: pending_asks with previewType, previewContent, timeoutSeconds: 0 and session asks API', { timeout: 60_000 }, async (t) => {
   const f = await createMeshFixture(t);
   const node = await f.addNode(['ask-bot']);
 
@@ -241,7 +241,7 @@ test('Task 2.1 & 2.2: pending_asks with previewType, previewContent, timeoutSeco
   assert.equal(pendingAfter.length, 0);
 });
 
-test('Task 2.3: outbound_task_queue store-and-forward when node is offline and auto-recovery on reconnect', async (t) => {
+test('Task 2.3: outbound_task_queue store-and-forward when node is offline and auto-recovery on reconnect', { timeout: 60_000 }, async (t) => {
   const f = await createMeshFixture(t);
 
   let turnReceived = false;
@@ -309,7 +309,7 @@ test('Task 2.3: outbound_task_queue store-and-forward when node is offline and a
   assert.match(assistantMsg.content, /Worker finished task after reconnect/);
 });
 
-test('Task 3.1: visibility = "team" bot sharing across users and access control', async (t) => {
+test('Task 3.1: visibility = "team" bot sharing across users and access control', { timeout: 60_000 }, async (t) => {
   const f = await createMeshFixture(t);
 
   // Admin creates node with a team-shared bot and a private bot
@@ -379,7 +379,7 @@ test('Task 3.1: visibility = "team" bot sharing across users and access control'
   assert.match(botReply.content, /Reply from @shared-bot/);
 });
 
-test('Task 1.4: Cross-node incomingArtifacts passed into rpc.runTurn', async (t) => {
+test('Task 1.4: Cross-node incomingArtifacts passed into rpc.runTurn', { timeout: 60_000 }, async (t) => {
   const f = await createMeshFixture(t);
 
   let bobReceivedArtifacts: any[] | undefined;

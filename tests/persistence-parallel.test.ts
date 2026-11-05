@@ -42,7 +42,7 @@ const deferred = <T>() => {
   return { promise, resolve, reject };
 };
 
-test('Hub 重启登录态持久化：同一 dbPath 重启后先前签发的 Cookie 依然能通过 /api/auth/me 鉴权', async (t: TestContext) => {
+test('Hub 重启登录态持久化：同一 dbPath 重启后先前签发的 Cookie 依然能通过 /api/auth/me 鉴权', { timeout: 60_000 }, async (t: TestContext) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-persist-auth-'));
   const dbPath = path.join(dir, 'hub.sqlite');
 
@@ -114,7 +114,7 @@ test('Hub 重启登录态持久化：同一 dbPath 重启后先前签发的 Cook
   assert.equal(meData2.user.role, 'admin');
 });
 
-test('db.savePendingAsk / getPendingAsksForSession 持久化、状态更新与过期清理', async (t: TestContext) => {
+test('db.savePendingAsk / getPendingAsksForSession 持久化、状态更新与过期清理', { timeout: 60_000 }, async (t: TestContext) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-persist-asks-'));
   const dbPath = path.join(dir, 'hub.sqlite');
 
@@ -199,7 +199,7 @@ test('db.savePendingAsk / getPendingAsksForSession 持久化、状态更新与�
   assert.equal(db2.getPendingAsksForSession('sess_test').length, 0, 'deleteSession 应同步清理 pending_asks 行');
 });
 
-test('会话运行时，session_status SSE 事件携带 activeBotIds 数组', async (t: TestContext) => {
+test('会话运行时，session_status SSE 事件携带 activeBotIds 数组', { timeout: 60_000 }, async (t: TestContext) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-parallel-sse-'));
   const dbPath = path.join(dir, 'hub.sqlite');
 

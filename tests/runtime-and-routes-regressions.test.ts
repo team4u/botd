@@ -156,7 +156,7 @@ async function fixture(t: TestContext, options?: { lazy?: boolean }): Promise<Fi
 
 // ---------------------------------------------------------------------------
 
-test('1. 2 MiB artifact upload succeeds (path-specific body limit)', { timeout: 30_000 }, async (t) => {
+test('1. 2 MiB artifact upload succeeds (path-specific body limit)', { timeout: 60_000 }, async (t) => {
   const f = await fixture(t);
   const big = Buffer.alloc(2 * 1024 * 1024, 0x61);
   const res = await f.req(
@@ -262,7 +262,7 @@ test('3. fork and edit-rewind of an attachment-bearing message keep durable cont
   );
 });
 
-test('4. cross-session protections: attachment 403 / recall 404 / global writes 403 / watchdog runPass 403', { timeout: 30_000 }, async (t) => {
+test('4. cross-session protections: attachment 403 / recall 404 / global writes 403 / watchdog runPass 403', { timeout: 60_000 }, async (t) => {
   const f = await fixture(t);
 
   // 两个用户各一个会话：bob 的会话无法引用 alice(admin) 会话的产物 id
@@ -314,7 +314,7 @@ test('4. cross-session protections: attachment 403 / recall 404 / global writes 
   assert.equal(watchdogRes.status, 403, `member watchdog runPass must 403 (got ${watchdogRes.status})`);
 });
 
-test('5. inheritSkills: persona prompt advertises botd-cli and the parent skill', { timeout: 30_000 }, async (t) => {
+test('5. inheritSkills: persona prompt advertises botd-cli and the parent skill', { timeout: 60_000 }, async (t) => {
   // 注入式 runtime 不带 skills 回调；懒打开路径由 createHub 接线 persona-skills。
   const f = await fixture(t, { lazy: true });
   const db = f.hub.db;

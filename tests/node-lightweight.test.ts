@@ -33,7 +33,7 @@ const ALLOWED_DEPENDENCIES = new Set(['@botd/protocol', 'birpc', 'commander', 'p
 // 1. package.json：engines 降到 >=20，依赖里没有任何重包
 // ---------------------------------------------------------------------------
 
-test('apps/node/package.json requires only node >=20 and zero heavyweight dependencies', async () => {
+test('apps/node/package.json requires only node >=20 and zero heavyweight dependencies', { timeout: 60_000 }, async () => {
   const pkg = JSON.parse(await readFile(nodePkgPath, 'utf8')) as {
     engines?: { node?: string };
     dependencies?: Record<string, string>;
@@ -67,7 +67,7 @@ async function collectSourceFiles(dir: string): Promise<string[]> {
   return files;
 }
 
-test('apps/node/src contains zero imports of @earendil-works/* or @botd/models', async () => {
+test('apps/node/src contains zero imports of @earendil-works/* or @botd/models', { timeout: 60_000 }, async () => {
   const files = await collectSourceFiles(nodeSrcDir);
   assert.ok(files.length > 0, 'apps/node/src must contain sources');
   const offenders: string[] = [];
@@ -85,7 +85,7 @@ test('apps/node/src contains zero imports of @earendil-works/* or @botd/models',
 // 3. getActiveExecCount 与升级排空保护
 // ---------------------------------------------------------------------------
 
-test('getActiveExecCount tracks in-flight envExec commands and returns to zero when done or aborted', async t => {
+test('getActiveExecCount tracks in-flight envExec commands and returns to zero when done or aborted', { timeout: 60_000 }, async t => {
   const root = await mkdtemp(path.join(tmpdir(), 'botd-lightweight-count-'));
   t.after(async () => {
     await rm(root, { recursive: true, force: true });
@@ -118,7 +118,7 @@ test('getActiveExecCount tracks in-flight envExec commands and returns to zero w
   assert.equal(rpc.getActiveExecCount?.(), 0, 'completed exec must decrement the count');
 });
 
-test('performNodeUpgrade drains an in-flight envExec before completing the upgrade', async t => {
+test('performNodeUpgrade drains an in-flight envExec before completing the upgrade', { timeout: 60_000 }, async t => {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'botd-lightweight-upgrade-'));
   const workDir = await mkdtemp(path.join(tmpdir(), 'botd-lightweight-work-'));
   t.after(async () => {

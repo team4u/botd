@@ -18,7 +18,7 @@ import { HubDatabase } from '../apps/hub/src/db.js';
  */
 
 
-test('场景 3（Hub 重启恢复）：queued_offline 会话保持 queued；孤儿 running 会话变 failed 并写入含「继续」提示的系统消息', async (t) => {
+test('场景 3（Hub 重启恢复）：queued_offline 会话保持 queued；孤儿 running 会话变 failed 并写入含「继续」提示的系统消息', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-reliability-restart-'));
   const dbPath = path.join(dir, 'hub.sqlite');
   try {

@@ -64,7 +64,7 @@ function renderWorkersDrawer(extraProps: Record<string, unknown> = {}): string {
   );
 }
 
-test('WorkersDrawer SSR（列表）: 有 Worker 时渲染任务行与巡检按钮，手动派发入口已移除', () => {
+test('WorkersDrawer SSR（列表）: 有 Worker 时渲染任务行与巡检按钮，手动派发入口已移除', { timeout: 60_000 }, () => {
   const html = renderWorkersDrawer();
 
   // worker 行本尊
@@ -79,7 +79,7 @@ test('WorkersDrawer SSR（列表）: 有 Worker 时渲染任务行与巡检按�
   assert.doesNotMatch(html, /立即派发/, '不应再渲染手动派发表单提交');
 }, { timeout: 60_000 });
 
-test('WorkersDrawer SSR（列表）: 零 Worker 时空态引导自然语言派发，仍可巡检', () => {
+test('WorkersDrawer SSR（列表）: 零 Worker 时空态引导自然语言派发，仍可巡检', { timeout: 60_000 }, () => {
   const html = renderWorkersDrawer({ workers: [] });
   assert.match(html, /title="运行 Watchdog 巡检"/);
   assert.match(html, /暂无后台任务/, '空态应提示暂无后台任务');
@@ -87,12 +87,12 @@ test('WorkersDrawer SSR（列表）: 零 Worker 时空态引导自然语言派�
   assert.doesNotMatch(html, /派发后台 Worker/, '不应再渲染手动派发按钮');
 }, { timeout: 60_000 });
 
-test('WorkersDrawer SSR（列表）: 未传入回调时不渲染巡检入口', () => {
+test('WorkersDrawer SSR（列表）: 未传入回调时不渲染巡检入口', { timeout: 60_000 }, () => {
   const html = renderWorkersDrawer({ onRunWatchdog: undefined });
   assert.doesNotMatch(html, /运行 Watchdog 巡检/, '未提供 onRunWatchdog 时不应渲染巡检按钮');
 }, { timeout: 60_000 });
 
-test('WorkersDrawer 源码: 手动派发表单与 onSpawnWorker 已彻底移除', () => {
+test('WorkersDrawer 源码: 手动派发表单与 onSpawnWorker 已彻底移除', { timeout: 60_000 }, () => {
   // SSR 无法点击；直接验证源码结构（派发表单、状态与提交行为全部清理干净）
   const source = readFileSync(path.join(webSrc, 'components/WorkersDrawer.tsx'), 'utf-8');
 
@@ -107,7 +107,7 @@ test('WorkersDrawer 源码: 手动派发表单与 onSpawnWorker 已彻底移除'
   assert.match(source, /人工干预记录/, '详情视图 Steer/Follow-up 时间线应保留');
 }, { timeout: 60_000 });
 
-test('WorkersDrawer SSR（列表）: 失败置顶，终态折叠为分组头', () => {
+test('WorkersDrawer SSR（列表）: 失败置顶，终态折叠为分组头', { timeout: 60_000 }, () => {
   const html = renderWorkersDrawer({
     workers: [
       makeWorker({ workerId: 'w-done', title: '已完成的任务', status: 'completed' }),
@@ -130,7 +130,7 @@ test('WorkersDrawer SSR（列表）: 失败置顶，终态折叠为分组头', (
 // 2. WorkersDrawer SSR（详情视图）：Watchdog 巡检动作 + 遥测徽标
 // ============================================================
 
-test('WorkersDrawer SSR（详情）: initialWorkerId 直达详情并渲染 Watchdog 巡检动作', () => {
+test('WorkersDrawer SSR（详情）: initialWorkerId 直达详情并渲染 Watchdog 巡检动作', { timeout: 60_000 }, () => {
   const noop = () => {};
   const html = ReactDOMServer.renderToStaticMarkup(
     React.createElement(WorkersDrawer as React.FC<Record<string, unknown>>, {
@@ -157,7 +157,7 @@ test('WorkersDrawer SSR（详情）: initialWorkerId 直达详情并渲染 Watch
   assert.match(html, /Tokens 1,234/, 'Token 徽标应渲染');
 }, { timeout: 60_000 });
 
-test('WorkersDrawer SSR: isOpen=false 时不渲染', () => {
+test('WorkersDrawer SSR: isOpen=false 时不渲染', { timeout: 60_000 }, () => {
   const noop = () => {};
   const html = ReactDOMServer.renderToStaticMarkup(
     React.createElement(WorkersDrawer as React.FC<Record<string, unknown>>, {
@@ -177,7 +177,7 @@ test('WorkersDrawer SSR: isOpen=false 时不渲染', () => {
 // 3. Node 死桩清理 + ChatView 接线
 // ============================================================
 
-test('daemon.ts: Node 侧废弃 RPC 死桩已全部移除', () => {
+test('daemon.ts: Node 侧废弃 RPC 死桩已全部移除', { timeout: 60_000 }, () => {
   const source = readFileSync(path.join(repoRoot, 'apps/node/src/daemon.ts'), 'utf-8');
   for (const name of [
     'startProviderLogin',
@@ -193,7 +193,7 @@ test('daemon.ts: Node 侧废弃 RPC 死桩已全部移除', () => {
   }
 }, { timeout: 60_000 });
 
-test('ChatView.tsx: 巡检回调与外部 Worker 检视已接线到后台子任务抽屉', () => {
+test('ChatView.tsx: 巡检回调与外部 Worker 检视已接线到后台子任务抽屉', { timeout: 60_000 }, () => {
   const source = readFileSync(path.join(webSrc, 'components/ChatView.tsx'), 'utf-8');
   assert.ok(!source.includes('onSpawnWorker'), '手动派发 onSpawnWorker 接线应移除');
   assert.ok(!source.includes('spawnBackgroundWorker'), '不应再解构 spawnBackgroundWorker');
@@ -215,7 +215,7 @@ test('ChatView.tsx: 巡检回调与外部 Worker 检视已接线到后台子任�
   assert.doesNotMatch(source, /showWorkerToolsBar/, 'showWorkerToolsBar 状态应彻底清理');
 }, { timeout: 60_000 });
 
-test('ChatView.tsx: 顶栏 ⚡ 子任务角标已接线，回执卡不再提供死链入口', () => {
+test('ChatView.tsx: 顶栏 ⚡ 子任务角标已接线，回执卡不再提供死链入口', { timeout: 60_000 }, () => {
   const source = readFileSync(path.join(webSrc, 'components/ChatView.tsx'), 'utf-8');
   // 顶栏 Zap 角标：零任务完全隐藏
   assert.match(source, /superAgent\.workers\.length > 0 && \(/, '零 worker 时 Zap 按钮应完全隐藏');
@@ -226,7 +226,7 @@ test('ChatView.tsx: 顶栏 ⚡ 子任务角标已接线，回执卡不再提供�
   assert.doesNotMatch(source, /onOpenWorker/, '回执卡 onOpenWorker 接线应移除');
 }, { timeout: 60_000 });
 
-test('MessageItem.tsx: Worker 完成回执卡是纯凭条（无链接、无截断摘要折叠）', () => {
+test('MessageItem.tsx: Worker 完成回执卡是纯凭条（无链接、无截断摘要折叠）', { timeout: 60_000 }, () => {
   const source = readFileSync(path.join(webSrc, 'components/MessageItem.tsx'), 'utf-8');
   assert.doesNotMatch(source, /onOpenWorker/, 'MessageItem 不应再有 onOpenWorker prop');
   assert.match(source, /const isWorkerReceipt = title === '后台任务完成';/, 'Worker 回执凭条判定');

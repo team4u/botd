@@ -109,7 +109,7 @@ async function createTestContext(t: TestContext): Promise<TestEnv> {
   };
 }
 
-test('1. POST/PATCH 跨 user 拒绝', async (t) => {
+test('1. POST/PATCH 跨 user 拒绝', { timeout: 60_000 }, async (t) => {
   const ctx = await createTestContext(t);
   const { user: userAdmin, cookie: adminCookie } = ctx;
   const { user: user2, cookie: user2Cookie } = await ctx.createUser('user2', 'user2password');
@@ -152,7 +152,7 @@ test('1. POST/PATCH 跨 user 拒绝', async (t) => {
   assert.equal(patchOther.status, 403);
 });
 
-test('2. queued clear/edited 后旧 task 失效，新编辑只执行一次', async (t) => {
+test('2. queued clear/edited 后旧 task 失效，新编辑只执行一次', { timeout: 60_000 }, async (t) => {
   const ctx = await createTestContext(t);
   const { user, cookie } = ctx;
   ctx.registerNodeWithBots(user.id, 'node_1', ['bot_1']);
@@ -232,7 +232,7 @@ test('2. queued clear/edited 后旧 task 失效，新编辑只执行一次', asy
   assert.doesNotMatch(runTurnCallsB[0].incrementalMessages, /stale message before edit/);
 });
 
-test('3. 离线 clear 保留 pending mark，下一 runTurn 前 reset 成功才 run、reset 失败不 run，覆盖串行和并行', async (t) => {
+test('3. 离线 clear 保留 pending mark，下一 runTurn 前 reset 成功才 run、reset 失败不 run，覆盖串行和并行', { timeout: 60_000 }, async (t) => {
   const ctx = await createTestContext(t);
   const { user, cookie } = ctx;
   ctx.registerNodeWithBots(user.id, 'node_s', ['bot_s']);
@@ -335,7 +335,7 @@ test('3. 离线 clear 保留 pending mark，下一 runTurn 前 reset 成功才 r
   assert.equal(p2RunTurnCalled, true);
 });
 
-test('4. 持久 db 重新打开 pending mark 仍在', async () => {
+test('4. 持久 db 重新打开 pending mark 仍在', { timeout: 60_000 }, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-pending-persist-'));
   const dbPath = path.join(dir, 'test.sqlite');
 
@@ -364,7 +364,7 @@ test('4. 持久 db 重新打开 pending mark 仍在', async () => {
   }
 });
 
-test('5. remove 成员后 webhook 403/直接 handleWakeup 拒绝、调度阶段不 run 移除成员', async (t) => {
+test('5. remove 成员后 webhook 403/直接 handleWakeup 拒绝、调度阶段不 run 移除成员', { timeout: 60_000 }, async (t) => {
   const ctx = await createTestContext(t);
   const { user, cookie } = ctx;
   ctx.registerNodeWithBots(user.id, 'node_rem', ['bot_lead', 'bot_stay', 'bot_rem']);
@@ -415,7 +415,7 @@ test('5. remove 成员后 webhook 403/直接 handleWakeup 拒绝、调度阶段�
   assert.equal(ctx.hub.router.canRunBot(sessionId, 'bot_stay'), true);
 });
 
-test('6. reset 异步中被取消/再次 clear 时老 reset 完成不能抹掉新的 pending 或 run 旧 task', async (t) => {
+test('6. reset 异步中被取消/再次 clear 时老 reset 完成不能抹掉新的 pending 或 run 旧 task', { timeout: 60_000 }, async (t) => {
   const ctx = await createTestContext(t);
   const { user, cookie } = ctx;
   ctx.registerNodeWithBots(user.id, 'node_race', ['bot_race']);

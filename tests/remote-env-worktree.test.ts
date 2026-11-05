@@ -82,7 +82,7 @@ async function setup(): Promise<TestSetup> {
 // 1. RPC 桥接：文件操作 / 二进制 / exec 流
 // ---------------------------------------------------------------------------
 
-test('remote file operations bridge to node env', async () => {
+test('remote file operations bridge to node env', { timeout: 60_000 }, async () => {
   const s = await setup();
   try {
     const write = await s.env.writeFile('hello.txt', 'line1\nline2\n', CTX);
@@ -149,7 +149,7 @@ test('remote file operations bridge to node env', async () => {
   }
 });
 
-test('binary range reads via openBinaryReader', async () => {
+test('binary range reads via openBinaryReader', { timeout: 60_000 }, async () => {
   const s = await setup();
   try {
     const bytes = new Uint8Array(256);
@@ -183,7 +183,7 @@ test('binary range reads via openBinaryReader', async () => {
   }
 });
 
-test('text line reader streams lines', async () => {
+test('text line reader streams lines', { timeout: 60_000 }, async () => {
   const s = await setup();
   try {
     await s.env.writeFile('poem.txt', 'roses\nare\nred\n', CTX);
@@ -203,7 +203,7 @@ test('text line reader streams lines', async () => {
   }
 });
 
-test('exec streams output and reports exit code', async () => {
+test('exec streams output and reports exit code', { timeout: 60_000 }, async () => {
   const s = await setup();
   try {
     const chunks: { text: string; stream: string }[] = [];
@@ -233,7 +233,7 @@ test('exec streams output and reports exit code', async () => {
   }
 });
 
-test('envAbortExec cancels a running command', async () => {
+test('envAbortExec cancels a running command', { timeout: 60_000 }, async () => {
   const s = await setup();
   try {
     const execPromise = s.rpc.envExec({ execId: 'abort-me', command: 'sleep 10 && echo done', timeout: 30 });
@@ -251,7 +251,7 @@ test('envAbortExec cancels a running command', async () => {
 // 2. Harness + CodingTools over RemoteExecutionEnv
 // ---------------------------------------------------------------------------
 
-test('coding tools run inside a real harness over remote env', async () => {
+test('coding tools run inside a real harness over remote env', { timeout: 60_000 }, async () => {
   const durable = await import('../apps/hub/node_modules/@earendil-works/pi-durable/dist/index.js');
   const durableTools = await import('../apps/hub/node_modules/@earendil-works/pi-durable/dist/tools/index.js');
   const piAi = await import('../apps/hub/node_modules/@earendil-works/pi-ai/dist/index.js');
@@ -369,7 +369,7 @@ test('coding tools run inside a real harness over remote env', async () => {
 // 3. Git Worktree 并发隔离
 // ---------------------------------------------------------------------------
 
-test('two workers modify the same file concurrently in separate worktrees', async () => {
+test('two workers modify the same file concurrently in separate worktrees', { timeout: 60_000 }, async () => {
   const s = await setup();
   const repoDir = await mkdtemp(path.join(tmpdir(), 'botd-repo-'));
   try {
@@ -435,7 +435,7 @@ test('two workers modify the same file concurrently in separate worktrees', asyn
   }
 });
 
-test('envAcquireWorktree on a non-git directory degrades gracefully', async () => {
+test('envAcquireWorktree on a non-git directory degrades gracefully', { timeout: 60_000 }, async () => {
   const s = await setup();
   const plain = await mkdtemp(path.join(tmpdir(), 'botd-plain-'));
   try {
@@ -453,7 +453,7 @@ test('envAcquireWorktree on a non-git directory degrades gracefully', async () =
 // 4. BYOM 离线韧性
 // ---------------------------------------------------------------------------
 
-test('offline node waits and resumes when back online', async () => {
+test('offline node waits and resumes when back online', { timeout: 60_000 }, async () => {
   const s = await setup();
   try {
     s.resolver.setOffline(true);
@@ -476,7 +476,7 @@ test('offline node waits and resumes when back online', async () => {
   }
 });
 
-test('offline without waitForNodeOnline fails fast', async () => {
+test('offline without waitForNodeOnline fails fast', { timeout: 60_000 }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'botd-offline-'));
   const env = new RemoteExecutionEnv({ getNodeEnvRpc: () => undefined }, { nodeId: 'ghost', cwd: root });
   await assert.rejects(() => env.exec('echo x', undefined, CTX), /offline/);
@@ -487,7 +487,7 @@ test('offline without waitForNodeOnline fails fast', async () => {
 // 5. 协议结构一致性（镜像类型 vs packages/protocol 定义）
 // ---------------------------------------------------------------------------
 
-test('mirror rpc types match packages/protocol definitions', async () => {
+test('mirror rpc types match packages/protocol definitions', { timeout: 60_000 }, async () => {
   // createNodeEnvRpcServer 的返回值必须可赋值给协议的 NodeEnvRpcFunctions（编译期已保证，运行期冒烟）。
   const server = createNodeEnvRpcServer({ defaultCwd: process.cwd() });
   const protocolTypeCheck: import('../packages/protocol/src/env-rpc.js').NodeEnvRpcFunctions = server;
@@ -528,7 +528,7 @@ test('mirror rpc types match packages/protocol definitions', async () => {
   assert.equal(ref.kind, 'worker');
 });
 
-test('remote env cwd is respected for relative exec commands', async () => {
+test('remote env cwd is respected for relative exec commands', { timeout: 60_000 }, async () => {
   const s = await setup();
   try {
     await s.env.createDir('workdir', { recursive: true }, CTX);

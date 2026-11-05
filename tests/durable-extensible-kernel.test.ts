@@ -169,7 +169,7 @@ async function openRuntimeWithDb(db: HubDatabase): Promise<{ runtime: HubDurable
   return { runtime, faux };
 }
 
-test('1. syncBotPersonas loads SYSTEM.md/MEMORY.md/skills/extensions from Hub SQLite into the persona', async () => {
+test('1. syncBotPersonas loads SYSTEM.md/MEMORY.md/skills/extensions from Hub SQLite into the persona', { timeout: 60_000 }, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-persona-skills-'));
   try {
     const db = new HubDatabase({ dbPath: path.join(dir, 'hub.sqlite') });
@@ -224,7 +224,7 @@ test('1. syncBotPersonas loads SYSTEM.md/MEMORY.md/skills/extensions from Hub SQ
   }
 });
 
-test('2. load_skill reads Hub skill content; update_memory persists into db bot_files', async () => {
+test('2. load_skill reads Hub skill content; update_memory persists into db bot_files', { timeout: 60_000 }, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-persona-skills-tools-'));
   try {
     const db = new HubDatabase({ dbPath: path.join(dir, 'hub.sqlite') });
@@ -316,7 +316,7 @@ test('2. load_skill reads Hub skill content; update_memory persists into db bot_
   }
 });
 
-test('3. dynamic extension loads from source, mounts via enabledExtensions, and returns a botd.v1 UI spec block', async () => {
+test('3. dynamic extension loads from source, mounts via enabledExtensions, and returns a botd.v1 UI spec block', { timeout: 60_000 }, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-dyn-ext-'));
   try {
     const db = new HubDatabase({ dbPath: path.join(dir, 'hub.sqlite') });
@@ -390,7 +390,7 @@ test('3. dynamic extension loads from source, mounts via enabledExtensions, and 
   }
 });
 
-test('4. ExtensionEditorModal starter template references pi-durable and zero pi-coding-agent', async () => {
+test('4. ExtensionEditorModal starter template references pi-durable and zero pi-coding-agent', { timeout: 60_000 }, async () => {
   const source = await readFile(
     path.resolve('apps/web/src/components/ExtensionEditorModal.tsx'),
     'utf8',
@@ -533,7 +533,7 @@ export default defineExtension({
 `,
 };
 
-test('6. multi-file extension: db.saveExtensionFiles + PUT /api/extensions load and execute end-to-end', async (t) => {
+test('6. multi-file extension: db.saveExtensionFiles + PUT /api/extensions load and execute end-to-end', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-multi-ext-'));
   t.after(async () => {
     await rm(dir, { recursive: true, force: true });
@@ -611,7 +611,7 @@ test('6. multi-file extension: db.saveExtensionFiles + PUT /api/extensions load 
   assert.ok(hub.db.getExtensionContent('single-ext').includes('multi-file-ext'));
 });
 
-test('7. multi-file skill: saveSkillFiles, load_skill path reads, and traversal rejection', async (t) => {
+test('7. multi-file skill: saveSkillFiles, load_skill path reads, and traversal rejection', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-multi-skill-'));
   t.after(async () => {
     await rm(dir, { recursive: true, force: true });
@@ -713,7 +713,7 @@ test('7. multi-file skill: saveSkillFiles, load_skill path reads, and traversal 
   assert.deepEqual(payload.files, ['SKILL.md', 'references/cli.md', 'scripts/check.sh']);
 });
 
-test('8. .agents/skills and .agent/skills discovery: workspace skills auto-available to the bot persona', async (t) => {
+test('8. .agents/skills and .agent/skills discovery: workspace skills auto-available to the bot persona', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-agent-skills-'));
   t.after(async () => {
     await rm(dir, { recursive: true, force: true });

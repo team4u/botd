@@ -18,7 +18,7 @@ export async function load(url, context, nextLoad) {
 `)
 );
 
-test('2. pickCurrentDirectSession: 严格排除 parentSessionId 子会话与归档会话', async () => {
+test('2. pickCurrentDirectSession: 严格排除 parentSessionId 子会话与归档会话', { timeout: 60_000 }, async () => {
   const sidebarModule = (await import('../apps/web/src/session-space.js' as any)) as {
     pickCurrentDirectSession: (sessions: SessionRecord[], botId: string) => SessionRecord | undefined;
   };
@@ -116,7 +116,7 @@ const mkBot = (over: Partial<BotConfig> & { id: string; name: string }): BotConf
   ...over,
 } as unknown as BotConfig);
 
-test('buildAssistantEntries: 每个主分身聚合为 1 条记录，汇总未读/最高注意力/directSessions', async () => {
+test('buildAssistantEntries: 每个主分身聚合为 1 条记录，汇总未读/最高注意力/directSessions', { timeout: 60_000 }, async () => {
   const { buildAssistantEntries } = (await import('../apps/web/src/session-space.js' as any)) as {
     buildAssistantEntries: typeof import('../apps/web/src/session-space.js').buildAssistantEntries;
   };
@@ -164,7 +164,7 @@ test('buildAssistantEntries: 每个主分身聚合为 1 条记录，汇总未读
   assert.equal(entryB!.directSessions.length, 1);
 });
 
-test('buildActivePulseEntries: 仅含非 idle 未归档会话，支持 priority 与 grouped 排序', async () => {
+test('buildActivePulseEntries: 仅含非 idle 未归档会话，支持 priority 与 grouped 排序', { timeout: 60_000 }, async () => {
   const { buildActivePulseEntries } = (await import('../apps/web/src/session-space.js' as any)) as {
     buildActivePulseEntries: typeof import('../apps/web/src/session-space.js').buildActivePulseEntries;
   };
@@ -214,7 +214,7 @@ test('buildActivePulseEntries: 仅含非 idle 未归档会话，支持 priority 
   );
 });
 
-test('resolveContextTabGroup: Space 会话与 Assistant 会话分别聚合平级未归档主会话 Tabs', async () => {
+test('resolveContextTabGroup: Space 会话与 Assistant 会话分别聚合平级未归档主会话 Tabs', { timeout: 60_000 }, async () => {
   const { resolveContextTabGroup } = (await import('../apps/web/src/session-space.js' as any)) as {
     resolveContextTabGroup: typeof import('../apps/web/src/session-space.js').resolveContextTabGroup;
   };

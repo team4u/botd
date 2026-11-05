@@ -254,7 +254,7 @@ async function createHubFixture(t: TestContext) {
 // -------------------------------------------------------------------------------------------------
 // 测试 1：全量 7 档 ThinkingLevel（off, minimal, low, medium, high, xhigh, max）
 // -------------------------------------------------------------------------------------------------
-test('全量 7 档 ThinkingLevel 在节点 registerNode 与 HTTP /api/bots 中的完整支持', async (t) => {
+test('全量 7 档 ThinkingLevel 在节点 registerNode 与 HTTP /api/bots 中的完整支持', { timeout: 60_000 }, async (t) => {
   const f = await createHubFixture(t);
 
   const allLevels: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -333,7 +333,7 @@ test('全量 7 档 ThinkingLevel 在节点 registerNode 与 HTTP /api/bots 中�
 // -------------------------------------------------------------------------------------------------
 // 测试 2：删除会话（DELETE /api/sessions/:id）与删除用户（DELETE /api/users/:id）时物理清理磁盘上的 Artifact 文件
 // -------------------------------------------------------------------------------------------------
-test('删除会话与删除用户时物理清理磁盘上的 Artifact 文件', async (t) => {
+test('删除会话与删除用户时物理清理磁盘上的 Artifact 文件', { timeout: 60_000 }, async (t) => {
   const f = await createHubFixture(t);
 
   // --- Part A: 会话删除触发物理清理 ---
@@ -411,7 +411,7 @@ test('删除会话与删除用户时物理清理磁盘上的 Artifact 文件', a
 // -------------------------------------------------------------------------------------------------
 // 测试 3：协议层权威校验原语（isSafeId, isValidBotEnvKey, isBotConfig）一致性测试
 // -------------------------------------------------------------------------------------------------
-test('协议层权威校验原语（isSafeId, isValidBotEnvKey, isBotConfig）一致性测试', () => {
+test('协议层权威校验原语（isSafeId, isValidBotEnvKey, isBotConfig）一致性测试', { timeout: 60_000 }, () => {
   // 1. isValidBotEnvKey
   // 合法 Key: 大小写、数字、下划线（不能以数字开头，不能有连字符/空格/特殊符号）
   const validEnvKeys = [
@@ -547,7 +547,7 @@ test('协议层权威校验原语（isSafeId, isValidBotEnvKey, isBotConfig）�
 // -------------------------------------------------------------------------------------------------
 // 测试 4：GroupRouter 串/并行统一管线的回合执行与错误隔离验证
 // -------------------------------------------------------------------------------------------------
-test('GroupRouter 串/并行统一管线的回合执行与错误隔离验证', async (t) => {
+test('GroupRouter 串/并行统一管线的回合执行与错误隔离验证', { timeout: 60_000 }, async (t) => {
   const f = await createHubFixture(t);
 
   const deliveredIncremental = new Map<string, string[]>();

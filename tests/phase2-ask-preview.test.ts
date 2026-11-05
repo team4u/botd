@@ -2,13 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { register } from 'node:module';
 import { createDaemonControlServer } from '../apps/node/src/daemon.js';
 
 const MAX_ASK_BODY_BYTES = 512 * 1024;
 import type { SessionRecord } from '../packages/protocol/src/index.js';
+import { isBotConfig } from '../packages/protocol/src/index.js';
 import type { BotConfig } from '../packages/protocol/src/index.js';
 
 // 拦截 CSS/TSX 导入（Sidebar.tsx 间接引入样式与 React 组件），复用 review-fixes-web 的加载策略
@@ -36,7 +36,7 @@ async function loadSidebarModule(): Promise<{
 // pickCurrentDirectSession: delegated child sessions must not hijack the
 // bot's main direct-chat entry (Task 1.2)
 // ---------------------------------------------------------------------------
-test('pickCurrentDirectSession 排除带 parentSessionId 的子会话，防止篡位主单聊入口', async () => {
+test('pickCurrentDirectSession 排除带 parentSessionId 的子会话，防止篡位主单聊入口', { timeout: 60_000 }, async () => {
   const { pickCurrentDirectSession } = await loadSidebarModule();
   const now = new Date().toISOString();
   const main = {
@@ -52,7 +52,7 @@ test('pickCurrentDirectSession 排除带 parentSessionId 的子会话，防止�
   assert.equal(picked?.id, 'sess_main', 'newest child session must be ignored');
 });
 
-test('pickCurrentDirectSession 无子会话时仍正常取最新主单聊', async () => {
+test('pickCurrentDirectSession 无子会话时仍正常取最新主单聊', { timeout: 60_000 }, async () => {
   const { pickCurrentDirectSession } = await loadSidebarModule();
   const a = { id: 'sess_a', archived: false, leadBotId: 'bot_1', updatedAt: new Date(Date.now() - 60_000).toISOString() } as any;
   const b = { id: 'sess_b', archived: false, leadBotId: 'bot_1', updatedAt: new Date().toISOString() } as any;
@@ -120,7 +120,7 @@ function makeIpcServer() {
   } as any);
 }
 
-test('Local IPC /ask 接受 previewType/previewContent 与 timeoutSeconds=0 并透传至 Hub', async () => {
+test('Local IPC /ask 接受 previewType/previewContent 与 timeoutSeconds=0 并透传至 Hub', { timeout: 60_000 }, async () => {
   askCalls.length = 0;
   const server = makeIpcServer();
   const port = await listen(server);
@@ -140,7 +140,7 @@ test('Local IPC /ask 接受 previewType/previewContent 与 timeoutSeconds=0 并�
   }
 });
 
-test('Local IPC /ask 超过 512KB 载荷被拒绝（413）', async () => {
+test('Local IPC /ask 超过 512KB 载荷被拒绝（413）', { timeout: 60_000 }, async () => {
   askCalls.length = 0;
   const server = makeIpcServer();
   const port = await listen(server);
@@ -159,32 +159,38 @@ test('Local IPC /ask 超过 512KB 载荷被拒绝（413）', async () => {
 // ---------------------------------------------------------------------------
 // Preview type inference from --file extension
 // ---------------------------------------------------------------------------
-test('preview 类型可由文件后缀推断（.diff/.patch→diff，.md→markdown）', async () => {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'botd-ask-'));
+test('preview 类型可由文件后缀推断（.diff/.patch→diff，.md→markdown）', { timeout: 60_000 }, async () => {
+  // 走生产入口验证：Local IPC /ask 只透传白名单内的 previewType（daemon.ts 与 CLI 后缀推断共用该白名单）。
+  // 对 diff / markdown 两种后缀可推断出的类型必须透传；未知后缀推断值必须被丢弃。
+  askCalls.length = 0;
+  const server = makeIpcServer();
+  const port = await listen(server);
   try {
-    const diffFile = path.join(tmp, 'changes.diff');
-    await fs.writeFile(diffFile, '@@ -1 +1 @@\n-old\n+new', 'utf8');
-    // 通过 commander 解析路径验证推断逻辑（复用 CLI 内部同一正则规则）
-    const diffType = /\.(diff|patch)$/i.test(diffFile) ? 'diff'
-      : /\.md$/i.test(diffFile) ? 'markdown' : 'text';
-    assert.equal(diffType, 'diff');
-
-    const mdFile = path.join(tmp, 'readme.md');
-    await fs.writeFile(mdFile, '# hi', 'utf8');
-    const mdType = /\.(diff|patch)$/i.test(mdFile) ? 'diff'
-      : /\.md$/i.test(mdFile) ? 'markdown' : 'text';
-    assert.equal(mdType, 'markdown');
+    const previewContent = '@@ -1 +1 @@\n-old\n+new';
+    for (const previewType of ['diff', 'markdown'] as const) {
+      const res = await post(port, '/ask', {
+        sessionId: 'sess_1', botId: 'bot_1', prompt: '是否提交？', previewType, previewContent,
+      });
+      assert.equal(res.status, 200);
+    }
+    const res = await post(port, '/ask', {
+      sessionId: 'sess_1', botId: 'bot_1', prompt: '是否提交？', previewType: 'binary', previewContent,
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(
+      askCalls.map((c) => c.previewType),
+      ['diff', 'markdown', undefined],
+      '.diff/.patch→diff 与 .md→markdown 透传；未知后缀推断值被白名单拦下不透传',
+    );
   } finally {
-    await fs.rm(tmp, { recursive: true, force: true });
+    server.close();
   }
 });
 
 // ---------------------------------------------------------------------------
 // Sidebar global pending-approvals inbox has been removed (session-view AskCard is the sole entry)
 // ---------------------------------------------------------------------------
-test('Sidebar 不再包含全局待确认收件箱（含 10s 轮询）', async () => {
-  const fs = await import('node:fs/promises');
-  const path = await import('node:path');
+test('Sidebar 不再包含全局待确认收件箱（含 10s 轮询）', { timeout: 60_000 }, async () => {
   const source = await fs.readFile(
     path.join(process.cwd(), 'apps/web/src/components/Sidebar.tsx'),
     'utf-8'
@@ -196,12 +202,17 @@ test('Sidebar 不再包含全局待确认收件箱（含 10s 轮询）', async (
 // ---------------------------------------------------------------------------
 // Team-shared bot badge data constraint
 // ---------------------------------------------------------------------------
-test('团队共享 Bot 携带 visibility/isTeamShared 标识', () => {
-  const bot = {
+test('团队共享 Bot 携带 visibility/isTeamShared 标识', { timeout: 60_000 }, () => {
+  const base = {
     id: 'bot_team', nodeId: 'node_1', name: 'Shared Bot', description: '',
     modelProvider: 'anthropic', modelId: 'claude-sonnet-4-5', enabledSkills: [],
-    visibility: 'team', isTeamShared: true, updatedAt: new Date().toISOString(),
-  } as BotConfig;
-  assert.equal(bot.visibility, 'team');
-  assert.equal(bot.isTeamShared, true);
+    updatedAt: new Date().toISOString(),
+  };
+  // 协议层校验：团队共享 Bot（visibility: 'team' + isTeamShared: true）必须能通过 isBotConfig
+  const teamBot = { ...base, visibility: 'team', isTeamShared: true } as BotConfig;
+  assert.equal(isBotConfig(teamBot), true, '团队共享 Bot 必须是合法 BotConfig');
+  // 私有 Bot（默认不带标识）同样合法；visibility 白名单外的取值必须被拒绝
+  assert.equal(isBotConfig({ ...base }), true);
+  assert.equal(isBotConfig({ ...base, visibility: 'org' }), false, 'visibility 只允许 private/team');
+  assert.equal(isBotConfig({ ...base, visibility: 'private', isTeamShared: false }), true);
 });

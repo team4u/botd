@@ -38,7 +38,7 @@ async function setupTestEnv() {
   };
 }
 
-test('Session reset pending table persists and cleans up with session/user deletion', async (t) => {
+test('Session reset pending table persists and cleans up with session/user deletion', { timeout: 60_000 }, async (t) => {
   const env = await setupTestEnv();
   t.after(env.cleanup);
 
@@ -92,7 +92,7 @@ test('Session reset pending table persists and cleans up with session/user delet
   assert.equal(db.hasPendingSessionReset('sess_2', 'bot_1'), false);
 });
 
-test('Database helper contracts: getSessionOwner and row mappings', async (t) => {
+test('Database helper contracts: getSessionOwner and row mappings', { timeout: 60_000 }, async (t) => {
   const env = await setupTestEnv();
   t.after(env.cleanup);
 
@@ -150,7 +150,7 @@ test('Database helper contracts: getSessionOwner and row mappings', async (t) =>
   assert.deepEqual(bot.enabledSkills, ['skill-a']);
 });
 
-test('Path traversal rejection: download does not fall back to disk path', async (t) => {
+test('Path traversal rejection: download does not fall back to disk path', { timeout: 60_000 }, async (t) => {
   const env = await setupTestEnv();
   t.after(env.cleanup);
 
@@ -200,7 +200,7 @@ test('Path traversal rejection: download does not fall back to disk path', async
   );
 });
 
-test('Access control: cross-user owner rejected, same-owner cross-node allowed', async (t) => {
+test('Access control: cross-user owner rejected, same-owner cross-node allowed', { timeout: 60_000 }, async (t) => {
   const env = await setupTestEnv();
   t.after(env.cleanup);
 
@@ -298,7 +298,7 @@ test('Access control: cross-user owner rejected, same-owner cross-node allowed',
   assert.equal(downloadedByUser.content.toString('utf8'), contentStr);
 });
 
-test('Upload size limit and validation are unified', async (t) => {
+test('Upload size limit and validation are unified', { timeout: 60_000 }, async (t) => {
   const env = await setupTestEnv();
   t.after(env.cleanup);
 
@@ -368,7 +368,7 @@ test('Upload size limit and validation are unified', async (t) => {
   );
 });
 
-test('Fork session: attachments rewritten, cross-owner clone rejected, survives source deletion, and cleans up on last reference', async (t) => {
+test('Fork session: attachments rewritten, cross-owner clone rejected, survives source deletion, and cleans up on last reference', { timeout: 60_000 }, async (t) => {
   const env = await setupTestEnv();
   t.after(env.cleanup);
 
@@ -499,7 +499,7 @@ test('Fork session: attachments rewritten, cross-owner clone rejected, survives 
   assert.equal(fs.existsSync(diskPath), false, 'Physical file must be unlinked after last reference is deleted');
 });
 
-test('Persistent cleanup GC records failures and retries on service operations', async (t) => {
+test('Persistent cleanup GC records failures and retries on service operations', { timeout: 60_000 }, async (t) => {
   const env = await setupTestEnv();
   t.after(env.cleanup);
 
@@ -524,7 +524,7 @@ test('Persistent cleanup GC records failures and retries on service operations',
   assert.equal(db.listArtifactCleanupPending().length, 0);
 });
 
-test('NodeConnectionManager integrates with ArtifactService default and custom instance', async (t) => {
+test('NodeConnectionManager integrates with ArtifactService default and custom instance', { timeout: 60_000 }, async (t) => {
   const env = await setupTestEnv();
   t.after(env.cleanup);
 

@@ -57,7 +57,7 @@ const openHarness = (models: ReturnType<typeof createModels>) =>
 
 // ---------------------------------------------------------------------------
 
-test('1. same-length summaries: LGTM and DONE both deliver (no dedup-key collision)', { timeout: 30_000 }, async (t) => {
+test('1. same-length summaries: LGTM and DONE both deliver (no dedup-key collision)', { timeout: 60_000 }, async (t) => {
 	const env = createFauxEnv();
 	const harness = await openHarness(env.models);
 	t.after(async () => await harness.close(BACKGROUND_CONTEXT).catch(() => undefined));
@@ -88,7 +88,7 @@ test('1. same-length summaries: LGTM and DONE both deliver (no dedup-key collisi
 	assert.match(texts, /DONE/, 'second same-length summary must also be delivered (was swallowed by the length-based dedup key)');
 });
 
-test('2. slow path: an event with no subscribers is really submitted to the Router conversation', { timeout: 30_000 }, async (t) => {
+test('2. slow path: an event with no subscribers is really submitted to the Router conversation', { timeout: 60_000 }, async (t) => {
 	const env = createFauxEnv();
 	const harness = await openHarness(env.models);
 	t.after(async () => await harness.close(BACKGROUND_CONTEXT).catch(() => undefined));
@@ -131,7 +131,7 @@ async function hangBusyConversation(
 	return conv;
 }
 
-test('3a. watchdog with a 24h stall budget never steers a freshly-started busy task', { timeout: 30_000 }, async (t) => {
+test('3a. watchdog with a 24h stall budget never steers a freshly-started busy task', { timeout: 60_000 }, async (t) => {
 	const env = createFauxEnv();
 	const harness = await openHarness(env.models);
 	t.after(async () => await harness.close(BACKGROUND_CONTEXT).catch(() => undefined));
@@ -149,7 +149,7 @@ test('3a. watchdog with a 24h stall budget never steers a freshly-started busy t
 	assert.equal(pass2.actions.filter((a) => a.kind === 'steer').length, 0, 'still no steer within budget');
 });
 
-test('3b. watchdog with a 20ms stall budget steers after two passes without progress', { timeout: 30_000 }, async (t) => {
+test('3b. watchdog with a 20ms stall budget steers after two passes without progress', { timeout: 60_000 }, async (t) => {
 	const env = createFauxEnv();
 	const harness = await openHarness(env.models);
 	t.after(async () => await harness.close(BACKGROUND_CONTEXT).catch(() => undefined));

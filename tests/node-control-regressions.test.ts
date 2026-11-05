@@ -51,7 +51,7 @@ async function stopChild(child: ChildProcess): Promise<void> {
 // ---------------------------------------------------------------------------
 
 describe('HubClient & CLI Config Scoping', () => {
-  test('updateCliConfig deletes explicit undefined properties and keeps omitted ones', async () => {
+  test('updateCliConfig deletes explicit undefined properties and keeps omitted ones', { timeout: 60_000 }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'botd-cli-config-test-'));
     try {
       await writeCliConfig(dir, {
@@ -90,7 +90,7 @@ describe('HubClient & CLI Config Scoping', () => {
     }
   });
 
-  test('HubClient.connect never leaks credentials to a different Hub via --hub', async () => {
+  test('HubClient.connect never leaks credentials to a different Hub via --hub', { timeout: 60_000 }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'botd-hub-client-test-'));
     const originalFetch = globalThis.fetch;
     const interceptedCalls: { url: string; body: unknown }[] = [];
@@ -143,7 +143,7 @@ describe('HubClient & CLI Config Scoping', () => {
     }
   });
 
-  test('automatic login preserves credentials previously saved for the same Hub', async () => {
+  test('automatic login preserves credentials previously saved for the same Hub', { timeout: 60_000 }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'botd-cli-saved-login-'));
     const originalFetch = globalThis.fetch;
     try {
@@ -161,7 +161,7 @@ describe('HubClient & CLI Config Scoping', () => {
     }
   });
 
-  test('HubClient.connect accepts explicit credentials for a new Hub', async () => {
+  test('HubClient.connect accepts explicit credentials for a new Hub', { timeout: 60_000 }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'botd-hub-client-test-'));
     const originalFetch = globalThis.fetch;
     const loginRequests: { url: string; body: any }[] = [];
@@ -205,7 +205,7 @@ describe('HubClient & CLI Config Scoping', () => {
     }
   });
 
-  test('HubClient.connect node.json fallback only allows matching Hub', async () => {
+  test('HubClient.connect node.json fallback only allows matching Hub', { timeout: 60_000 }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'botd-hub-client-test-'));
     try {
       // Write node.json paired to Hub A
@@ -248,7 +248,7 @@ describe('HubClient & CLI Config Scoping', () => {
 // ---------------------------------------------------------------------------
 
 describe('CLI --no-turn Option Resolution', () => {
-  test('wake --no-turn sends noTurn: true in socket payload', async () => {
+  test('wake --no-turn sends noTurn: true in socket payload', { timeout: 60_000 }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'botd-no-turn-wake-'));
     const socketPath = getDaemonSocketPath(dir);
     let receivedPayload: any = null;
@@ -297,7 +297,7 @@ describe('CLI --no-turn Option Resolution', () => {
     }
   });
 
-  test('wake without --no-turn does not send noTurn: true', async () => {
+  test('wake without --no-turn does not send noTurn: true', { timeout: 60_000 }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'botd-turn-wake-'));
     const socketPath = getDaemonSocketPath(dir);
     let receivedPayload: any = null;
@@ -348,7 +348,7 @@ describe('CLI --no-turn Option Resolution', () => {
 // ---------------------------------------------------------------------------
 
 describe('Artifact List Response Contract', () => {
-  test('parses { ok: true, artifacts } and displays rows for non-empty list', async () => {
+  test('parses { ok: true, artifacts } and displays rows for non-empty list', { timeout: 60_000 }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'botd-art-list-'));
     const socketPath = getDaemonSocketPath(dir);
 
@@ -405,7 +405,7 @@ describe('Artifact List Response Contract', () => {
     }
   });
 
-  test('parses { ok: true, artifacts: [] } and displays (no artifacts)', async () => {
+  test('parses { ok: true, artifacts: [] } and displays (no artifacts)', { timeout: 60_000 }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'botd-art-empty-'));
     const socketPath = getDaemonSocketPath(dir);
 
@@ -446,7 +446,7 @@ describe('Artifact List Response Contract', () => {
     }
   });
 
-  test('artifact list --json outputs raw artifacts array for empty and non-empty', async () => {
+  test('artifact list --json outputs raw artifacts array for empty and non-empty', { timeout: 60_000 }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'botd-art-json-'));
     const socketPath = getDaemonSocketPath(dir);
 
@@ -511,7 +511,7 @@ describe('Artifact List Response Contract', () => {
 // ---------------------------------------------------------------------------
 
 describe('Daemon Launch & Remote Restart', () => {
-  test('daemon invocation uses the resolved data directory and source loader', () => {
+  test('daemon invocation uses the resolved data directory and source loader', { timeout: 60_000 }, () => {
     const spec = buildDaemonSpawnSpec({ dataDir: '/var/lib/botd-test' });
     assert.equal(spec.execPath, process.execPath);
     assert(spec.args.some((arg) => arg.includes('tsx')));
@@ -520,7 +520,7 @@ describe('Daemon Launch & Remote Restart', () => {
     assert(!spec.args.includes('--detach'));
   });
 
-  test('spawnReplacementDaemon handles IPC ready signal and rejects on failure', async () => {
+  test('spawnReplacementDaemon handles IPC ready signal and rejects on failure', { timeout: 60_000 }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'botd-spawn-ipc-'));
     try {
       // 1. Success case: child sends botd:daemon-ready

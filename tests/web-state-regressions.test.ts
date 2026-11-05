@@ -35,7 +35,7 @@ function createMockAsk(id: string, status: PendingAskRecord['status'] = 'pending
   };
 }
 
-test('recent-page snapshots preserve confirmed earlier history and discard deleted tails', () => {
+test('recent-page snapshots preserve confirmed earlier history and discard deleted tails', { timeout: 60_000 }, () => {
   const current = ['older', 'shared', 'obsolete'].map((id) => createMockMessage(id));
   const known = new Set(current.map((message) => message.id));
   const page = [createMockMessage('shared'), createMockMessage('latest')];
@@ -49,7 +49,7 @@ test('recent-page snapshots preserve confirmed earlier history and discard delet
     .map((message) => message.id), ['older', 'shared', 'latest', 'live']);
 });
 
-test('1. 已删除旧消息不复活 (qa_anchor + qa_obsolete 截断回归)', () => {
+test('1. 已删除旧消息不复活 (qa_anchor + qa_obsolete 截断回归)', { timeout: 60_000 }, () => {
   // 场景：当前 UI 包含 anchor 和已被服务端删除的 obsolete 回复
   const anchor = createMockMessage('qa_anchor', 'user', 'original content');
   const obsolete = createMockMessage('qa_obsolete', 'assistant', 'obsolete reply');
@@ -96,7 +96,7 @@ test('1. 已删除旧消息不复活 (qa_anchor + qa_obsolete 截断回归)', ()
   assert.equal(mergedHistory[0].content, 'first query edited');
 });
 
-test('2. 请求期间新消息保留 (拉取快照期间通过 SSE 到达的消息必须保留)', () => {
+test('2. 请求期间新消息保留 (拉取快照期间通过 SSE 到达的消息必须保留)', { timeout: 60_000 }, () => {
   const u1 = createMockMessage('u1', 'user', 'hello');
   const knownAtStart = new Set(['u1']);
 
@@ -124,7 +124,7 @@ test('2. 请求期间新消息保留 (拉取快照期间通过 SSE 到达的消�
   );
 });
 
-test('3. 同会话乱序 snapshot / 截断前请求不覆盖', () => {
+test('3. 同会话乱序 snapshot / 截断前请求不覆盖', { timeout: 60_000 }, () => {
   const sessionId = 'session-order-test';
   const epoch = 1;
 
@@ -155,7 +155,7 @@ test('3. 同会话乱序 snapshot / 截断前请求不覆盖', () => {
   assert.equal(freshResponseValid, true, '截断后发起的新快照应被正常接纳');
 });
 
-test('4. 切会话隔离 (跨会话 snapshot 与事件隔离防护)', () => {
+test('4. 切会话隔离 (跨会话 snapshot 与事件隔离防护)', { timeout: 60_000 }, () => {
   const sessionA = 'session-a';
   const sessionB = 'session-b';
 
@@ -180,7 +180,7 @@ test('4. 切会话隔离 (跨会话 snapshot 与事件隔离防护)', () => {
   assert.equal(isLoggedOutAccepted, false, '登出后 snapshot 必须被丢弃');
 });
 
-test('5. 串/并发流 transition (单流与圆桌并发流状态演进)', () => {
+test('5. 串/并发流 transition (单流与圆桌并发流状态演进)', { timeout: 60_000 }, () => {
   let streamMap: Record<string, StreamingAssistantState> = {};
 
   // 5.1 单流产生与结束
@@ -228,7 +228,7 @@ test('5. 串/并发流 transition (单流与圆桌并发流状态演进)', () =>
   assert.deepEqual(streamMap, {}, 'clearStreamingMap 应重置为空对象');
 });
 
-test('6. 编辑消息与广播/响应竞态保护 (避免切掉新回复)', () => {
+test('6. 编辑消息与广播/响应竞态保护 (避免切掉新回复)', { timeout: 60_000 }, () => {
   // 初始：用户发送 message_1，bot 随后回复 reply_1
   const m1 = createMockMessage('message_1', 'user', 'original');
   const r1 = createMockMessage('reply_1', 'assistant', 'old reply');
@@ -271,7 +271,7 @@ test('6. 编辑消息与广播/响应竞态保护 (避免切掉新回复)', () =
   );
 });
 
-test('7. 待响应人机协同 asks 状态转移与合并', () => {
+test('7. 待响应人机协同 asks 状态转移与合并', { timeout: 60_000 }, () => {
   const ask1 = createMockAsk('ask-1', 'pending');
   const ask2 = createMockAsk('ask-2', 'pending');
 

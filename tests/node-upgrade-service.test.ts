@@ -48,18 +48,18 @@ describe('Version Detection & Semver Utilities', () => {
     }
   });
 
-  test('getNodeVersion returns BOTD_VERSION_OVERRIDE when set', () => {
+  test('getNodeVersion returns BOTD_VERSION_OVERRIDE when set', { timeout: 60_000 }, () => {
     process.env.BOTD_VERSION_OVERRIDE = '1.2.3-custom';
     assert.equal(getNodeVersion(), '1.2.3-custom');
   });
 
-  test('getNodeVersion falls back to package.json version', () => {
+  test('getNodeVersion falls back to package.json version', { timeout: 60_000 }, () => {
     delete process.env.BOTD_VERSION_OVERRIDE;
     const ver = getNodeVersion();
     assert.match(ver, /^[0-9]+\.[0-9]+\.[0-9]+/);
   });
 
-  test('compareSemver correctly compares versions', () => {
+  test('compareSemver correctly compares versions', { timeout: 60_000 }, () => {
     assert.equal(compareSemver('0.2.0', '0.1.0'), 1);
     assert.equal(compareSemver('0.1.0', '0.2.0'), -1);
     assert.equal(compareSemver('0.1.0', '0.1.0'), 0);
@@ -87,7 +87,7 @@ describe('checkNodeUpgrade', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test('detects update available when registry has newer version', async () => {
+  test('detects update available when registry has newer version', { timeout: 60_000 }, async () => {
     const mockFetch: typeof fetch = async (input) => {
       assert.match(String(input), /\/(?:%40botd%2Fnode|@botd\/node)\/latest$/i);
       return new Response(JSON.stringify({ version: '0.5.0' }), {
@@ -107,7 +107,7 @@ describe('checkNodeUpgrade', () => {
     assert.equal(result.blocked, undefined);
   });
 
-  test('detects no update when current version is equal or newer', async () => {
+  test('detects no update when current version is equal or newer', { timeout: 60_000 }, async () => {
     const mockFetch: typeof fetch = async () => {
       return new Response(JSON.stringify({ version: '0.1.0' }), {
         status: 200,
@@ -123,7 +123,7 @@ describe('checkNodeUpgrade', () => {
     assert.equal(result.updateAvailable, false);
   });
 
-  test('includes blocked record when update-blocked.json exists', async () => {
+  test('includes blocked record when update-blocked.json exists', { timeout: 60_000 }, async () => {
     await writeBlockedRelease(tempDir, {
       version: '0.5.0',
       reason: 'Canary startup failed',
@@ -148,7 +148,7 @@ describe('checkNodeUpgrade', () => {
     assert.equal(result.blocked?.reason, 'Canary startup failed');
   });
 
-  test('rejects when registry returns non-200 error', async () => {
+  test('rejects when registry returns non-200 error', { timeout: 60_000 }, async () => {
     const mockFetch: typeof fetch = async () => {
       return new Response('Not Found', { status: 404, statusText: 'Not Found' });
     };
@@ -179,7 +179,7 @@ describe('stageReleaseFromNpm', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test('rejects invalid target version format to prevent traversal', async () => {
+  test('rejects invalid target version format to prevent traversal', { timeout: 60_000 }, async () => {
     await assert.rejects(
       async () => {
         await stageReleaseFromNpm(tempDir, '../evil/version');
@@ -188,7 +188,7 @@ describe('stageReleaseFromNpm', () => {
     );
   });
 
-  test('stages release using custom stageExtractor and writes .complete marker', async () => {
+  test('stages release using custom stageExtractor and writes .complete marker', { timeout: 60_000 }, async () => {
     const staged = await stageReleaseFromNpm(tempDir, '0.3.0', {
       stageExtractor: async (stagingDir) => {
         await mkdir(path.join(stagingDir, 'bin'), { recursive: true });
@@ -221,7 +221,7 @@ describe('stageReleaseFromNpm', () => {
     assert.equal(cached.entryPath, staged.entryPath);
   });
 
-  test('stages release using BOTD_TEST_STAGE_ENTRY and BOTD_TEST_STAGE_FAIL', async () => {
+  test('stages release using BOTD_TEST_STAGE_ENTRY and BOTD_TEST_STAGE_FAIL', { timeout: 60_000 }, async () => {
     process.env.BOTD_TEST_STAGE_ENTRY = '1';
     process.env.BOTD_TEST_STAGE_FAIL = '1';
 
@@ -262,7 +262,7 @@ describe('performNodeUpgrade Lifecycle', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test('returns upgraded: false when already at target version without force', async () => {
+  test('returns upgraded: false when already at target version without force', { timeout: 60_000 }, async () => {
     await writeCurrentRelease(tempDir, {
       version: '0.2.0',
       entryPath: '/dummy/cli.js',
@@ -279,7 +279,7 @@ describe('performNodeUpgrade Lifecycle', () => {
     assert.equal(result.upgraded, false);
   });
 
-  test('successful upgrade: stages release, canary handshake succeeds, updates current.json', async () => {
+  test('successful upgrade: stages release, canary handshake succeeds, updates current.json', { timeout: 60_000 }, async () => {
     await writeCurrentRelease(tempDir, {
       version: '0.1.0',
       entryPath: '/old/cli.js',
@@ -332,7 +332,7 @@ describe('performNodeUpgrade Lifecycle', () => {
     assert.equal(blocked, null);
   });
 
-  test('canary failure: rolls back current.json, records update-blocked.json, avoids shutdown', async () => {
+  test('canary failure: rolls back current.json, records update-blocked.json, avoids shutdown', { timeout: 60_000 }, async () => {
     await writeCurrentRelease(tempDir, {
       version: '0.1.0',
       entryPath: '/old/cli.js',
@@ -383,7 +383,7 @@ describe('performNodeUpgrade Lifecycle', () => {
     assert.match(blocked?.reason || '', /Replacement daemon exited prematurely/);
   });
 
-  test('canary failure when no previous current.json exists: removes current.json and records blocked', async () => {
+  test('canary failure when no previous current.json exists: removes current.json and records blocked', { timeout: 60_000 }, async () => {
     // No current.json initially
     await assert.rejects(
       async () => {
@@ -412,7 +412,7 @@ describe('performNodeUpgrade Lifecycle', () => {
     assert.match(blocked?.reason || '', /Canary check failed/);
   });
 
-  test('drain protection: aborts with timeout when active turns do not drain', async () => {
+  test('drain protection: aborts with timeout when active turns do not drain', { timeout: 60_000 }, async () => {
     await writeCurrentRelease(tempDir, {
       version: '0.1.0',
       entryPath: '/old/cli.js',
@@ -441,7 +441,7 @@ describe('performNodeUpgrade Lifecycle', () => {
     assert.equal(current?.version, '0.1.0');
   });
 
-  test('drain protection: waits and succeeds when active turns drain within timeout', async () => {
+  test('drain protection: waits and succeeds when active turns drain within timeout', { timeout: 60_000 }, async () => {
     await writeCurrentRelease(tempDir, {
       version: '0.1.0',
       entryPath: '/old/cli.js',
@@ -485,7 +485,7 @@ describe('Cross-Platform Service Management', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test('generateServiceDescriptor for linux contains systemd user unit directives', () => {
+  test('generateServiceDescriptor for linux contains systemd user unit directives', { timeout: 60_000 }, () => {
     const desc = generateServiceDescriptor(tempDir, 'linux');
     assert.equal(desc.platform, 'linux');
     assert.equal(desc.configPath, path.join(tempDir, 'service', 'botd.service'));
@@ -498,7 +498,7 @@ describe('Cross-Platform Service Management', () => {
     assert.deepEqual(desc.uninstallCmd, ['systemctl', '--user', 'disable', '--now', 'botd.service']);
   });
 
-  test('generateServiceDescriptor for darwin contains LaunchAgent plist directives', () => {
+  test('generateServiceDescriptor for darwin contains LaunchAgent plist directives', { timeout: 60_000 }, () => {
     const desc = generateServiceDescriptor(tempDir, 'darwin');
     assert.equal(desc.platform, 'darwin');
     assert.equal(desc.configPath, path.join(tempDir, 'service', 'dev.botd.agent.plist'));
@@ -508,7 +508,7 @@ describe('Cross-Platform Service Management', () => {
     assert.match(desc.content, /<key>KeepAlive<\/key>/);
   });
 
-  test('generateServiceDescriptor for win32 contains cmd script and schtasks command', () => {
+  test('generateServiceDescriptor for win32 contains cmd script and schtasks command', { timeout: 60_000 }, () => {
     const desc = generateServiceDescriptor(tempDir, 'win32');
     assert.equal(desc.platform, 'win32');
     assert.equal(desc.configPath, path.join(tempDir, 'service', 'start-botd.cmd'));
@@ -518,7 +518,7 @@ describe('Cross-Platform Service Management', () => {
     assert(desc.installCmd.includes('ONLOGON'));
   });
 
-  test('installNodeService, getNodeServiceStatus, and uninstallNodeService lifecycle (dryRun)', async () => {
+  test('installNodeService, getNodeServiceStatus, and uninstallNodeService lifecycle (dryRun)', { timeout: 60_000 }, async () => {
     // Initial status: not installed
     const statusBefore = await getNodeServiceStatus(tempDir);
     assert.equal(statusBefore.installed, false);
@@ -566,7 +566,7 @@ describe('daemon-launch current.json Entry Resolution', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test('uses current.json entryPath when present without cliEntryOverride', async () => {
+  test('uses current.json entryPath when present without cliEntryOverride', { timeout: 60_000 }, async () => {
     const customEntry = path.join(tempDir, 'custom-cli.js');
     await writeFile(customEntry, '// custom\n', 'utf8');
 
@@ -580,7 +580,7 @@ describe('daemon-launch current.json Entry Resolution', () => {
     assert(spec.args.includes(customEntry));
   });
 
-  test('prefers cliEntryOverride over current.json entryPath', async () => {
+  test('prefers cliEntryOverride over current.json entryPath', { timeout: 60_000 }, async () => {
     const customEntry = path.join(tempDir, 'custom-cli.js');
     const overrideEntry = path.join(tempDir, 'override-cli.js');
     await writeFile(customEntry, '// custom\n', 'utf8');
@@ -622,7 +622,7 @@ describe('Local IPC Integration', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test('GET /status includes version string', async () => {
+  test('GET /status includes version string', { timeout: 60_000 }, async () => {
     process.env.BOTD_VERSION_OVERRIDE = '0.9.9-test';
 
     server = createDaemonControlServer({
@@ -658,7 +658,7 @@ describe('Local IPC Integration', () => {
     delete process.env.BOTD_VERSION_OVERRIDE;
   });
 
-  test('GET /upgrade/check and POST /upgrade over local socket', async () => {
+  test('GET /upgrade/check and POST /upgrade over local socket', { timeout: 60_000 }, async () => {
     let upgradeCalled = false;
     let shutdownCalled = false;
 
@@ -739,7 +739,7 @@ describe('CLI Commands: upgrade & service', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test('botd upgrade --check invokes checkNodeUpgrade and prints output', async () => {
+  test('botd upgrade --check invokes checkNodeUpgrade and prints output', { timeout: 60_000 }, async () => {
     await writeCurrentRelease(tempDir, {
       version: '0.1.0',
       entryPath: '/dummy/cli.js',
@@ -789,7 +789,7 @@ describe('CLI Commands: upgrade & service', () => {
     }
   });
 
-  test('botd service install/status/uninstall CLI commands', async () => {
+  test('botd service install/status/uninstall CLI commands', { timeout: 60_000 }, async () => {
     const logs: string[] = [];
     const origLog = console.log;
     console.log = (...args: unknown[]) => { logs.push(args.join(' ')); };
@@ -851,7 +851,7 @@ describe('CLI Commands: upgrade & service', () => {
     }
   });
 
-  test('botd nodes upgrade <nodeId> --check and post', async () => {
+  test('botd nodes upgrade <nodeId> --check and post', { timeout: 60_000 }, async () => {
     let checkCalled = false;
     let postCalled = false;
     let postBody: any = null;
@@ -979,13 +979,13 @@ describe('startAutoUpgradeLoop', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test('disabled by default: returns inert handle without touching registry', () => {
+  test('disabled by default: returns inert handle without touching registry', { timeout: 60_000 }, () => {
     const handle = startAutoUpgradeLoop(tempDir, { onScheduleShutdown: () => {} });
     handle.stop();
     // no timer created, nothing scheduled — absence of throw is the contract
   });
 
-  test('tick runs upgrade pipeline and reports success', async () => {
+  test('tick runs upgrade pipeline and reports success', { timeout: 60_000 }, async () => {
     await writeCurrentRelease(tempDir, {
       version: '0.1.0',
       entryPath: '/old/cli.js',
@@ -1033,7 +1033,7 @@ describe('startAutoUpgradeLoop', () => {
     }
   });
 
-  test('tick swallows upgrade failures (canary/network) for next-cycle retry', async () => {
+  test('tick swallows upgrade failures (canary/network) for next-cycle retry', { timeout: 60_000 }, async () => {
     const logs: string[] = [];
     let calls = 0;
 
@@ -1058,7 +1058,7 @@ describe('startAutoUpgradeLoop', () => {
     }
   });
 
-  test('tick is a no-op while shouldSkip returns true', async () => {
+  test('tick is a no-op while shouldSkip returns true', { timeout: 60_000 }, async () => {
     let calls = 0;
     let skip = true;
 

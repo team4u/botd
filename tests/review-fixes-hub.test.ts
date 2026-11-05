@@ -88,7 +88,7 @@ async function createTestEnv(t: TestContext): Promise<TestContextEnv> {
   };
 }
 
-test('Fix 4 — 子会话共享 storagePath 的会话删除不物理删除文件，直到最后一个引用消失', async (t) => {
+test('Fix 4 — 子会话共享 storagePath 的会话删除不物理删除文件，直到最后一个引用消失', { timeout: 60_000 }, async (t) => {
   const env = await createTestEnv(t);
   const { hub, dir, adminUser, adminCookie, registerNodeWithBots, jsonRequest } = env;
 
@@ -173,7 +173,7 @@ test('Fix 4 — 子会话共享 storagePath 的会话删除不物理删除文件
   assert.equal(fs.existsSync(tempFilePath), false, 'Physical file must be unlinked once child session is deleted');
 });
 
-test('Fix 4 — reclaimUnreferencedFiles invariant: shared storagePath kept until last reference deleted', async (t) => {
+test('Fix 4 — reclaimUnreferencedFiles invariant: shared storagePath kept until last reference deleted', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-reclaim-invariant-'));
   const dbPath = path.join(dir, 'test-hub.sqlite');
   const artifactsDir = path.join(dir, 'artifacts');
@@ -258,7 +258,7 @@ test('Fix 4 — reclaimUnreferencedFiles invariant: shared storagePath kept unti
   assert.equal(fs.existsSync(sharedDiskFile), false, 'File must be unlinked after all referencing sessions deleted');
 });
 
-test('Fix 5 — mapBotRowWithOwner and mapNodeRowWithOwner behavior parity', async (t) => {
+test('Fix 5 — mapBotRowWithOwner and mapNodeRowWithOwner behavior parity', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-mapping-test-'));
   const dbPath = path.join(dir, 'test-hub.sqlite');
   const db = new HubDatabase({ dbPath });

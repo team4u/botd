@@ -185,7 +185,7 @@ async function connectNode(
 // 1. 真实 WebSocket 桥：文件 / exec 流 / worktree
 // ---------------------------------------------------------------------------
 
-test('createRemoteEnv bridges files, streaming exec and worktrees over real websocket', async (t) => {
+test('createRemoteEnv bridges files, streaming exec and worktrees over real websocket', { timeout: 60_000 }, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'botd-bridge-'));
   t.after(() => rm(root, { recursive: true, force: true }).catch(() => undefined));
 
@@ -272,7 +272,7 @@ test('createRemoteEnv bridges files, streaming exec and worktrees over real webs
 // 2. waitForNodeOnline：先发起操作，节点后上线
 // ---------------------------------------------------------------------------
 
-test('remote env tool call started before node connects waits and completes on connect', async (t) => {
+test('remote env tool call started before node connects waits and completes on connect', { timeout: 60_000 }, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'botd-bridge-wait-'));
   t.after(() => rm(root, { recursive: true, force: true }).catch(() => undefined));
 
@@ -314,7 +314,7 @@ test('remote env tool call started before node connects waits and completes on c
   assert.equal(typeof onlineRpc.envExec, 'function');
 });
 
-test('waitForNodeOnline rejects when context is cancelled before the node comes online', async (t) => {
+test('waitForNodeOnline rejects when context is cancelled before the node comes online', { timeout: 60_000 }, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'botd-bridge-cancel-'));
   t.after(() => rm(root, { recursive: true, force: true }).catch(() => undefined));
 

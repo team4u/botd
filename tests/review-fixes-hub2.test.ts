@@ -71,7 +71,7 @@ function createSessionFixture(hub: ReturnType<typeof createHub>, userId: string,
 // 1. 上传体大小限制
 // ---------------------------------------------------------------------------
 
-test('artifact upload rejects oversized Content-Length before reading body', async (t) => {
+test('artifact upload rejects oversized Content-Length before reading body', { timeout: 60_000 }, async (t) => {
   const { hub, cookie } = await setupHub(t);
   const admin = hub.db.getUserWithHash('admin')!;
   createSessionFixture(hub, admin.id, 'sess_cl', 'bot_cl');
@@ -91,7 +91,7 @@ test('artifact upload rejects oversized Content-Length before reading body', asy
   assert.match((await res.json()).error, /too large/i);
 });
 
-test('artifact upload aborts chunked streaming body over the limit', async (t) => {
+test('artifact upload aborts chunked streaming body over the limit', { timeout: 60_000 }, async (t) => {
   const { hub, cookie } = await setupHub(t);
   const admin = hub.db.getUserWithHash('admin')!;
   createSessionFixture(hub, admin.id, 'sess_chunked', 'bot_chunked');
@@ -152,7 +152,7 @@ test('artifact upload aborts chunked streaming body over the limit', async (t) =
 // 2. filename 净化（服务层，覆盖 HTTP / RPC / IPC 全部入口）
 // ---------------------------------------------------------------------------
 
-test('artifact service rejects filename containing path components', async (t) => {
+test('artifact service rejects filename containing path components', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-review-fixes-svc-'));
   const db = new HubDatabase({ dbPath: path.join(dir, 'svc.sqlite') });
   const service = new ArtifactService(db, new SseHub(), { artifactsDir: path.join(dir, 'artifacts') });
@@ -231,7 +231,7 @@ test('artifact service rejects filename containing path components', async (t) =
 // 3. webhook 去重与频率限制
 // ---------------------------------------------------------------------------
 
-test('webhook: X-Botd-Dedup replays are swallowed with 200; token rate limit returns 429', async (t) => {
+test('webhook: X-Botd-Dedup replays are swallowed with 200; token rate limit returns 429', { timeout: 60_000 }, async (t) => {
   const { hub, cookie } = await setupHub(t);
   const admin = hub.db.getUserWithHash('admin')!;
   createSessionFixture(hub, admin.id, 'sess_hook', 'bot_hook');
@@ -310,7 +310,7 @@ test('webhook: X-Botd-Dedup replays are swallowed with 200; token rate limit ret
 // 4. 分享链接 expiresInHours
 // ---------------------------------------------------------------------------
 
-test('share link: expiresInHours sets expiresAt, validation rejects bad input, default stays NULL', async (t) => {
+test('share link: expiresInHours sets expiresAt, validation rejects bad input, default stays NULL', { timeout: 60_000 }, async (t) => {
   const { hub, cookie } = await setupHub(t);
   const admin = hub.db.getUserWithHash('admin')!;
   hub.db.createSession({
@@ -367,7 +367,7 @@ test('share link: expiresInHours sets expiresAt, validation rejects bad input, d
   assert.equal(publicRes.status, 404, '过期后公开访问 404');
 });
 
-test('share link: regenerate with expiresInHours=undefined keeps NULL semantics', async (t) => {
+test('share link: regenerate with expiresInHours=undefined keeps NULL semantics', { timeout: 60_000 }, async (t) => {
   const { hub, cookie } = await setupHub(t);
   const admin = hub.db.getUserWithHash('admin')!;
   hub.db.createSession({

@@ -11,7 +11,7 @@ import {
   isUploadResultValid,
 } from '../apps/web/src/utils/input-uploads.js';
 
-test('1. 上传时快捷键提交与提交按钮均被阻止 (Shortcut submit blocked while uploading)', () => {
+test('1. 上传时快捷键提交与提交按钮均被阻止 (Shortcut submit blocked while uploading)', { timeout: 60_000 }, () => {
   // 正常情况下：有文本且未在上传中，允许提交
   assert.equal(
     canSubmitMessage({
@@ -91,7 +91,7 @@ test('1. 上传时快捷键提交与提交按钮均被阻止 (Shortcut submit bl
   );
 });
 
-test('2. 多批上传一个结束仍阻止提交 (Multi-batch upload keeps submit blocked until all batches finish)', () => {
+test('2. 多批上传一个结束仍阻止提交 (Multi-batch upload keeps submit blocked until all batches finish)', { timeout: 60_000 }, () => {
   const tracker = createUploadTaskTracker(1);
   assert.equal(tracker.activeCount, 0);
 
@@ -154,7 +154,7 @@ test('2. 多批上传一个结束仍阻止提交 (Multi-batch upload keeps submi
   );
 });
 
-test('3. 切会话旧结果忽略与防止 ABA 竞态 (Session switch ignores old uploads and prevents ABA race)', () => {
+test('3. 切会话旧结果忽略与防止 ABA 竞态 (Session switch ignores old uploads and prevents ABA race)', { timeout: 60_000 }, () => {
   const tracker = createUploadTaskTracker(1);
   const currentSessionA = 'sess-alpha';
 
@@ -206,7 +206,7 @@ test('3. 切会话旧结果忽略与防止 ABA 竞态 (Session switch ignores ol
   assert.equal(tracker.activeCount, 0);
 });
 
-test('4. 发送完成只消费当次发送的附件与草稿，不清掉后加的新内容 (Send completion preserves new attachments and draft additions)', () => {
+test('4. 发送完成只消费当次发送的附件与草稿，不清掉后加的新内容 (Send completion preserves new attachments and draft additions)', { timeout: 60_000 }, () => {
   // --- 附件测试 ---
   const initialAtt1 = {
     id: 'att-001',

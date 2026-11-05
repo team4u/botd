@@ -162,7 +162,7 @@ async function fixture(t: TestContext) {
   return { hub, base, request, json, addNode, session, messages, idle, cookie: () => cookie, loginAs, forUser };
 }
 
-test('Pi catalog exposes full public metadata and Hub-owned api_key provider login', async t => {
+test('Pi catalog exposes full public metadata and Hub-owned api_key provider login', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   assert.equal((await f.request('/api/models/catalog', 'GET', undefined, false)).status, 401);
   const catalog = await f.json('/api/models/catalog');
@@ -222,7 +222,7 @@ test('Pi catalog exposes full public metadata and Hub-owned api_key provider log
   assert.equal((await f.request('/api/providers/ghost-provider/login', 'POST', { method: 'api_key' })).status, 501);
 });
 
-test('auth, one-time pairing and authenticated node registration', async t => {
+test('auth, one-time pairing and authenticated node registration', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   assert.equal((await f.request('/api/nodes', 'GET', undefined, false)).status, 401);
   assert.equal((await f.request('/api/auth/login', 'POST', { username: 'admin', password: 'wrong' }, false)).status, 401);
@@ -243,7 +243,7 @@ test('auth, one-time pairing and authenticated node registration', async t => {
   assert.equal((await f.json('/api/nodes'))[0].bots.length, 1, 'Hub-owned bots survive node re-registration');
 });
 
-test('isolates resources per user', async t => {
+test('isolates resources per user', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
 
   // 1. Admin creates a member account
@@ -294,7 +294,7 @@ test('isolates resources per user', async t => {
   assert.equal((await f.request('/api/users/user_missing', 'DELETE')).status, 404);
 });
 
-test('lead routing, user @ mention dispatch instructions, public incremental context and SSE', async t => {
+test('lead routing, user @ mention dispatch instructions, public incremental context and SSE', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const calls: Parameters<NodeRpcFunctions['runTurn']>[0][] = [];
   const lead = await f.addNode(['lead'], async input => {
@@ -337,7 +337,7 @@ test('lead routing, user @ mention dispatch instructions, public incremental con
   assert.equal(calls.at(-1)!.incrementalMessages.includes('Investigate the issue'), false);
 });
 
-test('user @mentions route to lead with dispatch prompt and assistant mentions do not cascade', async t => {
+test('user @mentions route to lead with dispatch prompt and assistant mentions do not cascade', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const calls: Parameters<NodeRpcFunctions['runTurn']>[0][] = [];
   await f.addNode(['lead', 'a', 'b'], async input => {
@@ -363,7 +363,7 @@ test('user @mentions route to lead with dispatch prompt and assistant mentions d
   assert.equal(calls.length, 2);
 });
 
-test('fan-out mentions in assistant text do not trigger cascading relays', async t => {
+test('fan-out mentions in assistant text do not trigger cascading relays', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   let calls = 0;
   await f.addNode(['a', 'b', 'c'], async () => {
@@ -377,7 +377,7 @@ test('fan-out mentions in assistant text do not trigger cascading relays', async
   assert.equal(calls, 1, 'assistant prose mentions must not trigger relay turns');
 });
 
-test('wake queues behind current turn and session cancellation suppresses late replies', async t => {
+test('wake queues behind current turn and session cancellation suppresses late replies', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const entered = deferred<void>();
   const finish = deferred<{ replyText: string; modelBadge: string }>();
@@ -404,7 +404,7 @@ test('wake queues behind current turn and session cancellation suppresses late r
   assert.equal(calls.length, 2);
 });
 
-test('RPC failure marks failed and later messages can recover', async t => {
+test('RPC failure marks failed and later messages can recover', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   let failing = true;
   await f.addNode(['bot'], async () => {
@@ -421,7 +421,7 @@ test('RPC failure marks failed and later messages can recover', async t => {
   await f.idle(session.id);
 });
 
-test('node identity and session membership constrain RPC operations', async t => {
+test('node identity and session membership constrain RPC operations', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const a = await f.addNode(['a']);
   const b = await f.addNode(['b']);
@@ -441,7 +441,7 @@ test('node identity and session membership constrain RPC operations', async t =>
   assert.equal(nodes.find((node: any) => node.id === a.identity.nodeId).name, 'Test node');
 });
 
-test('file management and offline nodes preserve metadata', async t => {
+test('file management and offline nodes preserve metadata', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const node = await f.addNode(['bot']);
   await f.json(`/api/bots/bot/memory`, 'PUT', { content: 'Remember this.' });
@@ -484,7 +484,7 @@ test('file management and offline nodes preserve metadata', async t => {
   assert.deepEqual(await f.json('/api/bots/bot/memory'), { content: 'Updated offline.' });
 });
 
-test('separate sessions execute concurrently while each session remains serial', async t => {
+test('separate sessions execute concurrently while each session remains serial', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const releases = new Map<string, ReturnType<typeof deferred<{ replyText: string; modelBadge: string }>>>();
   const calls: string[] = [];
@@ -528,7 +528,7 @@ test('separate sessions execute concurrently while each session remains serial',
   assert.equal(firstPrompts[1].incrementalMessages.includes('one'), false);
 });
 
-test('node removal disconnects the agent and revokes its credentials', async t => {
+test('node removal disconnects the agent and revokes its credentials', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const node = await f.addNode(['bot-a']);
 
@@ -557,7 +557,7 @@ test('node removal disconnects the agent and revokes its credentials', async t =
   assert.equal((await f.request('/api/nodes/ghost', 'DELETE')).status, 404);
 });
 
-test('force removal discards an offline node together with its cached bots', async t => {
+test('force removal discards an offline node together with its cached bots', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const node = await f.addNode(['bot-x', 'bot-y']);
 
@@ -585,7 +585,7 @@ test('force removal discards an offline node together with its cached bots', asy
   stale.terminate();
 });
 
-test('force removal of an online node best-effort deletes its local bots', async t => {
+test('force removal of an online node best-effort deletes its local bots', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const node = await f.addNode(['bot-z']);
 
@@ -598,7 +598,7 @@ test('force removal of an online node best-effort deletes its local bots', async
   assert.equal((await f.json('/api/nodes')).length, 0);
 });
 
-test('SQLite schema migration adds extensions columns to legacy tables without losing rows', async t => {
+test('SQLite schema migration adds extensions columns to legacy tables without losing rows', { timeout: 60_000 }, async t => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-hub-migration-'));
   const dbPath = path.join(dir, 'legacy.sqlite');
   const setupDb = new DatabaseSync(dbPath);
@@ -669,7 +669,7 @@ test('SQLite schema migration adds extensions columns to legacy tables without l
   assert.deepEqual(allNodesWithBots[0].bots[0].enabledExtensions, []);
 });
 
-test('restarts a node daemon via HTTP', async t => {
+test('restarts a node daemon via HTTP', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const node = await f.addNode(['bot']);
 
@@ -687,7 +687,7 @@ test('restarts a node daemon via HTTP', async t => {
   assert.deepEqual(await offline.json(), { error: 'Node is offline' });
 });
 
-test('GET /api/bots/:botId/commands auth, offline, not-found and success', async t => {
+test('GET /api/bots/:botId/commands auth, offline, not-found and success', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const node = await f.addNode(['bot1']);
 
@@ -715,7 +715,7 @@ test('GET /api/bots/:botId/commands auth, offline, not-found and success', async
   assert.deepEqual(await offline.json(), []);
 });
 
-test('command routing, execution and path compatibility', async t => {
+test('command routing, execution and path compatibility', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const calls: Parameters<NodeRpcFunctions['runTurn']>[0][] = [];
   const node = await f.addNode(['lead', 'coder', 'reviewer'], async input => {
@@ -778,7 +778,7 @@ test('command routing, execution and path compatibility', async t => {
   assert.equal(calls[0].commandText, undefined);
 });
 
-test('queued commands execute once each and historical or wake-up slash text stays context', async t => {
+test('queued commands execute once each and historical or wake-up slash text stays context', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const calls: Parameters<NodeRpcFunctions['runTurn']>[0][] = [];
   const entered = deferred<void>();
@@ -811,7 +811,7 @@ test('queued commands execute once each and historical or wake-up slash text sta
   assert.match(calls[3].incrementalMessages, /review wake-up text/);
 });
 
-test('edit user message truncates follow-ups and redispatches', async t => {
+test('edit user message truncates follow-ups and redispatches', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const node = await f.addNode(['solo']);
   const session = await f.session(['solo'], 'direct');
@@ -872,7 +872,7 @@ test('edit user message truncates follow-ups and redispatches', async t => {
   assert.equal((await f.request(`/api/sessions/${session.id}/messages/${anchor.id}`, 'PUT', { content: '   ' })).status, 400);
 });
 
-test('session deletion, message clearing and enriched session list', async t => {
+test('session deletion, message clearing and enriched session list', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   await f.addNode(['solo']);
 
@@ -931,7 +931,7 @@ test('session deletion, message clearing and enriched session list', async t => 
   assert.equal((await f.json<SessionRecord[]>('/api/sessions')).length, 0);
 });
 
-test('session archive flag toggles via PATCH, validates input and migrates legacy databases', async t => {
+test('session archive flag toggles via PATCH, validates input and migrates legacy databases', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   await f.addNode(['solo']);
   const session = await f.session(['solo'], 'direct');
@@ -1001,7 +1001,7 @@ test('session archive flag toggles via PATCH, validates input and migrates legac
   assert.equal(hubDb.getSession('legacy-sess')!.archived, true);
 });
 
-test('session fork clones config and history up to the anchor without touching the source', async t => {
+test('session fork clones config and history up to the anchor without touching the source', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   await f.addNode(['solo']);
   const session = await f.session(['solo'], 'direct');
@@ -1062,7 +1062,7 @@ test('session fork clones config and history up to the anchor without touching t
   assert.deepEqual(await noBody.json(), { error: 'Invalid anchorMessageId' });
 });
 
-test('archiving is allowed while a session is running, but config patches are still refused', async t => {
+test('archiving is allowed while a session is running, but config patches are still refused', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const finish = deferred<{ replyText: string; modelBadge: string }>();
   await f.addNode(['busy'], async () => finish.promise);
@@ -1089,7 +1089,7 @@ test('archiving is allowed while a session is running, but config patches are st
   assert.equal(settledItem.archived, true, 'archived flag must survive the background turn');
 });
 
-test('message pagination: no params stays full, before/around windows and hasMore', async t => {
+test('message pagination: no params stays full, before/around windows and hasMore', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   await f.addNode(['solo']);
   const session = await f.session(['solo'], 'direct');
@@ -1160,7 +1160,7 @@ test('message pagination: no params stays full, before/around windows and hasMor
   assert.equal(tailPage.hasMore, true);
 });
 
-test('POST /api/triggers/:triggerId/run fires a wakeup turn into the session', async t => {
+test('POST /api/triggers/:triggerId/run fires a wakeup turn into the session', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const calls: Parameters<NodeRpcFunctions['runTurn']>[0][] = [];
   await f.addNode(['solo'], async input => {
@@ -1190,7 +1190,7 @@ test('POST /api/triggers/:triggerId/run fires a wakeup turn into the session', a
   assert.equal((await f.request('/api/triggers/trg_missing/run', 'POST')).status, 404);
 });
 
-test('GET /api/events streams hello and forwards this user session events', async t => {
+test('GET /api/events streams hello and forwards this user session events', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   await f.addNode(['solo'], async input => ({ replyText: `Reply from ${input.botId}`, modelBadge: 'test/model' }));
   const session = await f.session(['solo'], 'direct');
@@ -1217,7 +1217,7 @@ test('GET /api/events streams hello and forwards this user session events', asyn
   await consuming;
 });
 
-test('global SSE delivers node online/offline events only to the node owner', async t => {
+test('global SSE delivers node online/offline events only to the node owner', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
 
   // bob 与他的专属订阅流
@@ -1255,7 +1255,7 @@ test('global SSE delivers node online/offline events only to the node owner', as
   await Promise.allSettled([adminRead, carolRead]);
 });
 
-test('Hub full ownership: Bot CRUD, SYSTEM/MEMORY, env, skills, extensions and provider api_key with NO node connected', async t => {
+test('Hub full ownership: Bot CRUD, SYSTEM/MEMORY, env, skills, extensions and provider api_key with NO node connected', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   // 全程不连接任何 Node：Hub SQLite 是唯一事实源
 

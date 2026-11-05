@@ -24,7 +24,7 @@ import { installResourceToNode, parseGitSource } from '../apps/node/src/installe
 // Hands on Node：env-rpc-server（NodeExecutionEnv + Git Worktree 隔离）
 // ---------------------------------------------------------------------------
 
-test('createNodeEnvRpcServer serves files and streaming exec locally (Hands on Node)', async t => {
+test('createNodeEnvRpcServer serves files and streaming exec locally (Hands on Node)', { timeout: 60_000 }, async t => {
   const root = await mkdtemp(path.join(tmpdir(), 'botd-sdk-env-'));
   t.after(async () => {
     await rm(root, { recursive: true, force: true });
@@ -55,7 +55,7 @@ test('createNodeEnvRpcServer serves files and streaming exec locally (Hands on N
   assert.equal(aborted.ok, false, 'aborted exec must return a failed RpcResult');
 });
 
-test('createNodeEnvRpcServer isolates concurrent workers with git worktrees', async t => {
+test('createNodeEnvRpcServer isolates concurrent workers with git worktrees', { timeout: 60_000 }, async t => {
   const root = await mkdtemp(path.join(tmpdir(), 'botd-sdk-worktree-'));
   t.after(async () => {
     await rm(root, { recursive: true, force: true });
@@ -101,7 +101,7 @@ test('createNodeEnvRpcServer isolates concurrent workers with git worktrees', as
 // Hands on Node：bin 包装器（botd CLI 供 BOT 脚本调用）
 // ---------------------------------------------------------------------------
 
-test('ensureBotdBinWrapper writes an executable wrapper and is idempotent', async t => {
+test('ensureBotdBinWrapper writes an executable wrapper and is idempotent', { timeout: 60_000 }, async t => {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'botd-sdk-bin-'));
   t.after(async () => {
     await rm(dataDir, { recursive: true, force: true });
@@ -121,7 +121,7 @@ test('ensureBotdBinWrapper writes an executable wrapper and is idempotent', asyn
 // 模型目录与 Provider 认证已 100% 迁至 Hub，由 tests/hub.test.ts 覆盖）
 // ---------------------------------------------------------------------------
 
-test('skill discovery reads .agents/skills and .agent/skills with precedence and symlinks', async t => {
+test('skill discovery reads .agents/skills and .agent/skills with precedence and symlinks', { timeout: 60_000 }, async t => {
   const home = await mkdtemp(path.join(tmpdir(), 'botd-skill-home-'));
   const dataDir = path.join(home, '.botd');
   t.after(() => rm(home, { recursive: true, force: true }));
@@ -184,7 +184,7 @@ test('skill discovery reads .agents/skills and .agent/skills with precedence and
   assert(!afterDelete.includes('shared-skill'), `primary + standard copies must both be gone, got: ${afterDelete.join(', ')}`);
 });
 
-test('seedStorageIfEmpty seeds cli-helper into the primary dir even when .agents/skills already has skills', async t => {
+test('seedStorageIfEmpty seeds cli-helper into the primary dir even when .agents/skills already has skills', { timeout: 60_000 }, async t => {
   const home = await mkdtemp(path.join(tmpdir(), 'botd-skill-seed-'));
   const dataDir = path.join(home, '.botd');
   t.after(() => rm(home, { recursive: true, force: true }));
@@ -201,7 +201,7 @@ test('seedStorageIfEmpty seeds cli-helper into the primary dir even when .agents
   assert(skills.includes('preexisting'));
 });
 
-test('installResourceToNode installs local skill dirs and nested git skill layouts', async t => {
+test('installResourceToNode installs local skill dirs and nested git skill layouts', { timeout: 60_000 }, async t => {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'botd-skill-install-'));
   const source = await mkdtemp(path.join(tmpdir(), 'botd-skill-src-'));
   t.after(async () => {

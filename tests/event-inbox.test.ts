@@ -126,7 +126,7 @@ const waitFor = async (predicate: () => boolean, timeout = 5000): Promise<void> 
 // 0. 纯函数单元测试：事件元信息提取与 eventFilter 匹配
 // ---------------------------------------------------------------------------
 
-test('extractWebhookEventMeta: GitHub 头解析、body source/type 回退、dedupKey 优先级', () => {
+test('extractWebhookEventMeta: GitHub 头解析、body source/type 回退、dedupKey 优先级', { timeout: 60_000 }, () => {
   // GitHub 事件：x-github-event + action 拼接
   const gh = extractWebhookEventMeta(
     (n) => (n === 'x-github-event' ? 'pull_request' : n === 'x-github-delivery' ? 'gh-delivery-1' : undefined),
@@ -170,7 +170,7 @@ test('extractWebhookEventMeta: GitHub 头解析、body source/type 回退、dedu
   assert.equal(dedupFirst.dedupKey, 'custom-hash');
 });
 
-test('matchesEventFilter: source / types / payloadMatch 组合判定', () => {
+test('matchesEventFilter: source / types / payloadMatch 组合判定', { timeout: 60_000 }, () => {
   const meta = { source: 'github', eventType: 'pull_request.opened', parsedObject: { action: 'opened', number: 42, merged: false } };
 
   assert.equal(matchesEventFilter({}, meta), true, '空 filter 全放行');
@@ -190,7 +190,7 @@ test('matchesEventFilter: source / types / payloadMatch 组合判定', () => {
   assert.equal(matchesEventFilter({ payloadMatch: { key: 'v' } }, { ...meta, parsedObject: undefined }), false, '无 JSON body 时 payloadMatch 不匹配');
 });
 
-test('matchesEventFilter: 点号嵌套路径、数组包含与对象数组穿透匹配', () => {
+test('matchesEventFilter: 点号嵌套路径、数组包含与对象数组穿透匹配', { timeout: 60_000 }, () => {
   const meta = {
     source: 'github',
     eventType: 'pull_request.opened',
@@ -230,7 +230,7 @@ test('matchesEventFilter: 点号嵌套路径、数组包含与对象数组穿透
   assert.equal(matchesEventFilter({ payloadMatch: { 'pull_request.number': '7' } }, meta), false);
 });
 
-test('matchesEventFilter: 顶层含点号字面量键名优先于路径解析', () => {
+test('matchesEventFilter: 顶层含点号字面量键名优先于路径解析', { timeout: 60_000 }, () => {
   const meta = {
     source: 'webhook',
     eventType: 'webhook.received',
@@ -244,7 +244,7 @@ test('matchesEventFilter: 顶层含点号字面量键名优先于路径解析', 
   assert.equal(matchesEventFilter({ payloadMatch: { 'a.b': 'nested' } }, meta2), true);
 });
 
-test('isSilentSkipReply: [PASS]/[IGNORE] 开头（后接空白/标点/结尾）判定', () => {
+test('isSilentSkipReply: [PASS]/[IGNORE] 开头（后接空白/标点/结尾）判定', { timeout: 60_000 }, () => {
   assert.equal(isSilentSkipReply('[PASS]'), true);
   assert.equal(isSilentSkipReply('[IGNORE]'), true);
   assert.equal(isSilentSkipReply('[pass]'), true, '大小写不敏感');
@@ -263,7 +263,7 @@ test('isSilentSkipReply: [PASS]/[IGNORE] 开头（后接空白/标点/结尾）�
 // 1. 持久化去重
 // ---------------------------------------------------------------------------
 
-test('webhook 持久化去重：x-github-delivery 重放被吞掉，跨 Hub 重启（新 HubDatabase 实例）依然去重', async (t) => {
+test('webhook 持久化去重：x-github-delivery 重放被吞掉，跨 Hub 重启（新 HubDatabase 实例）依然去重', { timeout: 60_000 }, async (t) => {
   const { hub, cookie, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_dedup', 'bot_dedup');
   const trigger = createWebhookTrigger(hub, admin.id, 'sess_dedup', 'bot_dedup');
@@ -310,7 +310,7 @@ test('webhook 持久化去重：x-github-delivery 重放被吞掉，跨 Hub 重�
   assert.equal(restartedDb.hasAutomationEventWithDedupKey(trigger.id, 'delivery-new'), false);
 });
 
-test('webhook 持久化去重：x-botd-dedup 亦作为 dedupKey 持久化；无 dedup 头的事件不去重', async (t) => {
+test('webhook 持久化去重：x-botd-dedup 亦作为 dedupKey 持久化；无 dedup 头的事件不去重', { timeout: 60_000 }, async (t) => {
   const { hub, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_dedup2', 'bot_dedup2');
   const trigger = createWebhookTrigger(hub, admin.id, 'sess_dedup2', 'bot_dedup2');
@@ -354,7 +354,7 @@ async function loginCookie(hub: ReturnType<typeof createHub>): Promise<string> {
 // 2. eventFilter 过滤
 // ---------------------------------------------------------------------------
 
-test('webhook eventFilter：不匹配返回 skipped/filter_mismatch 且不唤醒；匹配则正常触发', async (t) => {
+test('webhook eventFilter：不匹配返回 skipped/filter_mismatch 且不唤醒；匹配则正常触发', { timeout: 60_000 }, async (t) => {
   const { hub, cookie, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_filter', 'bot_filter');
 
@@ -417,7 +417,7 @@ test('webhook eventFilter：不匹配返回 skipped/filter_mismatch 且不唤醒
   hub.router.handleWakeup = originalHandleWakeup;
 });
 
-test('webhook eventFilter.payloadMatch：JSON 顶层键值精确匹配', async (t) => {
+test('webhook eventFilter.payloadMatch：JSON 顶层键值精确匹配', { timeout: 60_000 }, async (t) => {
   const { hub, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_pm', 'bot_pm');
 
@@ -461,7 +461,7 @@ test('webhook eventFilter.payloadMatch：JSON 顶层键值精确匹配', async (
 // 3. dispatchMode: 'subsession'
 // ---------------------------------------------------------------------------
 
-test('dispatchMode=subsession：Webhook 触发自动派生子会话、父会话通知、完成后回传摘要', async (t) => {
+test('dispatchMode=subsession：Webhook 触发自动派生子会话、父会话通知、完成后回传摘要', { timeout: 60_000 }, async (t) => {
   const { hub, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_sub', 'bot_sub');
 
@@ -526,7 +526,7 @@ test('dispatchMode=subsession：Webhook 触发自动派生子会话、父会话�
   assert.ok(events[0].payloadArtifactId, '载荷应落盘为 Artifact');
 });
 
-test('dispatchMode=subsession + skillId：初始消息加 /skill: 前缀；已以 / 开头则不加', async (t) => {
+test('dispatchMode=subsession + skillId：初始消息加 /skill: 前缀；已以 / 开头则不加', { timeout: 60_000 }, async (t) => {
   const { hub, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_skill', 'bot_skill');
 
@@ -556,7 +556,7 @@ test('dispatchMode=subsession + skillId：初始消息加 /skill: 前缀；已�
   await waitFor(() => turns.length > 0);
 });
 
-test('dispatchMode=subsession：cron/once/手动 run 亦派生子会话', async (t) => {
+test('dispatchMode=subsession：cron/once/手动 run 亦派生子会话', { timeout: 60_000 }, async (t) => {
   const { hub, cookie, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_manual', 'bot_manual');
 
@@ -602,7 +602,7 @@ test('dispatchMode=subsession：cron/once/手动 run 亦派生子会话', async 
   assert.equal(turns[0].sessionId, runJson.childSessionId);
 });
 
-test('dispatchMode=subsession：子会话失败时父会话收到失败回传', async (t) => {
+test('dispatchMode=subsession：子会话失败时父会话收到失败回传', { timeout: 60_000 }, async (t) => {
   const { hub, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_fail', 'bot_fail');
 
@@ -635,7 +635,7 @@ test('dispatchMode=subsession：子会话失败时父会话收到失败回传', 
 // 4. 载荷文件化
 // ---------------------------------------------------------------------------
 
-test('webhook 载荷落盘：append 与 subsession 模式均生成 event_<id>.json Artifact', async (t) => {
+test('webhook 载荷落盘：append 与 subsession 模式均生成 event_<id>.json Artifact', { timeout: 60_000 }, async (t) => {
   const { hub, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_art', 'bot_art');
 
@@ -686,7 +686,7 @@ test('webhook 载荷落盘：append 与 subsession 模式均生成 event_<id>.js
 // 5. GET /api/sessions/:id/events
 // ---------------------------------------------------------------------------
 
-test('GET /api/sessions/:id/automation-events：返回事件列表（倒序）并校验所有权', async (t) => {
+test('GET /api/sessions/:id/automation-events：返回事件列表（倒序）并校验所有权', { timeout: 60_000 }, async (t) => {
   const { hub, cookie, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_list', 'bot_list');
   createSessionFixture(hub, admin.id, 'sess_list2', 'bot_list2');
@@ -754,7 +754,7 @@ test('GET /api/sessions/:id/automation-events：返回事件列表（倒序）�
 // 6. 向后兼容
 // ---------------------------------------------------------------------------
 
-test('向后兼容：默认 dispatchMode=append，创建/查询触发器不带新字段时行为与旧版一致', async (t) => {
+test('向后兼容：默认 dispatchMode=append，创建/查询触发器不带新字段时行为与旧版一致', { timeout: 60_000 }, async (t) => {
   const { hub, cookie, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_compat', 'bot_compat');
 
@@ -822,7 +822,7 @@ test('向后兼容：默认 dispatchMode=append，创建/查询触发器不带�
   assert.equal(badFilter.status, 400);
 });
 
-test('db 层：automation_events 唯一索引拦截同 (trigger_id, dedup_key) 重复插入', async (t) => {
+test('db 层：automation_events 唯一索引拦截同 (trigger_id, dedup_key) 重复插入', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-evt-db-'));
   const db = new HubDatabase({ dbPath: path.join(dir, 'hub.sqlite') });
   t.after(async () => {
@@ -886,7 +886,7 @@ test('db 层：automation_events 唯一索引拦截同 (trigger_id, dedup_key) �
 // 7. 子会话新产物自动回传父会话（对齐 delegation.ts 交付物闭环）
 // ---------------------------------------------------------------------------
 
-test('dispatchMode=subsession：子会话执行期间新上传的 Artifact 完成时自动零拷贝回传父会话', async (t) => {
+test('dispatchMode=subsession：子会话执行期间新上传的 Artifact 完成时自动零拷贝回传父会话', { timeout: 60_000 }, async (t) => {
   const { hub, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_return', 'bot_return');
 
@@ -953,7 +953,7 @@ test('dispatchMode=subsession：子会话执行期间新上传的 Artifact 完�
 // 8. Webhook HMAC 签名校验（secret）
 // ---------------------------------------------------------------------------
 
-test('webhook secret：正确 X-Hub-Signature-256 放行，错误或缺失签名返回 401', async (t) => {
+test('webhook secret：正确 X-Hub-Signature-256 放行，错误或缺失签名返回 401', { timeout: 60_000 }, async (t) => {
   const { hub, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_hmac', 'bot_hmac');
 
@@ -1028,7 +1028,7 @@ test('webhook secret：正确 X-Hub-Signature-256 放行，错误或缺失签名
   assert.equal(rotated.status, 401, '旧 secret 签名应被拒绝');
 });
 
-test('webhook secret：x-botd-signature 头亦可作为签名来源；未配置 secret 的触发器不需签名', async (t) => {
+test('webhook secret：x-botd-signature 头亦可作为签名来源；未配置 secret 的触发器不需签名', { timeout: 60_000 }, async (t) => {
   const { hub, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_hmac2', 'bot_hmac2');
 
@@ -1072,7 +1072,7 @@ test('webhook secret：x-botd-signature 头亦可作为签名来源；未配置 
 // 9. 父子会话完成回调幂等防重
 // ---------------------------------------------------------------------------
 
-test('markSessionParentNotified 幂等防重：首次返回 true，重复调用返回 false', async (t) => {
+test('markSessionParentNotified 幂等防重：首次返回 true，重复调用返回 false', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-notified-db-'));
   const db = new HubDatabase({ dbPath: path.join(dir, 'hub.sqlite') });
   t.after(async () => {
@@ -1106,7 +1106,7 @@ test('markSessionParentNotified 幂等防重：首次返回 true，重复调用�
 // 10. PATCH /api/triggers/:id 更新与清除 eventFilter
 // ---------------------------------------------------------------------------
 
-test('PATCH /api/triggers/:id：更新与清除（null）eventFilter', async (t) => {
+test('PATCH /api/triggers/:id：更新与清除（null）eventFilter', { timeout: 60_000 }, async (t) => {
   const { hub, cookie, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_patch_filter', 'bot_patch_filter');
 
@@ -1166,7 +1166,7 @@ test('PATCH /api/triggers/:id：更新与清除（null）eventFilter', async (t)
 // 11. dispatchMode=subsession 静默跳过原语（[PASS] / [IGNORE]）
 // ---------------------------------------------------------------------------
 
-test('dispatchMode=subsession：子会话回复 [IGNORE]/[PASS] 且无新产物时，父会话不收到 callback 消息', async (t) => {
+test('dispatchMode=subsession：子会话回复 [IGNORE]/[PASS] 且无新产物时，父会话不收到 callback 消息', { timeout: 60_000 }, async (t) => {
   const { hub, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_skip', 'bot_skip');
 
@@ -1227,7 +1227,7 @@ test('dispatchMode=subsession：子会话回复 [IGNORE]/[PASS] 且无新产物�
   );
 });
 
-test('dispatchMode=subsession：子会话回复 [IGNORE] 但有新产物时仍正常回传 callback', async (t) => {
+test('dispatchMode=subsession：子会话回复 [IGNORE] 但有新产物时仍正常回传 callback', { timeout: 60_000 }, async (t) => {
   const { hub, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_skip_art', 'bot_skip_art');
 
@@ -1273,7 +1273,7 @@ test('dispatchMode=subsession：子会话回复 [IGNORE] 但有新产物时仍�
 // 12. channel-notifier：[PASS]/[IGNORE] 助手回复不推送外部通道
 // ---------------------------------------------------------------------------
 
-test('channel-notifier：[PASS]/[IGNORE] 助手回复不推送外部通道（always 与 needed 策略）', async (t) => {
+test('channel-notifier：[PASS]/[IGNORE] 助手回复不推送外部通道（always 与 needed 策略）', { timeout: 60_000 }, async (t) => {
   const { hub, admin } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_skip_notify', 'bot_skip_notify');
 
