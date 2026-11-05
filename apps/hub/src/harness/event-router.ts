@@ -10,6 +10,7 @@
 import { defineDoc, defineDocFamily } from '@earendil-works/pi-durable';
 import type { Context } from '@earendil-works/chord';
 import type { Conversation, ConversationId, Harness } from '@earendil-works/pi-durable';
+import { RecallIndexDoc } from './docs.js';
 
 // ---------------------------------------------------------------------------
 // 事件模型
@@ -366,11 +367,24 @@ async function persistSpill(
 	input: { spillId: string; event: IncomingEvent; fullContent: string; threadKey?: string; relatedIds: string[]; context: Context },
 ): Promise<void> {
 	await harness.commit(async (tx) => {
+		const now = Date.now();
 		const doc = await tx.doc(SpillStoreDoc, input.spillId, { spillId: input.spillId, fullContent: input.fullContent });
 		doc.fullContent = input.fullContent;
 		doc.relatedIds = input.relatedIds;
-		doc.createdAt = Date.now();
+		doc.createdAt = now;
 		doc.threadKey = input.threadKey ?? null;
+		// Chain of Recall 索引：spill 同时登记为 trigger 节点，recall({ id: spillId })
+		// 才能路由到该事件；索引只存目录卡（summary/800 字预览），全文仍在 SpillStoreDoc。
+		const recall = await tx.doc(RecallIndexDoc);
+		recall.nodes[input.spillId] = {
+			id: input.spillId,
+			kind: 'trigger',
+			title: `[${input.event.source}] ${input.event.type}`,
+			summary: input.event.summary.slice(0, 160),
+			contentPreview: input.fullContent.slice(0, 800),
+			relatedIds: input.relatedIds,
+			createdAt: now,
+		};
 	}, input.context);
 }
 
