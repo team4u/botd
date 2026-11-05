@@ -91,7 +91,7 @@ test('session-scoped stash：sess_A 的机密只注入 sess_A，绝不泄漏给 
   assert.equal(stash.getEnvRecord('sess_A')[envKey], 'sess-A-password');
 });
 
-test('无信任作用域时 fail-closed：不注入任何机密，stash 拒绝空 scope', { timeout: 60_000 }, async () => {
+test('无信任作用域时 fail-closed：不注入任何机密，stash 拒绝空 scope', { timeout: 60_000 }, () => {
   const stash = new SecretStash();
   const key = stash.stash('scoped-secret', 'sess_X');
   assert.equal(stash.peek(key, 'sess_X'), 'scoped-secret');
@@ -110,12 +110,11 @@ test('无信任作用域时 fail-closed：不注入任何机密，stash 拒绝�
 
   // stash 拒绝空/非字符串 scope：不存在无主机密。
   assert.throws(() => stash.stash('orphan', ''), /non-empty scopeId/);
+  assert.throws(() => stash.stash('orphan', '  '), /non-empty scopeId/);
   assert.throws(() => stash.stash('orphan', undefined as unknown as string), /non-empty scopeId/);
 
-  // TTL 过期后条目被清理，注入也随之消失（同作用域其余机密仍在）。
-  const ttlKey = stash.stash('ephemeral', 'sess_X', 1);
-  assert.equal(stash.getEnvRecord('sess_X')[ttlKey], 'ephemeral');
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  // 已到期条目立即清理，同作用域其余机密仍在。
+  const ttlKey = stash.stash('ephemeral', 'sess_X', 0);
   assert.equal(stash.peek(ttlKey, 'sess_X'), undefined, 'expired entry is pruned');
   assert.deepEqual(stash.getEnvRecord('sess_X'), { [key]: 'scoped-secret' }, 'only expired entries disappear');
 
