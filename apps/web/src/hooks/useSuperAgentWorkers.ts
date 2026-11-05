@@ -87,12 +87,14 @@ export interface UseSuperAgentWorkersResult {
   spawnBackgroundWorker: (input: SpawnBackgroundWorkerInput) => Promise<boolean>;
 }
 
-/** Durable 会话 transcript 条目（/workers/:workerId/recall 返回的最小摘录） */
+/** Durable 会话 transcript 条目（/workers/:workerId/recall 返回） */
 export interface WorkerTranscriptEntry {
   id: string;
   kind: string;
   role?: string;
   text: string;
+  /** pi-ai 原生结构化块（thinking / toolCall / text / toolResult）：完整时间线重建 */
+  content?: unknown[];
 }
 
 /** /workers/:workerId/recall 响应：Chain of Recall 节点 + 最近 transcript 摘录 */
@@ -131,7 +133,31 @@ export function telemetryOf(node: NonNullable<WorkerRecallPayload['node']>): {
 export function transcriptToTurnBlocks(transcript: WorkerTranscriptEntry[]): TurnBlock[] {
   const blocks: TurnBlock[] = [];
   for (const item of transcript) {
-    if (!item || typeof item !== 'object' || typeof item.text !== 'string' || item.text === '') continue;
+    if (!item || typeof item !== 'object') continue;
+    const content = Array.isArray(item.content) ? item.content : null;
+    if (content) {
+      for (const block of content) {
+        if (block === null || typeof block !== 'object') continue;
+        const b = block as { type?: string; thinking?: unknown; text?: unknown; id?: unknown; name?: unknown; arguments?: unknown };
+        if (b.type === 'thinking' && typeof b.thinking === 'string' && b.thinking) {
+          blocks.push({ type: 'thinking', thinking: b.thinking, status: 'done' });
+        } else if (b.type === 'text' && typeof b.text === 'string' && b.text) {
+          blocks.push({ type: 'text', text: b.text });
+        } else if (b.type === 'toolCall' && typeof b.name === 'string') {
+          blocks.push({
+            type: 'tool',
+            id: typeof b.id === 'string' ? b.id : `${b.name}_${blocks.length}`,
+            name: b.name,
+            ...(b.arguments !== null && typeof b.arguments === 'object'
+              ? { args: b.arguments as Record<string, unknown> }
+              : {}),
+            status: 'done',
+          });
+        }
+      }
+      continue;
+    }
+    if (typeof item.text !== 'string' || item.text === '') continue;
     if (item.kind === 'pi.tool-result') {
       blocks.push({
         type: 'tool',

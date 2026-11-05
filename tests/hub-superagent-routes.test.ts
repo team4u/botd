@@ -443,7 +443,8 @@ test('mainline cutover: session message drives Super-agent loop, worker complete
     async () => await json<Array<{ role: string; content: string }>>('/api/sessions/sess_mainline/messages'),
     (list) =>
       list.some((m) => m.role === 'assistant' && /guide worker|migration worker/i.test(m.content)) &&
-      list.some((m) => m.role === 'assistant' && /\[Worker Completed:/.test(m.content)),
+      // Worker 完成回执已改为 callback 轻量通知卡（不再冒充分身发言）
+      list.some((m) => m.role === 'callback' && /\[Worker Completed:/.test(m.content)),
     'mirrored assistant replies to appear in session messages',
   );
   assert(messages.some((m) => m.role === 'user' && /please write the migration guide/.test(m.content)));

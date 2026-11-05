@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
-  Brain,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -14,10 +13,9 @@ import {
   Send,
   Wrench,
   X,
-  Zap,
 } from 'lucide-react';
-import type { BotConfig, NodeRecord, ToolCallRecord, TurnBlock } from '@botd/protocol';
-import { BotAvatarBadge, formatDuration } from './MessageItem';
+import type { BotConfig, NodeRecord, ToolCallRecord } from '@botd/protocol';
+import { BotAvatarBadge, formatDuration, AssistantTurnContent } from './MessageItem';
 import {
   formatWorkerElapsed,
   isWorkerActive,
@@ -143,38 +141,6 @@ const ToolCallRow: React.FC<{ tool: ToolCallRecord }> = ({ tool }) => {
     </div>
   );
 };
-
-/** 时间线思考块行（可展开完整思考文本） */
-const ThinkingRow: React.FC<{ block: Extract<TurnBlock, { type: 'thinking' }> }> = ({ block }) => (
-  <div className="flex gap-2">
-    <span className="z-10 w-6 h-6 mt-0.5 rounded-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 flex items-center justify-center shrink-0">
-      <Brain className={`w-3 h-3 text-zinc-400 dark:text-zinc-500 ${block.status === 'running' ? 'animate-pulse' : ''}`} />
-    </span>
-    <div className="flex-1 min-w-0 pb-2">
-      <div className="flex items-center gap-1.5">
-        <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">思考</span>
-        {typeof block.durationMs === 'number' && (
-          <span className="font-mono text-[10px] text-zinc-400 dark:text-zinc-500">
-            {formatDuration(block.durationMs)}
-          </span>
-        )}
-      </div>
-      <ExpandablePreview text={block.thinking} label="思考过程" />
-    </div>
-  </div>
-);
-
-/** 时间线文本块行（Worker 产出的最终回答片段） */
-const TextRow: React.FC<{ block: Extract<TurnBlock, { type: 'text' }> }> = ({ block }) => (
-  <div className="flex gap-2">
-    <span className="z-10 w-6 h-6 mt-0.5 rounded-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 flex items-center justify-center shrink-0">
-      <Zap className="w-3 h-3 text-blue-500 dark:text-blue-400" />
-    </span>
-    <div className="flex-1 min-w-0 pb-2 text-[13px] text-zinc-800 dark:text-zinc-200 leading-relaxed break-words whitespace-pre-wrap">
-      {block.text}
-    </div>
-  </div>
-);
 
 /** 历次人工指令（Steer / Follow-up）行 */
 const SteerRow: React.FC<{ message: string; createdAt: string }> = ({ message, createdAt }) => (
@@ -469,39 +435,9 @@ export const WorkerInspectDrawer: React.FC<WorkerInspectDrawerProps> = ({
             </div>
           </div>
 
-          {/* 执行过程：blocks 交错时间线 / toolCalls 列表 / 无数据兜底 */}
+          {/* 执行过程：与主会话共享 AssistantTurnContent（Markdown / 思考 / 工具分组 / 返回值，同一渲染体系） */}
           {timelineBlocks ? (
-            <div className="relative">
-              {timelineBlocks.length > 1 && (
-                <span
-                  className="absolute left-[11px] top-2 bottom-2 w-px bg-zinc-200 dark:bg-zinc-800"
-                  aria-hidden="true"
-                />
-              )}
-              <div className="space-y-1">
-                {timelineBlocks.map((block, idx) =>
-                  block.type === 'thinking' ? (
-                    <ThinkingRow key={`thinking-${idx}`} block={block} />
-                  ) : block.type === 'tool' ? (
-                    <ToolCallRow
-                      key={`tool-${idx}`}
-                      tool={{
-                        id: block.id,
-                        name: block.name,
-                        ...(block.args ? { args: block.args } : {}),
-                        ...(block.summary ? { summary: block.summary } : {}),
-                        status: block.status,
-                        ...(block.durationMs !== undefined ? { durationMs: block.durationMs } : {}),
-                        ...(block.outputPreview !== undefined ? { outputPreview: block.outputPreview } : {}),
-                        ...(block.isError !== undefined ? { isError: block.isError } : {}),
-                      }}
-                    />
-                  ) : (
-                    <TextRow key={`text-${idx}`} block={block} />
-                  )
-                )}
-              </div>
-            </div>
+            <AssistantTurnContent blocks={timelineBlocks} />
           ) : worker.toolCalls && worker.toolCalls.length > 0 ? (
             <div className="relative">
               <span
@@ -524,8 +460,6 @@ export const WorkerInspectDrawer: React.FC<WorkerInspectDrawerProps> = ({
               暂无过程记录
             </div>
           )}
-
-          {/* 历次人工指令（Steer / Follow-up） */}
           {(worker.steers ?? []).length > 0 && (
             <div className="mt-3 pt-3 border-t border-zinc-100 dark:border-zinc-900 space-y-2">
               <div className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500">人工干预记录</div>

@@ -2270,6 +2270,30 @@ export class HubDatabase {
   }
 
   // --- Messages ---
+  /** 取会话里最近一条镜像自 durable 的 assistant 消息（含 blocks/toolCalls），供工具返回值回填。 */
+  getLastDurableAssistantMessage(sessionId: string): { id: string; blocks?: TurnBlock[]; toolCalls?: ToolCallRecord[] } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT ${MESSAGE_SELECT_COLUMNS} FROM messages WHERE session_id = ? AND role = 'assistant' AND id LIKE 'msg_dur_%' ORDER BY rowid DESC LIMIT 1`
+      )
+      .get(sessionId) as MessageRow | undefined;
+    if (!row) return undefined;
+    const blocks = parseOptionalJson<TurnBlock[]>(row.blocks_json);
+    const toolCalls = parseOptionalJson<ToolCallRecord[]>(row.tool_calls_json);
+    return {
+      id: row.id,
+      ...(blocks && blocks.length > 0 ? { blocks } : {}),
+      ...(toolCalls ? { toolCalls } : {}),
+    };
+  }
+
+  /** 工具返回值回填：覆写镜像消息的 blocks / toolCalls（同一轮工具调用的输出补全）。 */
+  updateMessageBlocksAndToolCalls(messageId: string, blocks: TurnBlock[], toolCalls: ToolCallRecord[]): void {
+    this.db
+      .prepare('UPDATE messages SET blocks_json = ?, tool_calls_json = ? WHERE id = ?')
+      .run(blocks.length > 0 ? JSON.stringify(blocks) : null, toolCalls.length > 0 ? JSON.stringify(toolCalls) : null, messageId);
+  }
+
   createMessage(msg: {
     id: string;
     sessionId: string;

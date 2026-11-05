@@ -11,7 +11,7 @@ import { configure, defineDocFamily } from '@earendil-works/pi-durable';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { requireAdmin, resolveOwnedSession } from '../http-helpers.js';
-import type { MessageAttachment, PendingAskRecord, ToolCallRecord, TurnUsage } from '@botd/protocol';
+import type { MessageAttachment, PendingAskRecord, ToolCallRecord, TurnBlock, TurnUsage } from '@botd/protocol';
 import { stringToConversationId, type HubDurableRuntime } from '../harness/hub-harness.js';
 import { AskDoc, type AskEntry } from '../harness/docs.js';
 import { RecallIndexDoc, TargetDoc, WorkerRegistryDoc, type WorkerEntry } from '../harness/docs.js';
@@ -816,7 +816,7 @@ const messageText = (message: unknown): string => {
 };
 
 /** 会话最近 Transcript 条目的轻量摘录（id / kind / role / 文本）。 */
-async function transcriptOf(conversation: NonNullable<Awaited<ReturnType<HubDurableRuntime['conversation']>>>): Promise<Array<{ id: string; kind: string; role?: string; text: string }>> {
+async function transcriptOf(conversation: NonNullable<Awaited<ReturnType<HubDurableRuntime['conversation']>>>): Promise<Array<{ id: string; kind: string; role?: string; text: string; content?: unknown[] }>> {
   const page = await conversation.entries({ order: 'ascending' }, 50, undefined, BACKGROUND_CONTEXT);
   return page.items.map((entry) => {
     const first = entry.model?.[0];
@@ -827,6 +827,11 @@ async function transcriptOf(conversation: NonNullable<Awaited<ReturnType<HubDura
         ? { role: (first as { role: string }).role }
         : {}),
       text: (entry.model ?? []).map(messageText).filter(Boolean).join('\n'),
+      // 结构化 content（thinking / toolCall / text / toolResult 原生块）：
+      // 检视抽屉据此重建完整时间线（含思考过程与工具返回值），与主会话 blocks 同构。
+      ...(first !== null && typeof first === 'object' && Array.isArray((first as { content?: unknown }).content)
+        ? { content: (first as { content: unknown[] }).content }
+        : {}),
     };
   });
 }
@@ -911,6 +916,104 @@ function workerReportText(entry: { model?: readonly unknown[] }): string | undef
   return content.startsWith('[Worker Completed:') ? content : undefined;
 }
 
+/**
+ * 提取 assistant 回合的完整 TurnBlock[]：thinking / toolCall / text 按原生顺序保留，
+ * 驱动主会话消息的思考过程与工具分组渲染（与旧 GroupRouter 路径的 blocks 同构）。
+ */
+function assistantEntryBlocks(entry: { model?: readonly unknown[] }): TurnBlock[] | undefined {
+  const first = entry.model?.[0] as
+    | { role?: string; content?: unknown }
+    | undefined;
+  if (first === undefined || first.role !== 'assistant' || !Array.isArray(first.content)) return undefined;
+  const blocks: TurnBlock[] = [];
+  for (const block of first.content) {
+    if (block === null || typeof block !== 'object') continue;
+    const b = block as { type?: string; thinking?: unknown; text?: unknown; id?: unknown; name?: unknown; arguments?: unknown };
+    if (b.type === 'thinking' && typeof b.thinking === 'string' && b.thinking) {
+      blocks.push({ type: 'thinking', thinking: b.thinking, status: 'done' });
+    } else if (b.type === 'text' && typeof b.text === 'string' && b.text) {
+      blocks.push({ type: 'text', text: b.text });
+    } else if (b.type === 'toolCall' && typeof b.name === 'string') {
+      blocks.push({
+        type: 'tool',
+        id: typeof b.id === 'string' ? b.id : `${b.name}_${blocks.length}`,
+        name: b.name,
+        ...(b.arguments !== null && typeof b.arguments === 'object'
+          ? { args: b.arguments as Record<string, unknown> }
+          : {}),
+        status: 'done',
+      });
+    }
+  }
+  return blocks.length > 0 ? blocks : undefined;
+}
+
+/**
+ * pi.tool-result entry → 回填最近一条镜像 assistant 消息：把工具输出（outputPreview /
+ * isError / durationMs）写入 blocks 与 toolCalls 里对应 toolCallId 的块并落库。
+ */
+function makeToolResultBackfiller(db: HubContext['db']) {
+  return (sessionId: string, entry: { model?: readonly unknown[] }): void => {
+  const result = entry.model?.[0] as
+    | {
+        role?: string;
+        toolCallId?: string;
+        toolName?: string;
+        content?: unknown;
+        isError?: boolean;
+        durationMs?: number;
+      }
+    | undefined;
+  if (result === undefined || result.role !== 'toolResult') return;
+  const toolCallId = typeof result.toolCallId === 'string' ? result.toolCallId : undefined;
+  if (!toolCallId) return;
+  const preview = Array.isArray(result.content)
+    ? result.content
+        .map((c) =>
+          c !== null && typeof c === 'object' && typeof (c as { text?: unknown }).text === 'string'
+            ? (c as { text: string }).text
+            : '',
+        )
+        .filter(Boolean)
+        .join('\n')
+    : typeof result.content === 'string'
+      ? result.content
+      : '';
+  if (!preview && result.isError !== true) return;
+
+  const msg = db.getLastDurableAssistantMessage(sessionId);
+  if (!msg) return;
+  let blocks: TurnBlock[] = msg.blocks ?? [];
+  let toolCalls: ToolCallRecord[] = msg.toolCalls ?? [];
+  let changed = false;
+  blocks = blocks.map((b) => {
+    if (b.type === 'tool' && b.id === toolCallId) {
+      changed = true;
+      return {
+        ...b,
+        ...(preview ? { outputPreview: preview.slice(0, 4000) } : {}),
+        ...(result.isError === true ? { isError: true, status: 'error' as const } : {}),
+        ...(typeof result.durationMs === 'number' ? { durationMs: result.durationMs } : {}),
+      };
+    }
+    return b;
+  });
+  toolCalls = toolCalls.map((tc) => {
+    if (tc.id === toolCallId) {
+      return {
+        ...tc,
+        ...(preview ? { outputPreview: preview.slice(0, 2000) } : {}),
+        ...(result.isError === true ? { isError: true, status: 'error' as const } : {}),
+        ...(typeof result.durationMs === 'number' ? { durationMs: result.durationMs } : {}),
+      };
+    }
+    return tc;
+  });
+  if (!changed) return;
+  db.updateMessageBlocksAndToolCalls(msg.id, blocks, toolCalls);
+  };
+}
+
 /** durable Router 会话的镜像器：把新 assistant 回复 / worker 完成通知同步回 botd 会话。 */
 export interface DurableSessionMirror {
   /** 确保 sessionId 的 Router 会话已建立 watch（幂等）。 */
@@ -934,6 +1037,7 @@ export function createDurableSessionMirror(
 ): DurableSessionMirror {
   const { db, sseHub } = ctx;
   const watches = new Map<string, { unwatch: () => Promise<void>; lastMirrored: number }>();
+  const backfillToolResult = makeToolResultBackfiller(db);
   /** 已广播过 interaction_request 的 askId（按会话去重，重启后由 GET /asks 兜底）。 */
   const broadcastAskIds = new Map<string, Set<string>>();
   let closed = false;
@@ -967,11 +1071,19 @@ export function createDurableSessionMirror(
       sseHub.broadcast(sessionId, { type: 'message_created', message: message.message });
       return;
     }
+    if (entry.kind === 'pi.tool-result') {
+      // 工具返回值回填：pi-ai 把 toolCall(assistant entry) 与 toolResult(tool-result entry)
+      // 拆成两个 entry；此处把结果写回该会话最近一条镜像 assistant 消息的 blocks/toolCalls，
+      // 刷新/翻历史时工具输出完整可见（实时期间前端有流式预览，不重复广播）。
+      backfillToolResult(sessionId, entry);
+      return;
+    }
     const text = assistantEntryText(entry);
     const toolCalls = assistantEntryToolCalls(entry);
     const usage = assistantEntryUsage(entry);
-    // 纯工具调用回合无文本，但 toolCalls/usage 仍是时间线的一部分：照常镜像。
-    if (text === undefined && toolCalls === undefined) return;
+    const blocks = assistantEntryBlocks(entry);
+    // 纯工具调用回合无文本，但 toolCalls/usage/blocks 仍是时间线的一部分：照常镜像。
+    if (text === undefined && toolCalls === undefined && (blocks?.length ?? 0) === 0) return;
     let message;
     try {
       message = db.createMessage({
@@ -982,6 +1094,7 @@ export function createDurableSessionMirror(
         ...(senderBotName !== senderBotId ? { senderBotName } : {}),
         content: text ?? '',
         ...(toolCalls ? { toolCalls } : {}),
+        ...(blocks && blocks.length > 0 ? { blocks } : {}),
         ...(usage ? { usage } : {}),
       });
     } catch {
