@@ -25,9 +25,12 @@ import {
 	type ConversationId,
 	type Extension,
 } from "@earendil-works/pi-durable";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 
 import { RecallIndexDoc, TargetDoc, WorkerRegistryDoc } from "./docs.js";
 import { askHumanTool } from "./router-extension.js";
+import { assistantEntryText } from "./recall-content.js";
 import { configure, type AgentChange } from "@earendil-works/pi-durable";
 
 export const WORKER_EXTENSION_NAME = "botd-worker";
@@ -46,23 +49,19 @@ const conversationIdToString = idToString;
 const stringToConversationId = toId;
 
 const SUMMARY_LIMIT = 200;
+/** Answers up to this length ride inline in the completion notification; longer ones spill to a local file. */
+const INLINE_LIMIT = 4000;
+/** Preview carried by the recall index node: the index is a catalog card, never a full body. */
+const PREVIEW_LIMIT = 800;
+/** One-line summary cap for the recall index node. */
+const SUMMARY_LINE_LIMIT = 160;
 
-/** Extract the final assistant text of a run from its answer entry. */
-function assistantText(entry: { model?: readonly { role: string; content?: unknown }[] } | undefined): string {
-	if (entry === undefined) return "";
-	const first = entry.model?.[0];
-	if (first === undefined || first.role !== "assistant") return "";
-	const content = first.content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.map((block) => {
-			if (typeof block === "object" && block !== null && "text" in block && typeof block.text === "string") {
-				return block.text;
-			}
-			return "";
-		})
-		.filter(Boolean)
-		.join("\n");
+/** Write the full report to `<cwd>/.botd/recall/<workerId>.md`; returns the absolute path and byte size. */
+async function spillReportToDisk(cwd: string, workerId: string, answer: string): Promise<{ spillPath: string; spillBytes: number }> {
+	const spillPath = path.resolve(cwd, ".botd", "recall", `${workerId}.md`);
+	await mkdir(path.dirname(spillPath), { recursive: true });
+	await writeFile(spillPath, answer, "utf8");
+	return { spillPath, spillBytes: Buffer.byteLength(answer, "utf8") };
 }
 
 /**
@@ -76,6 +75,8 @@ interface WorkerReportInput {
 	parentConversationId: string;
 	title: string;
 	answer: string;
+	/** Worker cwd (from TargetDoc): where a long report spills to `.botd/recall/<workerId>.md`. */
+	cwd?: string;
 	worktreePath?: string;
 	branchName?: string;
 }
@@ -91,10 +92,37 @@ const WorkerReportTask = defineTask<WorkerReportInput, { phase: "report" }, { re
 				input.answer.length > SUMMARY_LIMIT
 					? `${input.answer.slice(0, SUMMARY_LIMIT)}…`
 					: input.answer;
+
+			// Length-based routing (Chain of Recall Inline & Spill): short answers ride
+			// inline in full so the Router reads them with zero extra tool calls; long
+			// ones spill to `<cwd>/.botd/recall/<workerId>.md` and the notification
+			// carries a preview plus a pointer. A spill failure degrades to inline —
+			// never drop a report because the disk refused it.
+			let body = "";
+			let spillPath: string | undefined;
+			let spillBytes: number | undefined;
+			if (input.answer.length <= INLINE_LIMIT) {
+				body = input.answer;
+			} else {
+				const cwd = input.cwd ?? process.cwd();
+				try {
+					({ spillPath, spillBytes } = await spillReportToDisk(cwd, input.workerId, input.answer));
+				} catch (error) {
+					const reason = error instanceof Error ? error.message : String(error);
+					body = `${input.answer.slice(0, INLINE_LIMIT)}\n[Spill failed: ${reason}]`;
+				}
+				if (spillPath !== undefined) {
+					body =
+						`${input.answer.slice(0, 1500)}\n` +
+						`[Spilled ${input.answer.length} chars -> full report: ${spillPath} | recall({ id: "${input.workerId}" }) or read the file]`;
+				}
+			}
+
 			const notification =
 				`[Worker Completed: ${input.workerId} | ${input.title}]\n` +
 				`Summary: ${summary}\n` +
 				(input.worktreePath === undefined ? "" : `Worktree: ${input.branchName ?? "worktree"} (${input.worktreePath})\n`) +
+				`${body}\n` +
 				`(Use recall({ id: "${input.workerId}" }) for full transcript & details)`;
 
 			// Acquire the parent handle BEFORE the commit: `runtime.conversation()` is a
@@ -104,19 +132,27 @@ const WorkerReportTask = defineTask<WorkerReportInput, { phase: "report" }, { re
 			const router = await runtime.conversation(parentId, context);
 
 			await runtime.commit(async (tx) => {
-				// 1. Full result + summary into the session-wide Chain of Recall.
+				// 1. Index into the session-wide Chain of Recall. The doc stays a pure
+				//    index: one-line summary + 800-char catalog preview (+ spill pointer
+				//    when the body went to disk) — never a full-body copy.
 				const recall = await tx.doc(RecallIndexDoc);
+				const summaryLine = `Completed: ${input.title}`.slice(0, SUMMARY_LINE_LIMIT);
 				const node = recall.nodes[input.workerId];
 				if (node !== undefined) {
-					node.summary = `Completed: ${input.title}`;
-					node.contentPreview = input.answer.slice(0, 480);
+					node.summary = summaryLine;
+					node.contentPreview = input.answer.slice(0, PREVIEW_LIMIT);
+					if (spillPath !== undefined) {
+						node.spillPath = spillPath;
+						node.spillBytes = spillBytes;
+					}
 				} else {
 					recall.nodes[input.workerId] = {
 						id: input.workerId,
 						kind: "worker",
 						title: input.title,
-						summary: `Completed: ${input.title}`,
-						contentPreview: input.answer.slice(0, 480),
+						summary: summaryLine,
+						contentPreview: input.answer.slice(0, PREVIEW_LIMIT),
+						...(spillPath === undefined ? {} : { spillPath, ...(spillBytes === undefined ? {} : { spillBytes }) }),
 						conversationId: conversationIdToString(runtime.conversationId),
 						relatedIds: [],
 						createdAt: runtime.now(),
@@ -259,7 +295,7 @@ const subagentToolFor = (resolveSubagentChange: SubagentChangeResolver | undefin
 					(tx) => tx.entry(AssistantEntry, settled.answer),
 					context,
 				);
-				text = assistantText(answerEntry) || settled.status;
+				text = assistantEntryText(answerEntry) || settled.status;
 			}
 			if (useWorktree) text += `\n[worktree: ${branchName} at ${worktreePath}]`;
 			return { output: [{ type: "text", text }] };
@@ -284,7 +320,7 @@ export function createWorkerExtension(
 
 					// Extract the final assistant answer text.
 					const answerEntry = await api.entry(AssistantEntry, run.answer, context);
-					const answer = assistantText(answerEntry);
+					const answer = assistantEntryText(answerEntry);
 					if (answer === "") return undefined;
 
 					// Which workerId? The newest `botd.worker-task` input in this run names it.
@@ -311,6 +347,7 @@ export function createWorkerExtension(
 								parentConversationId: target.parentConversationId,
 								title,
 								answer,
+								...(target.cwd === "" ? {} : { cwd: target.cwd }),
 								...(target.worktreePath === undefined ? {} : { worktreePath: target.worktreePath }),
 								...(target.branchName === undefined ? {} : { branchName: target.branchName }),
 							}),

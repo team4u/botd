@@ -98,7 +98,7 @@ export const BUILTIN_SKILL_REFERENCES: Record<string, string> = {
 - 替别的 BOT 干活：\`delegate_to_bot\`（以目标 BOT 的模型+人设后台运行）。
 - 麾下子代理分身（同工作区，各自模型/人设/toolScope）：\`spawn_worker({ subagent: "<id>", title, task })\`；或 \`agent(prompt, { agentType: "<id>" })\` 在流水线中调度。
 - Worker 运行期间保持可聊：\`steer_worker\` 改向或唤醒已结束/已停止的 Worker（保留完整上下文）、\`stop_worker\` 中止、\`recall({ id })\` 取结果。
-- Worker 完成会自动汇报；为用户总结其报告即可。
+- Worker 完成会自动汇报；短报告（≤4000 字）全文内联在汇报里，直接为用户总结即可；长报告汇报里带 \`[Spilled ...]\` 指针，用 \`recall({ id })\` 或读文件取全文。
 
 \`spawn_worker\` 参数：\`{ title, task, subagent?, resume?, forkContext? (default false), threadKey?, cwd?, worktree? }\`。新建 Worker 默认是干净的独立会话——靠自包含的 \`task\` 传递上下文，不复制主会话历史；仅当确需继承主会话上下文时才显式 \`forkContext: true\`。\`worktree: true\` 时 Worker 在 \`<cwd>/.botd-worktrees/<workerId>\` 的独立 git worktree 里改代码（多 Worker 并发改同一仓库时必开）。\`resume: "w-1-2"\` 复用旧 Worker 的会话与 worktree 续跑。\`threadKey\` 让 Worker 直接接收该线程上的后续事件（EventRouter 直通）。
 

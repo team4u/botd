@@ -155,10 +155,14 @@ export interface RecallNode {
 	id: string;
 	kind: RecallKind;
 	title: string;
-	/** One-to-three-line summary (Chain of Recall inline layer). */
+	/** One-line summary (Chain of Recall inline layer, capped at ~160 chars). */
 	summary: string;
-	/** Preview of the underlying content, capped for prompt-friendliness. */
+	/** Catalog-card preview of the content, capped at 800 chars — the index never stores full bodies. */
 	contentPreview: string;
+	/** Absolute path of the spilled full-report file (`<cwd>/.botd/recall/<workerId>.md`), when the body spilled to disk. */
+	spillPath?: string;
+	/** Byte size of the spill file, for UI/model judgement. */
+	spillBytes?: number;
 	/** Conversation holding the full content (workers: their transcript). */
 	conversationId?: string;
 	/** Next-hop node ids for multi-hop `recall(id)` lookups. */

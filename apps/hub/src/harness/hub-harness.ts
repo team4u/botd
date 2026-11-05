@@ -48,6 +48,7 @@ import { createRouterExtension, type PersonaResolver, ROUTER_EXTENSION, type Wor
 import { createWorkerExtension, WORKER_EXTENSION_NAME } from "./worker-extension.js";
 import { createWorkflowExtension } from "./workflow-extension.js";
 import { RecallIndexDoc, SessionIndexDoc, TargetDoc, WorkerRegistryDoc, type WorkerEntry } from "./docs.js";
+import { capRecallContent, resolveRecallBody } from "./recall-content.js";
 import type { Cursor } from "@earendil-works/pi-durable";
 
 /** Configuration of one Bot persona. */
@@ -919,10 +920,21 @@ export class HubDurableRuntime {
 		return true;
 	}
 
-	/** Chain of Recall lookup by node id (worker, spill, thread, ...). */
+	/** Chain of Recall lookup by node id: the index node plus its resolved full content (spill file / worker transcript). */
 	async recall(id: string, context: Context = BACKGROUND_CONTEXT): Promise<unknown> {
 		const index = await this.harness.snapshot(RecallIndexDoc, context);
-		return index?.nodes[id];
+		const node = index?.nodes[id];
+		if (node === undefined) return undefined;
+		const body = await resolveRecallBody(node, async (query, limit) => {
+			const conversation = await this.harness.conversation(query.conversationId, context);
+			if (conversation === undefined) return { items: [] };
+			return conversation.entries(query, limit, undefined, context);
+		});
+		return {
+			...node,
+			fullContent: capRecallContent(body.content, node),
+			...(body.notice === undefined ? {} : { notice: body.notice }),
+		};
 	}
 
 	private async findWorkerEntry(

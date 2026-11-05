@@ -23,10 +23,12 @@ import {
 	AskDoc,
 	RecallIndexDoc,
 	type RecallIndexState,
+	type RecallNode,
 	TargetDoc,
 	WorkerRegistryDoc,
 	type WorkerEntry,
 } from "./docs.js";
+import { capRecallContent, resolveRecallBody } from "./recall-content.js";
 
 export const ROUTER_EXTENSION = "botd-router";
 export const WORKER_EXTENSION = "botd-worker";
@@ -674,6 +676,13 @@ export function createRouterExtension(options: {
 			if (node === undefined) {
 				return { isError: true, output: [{ type: "text", text: `No recall node: ${args.id}` }] };
 			}
+			// The index is a pure pointer store: follow it to the real body — the
+			// spill file, else the worker conversation's last assistant entry, else
+			// the catalog preview.
+			const body = await resolveRecallBody(node as RecallNode, (query, limit) =>
+				api.commit((tx) => tx.scanEntries(query, limit), context),
+			);
+			const content = capRecallContent(body.content, node);
 			// Multi-hop: one-line summaries of the next-hop nodes.
 			const related = node.relatedIds
 				.map((id) => nodes[id])
@@ -683,7 +692,8 @@ export function createRouterExtension(options: {
 				`# ${node.id} — ${node.title}`,
 				`kind: ${node.kind}  created: ${new Date(node.createdAt).toISOString()}`,
 				`summary: ${node.summary}`,
-				`content: ${node.contentPreview}`,
+				...(body.notice === undefined ? [] : [body.notice]),
+				`content: ${content}`,
 			];
 			if (related.length > 0) lines.push("related (next hops):", ...related);
 			return {
