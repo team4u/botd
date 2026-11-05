@@ -44,10 +44,11 @@ import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { createPersonaSkillsExtension, PERSONA_SKILLS_EXTENSION, type PersonaSkillsOptions } from "./persona-skills-extension.js";
-import { createRouterExtension, type PersonaResolver, ROUTER_EXTENSION, type WorkerAgentFactory, WORKER_EXTENSION } from "./router-extension.js";
+import { createRouterExtension, releaseLocalWorktree, type PersonaResolver, ROUTER_EXTENSION, type WorkerAgentFactory, WORKER_EXTENSION } from "./router-extension.js";
 import { createWorkerExtension, WORKER_EXTENSION_NAME } from "./worker-extension.js";
 import { createWorkflowExtension } from "./workflow-extension.js";
 import { RecallIndexDoc, SessionIndexDoc, TargetDoc, WorkerRegistryDoc, type WorkerEntry } from "./docs.js";
+import { SpillStoreDoc, ThreadSubscriptionsDoc } from "./event-router.js";
 import { capRecallContent, resolveRecallBody } from "./recall-content.js";
 import type { Cursor } from "@earendil-works/pi-durable";
 
@@ -240,7 +241,20 @@ export class HubDurableRuntime {
 			if (persona === undefined || runtime === undefined) return undefined;
 			return { ...runtime.workerAgentFor(persona), cwd: cwd ?? persona.cwd };
 		};
-		const workerExtension = createWorkerExtension({ resolveSubagentChange });
+		const workerExtension = createWorkerExtension({
+			resolveSubagentChange,
+			listPersonas: () =>
+				[...personas.values()].map((persona) => ({
+					botId: persona.botId,
+					name: persona.name,
+					...(persona.parentBotId === undefined ? {} : { parentBotId: persona.parentBotId }),
+					...(persona.description === undefined || persona.description === "" ? {} : { description: persona.description }),
+					model: persona.model,
+					...(persona.toolScope === undefined ? {} : { toolScope: persona.toolScope }),
+					nodeId: persona.nodeId,
+					cwd: persona.cwd,
+				})),
+		});
 		registry.install(workerExtension);
 		// SubagentWorkflow is a session-wide capability: every Router and Worker
 		// conversation can run deterministic crash-resumable multi-step workflows.
@@ -356,10 +370,15 @@ export class HubDurableRuntime {
 		// Persona lookups from tools run through this map (set via registerPersona).
 		(runtime as unknown as { personas: Map<string, BotPersonaConfig> }).personas === personas; // keep reference alive
 		runtime.#personaSource = personas;
+		runtime.#releaseWorktreeCache = (conversationId: string) => {
+			acquiredWorktrees.delete(conversationId);
+		};
 		return runtime;
 	}
 
 	#personaSource: Map<string, BotPersonaConfig> | undefined;
+	/** Drops a conversation's cached worktree mount (set by `open`, used by `stopWorker`). */
+	#releaseWorktreeCache: ((conversationId: string) => void) | undefined;
 
 	/** Register (or replace) a Bot persona available in this runtime. */
 	registerPersona(persona: BotPersonaConfig): void {
@@ -657,6 +676,15 @@ export class HubDurableRuntime {
 			if (options.worktree === true) {
 				(recall.nodes[workerId] as unknown as Record<string, unknown>).data = { node: { worktreePath, branchName } };
 			}
+			// threadKeys 直通订阅：同线程事件绕过 Router LLM 直接投给 Worker 会话。
+			if (threadKeys.length > 0) {
+				const subsDoc = await tx.doc(ThreadSubscriptionsDoc);
+				for (const key of threadKeys) {
+					const list = subsDoc.subs[key] ?? [];
+					if (!list.includes(conversationId)) list.push(conversationId);
+					subsDoc.subs[key] = list;
+				}
+			}
 		}, context);
 
 		const conversation = (await this.harness.conversation(stringToConversationId(conversationId), context))!;
@@ -887,6 +915,9 @@ export class HubDurableRuntime {
 
 	/**
 	 * Abort a worker registered under a Router conversation and mark it aborted.
+	 * Also unsubscribes the worker from its threadKeys' passthrough table and
+	 * releases its git worktree (an explicitly stopped worktree worker is
+	 * nobody's to inspect; a completed worker's worktree survives for merging).
 	 * Returns false when the worker is unknown (an already-finished worker still
 	 * aborts its conversation idempotently).
 	 */
@@ -899,24 +930,38 @@ export class HubDurableRuntime {
 		if (entry === undefined) return false;
 		// Mark first, then abort: an explicit stop wins over a completion report
 		// that lands while the abort is in flight (same ordering as stop_worker).
-		await this.harness.commit(async (tx) => {
-			const doc = await tx.doc(WorkerRegistryDoc, stringToConversationId(routerConversationId));
-			const record = doc.workers[workerId];
-			if (record !== undefined && record.status === "running") {
-				record.status = "aborted";
-				record.finishedAt = Date.now();
-			}
-		}, context);
+		const markAborted = async () =>
+			await this.harness.commit(async (tx) => {
+				const doc = await tx.doc(WorkerRegistryDoc, stringToConversationId(routerConversationId));
+				const record = doc.workers[workerId];
+				if (record !== undefined && record.status === "running") {
+					record.status = "aborted";
+					record.finishedAt = Date.now();
+				}
+				// A stopped worker stops feeding its threads: drop its passthrough
+				// subscriptions whatever the status (stop on a finished worker too).
+				if (record !== undefined && (record.threadKeys ?? []).length > 0) {
+					const subsDoc = await tx.doc(ThreadSubscriptionsDoc);
+					for (const key of record.threadKeys ?? []) {
+						const list = subsDoc.subs[key];
+						if (list === undefined) continue;
+						const next = list.filter((id) => id !== record.conversationId);
+						if (next.length === 0) delete subsDoc.subs[key];
+						else subsDoc.subs[key] = next;
+					}
+				}
+			}, context);
+		await markAborted();
 		const conversation = await this.harness.conversation(stringToConversationId(entry.conversationId), context);
 		if (conversation !== undefined) await conversation.abort(context, { background: true }).catch(() => undefined);
-		await this.harness.commit(async (tx) => {
-			const doc = await tx.doc(WorkerRegistryDoc, stringToConversationId(routerConversationId));
-			const record = doc.workers[workerId];
-			if (record !== undefined && record.status === "running") {
-				record.status = "aborted";
-				record.finishedAt = Date.now();
-			}
-		}, context);
+		await markAborted();
+		// Release the worktree of an explicitly stopped worker (never on plain
+		// completion: the branch may still be inspected or merged afterwards).
+		if (entry.worktreePath !== undefined && entry.worktreePath !== "") {
+			const baseCwd = entry.cwd === "" ? process.cwd() : entry.cwd;
+			await releaseLocalWorktree(baseCwd, entry.worktreePath, entry.branchName).catch(() => undefined);
+			this.#releaseWorktreeCache?.(entry.conversationId);
+		}
 		return true;
 	}
 
@@ -924,12 +969,49 @@ export class HubDurableRuntime {
 	async recall(id: string, context: Context = BACKGROUND_CONTEXT): Promise<unknown> {
 		const index = await this.harness.snapshot(RecallIndexDoc, context);
 		const node = index?.nodes[id];
-		if (node === undefined) return undefined;
-		const body = await resolveRecallBody(node, async (query, limit) => {
+		if (node === undefined) {
+			// Unknown to the index: a spilled event payload lives directly in the
+			// SpillStore (its inline text points the model at recall({ id: "spill_xxx" })).
+			const spill = await this.harness.snapshot(SpillStoreDoc, id, context);
+			if (spill !== undefined) {
+				return {
+					id: spill.spillId,
+					kind: "entry" as const,
+					title: spill.spillId,
+					summary: "spilled payload",
+					...(spill.threadKey === null ? {} : { threadKey: spill.threadKey }),
+					relatedIds: spill.relatedIds,
+					createdAt: spill.createdAt,
+					fullContent: capRecallContent(spill.fullContent, {
+						id: spill.spillId,
+						kind: "entry",
+						title: spill.spillId,
+						summary: "spilled payload",
+						contentPreview: "",
+						relatedIds: [],
+						createdAt: spill.createdAt,
+					}),
+				};
+			}
+			return undefined;
+		}
+		let body = await resolveRecallBody(node, async (query, limit) => {
 			const conversation = await this.harness.conversation(query.conversationId, context);
 			if (conversation === undefined) return { items: [] };
 			return conversation.entries(query, limit, undefined, context);
 		});
+		// A spilled worker report also lives in the SpillStore under its workerId:
+		// on an unreadable spill file (remote Node cwd) it beats the truncated preview.
+		if (body.source === "preview" || body.notice !== undefined) {
+			const spill = await this.harness.snapshot(SpillStoreDoc, id, context);
+			if (spill !== undefined && spill.fullContent !== "") {
+				body = {
+					content: spill.fullContent,
+					source: "spill-file",
+					...(body.notice === undefined ? {} : { notice: body.notice }),
+				};
+			}
+		}
 		return {
 			...node,
 			fullContent: capRecallContent(body.content, node),
@@ -965,5 +1047,5 @@ export class HubDurableRuntime {
 	}
 }
 
-export { ROUTER_EXTENSION, WORKER_EXTENSION, WORKER_EXTENSION_NAME, PERSONA_SKILLS_EXTENSION };
+export { ROUTER_EXTENSION, WORKER_EXTENSION, WORKER_EXTENSION_NAME, PERSONA_SKILLS_EXTENSION, releaseLocalWorktree };
 export type { PersonaResolver, WorkerAgentFactory, ToolRegistration, Registry, Storage };
