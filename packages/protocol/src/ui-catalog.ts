@@ -233,34 +233,81 @@ function isStringArrayOrStateBinding(val: unknown): boolean {
 }
 
 // --- per-component props validators -----------------------------------------
+//
+// 校验以小 helper 组合：requireXxx 校验必填字段，optionalXxx 校验可选字段，
+// validateItems 统一处理「非空数组 + 逐项校验」模式（数组非法时只报
+// requires 一条，与历史短路行为一致）。错误消息格式逐字节保持不变
+// （tests/generative-ui.test.ts 与 tests/secret-ui-stash.test.ts 锚定）。
 
 type PropsValidator = (id: string, props: Record<string, any>) => string[];
 
+const isItemObject = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null;
+
+/** `"a", "b", or "c"`（两个值时为 `"a" or "b"`）。 */
+const quotedList = (values: readonly string[]): string =>
+  values.length === 2
+    ? `"${values[0]}" or "${values[1]}"`
+    : `${values.slice(0, -1).map((v) => `"${v}"`).join(', ')}, or "${values[values.length - 1]}"`;
+
+function requireNonEmptyString(id: string, component: string, props: Record<string, any>, field: string, errors: string[]): void {
+  if (typeof props[field] !== 'string' || !props[field].trim()) {
+    errors.push(`Element "${id}" (${component}) requires a non-empty string "${field}" prop`);
+  }
+}
+
+function optionalString(id: string, component: string, props: Record<string, any>, field: string, errors: string[]): void {
+  if (props[field] !== undefined && typeof props[field] !== 'string') {
+    errors.push(`Element "${id}" (${component}) props.${field} must be a string`);
+  }
+}
+
+function optionalBoolean(id: string, component: string, props: Record<string, any>, field: string, errors: string[]): void {
+  if (props[field] !== undefined && typeof props[field] !== 'boolean') {
+    errors.push(`Element "${id}" (${component}) props.${field} must be a boolean`);
+  }
+}
+
+function optionalEnum(id: string, component: string, props: Record<string, any>, field: string, values: readonly string[], errors: string[]): void {
+  const v = props[field];
+  if (v !== undefined && !values.includes(v)) {
+    errors.push(`Element "${id}" (${component}) props.${field} must be ${quotedList(values)}`);
+  }
+}
+
+/** 非空数组字段 + 逐项校验；数组本身非法时只报一条 requires 错误。 */
+function validateItems(
+  id: string,
+  component: string,
+  arr: unknown,
+  field: string,
+  itemCheck: (item: Record<string, any> | undefined, index: number, errors: string[]) => void,
+): string[] {
+  const errors: string[] = [];
+  if (!Array.isArray(arr) || arr.length === 0) {
+    errors.push(`Element "${id}" (${component}) requires a non-empty array "${field}" prop`);
+    return errors;
+  }
+  for (let i = 0; i < arr.length; i++) {
+    const raw = arr[i];
+    // 与历史行为一致：非对象（或 null）项只报首条字段缺失错误，跳过其余字段检查
+    itemCheck(isItemObject(raw) ? raw : undefined, i, errors);
+  }
+  return errors;
+}
+
 function validateStackProps(id: string, props: Record<string, any>): string[] {
   const errors: string[] = [];
-  if (props.direction !== undefined && props.direction !== 'vertical' && props.direction !== 'horizontal') {
-    errors.push(`Element "${id}" (Stack) props.direction must be "vertical" or "horizontal"`);
-  }
-  if (props.gap !== undefined && props.gap !== 'sm' && props.gap !== 'md') {
-    errors.push(`Element "${id}" (Stack) props.gap must be "sm" or "md"`);
-  }
+  optionalEnum(id, 'Stack', props, 'direction', ['vertical', 'horizontal'], errors);
+  optionalEnum(id, 'Stack', props, 'gap', ['sm', 'md'], errors);
   return errors;
 }
 
 function validateCardProps(id: string, props: Record<string, any>): string[] {
   const errors: string[] = [];
-  if (typeof props.title !== 'string' || !props.title.trim()) {
-    errors.push(`Element "${id}" (Card) requires a non-empty string "title" prop`);
-  }
-  if (props.subtitle !== undefined && typeof props.subtitle !== 'string') {
-    errors.push(`Element "${id}" (Card) props.subtitle must be a string`);
-  }
-  if (props.badge !== undefined && typeof props.badge !== 'string') {
-    errors.push(`Element "${id}" (Card) props.badge must be a string`);
-  }
-  if (props.icon !== undefined && typeof props.icon !== 'string') {
-    errors.push(`Element "${id}" (Card) props.icon must be a string`);
-  }
+  requireNonEmptyString(id, 'Card', props, 'title', errors);
+  optionalString(id, 'Card', props, 'subtitle', errors);
+  optionalString(id, 'Card', props, 'badge', errors);
+  optionalString(id, 'Card', props, 'icon', errors);
   return errors;
 }
 
@@ -274,302 +321,205 @@ function validateMetricGridProps(id: string, props: Record<string, any>): string
 
 function validateMetricCardProps(id: string, props: Record<string, any>): string[] {
   const errors: string[] = [];
-  if (typeof props.label !== 'string' || !props.label.trim()) {
-    errors.push(`Element "${id}" (MetricCard) requires a non-empty string "label" prop`);
-  }
+  requireNonEmptyString(id, 'MetricCard', props, 'label', errors);
   if (typeof props.value !== 'string') {
     errors.push(`Element "${id}" (MetricCard) requires a string "value" prop`);
   }
-  if (props.hint !== undefined && typeof props.hint !== 'string') {
-    errors.push(`Element "${id}" (MetricCard) props.hint must be a string`);
-  }
-  if (props.status !== undefined && !['ok', 'warn', 'error'].includes(props.status)) {
-    errors.push(`Element "${id}" (MetricCard) props.status must be "ok", "warn", or "error"`);
-  }
-  if (props.trend !== undefined && !['up', 'down', 'flat'].includes(props.trend)) {
-    errors.push(`Element "${id}" (MetricCard) props.trend must be "up", "down", or "flat"`);
-  }
-  if (props.icon !== undefined && typeof props.icon !== 'string') {
-    errors.push(`Element "${id}" (MetricCard) props.icon must be a string`);
-  }
+  optionalString(id, 'MetricCard', props, 'hint', errors);
+  optionalEnum(id, 'MetricCard', props, 'status', ['ok', 'warn', 'error'], errors);
+  optionalEnum(id, 'MetricCard', props, 'trend', ['up', 'down', 'flat'], errors);
+  optionalString(id, 'MetricCard', props, 'icon', errors);
   return errors;
 }
 
 function validateKeyValueListProps(id: string, props: Record<string, any>): string[] {
-  const errors: string[] = [];
-  if (!Array.isArray(props.items) || props.items.length === 0) {
-    errors.push(`Element "${id}" (KeyValueList) requires a non-empty array "items" prop`);
-  } else {
-    for (let i = 0; i < props.items.length; i++) {
-      const item = props.items[i];
-      if (!item || typeof item !== 'object' || typeof item.key !== 'string' || typeof item.value !== 'string') {
-        errors.push(`Element "${id}" (KeyValueList) item at index ${i} must have string "key" and "value"`);
-      }
-      if (item && item.mono !== undefined && typeof item.mono !== 'boolean') {
-        errors.push(`Element "${id}" (KeyValueList) item at index ${i} "mono" must be a boolean`);
-      }
-      if (item && item.badge !== undefined && typeof item.badge !== 'string') {
-        errors.push(`Element "${id}" (KeyValueList) item at index ${i} "badge" must be a string`);
-      }
+  return validateItems(id, 'KeyValueList', props.items, 'items', (item, i, errors) => {
+    if (!item || typeof item.key !== 'string' || typeof item.value !== 'string') {
+      errors.push(`Element "${id}" (KeyValueList) item at index ${i} must have string "key" and "value"`);
+      return;
     }
-  }
-  return errors;
+    if (item.mono !== undefined && typeof item.mono !== 'boolean') {
+      errors.push(`Element "${id}" (KeyValueList) item at index ${i} "mono" must be a boolean`);
+    }
+    if (item.badge !== undefined && typeof item.badge !== 'string') {
+      errors.push(`Element "${id}" (KeyValueList) item at index ${i} "badge" must be a string`);
+    }
+  });
 }
 
 function validateTextInputProps(id: string, props: Record<string, any>): string[] {
   const errors: string[] = [];
-  if (typeof props.label !== 'string' || !props.label.trim()) {
-    errors.push(`Element "${id}" (TextInput) requires a non-empty string "label" prop`);
-  }
+  requireNonEmptyString(id, 'TextInput', props, 'label', errors);
   if (props.value !== undefined && !isStringOrStateBinding(props.value)) {
     errors.push(`Element "${id}" (TextInput) props.value must be a string or state binding {"$state": "..."}`);
   }
-  if (props.placeholder !== undefined && typeof props.placeholder !== 'string') {
-    errors.push(`Element "${id}" (TextInput) props.placeholder must be a string`);
-  }
-  if (props.hint !== undefined && typeof props.hint !== 'string') {
-    errors.push(`Element "${id}" (TextInput) props.hint must be a string`);
-  }
-  if (props.multiline !== undefined && typeof props.multiline !== 'boolean') {
-    errors.push(`Element "${id}" (TextInput) props.multiline must be a boolean`);
-  }
-  if (
-    props.rows !== undefined &&
-    (typeof props.rows !== 'number' || !Number.isInteger(props.rows) || props.rows < 2 || props.rows > 12)
-  ) {
+  optionalString(id, 'TextInput', props, 'placeholder', errors);
+  optionalString(id, 'TextInput', props, 'hint', errors);
+  optionalBoolean(id, 'TextInput', props, 'multiline', errors);
+  const rows = props.rows;
+  if (rows !== undefined && (typeof rows !== 'number' || !Number.isInteger(rows) || rows < 2 || rows > 12)) {
     errors.push(`Element "${id}" (TextInput) props.rows must be an integer between 2 and 12`);
   }
-  if (props.secret !== undefined && typeof props.secret !== 'boolean') {
-    errors.push(`Element "${id}" (TextInput) props.secret must be a boolean`);
-  }
+  optionalBoolean(id, 'TextInput', props, 'secret', errors);
   return errors;
 }
 
 function validateSelectProps(id: string, props: Record<string, any>): string[] {
   const errors: string[] = [];
-  if (typeof props.label !== 'string' || !props.label.trim()) {
-    errors.push(`Element "${id}" (Select) requires a non-empty string "label" prop`);
-  }
+  requireNonEmptyString(id, 'Select', props, 'label', errors);
   if (props.value !== undefined && !isStringOrStateBinding(props.value)) {
     errors.push(`Element "${id}" (Select) props.value must be a string or state binding {"$state": "..."}`);
   }
-  if (!Array.isArray(props.options) || props.options.length === 0) {
-    errors.push(`Element "${id}" (Select) requires a non-empty array "options" prop`);
-  } else {
-    for (let i = 0; i < props.options.length; i++) {
-      const opt = props.options[i];
-      if (!opt || typeof opt !== 'object' || typeof opt.value !== 'string' || typeof opt.label !== 'string') {
-        errors.push(`Element "${id}" (Select) option at index ${i} must have string "value" and "label"`);
-      }
+  errors.push(...validateItems(id, 'Select', props.options, 'options', (opt, i, errors) => {
+    if (!opt || typeof opt.value !== 'string' || typeof opt.label !== 'string') {
+      errors.push(`Element "${id}" (Select) option at index ${i} must have string "value" and "label"`);
     }
-  }
+  }));
   return errors;
 }
 
 function validateSwitchProps(id: string, props: Record<string, any>): string[] {
   const errors: string[] = [];
-  if (typeof props.label !== 'string' || !props.label.trim()) {
-    errors.push(`Element "${id}" (Switch) requires a non-empty string "label" prop`);
-  }
+  requireNonEmptyString(id, 'Switch', props, 'label', errors);
   if (props.checked !== undefined && !isBooleanOrStateBinding(props.checked)) {
     errors.push(`Element "${id}" (Switch) props.checked must be a boolean or state binding {"$state": "..."}`);
   }
-  if (props.hint !== undefined && typeof props.hint !== 'string') {
-    errors.push(`Element "${id}" (Switch) props.hint must be a string`);
-  }
+  optionalString(id, 'Switch', props, 'hint', errors);
   return errors;
 }
 
 function validateCheckboxGroupProps(id: string, props: Record<string, any>): string[] {
   const errors: string[] = [];
-  if (typeof props.label !== 'string' || !props.label.trim()) {
-    errors.push(`Element "${id}" (CheckboxGroup) requires a non-empty string "label" prop`);
-  }
+  requireNonEmptyString(id, 'CheckboxGroup', props, 'label', errors);
   if (props.value !== undefined && !isStringArrayOrStateBinding(props.value)) {
-    errors.push(
-      `Element "${id}" (CheckboxGroup) props.value must be a string array or state binding {"$state": "..."}`,
-    );
+    errors.push(`Element "${id}" (CheckboxGroup) props.value must be a string array or state binding {"$state": "..."}`);
   }
-  if (!Array.isArray(props.options) || props.options.length === 0) {
-    errors.push(`Element "${id}" (CheckboxGroup) requires a non-empty array "options" prop`);
-  } else {
-    for (let i = 0; i < props.options.length; i++) {
-      const opt = props.options[i];
-      if (!opt || typeof opt !== 'object' || typeof opt.value !== 'string' || typeof opt.label !== 'string') {
-        errors.push(`Element "${id}" (CheckboxGroup) option at index ${i} must have string "value" and "label"`);
-      }
-      if (opt && opt.description !== undefined && typeof opt.description !== 'string') {
-        errors.push(`Element "${id}" (CheckboxGroup) option at index ${i} "description" must be a string`);
-      }
+  errors.push(...validateItems(id, 'CheckboxGroup', props.options, 'options', (opt, i, errors) => {
+    if (!opt || typeof opt.value !== 'string' || typeof opt.label !== 'string') {
+      errors.push(`Element "${id}" (CheckboxGroup) option at index ${i} must have string "value" and "label"`);
+      return;
     }
-  }
-  if (props.hint !== undefined && typeof props.hint !== 'string') {
-    errors.push(`Element "${id}" (CheckboxGroup) props.hint must be a string`);
-  }
+    if (opt.description !== undefined && typeof opt.description !== 'string') {
+      errors.push(`Element "${id}" (CheckboxGroup) option at index ${i} "description" must be a string`);
+    }
+  }));
+  optionalString(id, 'CheckboxGroup', props, 'hint', errors);
   return errors;
 }
 
 function validateActionBarProps(id: string, props: Record<string, any>): string[] {
   const errors: string[] = [];
-  if (props.align !== undefined && !['left', 'right', 'between'].includes(props.align)) {
-    errors.push(`Element "${id}" (ActionBar) props.align must be "left", "right", or "between"`);
-  }
+  optionalEnum(id, 'ActionBar', props, 'align', ['left', 'right', 'between'], errors);
   return errors;
 }
 
 function validateButtonProps(id: string, props: Record<string, any>): string[] {
   const errors: string[] = [];
-  if (typeof props.label !== 'string' || !props.label.trim()) {
-    errors.push(`Element "${id}" (Button) requires a non-empty string "label" prop`);
-  }
-  if (props.variant !== undefined && !['primary', 'secondary', 'danger'].includes(props.variant)) {
-    errors.push(`Element "${id}" (Button) props.variant must be "primary", "secondary", or "danger"`);
-  }
+  requireNonEmptyString(id, 'Button', props, 'label', errors);
+  optionalEnum(id, 'Button', props, 'variant', ['primary', 'secondary', 'danger'], errors);
   return errors;
 }
 
 function validateCalloutProps(id: string, props: Record<string, any>): string[] {
   const errors: string[] = [];
-  if (typeof props.content !== 'string' || !props.content.trim()) {
-    errors.push(`Element "${id}" (Callout) requires a non-empty string "content" prop`);
-  }
-  if (props.title !== undefined && typeof props.title !== 'string') {
-    errors.push(`Element "${id}" (Callout) props.title must be a string`);
-  }
-  if (props.variant !== undefined && !['info', 'tip', 'warn', 'error'].includes(props.variant)) {
-    errors.push(`Element "${id}" (Callout) props.variant must be "info", "tip", "warn", or "error"`);
-  }
-  if (props.icon !== undefined && typeof props.icon !== 'string') {
-    errors.push(`Element "${id}" (Callout) props.icon must be a string`);
-  }
-  if (props.mono !== undefined && typeof props.mono !== 'boolean') {
-    errors.push(`Element "${id}" (Callout) props.mono must be a boolean`);
-  }
+  requireNonEmptyString(id, 'Callout', props, 'content', errors);
+  optionalString(id, 'Callout', props, 'title', errors);
+  optionalEnum(id, 'Callout', props, 'variant', ['info', 'tip', 'warn', 'error'], errors);
+  optionalString(id, 'Callout', props, 'icon', errors);
+  optionalBoolean(id, 'Callout', props, 'mono', errors);
   return errors;
 }
 
 function validateTabsProps(id: string, props: Record<string, any>): string[] {
   const errors: string[] = [];
-  if (!Array.isArray(props.tabs) || props.tabs.length === 0) {
-    errors.push(`Element "${id}" (Tabs) requires a non-empty array "tabs" prop`);
-  } else {
-    for (let i = 0; i < props.tabs.length; i++) {
-      const tab = props.tabs[i];
-      if (!tab || typeof tab !== 'object' || typeof tab.id !== 'string' || typeof tab.label !== 'string') {
-        errors.push(`Element "${id}" (Tabs) tab at index ${i} must have string "id" and "label"`);
-      }
-      if (tab && tab.icon !== undefined && typeof tab.icon !== 'string') {
-        errors.push(`Element "${id}" (Tabs) tab at index ${i} "icon" must be a string`);
-      }
+  errors.push(...validateItems(id, 'Tabs', props.tabs, 'tabs', (tab, i, errors) => {
+    if (!tab || typeof tab.id !== 'string' || typeof tab.label !== 'string') {
+      errors.push(`Element "${id}" (Tabs) tab at index ${i} must have string "id" and "label"`);
+      return;
     }
-  }
-  if (props.defaultTab !== undefined && typeof props.defaultTab !== 'string') {
-    errors.push(`Element "${id}" (Tabs) props.defaultTab must be a string`);
-  }
+    if (tab.icon !== undefined && typeof tab.icon !== 'string') {
+      errors.push(`Element "${id}" (Tabs) tab at index ${i} "icon" must be a string`);
+    }
+  }));
+  optionalString(id, 'Tabs', props, 'defaultTab', errors);
   return errors;
 }
 
 function validateStepsProps(id: string, props: Record<string, any>): string[] {
-  const errors: string[] = [];
-  if (!Array.isArray(props.items) || props.items.length === 0) {
-    errors.push(`Element "${id}" (Steps) requires a non-empty array "items" prop`);
-  } else {
-    for (let i = 0; i < props.items.length; i++) {
-      const step = props.items[i];
-      if (!step || typeof step !== 'object' || typeof step.title !== 'string' || !step.title.trim()) {
-        errors.push(`Element "${id}" (Steps) step at index ${i} must have non-empty string "title"`);
-      }
-      if (step && step.description !== undefined && typeof step.description !== 'string') {
-        errors.push(`Element "${id}" (Steps) step at index ${i} "description" must be a string`);
-      }
-      if (step && step.status !== undefined && !['done', 'current', 'pending'].includes(step.status)) {
-        errors.push(`Element "${id}" (Steps) step at index ${i} "status" must be "done", "current", or "pending"`);
-      }
-      if (step && step.icon !== undefined && typeof step.icon !== 'string') {
-        errors.push(`Element "${id}" (Steps) step at index ${i} "icon" must be a string`);
-      }
-      if (step && step.badge !== undefined && typeof step.badge !== 'string') {
-        errors.push(`Element "${id}" (Steps) step at index ${i} "badge" must be a string`);
-      }
+  return validateItems(id, 'Steps', props.items, 'items', (step, i, errors) => {
+    if (!step || typeof step.title !== 'string' || !step.title.trim()) {
+      errors.push(`Element "${id}" (Steps) step at index ${i} must have non-empty string "title"`);
+      return;
     }
-  }
-  return errors;
+    if (step.description !== undefined && typeof step.description !== 'string') {
+      errors.push(`Element "${id}" (Steps) step at index ${i} "description" must be a string`);
+    }
+    if (step.status !== undefined && !['done', 'current', 'pending'].includes(step.status)) {
+      errors.push(`Element "${id}" (Steps) step at index ${i} "status" must be "done", "current", or "pending"`);
+    }
+    if (step.icon !== undefined && typeof step.icon !== 'string') {
+      errors.push(`Element "${id}" (Steps) step at index ${i} "icon" must be a string`);
+    }
+    if (step.badge !== undefined && typeof step.badge !== 'string') {
+      errors.push(`Element "${id}" (Steps) step at index ${i} "badge" must be a string`);
+    }
+  });
 }
 
 function validateAccordionProps(id: string, props: Record<string, any>): string[] {
-  const errors: string[] = [];
-  if (!Array.isArray(props.items) || props.items.length === 0) {
-    errors.push(`Element "${id}" (Accordion) requires a non-empty array "items" prop`);
-  } else {
-    for (let i = 0; i < props.items.length; i++) {
-      const acc = props.items[i];
-      if (!acc || typeof acc !== 'object' || typeof acc.title !== 'string' || !acc.title.trim()) {
-        errors.push(`Element "${id}" (Accordion) item at index ${i} must have non-empty string "title"`);
-      }
-      if (acc && acc.content !== undefined && typeof acc.content !== 'string') {
-        errors.push(`Element "${id}" (Accordion) item at index ${i} "content" must be a string`);
-      }
-      if (acc && acc.defaultOpen !== undefined && typeof acc.defaultOpen !== 'boolean') {
-        errors.push(`Element "${id}" (Accordion) item at index ${i} "defaultOpen" must be a boolean`);
-      }
-      if (acc && acc.icon !== undefined && typeof acc.icon !== 'string') {
-        errors.push(`Element "${id}" (Accordion) item at index ${i} "icon" must be a string`);
-      }
-      if (acc && acc.badge !== undefined && typeof acc.badge !== 'string') {
-        errors.push(`Element "${id}" (Accordion) item at index ${i} "badge" must be a string`);
-      }
-      if (acc && acc.mono !== undefined && typeof acc.mono !== 'boolean') {
-        errors.push(`Element "${id}" (Accordion) item at index ${i} "mono" must be a boolean`);
-      }
+  return validateItems(id, 'Accordion', props.items, 'items', (acc, i, errors) => {
+    if (!acc || typeof acc.title !== 'string' || !acc.title.trim()) {
+      errors.push(`Element "${id}" (Accordion) item at index ${i} must have non-empty string "title"`);
+      return;
     }
-  }
-  return errors;
+    if (acc.content !== undefined && typeof acc.content !== 'string') {
+      errors.push(`Element "${id}" (Accordion) item at index ${i} "content" must be a string`);
+    }
+    if (acc.defaultOpen !== undefined && typeof acc.defaultOpen !== 'boolean') {
+      errors.push(`Element "${id}" (Accordion) item at index ${i} "defaultOpen" must be a boolean`);
+    }
+    if (acc.icon !== undefined && typeof acc.icon !== 'string') {
+      errors.push(`Element "${id}" (Accordion) item at index ${i} "icon" must be a string`);
+    }
+    if (acc.badge !== undefined && typeof acc.badge !== 'string') {
+      errors.push(`Element "${id}" (Accordion) item at index ${i} "badge" must be a string`);
+    }
+    if (acc.mono !== undefined && typeof acc.mono !== 'boolean') {
+      errors.push(`Element "${id}" (Accordion) item at index ${i} "mono" must be a boolean`);
+    }
+  });
 }
 
 function validateBarListProps(id: string, props: Record<string, any>): string[] {
   const errors: string[] = [];
-  if (!Array.isArray(props.items) || props.items.length === 0) {
-    errors.push(`Element "${id}" (BarList) requires a non-empty array "items" prop`);
-  } else {
-    for (let i = 0; i < props.items.length; i++) {
-      const bar = props.items[i];
-      if (!bar || typeof bar !== 'object' || typeof bar.label !== 'string' || typeof bar.value !== 'number' || !Number.isFinite(bar.value)) {
-        errors.push(`Element "${id}" (BarList) item at index ${i} must have string "label" and finite number "value"`);
-      }
-      if (bar && bar.max !== undefined && (typeof bar.max !== 'number' || !Number.isFinite(bar.max) || bar.max <= 0)) {
-        errors.push(`Element "${id}" (BarList) item at index ${i} "max" must be a positive number`);
-      }
-      if (bar && bar.displayValue !== undefined && typeof bar.displayValue !== 'string') {
-        errors.push(`Element "${id}" (BarList) item at index ${i} "displayValue" must be a string`);
-      }
-      if (bar && bar.color !== undefined && !['blue', 'emerald', 'amber', 'rose', 'purple'].includes(bar.color)) {
-        errors.push(`Element "${id}" (BarList) item at index ${i} "color" must be "blue", "emerald", "amber", "rose", or "purple"`);
-      }
+  errors.push(...validateItems(id, 'BarList', props.items, 'items', (bar, i, errors) => {
+    if (!bar || typeof bar.label !== 'string' || typeof bar.value !== 'number' || !Number.isFinite(bar.value)) {
+      errors.push(`Element "${id}" (BarList) item at index ${i} must have string "label" and finite number "value"`);
+      return;
     }
-  }
-  if (props.title !== undefined && typeof props.title !== 'string') {
-    errors.push(`Element "${id}" (BarList) props.title must be a string`);
-  }
+    if (bar.max !== undefined && (typeof bar.max !== 'number' || !Number.isFinite(bar.max) || bar.max <= 0)) {
+      errors.push(`Element "${id}" (BarList) item at index ${i} "max" must be a positive number`);
+    }
+    if (bar.displayValue !== undefined && typeof bar.displayValue !== 'string') {
+      errors.push(`Element "${id}" (BarList) item at index ${i} "displayValue" must be a string`);
+    }
+    if (bar.color !== undefined && !['blue', 'emerald', 'amber', 'rose', 'purple'].includes(bar.color)) {
+      errors.push(`Element "${id}" (BarList) item at index ${i} "color" must be "blue", "emerald", "amber", "rose", or "purple"`);
+    }
+  }));
+  optionalString(id, 'BarList', props, 'title', errors);
   return errors;
 }
 
 function validateTableProps(id: string, props: Record<string, any>): string[] {
   const errors: string[] = [];
-  if (
-    !Array.isArray(props.columns) ||
-    props.columns.length === 0 ||
-    props.columns.some((c: unknown) => typeof c !== 'string')
-  ) {
+  if (!Array.isArray(props.columns) || props.columns.length === 0 || props.columns.some((c: unknown) => typeof c !== 'string')) {
     errors.push(`Element "${id}" (Table) requires a non-empty array "columns" prop of strings`);
   }
-  if (props.title !== undefined && typeof props.title !== 'string') {
-    errors.push(`Element "${id}" (Table) props.title must be a string`);
-  }
+  optionalString(id, 'Table', props, 'title', errors);
   if (props.monoColumns !== undefined) {
-    if (
-      !Array.isArray(props.monoColumns) ||
-      props.monoColumns.some((n: unknown) => typeof n !== 'number' || !Number.isInteger(n) || n < 0)
-    ) {
+    const monoOk = Array.isArray(props.monoColumns) && props.monoColumns.every((n: unknown) => typeof n === 'number' && Number.isInteger(n) && n >= 0);
+    if (!monoOk) {
       errors.push(`Element "${id}" (Table) props.monoColumns must be an array of non-negative integers`);
     } else if (Array.isArray(props.columns)) {
       const colCount = props.columns.length;
@@ -587,9 +537,7 @@ function validateTableProps(id: string, props: Record<string, any>): string[] {
     for (let i = 0; i < props.rows.length; i++) {
       const row = props.rows[i];
       if (!Array.isArray(row) || row.length !== colCount || row.some((cell: unknown) => typeof cell !== 'string')) {
-        errors.push(
-          `Element "${id}" (Table) row at index ${i} must be a string array of length ${colCount} matching columns`,
-        );
+        errors.push(`Element "${id}" (Table) row at index ${i} must be a string array of length ${colCount} matching columns`);
       }
     }
   }
@@ -865,101 +813,6 @@ export function validateUiSpec(input: string | unknown): UiValidationResult {
     normalizedJson: JSON.stringify(raw),
   };
 }
-
-export const BOTD_UI_SCHEMA_DOC = `# botd.v1 Generative UI Spec Schema & Component Catalog
-
-Version: ${BOTD_UI_CATALOG_VERSION}
-Max Bytes: ${MAX_UI_SPEC_BYTES} (64KB) | Max Elements: ${MAX_UI_ELEMENTS} | Max Depth: ${MAX_UI_TREE_DEPTH}
-
-## Spec Structure
-\`\`\`json
-{
-  "root": "root-element-id",
-  "elements": {
-    "root-element-id": {
-      "type": "Stack | Card | MetricGrid | MetricCard | KeyValueList | TextInput | Select | Switch | CheckboxGroup | ActionBar | Button | Callout | Tabs | Steps | Accordion | BarList | Table",
-      "props": { ... },
-      "children": ["child-id-1", "child-id-2"],
-      "slots": { "tab1": ["child-id-1"] },
-      "on": {
-        "press": {
-          "action": "submit",
-          "params": { "decision": "approve" }
-        }
-      }
-    }
-  },
-  "state": {
-    "key": "initialValue"
-  }
-}
-\`\`\`
-
-## Component Catalog (17 Components)
-
-### 1. Layout & Groups
-1. Stack (Flex layout container)
-   - props: { direction?: "vertical" | "horizontal", gap?: "sm" | "md" }
-   - children: string[]
-
-2. Card (Visual grouping card with optional icon and badge)
-   - props: { title: string, subtitle?: string, badge?: string, icon?: string }
-   - children: string[]
-
-3. Tabs (Segmented switchable view for multi-angle concept explanation)
-   - props: { tabs: Array<{ id: string, label: string, icon?: string }>, defaultTab?: string }
-   - children: string[] (mapped to tabs 1:1) or slots: { [tabId]: string[] }
-
-4. Accordion (Progressive disclosure collapsible list for FAQs and deep-dives)
-   - props: { items: Array<{ title: string, content?: string, defaultOpen?: boolean, icon?: string, badge?: string, mono?: boolean }> }
-   - Item content renders as text; to nest arbitrary components inside an item, put child element ids in slots keyed by item title.
-
-### 2. Metrics & Comparison
-5. MetricGrid (Responsive metric cards grid)
-   - props: { columns?: 2 | 3 | 4 }
-   - children: string[]
-
-6. MetricCard (Key metric display with status and trend)
-   - props: { label: string, value: string, hint?: string, status?: "ok" | "warn" | "error", trend?: "up" | "down" | "flat", icon?: string }
-
-7. BarList (Horizontal comparison / proportion bars for benchmarks and ratios)
-   - props: { items: Array<{ label: string, value: number, max?: number, displayValue?: string, color?: "blue"|"emerald"|"amber"|"rose"|"purple" }>, title?: string }
-
-8. KeyValueList (Compact property-value table)
-   - props: { items: Array<{ key: string, value: string, mono?: boolean, badge?: string }> }
-
-### 3. Explanation & Process
-9. Callout (Highlighted note/tip/warning box for key definitions)
-   - props: { title?: string, content: string, variant?: "info" | "tip" | "warn" | "error", icon?: string }
-
-11. Steps (Vertical timeline / lifecycle flow for algorithms and execution steps)
-    - props: { items: Array<{ title: string, description?: string, status?: "done" | "current" | "pending", icon?: string, badge?: string }> }
-
-### 4. Interactive Forms & Actions
-12. TextInput (Single-line input, or multi-line textarea when multiline is true; secret masks as password)
-    - props: { label: string, value?: string | { "$state": "/key" }, placeholder?: string, hint?: string, multiline?: boolean, rows?: number (2-12), secret?: boolean }
-
-13. Select (Dropdown selector)
-    - props: { label: string, value?: string | { "$state": "/key" }, options: Array<{ value: string, label: string }> }
-
-14. Switch (Toggle switch)
-    - props: { label: string, checked?: boolean | { "$state": "/key" }, hint?: string }
-
-15. CheckboxGroup (Multi-select checkbox list, binds string[] to state)
-    - props: { label: string, options: Array<{ value: string, label: string, description?: string }>, value?: string[] | { "$state": "/key" }, hint?: string }
-
-16. ActionBar (Horizontal action button bar)
-    - props: { align?: "left" | "right" | "between" }
-    - children: string[]
-
-17. Button (Action trigger)
-    - props: { label: string, variant?: "primary" | "secondary" | "danger" }
-    - on.press: { action: "submit", params?: { decision?: string, [k: string]: unknown } }
-
-## Semantic Icons
-Available semantic icon names:
-lightbulb, info, alert-triangle, alert-circle, check-circle, cpu, database, server, hard-drive, activity, layers, terminal, code, git-branch, workflow, shield, lock, key, globe, zap, clock, sparkles, book-open, file-text, box, help-circle, trending-up, trending-down, bar-chart, refresh.
-`;
 
 // --- secret extraction -------------------------------------------------------
 
