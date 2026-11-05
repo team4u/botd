@@ -13,8 +13,7 @@
  *   下以 `git worktree add -B botd/<workerId> <path> HEAD` 创建隔离工作树，
  *   取代旧的全局工作区互斥锁，两个 worker 可并发改同一文件互不干扰。
  *
- * 说明：本文件的本地 RPC 类型是协议文件的结构镜像（协议包的 index 未导出 env-rpc，
- * 跨包源引用会破坏 rootDir），由 tests/remote-env-worktree.test.ts 做结构一致性校验。
+ * 协议类型直接从 @botd/protocol 导入并 re-export（对外类型名不变）。
  *
  * 执行环境使用同包 vendored 实现（./env/，仅依赖 Node 标准库），不引入
  * pi-durable/chord —— @botd/node 保持轻量（Brain in Hub, Hands on Node）。
@@ -29,119 +28,36 @@ import {
   ok,
   type BinaryReader,
   type DirReader,
-  type ExecutionErrorCode,
-  type FileErrorCode,
-  type LineScan,
   type Result,
   type TextLineReader,
 } from './env/index.js';
+import type {
+  EnvAcquireWorktreeResult,
+  EnvExecInput,
+  EnvExecOk,
+  EnvExecOutputEvent,
+  NodeEnvRpcFunctions,
+  RpcEnvError,
+  RpcResult,
+} from '@botd/protocol';
 
-// ---------------------------------------------------------------------------
-// 协议类型镜像（与 packages/protocol/src/env-rpc.ts 保持结构一致）
-// ---------------------------------------------------------------------------
+export type {
+  EnvAcquireWorktreeInput,
+  EnvAcquireWorktreeResult,
+  EnvExecInput,
+  EnvExecOk,
+  EnvExecOutputEvent,
+  EnvReleaseWorktreeInput,
+  NodeEnvRpcFunctions,
+  RpcEnvError,
+  RpcFileKind,
+  RpcFileInfo,
+  RpcResult,
+  RpcTextLine,
+} from '@botd/protocol';
 
-type RpcFileKind = 'file' | 'directory' | 'symlink';
-type RpcErrorCode = FileErrorCode | ExecutionErrorCode;
-
-interface RpcEnvError {
-  code: RpcErrorCode;
-  message: string;
-  spillPath?: string;
-}
-
-type RpcResult<T> = { ok: true; value: T } | { ok: false; error: RpcEnvError };
-
-interface RpcFileInfo {
-  name: string;
-  path: string;
-  kind: RpcFileKind;
-  size: number;
-  mtimeMs: number;
-}
-
-interface RpcTextLine {
-  text: string;
-  terminated: boolean;
-}
-
-interface EnvExecOutputEvent {
-  execId: string;
-  text: string;
-  stream: 'stdout' | 'stderr';
-  skipped?: { bytes: number; newlines: number; endsWithNewline: boolean };
-}
-
-interface EnvExecInput {
-  execId: string;
-  command: string | readonly string[];
-  cwd?: string;
-  env?: Record<string, string>;
-  inheritEnv?: boolean;
-  timeout?: number;
-  spill?: { afterBytes: number; afterLines: number };
-  window?: { maxBytes: number; maxLines: number; minIntervalMs: number; bytesPerSecond: number };
-}
-
-interface EnvExecOk {
-  exitCode: number;
-  spillPath?: string;
-}
-
-interface EnvAcquireWorktreeInput {
-  repoDir: string;
-  workerId: string;
-  branchPrefix?: string;
-}
-
-interface EnvAcquireWorktreeResult {
-  worktreePath: string;
-  branchName: string;
-  isGitRepo: boolean;
-}
-
-interface EnvReleaseWorktreeInput {
-  repoDir: string;
-  worktreePath: string;
-  branchName?: string;
-  deleteBranch?: boolean;
-}
-
-interface NodeEnvRpcFunctions {
-  envAbsolutePath(input: { path: string; cwd?: string }): Promise<RpcResult<string>>;
-  envJoinPath(input: { parts: string[]; cwd?: string }): Promise<RpcResult<string>>;
-  envReadTextFile(input: { path: string; cwd?: string }): Promise<RpcResult<string>>;
-  envReadTextLines(input: { path: string; maxLines?: number; cwd?: string }): Promise<RpcResult<string[]>>;
-  envReadBinaryFile(input: { path: string; cwd?: string }): Promise<RpcResult<{ base64: string }>>;
-  envWriteFile(input: { path: string; content: string; encoding?: 'utf8' | 'base64'; cwd?: string }): Promise<RpcResult<null>>;
-  envAppendFile(input: { path: string; content: string; encoding?: 'utf8' | 'base64'; cwd?: string }): Promise<RpcResult<null>>;
-  envTruncateFile(input: { path: string; size: number; cwd?: string }): Promise<RpcResult<null>>;
-  envRenameFile(input: { sourcePath: string; destinationPath: string; cwd?: string }): Promise<RpcResult<null>>;
-  envFileInfo(input: { path: string; cwd?: string }): Promise<RpcResult<RpcFileInfo>>;
-  envListDir(input: { path: string; cwd?: string }): Promise<RpcResult<RpcFileInfo[]>>;
-  envListFiles(input: { path: string; cwd?: string }): Promise<RpcResult<{ entries: { path: string; kind: RpcFileKind }[]; truncated: boolean }>>;
-  envCanonicalPath(input: { path: string; cwd?: string }): Promise<RpcResult<string>>;
-  envExists(input: { path: string; cwd?: string }): Promise<RpcResult<boolean>>;
-  envCreateDir(input: { path: string; recursive?: boolean; cwd?: string }): Promise<RpcResult<null>>;
-  envRemove(input: { path: string; recursive?: boolean; force?: boolean; cwd?: string }): Promise<RpcResult<null>>;
-  envCreateTempDir(input: { prefix?: string; cwd?: string }): Promise<RpcResult<string>>;
-  envCreateTempFile(input: { prefix?: string; suffix?: string; cwd?: string }): Promise<RpcResult<string>>;
-  envOpenTextLineReader(input: { path: string; cwd?: string }): Promise<RpcResult<{ readerId: string }>>;
-  envTextReaderRead(input: { readerId: string }): Promise<RpcResult<RpcTextLine | null>>;
-  envTextReaderClose(input: { readerId: string }): Promise<RpcResult<null>>;
-  envOpenBinaryReader(input: { path: string; noFollow?: boolean; cwd?: string }): Promise<RpcResult<{ readerId: string }>>;
-  envBinaryReaderInfo(input: { readerId: string }): Promise<RpcResult<RpcFileInfo>>;
-  envBinaryReaderRead(input: { readerId: string; offset: number; length: number }): Promise<RpcResult<{ base64: string; byteLength: number }>>;
-  envBinaryReaderScanLines(input: { readerId: string; startLine: number; endLine?: number }): Promise<RpcResult<LineScan>>;
-  envBinaryReaderClose(input: { readerId: string }): Promise<RpcResult<null>>;
-  envOpenDirReader(input: { path: string; cwd?: string }): Promise<RpcResult<{ readerId: string }>>;
-  envDirReaderNext(input: { readerId: string; maxEntries: number }): Promise<RpcResult<{ entries: RpcFileInfo[]; done: boolean }>>;
-  envDirReaderClose(input: { readerId: string }): Promise<RpcResult<null>>;
-  envExec(input: EnvExecInput): Promise<RpcResult<EnvExecOk>>;
-  envAbortExec(execId: string): Promise<void>;
-  envCleanup(cwd?: string): Promise<void>;
-  envAcquireWorktree(input: EnvAcquireWorktreeInput): Promise<EnvAcquireWorktreeResult>;
-  envReleaseWorktree(input: EnvReleaseWorktreeInput): Promise<{ ok: boolean }>;
-}
+// 本地实现使用的错误码联合（协议侧 RpcEnvError.code 的本地简写）。
+type RpcErrorCode = RpcEnvError['code'];
 
 /** NodeEnvRpcFunctions + 升级排空内省：在途 envExec 计数供 performNodeUpgrade 排空等待。 */
 export interface NodeEnvRpcServer extends NodeEnvRpcFunctions {

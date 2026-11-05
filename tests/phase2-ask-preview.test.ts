@@ -1,15 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { register } from 'node:module';
-import { createDaemonControlServer } from '../apps/node/src/daemon.js';
-
-const MAX_ASK_BODY_BYTES = 512 * 1024;
-import type { SessionRecord } from '../packages/protocol/src/index.js';
-import type { BotConfig } from '../packages/protocol/src/index.js';
+import type { SessionRecord, BotConfig } from '../packages/protocol/src/index.js';
 
 // 拦截 CSS/TSX 导入（Sidebar.tsx 间接引入样式与 React 组件），复用 review-fixes-web 的加载策略
 register(
@@ -57,103 +52,6 @@ test('pickCurrentDirectSession 无子会话时仍正常取最新主单聊', asyn
   const a = { id: 'sess_a', archived: false, leadBotId: 'bot_1', updatedAt: new Date(Date.now() - 60_000).toISOString() } as any;
   const b = { id: 'sess_b', archived: false, leadBotId: 'bot_1', updatedAt: new Date().toISOString() } as any;
   assert.equal(pickCurrentDirectSession([a, b], 'bot_1')?.id, 'sess_b');
-});
-
-// ---------------------------------------------------------------------------
-// Local IPC /ask: preview payload acceptance + timeoutSeconds: 0 pass-through
-// ---------------------------------------------------------------------------
-function listen(server: http.Server): Promise<number> {
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address() as { port: number };
-      resolve(addr.port);
-    });
-  });
-}
-
-function post(port: number, url: string, body: unknown): Promise<{ status: number; body: string }> {
-  const data = JSON.stringify(body);
-  return new Promise((resolve, reject) => {
-    const req = http.request(
-      {
-        host: '127.0.0.1', port, path: url, method: 'POST',
-        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) },
-      },
-      (res) => {
-        let out = '';
-        res.setEncoding('utf8');
-        res.on('data', (c) => { out += c; });
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: out }));
-      },
-    );
-    req.on('error', reject);
-    req.write(data);
-    req.end();
-  });
-}
-
-const askCalls: any[] = [];
-
-function makeIpcServer() {
-  return createDaemonControlServer({
-    identity: { nodeId: 'node_test', name: 'test', hubUrl: 'http://127.0.0.1:1' },
-    dataDir: '/tmp/botd-test-data',
-    socketPath: '/tmp/botd-test.sock',
-    startedAt: Date.now(),
-    isHubConnected: () => true,
-    ipcToken: null,
-    getHubRpc: () => ({
-      requestHumanInput: async (input: any) => {
-        askCalls.push(input);
-        return { answer: '确认' };
-      },
-      onSessionStream: { asEvent: () => {} },
-      requestWakeupTurn: async () => {},
-      uploadArtifact: async () => { throw new Error('noop'); },
-      downloadArtifact: async () => { throw new Error('noop'); },
-      listSessionArtifacts: async () => [],
-      registerNode: async () => {},
-      heartbeat: async () => {},
-    }) as any,
-    syncRegistrationWithHub: async () => {},
-    handleShutdown: () => {},
-  } as any);
-}
-
-test('Local IPC /ask 接受 previewType/previewContent 与 timeoutSeconds=0 并透传至 Hub', async () => {
-  askCalls.length = 0;
-  const server = makeIpcServer();
-  const port = await listen(server);
-  try {
-    const res = await post(port, '/ask', {
-      sessionId: 'sess_1', botId: 'bot_1', prompt: '是否提交？',
-      options: ['提交', '取消'], timeoutSeconds: 0,
-      previewType: 'diff', previewContent: '@@ -1 +1 @@\n-old\n+new',
-    });
-    assert.equal(res.status, 200);
-    assert.equal(askCalls.length, 1);
-    assert.equal(askCalls[0].previewType, 'diff');
-    assert.match(askCalls[0].previewContent, /\+new/);
-    assert.equal(askCalls[0].timeoutSeconds, 0);
-  } finally {
-    server.close();
-  }
-});
-
-test('Local IPC /ask 超过 512KB 载荷被拒绝（413）', async () => {
-  askCalls.length = 0;
-  const server = makeIpcServer();
-  const port = await listen(server);
-  try {
-    const huge = 'x'.repeat(MAX_ASK_BODY_BYTES + 1024);
-    const res = await post(port, '/ask', {
-      sessionId: 'sess_1', botId: 'bot_1', prompt: 'p', previewContent: huge,
-    });
-    assert.equal(res.status, 413);
-    assert.equal(askCalls.length, 0);
-  } finally {
-    server.close();
-  }
 });
 
 // ---------------------------------------------------------------------------

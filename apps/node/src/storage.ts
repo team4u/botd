@@ -154,41 +154,6 @@ export function getBotDir(dataDir: string, botId: string): string {
   return path.join(dataDir, 'bots', botId);
 }
 
-export function getBotWorkspaceDir(dataDir: string, botId: string): string {
-  return path.join(getBotDir(dataDir, botId), 'workspace');
-}
-
-/** Bot 级主题记忆目录：<dataDir>/bots/<botId>/memory（分层渐进式披露的详细归档层） */
-export function getBotMemoryDir(dataDir: string, botId: string): string {
-  return path.join(getBotDir(dataDir, botId), 'memory');
-}
-
-/** 列出 Bot 的主题记忆文件（仅 .md，字母序）；目录不存在时返回空数组 */
-export async function listBotMemoryTopics(dataDir: string, botId: string): Promise<string[]> {
-  const memoryDir = getBotMemoryDir(dataDir, botId);
-  if (!existsSync(memoryDir)) return [];
-  const entries = await fs.readdir(memoryDir, { withFileTypes: true });
-  return entries
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
-    .map((entry) => entry.name)
-    .sort();
-}
-
-/** 读取节点级共享记忆 <dataDir>/MEMORY.md（不存在时返回空串） */
-export async function readNodeMemory(dataDir: string): Promise<string> {
-  try {
-    return await fs.readFile(path.join(dataDir, 'MEMORY.md'), 'utf-8');
-  } catch {
-    return '';
-  }
-}
-
-/** 原子写入节点级共享记忆 <dataDir>/MEMORY.md */
-export async function writeNodeMemory(dataDir: string, content: string): Promise<void> {
-  await ensureDir(dataDir);
-  await writeAtomicFile(path.join(dataDir, 'MEMORY.md'), content);
-}
-
 export function getSkillDir(dataDir: string, skillId: string): string {
   assertSafeId(skillId, 'Skill ID');
   return path.join(dataDir, 'skills', skillId);
@@ -287,12 +252,6 @@ export async function readBot(
 
 export async function saveBot(dataDir: string, bot: BotConfig, systemMd?: string): Promise<void> {
   assertSafeId(bot.id, 'Bot ID');
-  const existing = await readBot(dataDir, bot.id).catch(() => null);
-  if (existing?.bot.parentBotId && existing.bot.parentBotId !== bot.parentBotId) {
-    const oldParentDir = getBotDir(dataDir, existing.bot.parentBotId);
-    await fs.rm(path.join(oldParentDir, 'agents', `${bot.id}.md`), { force: true }).catch(() => {});
-  }
-
   const botDir = getBotDir(dataDir, bot.id);
   const workspaceDir = path.join(botDir, 'workspace');
   const sessionsDir = path.join(botDir, 'sessions');
@@ -318,62 +277,10 @@ export async function saveBot(dataDir: string, bot: BotConfig, systemMd?: string
   if (!existsSync(memoryPath)) {
     await writeAtomicFile(memoryPath, '');
   }
-
-  const subagentsJsonContent = JSON.stringify(
-    {
-      disableDefaultAgents: false,
-      disableDefaults: false,
-      fallbackSubagent: 'none',
-      backgroundByDefault: false,
-      packageAgents: false,
-      defaultJoinMode: 'smart',
-    },
-    null,
-    2
-  );
-
-  if (bot.parentBotId) {
-    assertSafeId(bot.parentBotId, 'Parent Bot ID');
-    const parentBotDir = getBotDir(dataDir, bot.parentBotId);
-    const parentAgentsDir = path.join(parentBotDir, 'agents');
-    await ensureDir(parentAgentsDir);
-
-    const frontmatterLines = [
-      '---',
-      `name: ${bot.id}`,
-      `display_name: ${bot.name}`,
-      `description: ${bot.description || ''}`,
-    ];
-    if (!bot.inheritModel && bot.modelProvider && bot.modelId) {
-      frontmatterLines.push(`model: ${bot.modelProvider}/${bot.modelId}`);
-    }
-    if (bot.thinkingLevel) {
-      frontmatterLines.push(`thinking: ${bot.thinkingLevel}`);
-    }
-    if (bot.toolScope === 'readonly') {
-      frontmatterLines.push('tools: read, grep, find, ls');
-    } else if (bot.toolScope === 'custom' && bot.customTools?.length) {
-      frontmatterLines.push(`tools: ${bot.customTools.join(', ')}`);
-    }
-    frontmatterLines.push('---');
-    const agentMdContent = `${frontmatterLines.join('\n')}\n\n${systemMd ?? ''}`;
-
-    await writeAtomicFile(path.join(parentAgentsDir, `${bot.id}.md`), agentMdContent);
-    await writeAtomicFile(path.join(parentBotDir, 'subagents.json'), subagentsJsonContent);
-  } else {
-    await ensureDir(path.join(botDir, 'agents'));
-    await writeAtomicFile(path.join(botDir, 'subagents.json'), subagentsJsonContent);
-  }
 }
 
 export async function deleteBot(dataDir: string, botId: string): Promise<void> {
   assertSafeId(botId, 'Bot ID');
-  const existing = await readBot(dataDir, botId).catch(() => null);
-  if (existing?.bot.parentBotId) {
-    const parentBotDir = getBotDir(dataDir, existing.bot.parentBotId);
-    const agentMd = path.join(parentBotDir, 'agents', `${botId}.md`);
-    await fs.rm(agentMd, { force: true }).catch(() => {});
-  }
   const botDir = getBotDir(dataDir, botId);
   await fs.rm(botDir, { recursive: true, force: true });
 }

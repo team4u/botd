@@ -20,51 +20,43 @@ export function registerSkillsCommands(program: Command): void {
   skills
     .command('list')
     .description('List all skills hosted on the Hub')
-    .action((options: Record<string, unknown>, command: Command) =>
-      cliAction(async (_options, cmd) => {
-        const g = readGlobals(cmd);
-        const client = await HubClient.connect(g);
-        const result = await client.get<Array<{ id: string; updatedAt: string }>>('/api/skills');
-        printResult(result, g.json);
-      })(options, command),
-    );
+    .action(cliAction(async (_options: Record<string, unknown>, command: Command) => {
+      const g = readGlobals(command);
+      const client = await HubClient.connect(g);
+      const result = await client.get<Array<{ id: string; updatedAt: string }>>('/api/skills');
+      printResult(result, g.json);
+    }));
 
   skills
     .command('get <skillIdOrNodeId> [skillId]')
     .description('Get skill content (global by id, or node-scoped with nodeId prefix)')
-    .action((skillIdOrNodeId: string, skillId: string | undefined, options: Record<string, unknown>, command: Command) =>
-      cliAction(async (_options, cmd) => {
-        const g = readGlobals(cmd);
-        const client = await HubClient.connect(g);
-        const result = await client.get<{ content: string }>(skillRoute(skillIdOrNodeId, skillId));
-        printContent(result, g.json);
-      })(options, command),
-    );
+    .action(cliAction(async (skillIdOrNodeId: string, skillId: string | undefined, _options: Record<string, unknown>, command: Command) => {
+      const g = readGlobals(command);
+      const client = await HubClient.connect(g);
+      const result = await client.get<{ content: string }>(skillRoute(skillIdOrNodeId, skillId));
+      printContent(result, g.json);
+    }));
 
   skills
     .command('put <skillIdOrNodeId> [skillId]')
     .description('Upload or update a skill (reads from stdin by default)')
     .option('--file <path>', 'path to skill file, or - for stdin (default: stdin)')
-    .action((skillIdOrNodeId: string, skillId: string | undefined, options: Record<string, unknown>, command: Command) =>
-      cliAction(async (_options, cmd) => {
-        const g = readGlobals(cmd);
-        const client = await HubClient.connect(g);
-        const file = typeof options.file === 'string' ? options.file : undefined;
-        const content = await readInput(file);
-        const result = await client.put<{ ok: boolean }>(skillRoute(skillIdOrNodeId, skillId), { content });
-        printResult(result, g.json);
-      })(options, command),
-    );
+    .action(cliAction(async (skillIdOrNodeId: string, skillId: string | undefined, options: Record<string, unknown>, command: Command) => {
+      const g = readGlobals(command);
+      const client = await HubClient.connect(g);
+      const file = typeof options.file === 'string' ? options.file : undefined;
+      const content = await readInput(file);
+      const result = await client.put<{ ok: boolean }>(skillRoute(skillIdOrNodeId, skillId), { content });
+      printResult(result, g.json);
+    }));
 
   skills
     .command('delete <skillIdOrNodeId> [skillId]')
     .description('Delete a skill (global by id, or node-scoped with nodeId prefix)')
-    .action((skillIdOrNodeId: string, skillId: string | undefined, options: Record<string, unknown>, command: Command) =>
-      cliAction(async (_options, cmd) => {
-        const g = readGlobals(cmd);
-        const client = await HubClient.connect(g);
-        const result = await client.delete<{ ok: boolean }>(skillRoute(skillIdOrNodeId, skillId));
-        printResult(result, g.json);
-      })(options, command),
-    );
+    .action(cliAction(async (skillIdOrNodeId: string, skillId: string | undefined, _options: Record<string, unknown>, command: Command) => {
+      const g = readGlobals(command);
+      const client = await HubClient.connect(g);
+      const result = await client.delete<{ ok: boolean }>(skillRoute(skillIdOrNodeId, skillId));
+      printResult(result, g.json);
+    }));
 }

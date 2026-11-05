@@ -20,51 +20,43 @@ export function registerExtensionsCommands(program: Command): void {
   extensions
     .command('list')
     .description('List all extensions hosted on the Hub')
-    .action((options: Record<string, unknown>, command: Command) =>
-      cliAction(async (_options, cmd) => {
-        const g = readGlobals(cmd);
-        const client = await HubClient.connect(g);
-        const result = await client.get<Array<{ id: string; updatedAt: string }>>('/api/extensions');
-        printResult(result, g.json);
-      })(options, command),
-    );
+    .action(cliAction(async (_options: Record<string, unknown>, command: Command) => {
+      const g = readGlobals(command);
+      const client = await HubClient.connect(g);
+      const result = await client.get<Array<{ id: string; updatedAt: string }>>('/api/extensions');
+      printResult(result, g.json);
+    }));
 
   extensions
     .command('get <extIdOrNodeId> [extId]')
     .description('Get extension content (global by id, or node-scoped with nodeId prefix)')
-    .action((extIdOrNodeId: string, extId: string | undefined, options: Record<string, unknown>, command: Command) =>
-      cliAction(async (_options, cmd) => {
-        const g = readGlobals(cmd);
-        const client = await HubClient.connect(g);
-        const result = await client.get<{ content: string }>(extensionRoute(extIdOrNodeId, extId));
-        printContent(result, g.json);
-      })(options, command),
-    );
+    .action(cliAction(async (extIdOrNodeId: string, extId: string | undefined, _options: Record<string, unknown>, command: Command) => {
+      const g = readGlobals(command);
+      const client = await HubClient.connect(g);
+      const result = await client.get<{ content: string }>(extensionRoute(extIdOrNodeId, extId));
+      printContent(result, g.json);
+    }));
 
   extensions
     .command('put <extIdOrNodeId> [extId]')
     .description('Upload or update an extension (reads from stdin by default)')
     .option('--file <path>', 'path to extension file, or - for stdin (default: stdin)')
-    .action((extIdOrNodeId: string, extId: string | undefined, options: Record<string, unknown>, command: Command) =>
-      cliAction(async (_options, cmd) => {
-        const g = readGlobals(cmd);
-        const client = await HubClient.connect(g);
-        const file = typeof options.file === 'string' ? options.file : undefined;
-        const content = await readInput(file);
-        const result = await client.put<{ ok: boolean }>(extensionRoute(extIdOrNodeId, extId), { content });
-        printResult(result, g.json);
-      })(options, command),
-    );
+    .action(cliAction(async (extIdOrNodeId: string, extId: string | undefined, options: Record<string, unknown>, command: Command) => {
+      const g = readGlobals(command);
+      const client = await HubClient.connect(g);
+      const file = typeof options.file === 'string' ? options.file : undefined;
+      const content = await readInput(file);
+      const result = await client.put<{ ok: boolean }>(extensionRoute(extIdOrNodeId, extId), { content });
+      printResult(result, g.json);
+    }));
 
   extensions
     .command('delete <extIdOrNodeId> [extId]')
     .description('Delete an extension (global by id, or node-scoped with nodeId prefix)')
-    .action((extIdOrNodeId: string, extId: string | undefined, options: Record<string, unknown>, command: Command) =>
-      cliAction(async (_options, cmd) => {
-        const g = readGlobals(cmd);
-        const client = await HubClient.connect(g);
-        const result = await client.delete<{ ok: boolean }>(extensionRoute(extIdOrNodeId, extId));
-        printResult(result, g.json);
-      })(options, command),
-    );
+    .action(cliAction(async (extIdOrNodeId: string, extId: string | undefined, _options: Record<string, unknown>, command: Command) => {
+      const g = readGlobals(command);
+      const client = await HubClient.connect(g);
+      const result = await client.delete<{ ok: boolean }>(extensionRoute(extIdOrNodeId, extId));
+      printResult(result, g.json);
+    }));
 }

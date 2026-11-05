@@ -31,12 +31,13 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { homedir, constants as osConstants, tmpdir } from 'node:os';
-import { basename, isAbsolute, join, resolve, win32 } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StreamDecoder } from './decode.js';
 import { err, ExecutionError, FileError, ok, toError, type Result } from './errors.js';
 import { LineScanner } from './line-scan.js';
 import type { Context } from './context.js';
+import { isLegacyWslBashPath, resolveWindowsBash } from '../windows-shell.js';
 import type {
   BinaryReader,
   DirReader,
@@ -166,24 +167,12 @@ async function runCommand(command: string, args: string[], timeoutMs: number): P
   });
 }
 
+/** POSIX：PATH 上找 bash（`which`）；Windows 由 ../windows-shell.ts 的 resolveWindowsBash 统一解析。 */
 async function findBashOnPath(): Promise<string | null> {
-  const result = process.platform === 'win32'
-    ? await runCommand('where', ['bash.exe'], 5000)
-    : await runCommand('which', ['bash'], 5000);
+  const result = await runCommand('which', ['bash'], 5000);
   if (result.status !== 0 || !result.stdout) return null;
   const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
   return firstMatch && (await pathExists(firstMatch)) ? firstMatch : null;
-}
-
-// 与 pi-durable 上游保持同步：遗留 WSL bash 启动器需要 stdin 传输命令。
-function isLegacyWslBashPath(path: string): boolean {
-  const normalized = win32.normalize(path).toLowerCase();
-  const systemRoot = process.env.SystemRoot;
-  if (systemRoot) {
-    if (!/^[a-z]:[\\/]/i.test(systemRoot)) return false;
-    return ['System32', 'Sysnative'].some((directory) => normalized === win32.join(systemRoot, directory, 'bash.exe').toLowerCase());
-  }
-  return /^[a-z]:\\windows\\(?:system32|sysnative)\\bash\.exe$/.test(normalized);
 }
 
 function getBashShellConfig(shell: string): { shell: string; args: string[]; commandTransport?: 'stdin' } {
@@ -198,25 +187,18 @@ async function getShellConfig(customShellPath: string | undefined): Promise<Resu
     return err(new ExecutionError('shell_unavailable', `Custom shell path not found: ${customShellPath}`));
   }
   if (process.platform === 'win32') {
-    const candidates: string[] = [];
-    const programFiles = process.env.ProgramFiles;
-    if (programFiles) candidates.push(`${programFiles}\\Git\\bin\\bash.exe`);
-    const programFilesX86 = process.env['ProgramFiles(x86)'];
-    if (programFilesX86) candidates.push(`${programFilesX86}\\Git\\bin\\bash.exe`);
-    for (const candidate of candidates) {
-      if (await pathExists(candidate)) {
-        return ok(getBashShellConfig(candidate));
-      }
-    }
-    const bashOnPath = await findBashOnPath();
-    if (bashOnPath) {
-      return ok(getBashShellConfig(bashOnPath));
+    // 与 ../windows-shell.ts 同一条解析链：BOTD_BASH_PATH → 托管便携 MinGit →
+    // Git for Windows → PATH（含遗留 WSL 启动器排除）。dataDir 缺省 ~/.botd。
+    const dataDir = process.env.BOTD_DATA_DIR || join(homedir(), '.botd');
+    const resolved = resolveWindowsBash(dataDir);
+    if (resolved) {
+      return ok(getBashShellConfig(resolved));
     }
     return err(new ExecutionError('shell_unavailable', `No bash shell found. Options:\n` +
       `  1. Install Git for Windows: https://git-scm.com/download/win\n` +
       `  2. Add your bash to PATH (Cygwin, MSYS2, etc.)\n` +
       '  3. Configure an explicit shellPath\n\n' +
-      `Searched Git Bash in:\n${candidates.map((path) => `  ${path}`).join('\n')}`));
+      `Searched: BOTD_BASH_PATH, ${join(dataDir, 'runtime', 'mingit', 'bin', 'bash.exe')} and PATH.`));
   }
   if (await pathExists('/bin/bash')) {
     return ok(getBashShellConfig('/bin/bash'));

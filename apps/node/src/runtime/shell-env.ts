@@ -41,8 +41,3 @@ export function buildBotShellEnv(
     ...options.turnEnv,
   };
 }
-
-/** 从环境或默认路径解析 daemon 数据目录（回合外 resume 需要重建资源时使用） */
-export function getDataDirSafe(): string {
-  return process.env.BOTD_DATA_DIR || path.join(process.env.HOME || process.cwd(), '.botd');
-}
