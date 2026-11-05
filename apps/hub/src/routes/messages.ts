@@ -6,6 +6,8 @@ import { ArtifactError, type ArtifactActor, type ArtifactService } from '../arti
 import type { HubDatabase } from '../db.js';
 import {
   ensureRouterConversationId,
+  HUB_ROUTER_BOT_ID,
+  resolveHubRouterBotConfig,
   rewindDurableSessionBeforeMessage,
   submitSessionMessageToDurable,
   type DurableSessionMirror,
@@ -267,7 +269,7 @@ export function registerMessageRoutes(
     // 校验实际会话模型，避免全局 Bot 的空配置挡住有效的会话覆盖。
     // 节点自行执行的路径仍由节点管理凭据。
     if (rt !== undefined && !ctx.durableInjected && targetBotId) {
-      const bot = db.getBot(targetBotId);
+      const bot = db.getBot(targetBotId) ?? (targetBotId === HUB_ROUTER_BOT_ID ? resolveHubRouterBotConfig(db) : undefined);
       if (bot) {
         const conversationId = await ensureRouterConversationId(rt, id, targetBotId, { workspaceDir: session.workspaceDir });
         const { effective } = await rt.getConversationModelConfig(conversationId);

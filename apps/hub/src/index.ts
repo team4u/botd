@@ -15,7 +15,7 @@ import { GroupRouter } from './group-router.js';
 import { createStaticMiddleware } from './static.js';
 import { ArtifactService } from './artifact-service.js';
 import { HubDurableRuntime, SecretInjectingEnv, type BotPersonaConfig } from './harness/hub-harness.js';
-import { createHubCredentialStore, registerStoredProviders, listEffectiveProviderCredentials } from './credential-store.js';
+import { createHubCredentialStore, registerStoredProviders, listEffectiveProviderCredentials, loadStoredProviders } from './credential-store.js';
 import { loadDynamicDurableExtension } from './harness/dynamic-extension-loader.js';
 import { TargetDoc, WorkerRegistryDoc } from './harness/docs.js';
 import { registerProviderRoutes } from './providers.js';
@@ -30,7 +30,7 @@ import { registerBotRoutes } from './routes/bots.js';
 import { registerSessionRoutes } from './routes/sessions.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { registerEventRoutes } from './routes/events.js';
-import { registerWorkerRoutes, createDurableSessionMirror, submitSessionMessageToDurable, type DurableSessionMirror } from './routes/workers.js';
+import { registerWorkerRoutes, createDurableSessionMirror, submitSessionMessageToDurable, HUB_ROUTER_BOT_ID, resolveHubRouterBotConfig, type DurableSessionMirror } from './routes/workers.js';
 import { runWatchdogPass } from './harness/watchdog.js';
 import { acquireLocalWorktree } from './harness/worktree.js';
 import { seedBuiltinSkillInHub } from './builtin-skill-seed.js';
@@ -424,6 +424,50 @@ export function createHub(options?: HubOptions): HubInstance {
       }
       runtime.registerPersona(persona);
       personas.push(persona);
+    }
+    // 内置「⚡ 中枢总管」（hub-router）分身：不落 SQLite bots 表，始终与最新
+    // 配置的模型/凭据/技能保持同步（模型先取已配置主分身，否则取首个可用凭据的
+    // 服务商目录模型）。
+    {
+      const hubRouterConfig = resolveHubRouterBotConfig(db);
+      let provider = hubRouterConfig.modelProvider;
+      let modelId = hubRouterConfig.modelId;
+      if (!provider.trim() || !modelId.trim()) {
+        const credentialProviders = new Set(
+          listEffectiveProviderCredentials(db).map((credential) => credential.providerId),
+        );
+        if (credentialProviders.size > 0) {
+          const models = await import('@botd/models');
+          const builtin = models.getBuiltinModelCatalog();
+          const storedCatalog = models.buildModelCatalog(loadStoredProviders(db.getDataDir()));
+          const catalogProviders = [
+            ...builtin.providers,
+            ...storedCatalog.providers.filter((p) => !builtin.providers.some((b) => b.id === p.id)),
+          ];
+          const catalogProvider = catalogProviders.find(
+            (p) => credentialProviders.has(p.id) && p.models.length > 0,
+          );
+          if (catalogProvider) {
+            provider = catalogProvider.id;
+            modelId = catalogProvider.models[0].id;
+          }
+        }
+      }
+      const firstPersona = personas.find((p) => p.parentBotId === undefined) ?? personas[0];
+      const hubPersona: BotPersonaConfig = {
+        botId: HUB_ROUTER_BOT_ID,
+        name: '中枢总管',
+        description: hubRouterConfig.description,
+        model: { provider, modelId },
+        instructions:
+          '你是 botd 系统内置的「⚡ 中枢总管」（Global Super-agent Router）。负责全局协调，通过 spawn_worker 或 delegate_to_bot 将任务派发到后台执行，前台保持极速响应。',
+        enabledSkills: hubRouterConfig.enabledSkills,
+        enabledExtensions: [],
+        nodeId: hubRouterConfig.nodeId,
+        cwd: firstPersona?.cwd ?? process.cwd(),
+      };
+      runtime.registerPersona(hubPersona);
+      personas.push(hubPersona);
     }
     // 存量会话热同步：已创建的 Router/Worker 会话立即应用最新分身配置
     //（模型/思考档位/SYSTEM/MEMORY/toolScope/扩展选择），无需重启或新建会话。

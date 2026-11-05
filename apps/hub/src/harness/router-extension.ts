@@ -38,6 +38,9 @@ import {
 export const ROUTER_EXTENSION = "botd-router";
 export const WORKER_EXTENSION = "botd-worker";
 
+/** 系统内置「⚡ 中枢总管」Router 分身 id：不落 SQLite bots 表，动态注册到运行时。 */
+export const HUB_ROUTER_BOT_ID = "hub-router";
+
 /** How the Router resolves the persona config of a bot (registered by HubDurableRuntime). */
 export interface PersonaResolver {
 	(botId: string): {
@@ -327,7 +330,14 @@ function renderPersona(
 	// registered persona set so the Router can dispatch by real identity.
 	const personas = listPersonas?.() ?? [];
 	const subagents = personas.filter((p) => p.parentBotId === target.botId);
-	const peers = personas.filter((p) => p.parentBotId === undefined && p.botId !== target.botId);
+	// hub-router 是系统内置总管：普通业务分身不把它列为可派发的 peer；
+	// 而它自身（target.botId === HUB_ROUTER_BOT_ID）则看到全部用户主分身。
+	const peers =
+		target.botId === HUB_ROUTER_BOT_ID
+			? personas.filter((p) => p.parentBotId === undefined && p.botId !== target.botId)
+			: personas.filter(
+					(p) => p.parentBotId === undefined && p.botId !== target.botId && p.botId !== HUB_ROUTER_BOT_ID,
+			);
 	if (subagents.length > 0) {
 		lines.push(
 			"",
@@ -369,7 +379,7 @@ function renderPersona(
 		"- While a worker runs, keep chatting: `steer_worker` redirects or resumes it, `stop_worker` cancels it, `recall({ id })` loads its results.",
 		"- When a worker finishes it reports back here automatically; summarize its report for the user.",
 	);
-	if (target.title !== undefined && target.title.includes("中枢")) {
+	if (target.botId === HUB_ROUTER_BOT_ID || (target.title !== undefined && target.title.includes("中枢"))) {
 		lines.push(
 			"",
 			"## Central Hub Dispatcher Rules (中枢总管守则)",

@@ -427,3 +427,89 @@ test('4. 中枢-titled session syncs TargetDoc.title and injects Central Hub Dis
   await waitFor(() => plainPrompts.length, (n) => n >= 1, 'plain router system prompt captured');
   assert.doesNotMatch(plainPrompts.at(-1)!, /中枢总管守则/, 'non-hub sessions must not get dispatcher rules');
 });
+
+test('5. hub-router built-in persona: session creation, commands, end-to-end messaging and peer visibility', { timeout: 60_000 }, async (t) => {
+  const f = await fixture(t);
+
+  // 前置断言：hub-router 不在 SQLite bots 表，也不出现在 GET /api/bots。
+  assert.ok(!f.hub.db.getAllBots().some((b: { id: string }) => b.id === 'hub-router'));
+  const botsListed = await f.json<Array<{ id: string }>>('/api/bots');
+  assert.ok(!botsListed.some((b) => b.id === 'hub-router'), 'GET /api/bots must not list hub-router');
+
+  // 1. 以 leadBotId: 'hub-router' 创建会话（不在 bots 表也能成功）。
+  const session = await f.json<{ id: string; leadBotId: string }>('/api/sessions', 'POST', {
+    title: '⚡ 中枢总管',
+    leadBotId: 'hub-router',
+  });
+  assert.equal(session.leadBotId, 'hub-router');
+  const sid = session.id;
+
+  // 2. GET /api/bots/hub-router/commands 返回 200（技能命令直出）。
+  const commands = await f.json<Array<{ name: string; source: string }>>('/api/bots/hub-router/commands');
+  assert.ok(Array.isArray(commands));
+
+  // 3. 端到端发消息：注入中枢守则 + Peer Bots 列出用户主分身（含 cwd/nodeId/description）。
+  const systemPrompts: string[] = [];
+  const capture = () =>
+    ((context: { messages: Array<{ role: string; content?: unknown }> }) => {
+      const shown = new Map<string, string>();
+      for (const m of context.messages) {
+        if (m.role !== 'system') continue;
+        const sections = (m as { sections?: Record<string, string | null> }).sections;
+        if (sections === undefined) continue;
+        for (const [k, v] of Object.entries(sections)) {
+          if (v === null) shown.delete(k);
+          else shown.set(k, v);
+        }
+      }
+      systemPrompts.push([...shown.values()].join('\n'));
+      return fauxAssistantMessage('dispatching via hub-router.');
+    }) as never;
+  f.faux.setResponses([capture(), capture()]);
+  await f.json(`/api/sessions/${sid}/messages`, 'POST', { content: '调度一个跨项目任务' });
+  await waitFor(() => systemPrompts.length, (n) => n >= 1, 'hub-router system prompt captured');
+
+  const prompt = systemPrompts.at(-1)!;
+  // 中枢守则按 botId 触发（标题只是兑底信号）。
+  assert.match(prompt, /Central Hub Dispatcher Rules \(中枢总管守则\)/);
+  // Peer Bots 列出用户主分身 architect 及其 cwd / node / description。
+  assert.match(prompt, /## Peer Bots \(cross-workspace \/ cross-node\)/);
+  const peerLine = prompt.split('\n').find((l) => l.includes('- architect')) ?? '';
+  assert.ok(peerLine, 'peer bots section must list the user-created architect bot');
+  assert.match(peerLine, /cwd \/tmp/);
+  assert.match(peerLine, /node node-1/);
+  assert.match(peerLine, /You design systems\./);
+
+  // 4. 对照组：普通分身的提示词不把 hub-router 列为 peer。
+  const plainSid = 'sess_router_plain';
+  f.hub.db.createSession({
+    id: plainSid,
+    title: '普通工作会话',
+    leadBotId: 'architect',
+    ownerId: 'user_admin',
+  });
+  const plainPrompts: string[] = [];
+  const plainCapture = () =>
+    ((context: { messages: Array<{ role: string; content?: unknown }> }) => {
+      const shown = new Map<string, string>();
+      for (const m of context.messages) {
+        if (m.role !== 'system') continue;
+        const sections = (m as { sections?: Record<string, string | null> }).sections;
+        if (sections === undefined) continue;
+        for (const [k, v] of Object.entries(sections)) {
+          if (v === null) shown.delete(k);
+          else shown.set(k, v);
+        }
+      }
+      plainPrompts.push([...shown.values()].join('\n'));
+      return fauxAssistantMessage('working directly.');
+    }) as never;
+  f.faux.setResponses([plainCapture(), plainCapture()]);
+  await f.json(`/api/sessions/${plainSid}/messages`, 'POST', { content: 'just do the work' });
+  await waitFor(() => plainPrompts.length, (n) => n >= 1, 'plain router system prompt captured');
+  const plainPrompt = plainPrompts.at(-1)!;
+  assert.ok(
+    !plainPrompt.split('\n').some((l) => l.includes('- hub-router')),
+    'regular bots must not see hub-router as a peer',
+  );
+});
