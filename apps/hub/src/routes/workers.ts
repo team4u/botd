@@ -8,6 +8,7 @@
  */
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { configure, defineDocFamily } from '@earendil-works/pi-durable';
+import type { LiveState } from '@earendil-works/pi-durable';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { requireAdmin, resolveOwnedSession } from '../http-helpers.js';
@@ -1036,7 +1037,20 @@ export function createDurableSessionMirror(
   ctx: Pick<HubContext, 'db' | 'sseHub'> & { durableRuntime?: HubDurableRuntime },
 ): DurableSessionMirror {
   const { db, sseHub } = ctx;
-  const watches = new Map<string, { unwatch: () => Promise<void>; lastMirrored: number }>();
+  /** 每个被 watch 的 Router 会话的镜像推进状态（lastMirrored 增量游标 + Live 流水位）。 */
+  interface WatchMirrorState {
+    unwatch: () => Promise<void>;
+    lastMirrored: number;
+    /** 上一帧是否处于 running（pi.live.run 存在）：驱动 running/idle 状态机的边沿检测。 */
+    wasRunning: boolean;
+    /** 已广播为 text_delta 的累计正文（live.generation.message 前缀差分）。 */
+    streamedText: string;
+    /** 已广播为 thinking_stream delta 的累计思考文本。 */
+    streamedThinking: string;
+    /** 已广播 tool_status 的工具调用快照（status/outputLen 变更才重播）。 */
+    toolSnapshots: Map<string, { status: string; outputLen: number }>;
+  }
+  const watches = new Map<string, WatchMirrorState>();
   const backfillToolResult = makeToolResultBackfiller(db);
   /** 已广播过 interaction_request 的 askId（按会话去重，重启后由 GET /asks 兜底）。 */
   const broadcastAskIds = new Map<string, Set<string>>();
@@ -1142,19 +1156,111 @@ export function createDurableSessionMirror(
     }
   };
 
+  /** 拼接 LiveDoc 半成品 assistant 消息里全部 thinking 块 / text 块的文本。 */
+  const liveStreamedText = (message: unknown, field: 'thinking' | 'text'): string => {
+    if (message === null || typeof message !== 'object') return '';
+    const content = (message as { content?: unknown }).content;
+    if (!Array.isArray(content)) return '';
+    return content
+      .map((block) =>
+        block !== null && typeof block === 'object' && (block as { type?: unknown }).type === field &&
+          typeof (block as Record<string, unknown>)[field] === 'string'
+          ? ((block as Record<string, unknown>)[field] as string)
+          : '',
+      )
+      .filter(Boolean)
+      .join('');
+  };
+
   const attach = async (sessionId: string, conversationId: string): Promise<void> => {
     if (closed || watches.has(conversationId)) return;
     const botId = db.getSession(sessionId)?.leadBotId;
     if (botId === undefined) return;
-    const state: { unwatch: () => Promise<void>; lastMirrored: number } = {
+    const state: WatchMirrorState = {
       unwatch: async () => undefined,
       lastMirrored: 0,
+      wasRunning: false,
+      streamedText: '',
+      streamedThinking: '',
+      toolSnapshots: new Map(),
     };
     watches.set(conversationId, state);
     try {
       const unwatch = await ctx.durableRuntime!.watchConversationView(conversationId, (view) => {
         const current = watches.get(conversationId);
         if (current === undefined) return;
+        // 群聊多分身：最近被 @ 的分身优先于会话固定的 lead bot。
+        const session = db.getSession(sessionId);
+        const activeBotId = lastActiveBotBySession.get(sessionId) ?? session?.leadBotId ?? botId;
+
+        // --- LiveDoc（pi.live）桥：流式增量 + 会话 running/idle 状态 ----------------
+        // pi.live 在 Durable 回合进行中持续演进（run/generation/tools），这里把它的
+        // 每次提交差分转成 text_delta / thinking_stream / tool_status SSE 事件，并驱动
+        // db.updateSessionStatus 与 session_status 广播 —— 否则前端时间线静止、
+        // watchSubSessionCompletion（等 session_status: idle）永不触发。
+        const live = (view.docs as Record<string, unknown> | undefined)?.['pi.live'] as LiveState | undefined;
+        const isRunning = live?.run !== undefined;
+
+        // A. 空闲 -> running：复位流水位并广播运行中状态。
+        if (isRunning && !current.wasRunning) {
+          current.wasRunning = true;
+          current.streamedText = '';
+          current.streamedThinking = '';
+          current.toolSnapshots.clear();
+          db.updateSessionStatus(sessionId, 'running', activeBotId);
+          sseHub.broadcast(sessionId, {
+            type: 'session_status',
+            sessionId,
+            status: 'running',
+            activeBotId,
+            activeBotIds: [activeBotId],
+          });
+        }
+
+        // B. running 期间：半成品 assistant 消息（live.generation.message）按前缀差分
+        // 广播 thinking/text 增量；工具槽（live.tools）按 status/输出长度变更广播。
+        if (isRunning) {
+          const partial = live?.generation?.message;
+          const thinkingFull = liveStreamedText(partial, 'thinking');
+          if (thinkingFull.startsWith(current.streamedThinking) && thinkingFull.length > current.streamedThinking.length) {
+            const delta = thinkingFull.slice(current.streamedThinking.length);
+            current.streamedThinking = thinkingFull;
+            sseHub.broadcast(sessionId, {
+              type: 'thinking_stream',
+              sessionId,
+              botId: activeBotId,
+              delta,
+              status: 'running',
+            });
+          }
+          const textFull = liveStreamedText(partial, 'text');
+          if (textFull.startsWith(current.streamedText) && textFull.length > current.streamedText.length) {
+            const delta = textFull.slice(current.streamedText.length);
+            current.streamedText = textFull;
+            sseHub.broadcast(sessionId, { type: 'text_delta', sessionId, botId: activeBotId, delta });
+          }
+          for (const slot of live?.tools ?? []) {
+            const outLen = slot.output?.length ?? 0;
+            const prev = current.toolSnapshots.get(slot.callId);
+            if (!prev || prev.status !== slot.status || prev.outputLen !== outLen) {
+              current.toolSnapshots.set(slot.callId, { status: slot.status, outputLen: outLen });
+              sseHub.broadcast(sessionId, {
+                type: 'tool_status',
+                sessionId,
+                botId: activeBotId,
+                toolCallId: slot.callId,
+                toolName: slot.name,
+                status: slot.status === 'done' ? 'done' : 'running',
+                ...(slot.output ? { outputPreview: slot.output.slice(0, 2000) } : {}),
+              });
+            }
+          }
+        }
+
+        // C. 先镜像本帧已提交的 entries（pi.assistant / pi.tool-result /
+        // botd.worker-report 落库并广播 message_created），再宣布 idle：保证
+        // watchSubSessionCompletion 等监听者在看到 session_status: idle 时，最终
+        // assistant 消息已经写进 db 时间线。
         const entries = view.entries as unknown as Array<{ id: unknown; kind: string; model?: readonly unknown[] }>;
         for (const entry of entries) {
           const entryId = Number(entry.id);
@@ -1162,6 +1268,34 @@ export function createDurableSessionMirror(
           current.lastMirrored = entryId;
           mirror(sessionId, botId, entry);
         }
+
+        // D. running -> 空闲：收尾思考流，复位水位，会话置 idle 并广播（子会话完成
+        // 监听、前端运行指示灯由此解锁）。
+        if (!isRunning && current.wasRunning) {
+          if (current.streamedThinking.length > 0) {
+            sseHub.broadcast(sessionId, {
+              type: 'thinking_stream',
+              sessionId,
+              botId: activeBotId,
+              status: 'done',
+            });
+          }
+          current.wasRunning = false;
+          current.streamedText = '';
+          current.streamedThinking = '';
+          current.toolSnapshots.clear();
+          db.updateSessionStatus(sessionId, 'idle', undefined);
+          sseHub.broadcast(sessionId, {
+            type: 'session_status',
+            sessionId,
+            status: 'idle',
+            activeBotId: undefined,
+            activeBotIds: [],
+            queuePlan: [],
+          });
+        }
+
+        // E. 新 pending ask 广播（不变）。
         void broadcastNewAsks(sessionId, botId, conversationId);
       });
       if (closed) {
@@ -1266,7 +1400,11 @@ function formatAttachedFilesContext(
     if (!att) continue;
     const disk = resolveDiskArtifact(att, db);
     if (!disk) continue;
-    lines.push(`- ${disk.filename} (${disk.mimeType}, ${disk.sizeBytes} bytes) -> path: ${disk.storagePath}`);
+    // 远端 Node 提示：storagePath 是 Hub 本机路径，远端分身拿不到；附上 artifactId
+    // 与 `botd artifact pull` 拉取指引，让 RemoteExecutionEnv 上的模型也能取到文件。
+    lines.push(
+      `- ${disk.filename} (${disk.mimeType}, ${disk.sizeBytes} bytes) -> path: ${disk.storagePath} (artifactId: ${att.id}; on remote nodes run: botd artifact pull ${att.id} --output ./${disk.filename})`,
+    );
   }
   if (lines.length === 0) return '';
   return `[Attached Files]:\n${lines.join('\n')}`;
