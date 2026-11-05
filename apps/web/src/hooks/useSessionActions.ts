@@ -4,8 +4,10 @@ import type { SessionRecord, BotConfig, CreateSessionInput } from '@botd/protoco
 import { api, AuthRequiredError } from '../api';
 import {
   pickCurrentDirectSession,
+  pickHubAssistantSession,
   getSpaceDisplayName,
   normalizeWorkspaceDir,
+  HUB_ASSISTANT_TITLE,
 } from '../session-space';
 import type { AddToastFn } from './useToasts';
 import type { NavigateFn } from './useHashRoute';
@@ -42,6 +44,39 @@ export const useSessionActions = (params: SessionActionsParams) => {
   const creatingBotChatRef = useRef(false);
   // 会话分叉并发防抖：分叉请求进行中忽略重复点击
   const forkingRef = useRef(false);
+  // 中枢总管创建并发防抖：创建进行中忽略重复点击
+  const creatingHubRef = useRef(false);
+
+  // 打开中枢总管会话：存在则直接进入，不存在则以主分身创建（中枢模式的自然语言调度入口）
+  const handleOpenHubAssistant = useCallback(async () => {
+    const existing = pickHubAssistantSession(sessions);
+    if (existing) {
+      navigate({ sessionId: existing.id, view: 'chat', messageId: null });
+      return;
+    }
+    if (creatingHubRef.current) return;
+    const primaryBot =
+      [...botMap.values()].find((b) => !b.parentBotId || !botMap.has(b.parentBotId)) ??
+      [...botMap.values()][0];
+    if (!primaryBot) return;
+    creatingHubRef.current = true;
+    try {
+      const created = await api.createSession({
+        title: HUB_ASSISTANT_TITLE,
+        leadBotId: primaryBot.id,
+      });
+      setSessions((prev) => [created, ...prev]);
+      navigate({ sessionId: created.id, view: 'chat', modal: null });
+    } catch (err: any) {
+      if (err instanceof AuthRequiredError || err?.status === 401) {
+        onAuthLostRef.current();
+        return;
+      }
+      addToast('error', err?.message || '创建中枢总管会话失败');
+    } finally {
+      creatingHubRef.current = false;
+    }
+  }, [sessions, setSessions, botMap, navigate, addToast, onAuthLostRef]);
 
   // 点击通讯录中的智能体：进入其当前单聊，不存在则静默创建
   const handleOpenBotChat = useCallback(async (bot: BotConfig) => {
@@ -283,6 +318,7 @@ export const useSessionActions = (params: SessionActionsParams) => {
 
   return {
     handleOpenBotChat,
+    handleOpenHubAssistant,
     handleNewTopic,
     handleCreateParallelTopic,
     handleForkMessage,

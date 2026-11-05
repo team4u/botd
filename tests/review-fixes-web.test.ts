@@ -274,6 +274,189 @@ test('resolveContextTabGroup: Space 会话与 Assistant 会话分别聚合平级
 });
 
 // ==========================================
+// 中枢总管（⚡ 中枢总管）与全局后台 Worker 脉冲
+// ==========================================
+
+test('中枢总管会话：isHubAssistantSession/pickHubAssistantSession 识别且不篡位普通单聊', { timeout: 60_000 }, async () => {
+  const mod = (await import('../apps/web/src/session-space.js' as any)) as {
+    isHubAssistantSession: typeof import('../apps/web/src/session-space.js').isHubAssistantSession;
+    pickHubAssistantSession: typeof import('../apps/web/src/session-space.js').pickHubAssistantSession;
+    buildAssistantEntries: typeof import('../apps/web/src/session-space.js').buildAssistantEntries;
+    pickCurrentDirectSession: typeof import('../apps/web/src/session-space.js').pickCurrentDirectSession;
+    HUB_ASSISTANT_TITLE: string;
+  };
+  const { isHubAssistantSession, pickHubAssistantSession, buildAssistantEntries, pickCurrentDirectSession } = mod;
+  assert.equal(mod.HUB_ASSISTANT_TITLE, '⚡ 中枢总管');
+
+  const botA = mkBot({ id: 'bot_a', name: '助理 A' });
+  const now = Date.now();
+
+  // 严格匹配：标题 + 未归档 + 无父会话
+  const hubSession = mkSession({
+    id: 'hub_1',
+    leadBotId: 'bot_a',
+    title: '⚡ 中枢总管',
+    updatedAt: new Date(now - 50_000).toISOString(),
+  });
+  const hubNewer = mkSession({
+    id: 'hub_2',
+    leadBotId: 'bot_a',
+    title: '⚡ 中枢总管',
+    updatedAt: new Date(now - 10_000).toISOString(),
+  });
+  const hubArchived = mkSession({
+    id: 'hub_arch',
+    leadBotId: 'bot_a',
+    title: '⚡ 中枢总管',
+    archived: true,
+  });
+  const hubChild = mkSession({
+    id: 'hub_child',
+    leadBotId: 'bot_a',
+    title: '⚡ 中枢总管',
+    parentSessionId: 'hub_1',
+  });
+
+  assert.ok(isHubAssistantSession(hubSession), '标题匹配且未归档无父会话 → 是中枢总管');
+  assert.ok(!isHubAssistantSession(hubArchived), '已归档 → 不是');
+  assert.ok(!isHubAssistantSession(hubChild), '有父会话 → 不是');
+  assert.ok(
+    !isHubAssistantSession(mkSession({ id: 'x1', leadBotId: 'bot_a', title: '中枢总管' })),
+    '标题不精确匹配（缺 ⚡ 前缀）→ 不是'
+  );
+
+  // 多条同标题时取最近活跃
+  assert.equal(pickHubAssistantSession([hubSession, hubNewer, hubArchived, hubChild])?.id, 'hub_2');
+  assert.equal(pickHubAssistantSession([]), undefined, '无中枢总管时返回 undefined');
+
+  // 不篡位普通单聊：pickCurrentDirectSession 与 buildAssistantEntries 均排除中枢总管
+  const normalDirect = mkSession({
+    id: 'direct_1',
+    leadBotId: 'bot_a',
+    title: '日常单聊',
+    updatedAt: new Date(now - 200_000).toISOString(),
+  });
+  assert.equal(
+    pickCurrentDirectSession([hubNewer, normalDirect], 'bot_a')?.id,
+    'direct_1',
+    '中枢总管即使更新也不得成为分身默认单聊'
+  );
+
+  const entries = buildAssistantEntries([hubNewer, normalDirect], [botA], {});
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]!.currentSession?.id, 'direct_1', '助理单聊预览不得被中枢总管覆盖');
+  assert.deepEqual(
+    entries[0]!.directSessions.map((s) => s.id),
+    ['direct_1'],
+    'directSessions 不含中枢总管会话'
+  );
+});
+
+test('getSessionAttention/buildActivePulseEntries：后台 worker 让 idle 会话进入雷达', { timeout: 60_000 }, async () => {
+  const now = Date.now();
+  const mod = (await import('../apps/web/src/session-space.js' as any)) as {
+    getSessionAttention: typeof import('../apps/web/src/session-space.js').getSessionAttention;
+    buildActivePulseEntries: typeof import('../apps/web/src/session-space.js').buildActivePulseEntries;
+    aggregateWorkerStatsBySession: typeof import('../apps/web/src/session-space.js').aggregateWorkerStatsBySession;
+  };
+  const { getSessionAttention, buildActivePulseEntries, aggregateWorkerStatsBySession } = mod;
+
+  // 基础注意力不受影响（未传 workerStats 时行为不变）
+  assert.equal(getSessionAttention({ status: 'failed' }, 0), 'failed');
+  assert.equal(getSessionAttention({ status: 'idle' }, 3), 'done_unseen');
+  assert.equal(getSessionAttention({ status: 'running' }, 0), 'working');
+  assert.equal(getSessionAttention({ status: 'idle' }, 0), 'idle');
+
+  // workerStats：失败后台 worker → failed；活跃 worker 压过 done_unseen → working
+  assert.equal(getSessionAttention({ status: 'idle' }, 0, { failedCount: 1 }), 'failed');
+  assert.equal(getSessionAttention({ status: 'idle' }, 5, { activeCount: 2 }), 'working');
+  assert.equal(getSessionAttention({ status: 'idle' }, 5, { activeCount: 0 }), 'done_unseen');
+  assert.equal(getSessionAttention({ status: 'running' }, 0, { activeCount: 0 }), 'working');
+
+  // 聚合：pending/running/waiting 计 active，failed 计 failed，其余不计
+  const stats = aggregateWorkerStatsBySession([
+    { workerId: 'w1', parentSessionId: 's1', status: 'running' },
+    { workerId: 'w2', parentSessionId: 's1', status: 'pending' },
+    { workerId: 'w3', parentSessionId: 's1', status: 'waiting' },
+    { workerId: 'w4', parentSessionId: 's1', status: 'completed' },
+    { workerId: 'w5', parentSessionId: 's2', status: 'failed' },
+  ] as any);
+  assert.deepEqual(stats.get('s1'), { activeCount: 3, failedCount: 0 });
+  assert.deepEqual(stats.get('s2'), { activeCount: 0, failedCount: 1 });
+
+  // 雷达：前台 idle 但后台 worker 活跃/失败的会话必须出现
+  const botDev = mkBot({ id: 'bot_dev', name: 'Dev Bot', workspaceDir: '/root/code/botd' });
+  const botLife = mkBot({ id: 'bot_life', name: 'Life Bot' });
+  const idleWithWorker = mkSession({ id: 's_bg', leadBotId: 'bot_dev', status: 'idle' });
+  const idleWithFailed = mkSession({ id: 's_bgf', leadBotId: 'bot_life', status: 'idle' });
+  const plainIdle = mkSession({ id: 's_quiet', leadBotId: 'bot_life', status: 'idle' });
+
+  const globalWorkers = [
+    { workerId: 'w-run', conversationId: 'c1', parentSessionId: 's_bg', botId: 'bot_dev', title: '重构 worker', status: 'running', startedAt: new Date(now - 30_000).toISOString() },
+    { workerId: 'w-fail', conversationId: 'c2', parentSessionId: 's_bgf', botId: 'bot_life', title: '失败 worker', status: 'failed', startedAt: new Date(now - 30_000).toISOString() },
+    { workerId: 'w-other', conversationId: 'c3', parentSessionId: 'sess_unknown', botId: 'bot_dev', title: '孤儿 worker', status: 'running', startedAt: new Date(now - 30_000).toISOString() },
+  ] as any[];
+
+  const pulse = buildActivePulseEntries(
+    [idleWithWorker, idleWithFailed, plainIdle],
+    [botDev, botLife],
+    {},
+    'priority',
+    globalWorkers
+  );
+  const byId = new Map(pulse.map((p) => [p.session.id, p]));
+  assert.equal(byId.get('s_bg')?.attention, 'working', '后台 worker 运行 → 会话 working 入雷达');
+  assert.equal(byId.get('s_bgf')?.attention, 'failed', '后台 worker 失败 → 会话 failed 入雷达');
+  assert.ok(!byId.has('s_quiet'), '无 worker 且 idle 的会话不入雷达');
+  assert.ok(!byId.has('sess_unknown'), 'worker 不能先于会话凭空制造雷达条目');
+
+  // 不传 globalWorkers 时保持旧行为：idle 会话不入雷达
+  const legacyPulse = buildActivePulseEntries([idleWithWorker, plainIdle], [botDev, botLife], {}, 'priority');
+  assert.equal(legacyPulse.length, 0, '未传 globalWorkers 时纯 idle 会话不入雷达');
+});
+
+test('Sidebar 中枢模式：⚡ 中枢总管置顶卡片与全局 Worker 舰队渲染', { timeout: 60_000 }, async () => {
+  const sidebarPath = fileURLToPath(
+    new URL('../apps/web/src/components/Sidebar.tsx', import.meta.url)
+  );
+  const source = readFileSync(sidebarPath, 'utf-8');
+
+  // 1. 中枢总管置顶卡片：位于活跃雷达块内、标题头之前，含ⓡ图标/徽标/副标题文案
+  const pulseStart = source.indexOf('===== 编程模式（下半区）/ 中枢模式（第 1 块）：活跃任务雷达');
+  const pulseChildren = source.indexOf('===== 中枢模式（第 2 块）：子代理任务');
+  assert.ok(pulseStart >= 0 && pulseChildren > pulseStart, '区块标记必须存在且有序');
+  const pulseSection = source.slice(pulseStart, pulseChildren);
+  assert.match(pulseSection, /中枢总管/, '雷达块内应渲染中枢总管卡片');
+  assert.match(pulseSection, /sidebarMode === 'pulse' && \(/, '卡片仅中枢模式渲染');
+  assert.match(pulseSection, /自然语言调度/, '卡片带自然语言调度徽标');
+  assert.match(pulseSection, /直接对话派发跨项目后台任务/, '卡片副标题说明调度能力');
+  assert.match(pulseSection, /pickHubAssistantSession|hubAssistantSession/, '卡片高亮依赖中枢总管会话定位');
+  assert.match(pulseSection, /onOpenHubAssistant/, '无会话时回退创建中枢总管');
+  // 空态文案保留
+  assert.match(pulseSection, /所有智能体空闲待命/, '零活跃空态文案保留');
+
+  // 2. 第 2 块：全局 Worker 舰队与子会话同区渲染，计数为二者之和
+  const childrenSection = source.slice(pulseChildren, source.indexOf('===== 中枢模式（第 3 块）：已归档'));
+  assert.match(childrenSection, /filteredGlobalWorkers/, '子代理任务区应渲染全局后台 Worker');
+  assert.match(
+    childrenSection,
+    /filteredGlobalWorkers\.length \+ childSessions\.length/,
+    '计数为 Worker + 子会话之和'
+  );
+  assert.match(source, /GlobalWorkerRow/, '应存在后台 Worker 行组件');
+  assert.match(source, /worker\.worktreePath && \(/, 'Worker 行应展示 worktree 徽标');
+  assert.match(source, /worktree\s+<\/span>/, 'worktree 徽标文案');
+  assert.match(childrenSection, /onInspectWorker/, '点击 Worker 应支持打开巡检抽屉');
+  assert.match(childrenSection, /onInspectWorker\(worker\.parentSessionId, worker\.workerId\)/, '巡检携带父会话与 workerId');
+
+  // 3. 数据接线：globalWorkers 贯穿雷达/空间分组/注意力判定，切模式自动开总管
+  assert.match(source, /buildActivePulseEntries\(sessions, bots, unreadCounts, pulseSortMode, globalWorkers\)/, '雷达接入 globalWorkers');
+  assert.match(source, /buildSpaceGroups\(sessions, bots, unreadCounts, globalWorkers\)/, '空间分组接入 globalWorkers');
+  assert.match(source, /aggregateWorkerStatsBySession\(globalWorkers\)/, '注意力判定接入 worker 统计');
+  assert.match(source, /if \(mode === 'pulse'\) onOpenHubAssistant\?\.\(\);/, '切入中枢模式即打开中枢总管');
+});
+
+// ==========================================
 // 三场景正交编排：助理（通讯录）/ 编程（Spaces+雷达）/ 中枢（脉冲+归档治理）
 // ==========================================
 

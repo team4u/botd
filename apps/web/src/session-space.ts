@@ -4,6 +4,35 @@
  */
 import type { SessionRecord, BotConfig } from '@botd/protocol';
 
+// ---------------------------------------------------------------------------
+// 中枢总管（Hub Assistant）：Pulse 中枢模式的常驻自然语言调度入口
+// ---------------------------------------------------------------------------
+
+/** 中枢总管会话的固定标题（⚡ 中枢总管）：全局唯一、跨会话复用的持久会话 */
+export const HUB_ASSISTANT_TITLE = '⚡ 中枢总管';
+
+/** 判定是否为中枢总管会话：未归档、无父会话、标题精确匹配 */
+export function isHubAssistantSession(
+  session: Pick<SessionRecord, 'title' | 'archived' | 'parentSessionId'>
+): boolean {
+  return !session.archived && !session.parentSessionId && session.title === HUB_ASSISTANT_TITLE;
+}
+
+/** 选取当前中枢总管会话（同标题存在多条时取最近活跃的一条） */
+export function pickHubAssistantSession(sessions: SessionRecord[]): SessionRecord | undefined {
+  let latest: SessionRecord | undefined;
+  let latestTime = -Infinity;
+  for (const s of sessions) {
+    if (!isHubAssistantSession(s)) continue;
+    const time = activityTimeOf(s);
+    if (time > latestTime) {
+      latest = s;
+      latestTime = time;
+    }
+  }
+  return latest;
+}
+
 export function pickCurrentDirectSession(
   sessions: SessionRecord[],
   botId: string
@@ -13,6 +42,8 @@ export function pickCurrentDirectSession(
   for (const s of sessions) {
     if (s.archived) continue;
     if (s.parentSessionId) continue;
+    // 中枢总管会话专属 Pulse 中枢模式，不得篡位普通单聊入口
+    if (isHubAssistantSession(s)) continue;
     if (s.leadBotId !== botId) continue;
     const time = new Date(s.updatedAt).getTime();
     if (Number.isFinite(time) && time > latestTime) {
@@ -63,17 +94,76 @@ export const ATTENTION_VISUALS: Record<
   },
 };
 
+// ---------------------------------------------------------------------------
+// 全局后台 Worker 脉冲（Global Worker Pulse）
+// ---------------------------------------------------------------------------
+
+/**
+ * 全局后台 Worker 脉冲条目：从 hub `/api/workers` 聚合的跨会话后台子任务摘要。
+ * 前台 Router 会话 idle 时，其后台 worker 依然让会话在雷达中保持活跃。
+ */
+export interface GlobalWorkerPulseItem {
+  workerId: string;
+  conversationId: string;
+  parentSessionId: string;
+  botId: string;
+  title: string;
+  kind?: 'worker' | 'workflow' | 'speculative';
+  status: 'pending' | 'running' | 'waiting' | 'completed' | 'failed' | 'aborted';
+  nodeId?: string;
+  cwd?: string;
+  worktreePath?: string;
+  branchName?: string;
+  threadKeys?: string[];
+  startedAt: string;
+  updatedAt?: string;
+  summary?: string;
+  sessionTitle?: string;
+  workspaceDir?: string;
+}
+
+/** 活跃（进行中）worker 判定：pending/running/waiting 均视为后台仍在干活 */
+const isActiveWorkerStatus = (status: GlobalWorkerPulseItem['status']): boolean =>
+  status === 'pending' || status === 'running' || status === 'waiting';
+
+/**
+ * 按父会话聚合 worker 统计：activeCount（进行中）/ failedCount（失败待处理）。
+ * 用于让「前台 idle 但后台有 worker」的会话在雷达中获得 working/failed 注意力。
+ */
+export function aggregateWorkerStatsBySession(
+  globalWorkers: GlobalWorkerPulseItem[]
+): Map<string, { activeCount: number; failedCount: number }> {
+  const stats = new Map<string, { activeCount: number; failedCount: number }>();
+  for (const worker of globalWorkers) {
+    const entry = stats.get(worker.parentSessionId) ?? { activeCount: 0, failedCount: 0 };
+    if (isActiveWorkerStatus(worker.status)) entry.activeCount += 1;
+    else if (worker.status === 'failed') entry.failedCount += 1;
+    stats.set(worker.parentSessionId, entry);
+  }
+  return stats;
+}
+
 /**
  * 会话注意力优先级判定（纯函数）：
- * failed(4) > done_unseen(3，刚干完活还没验收) > working(2) > idle(1)。
+ * failed(4) > done_unseen(3，刚干完活还没验收；后台仍有 worker 活跃时不算完成)
+ * > working(2，自身运行或后台 worker 运行) > idle(1)。
  */
 export function getSessionAttention(
   session: Pick<SessionRecord, 'status'>,
-  unreadCount: number
+  unreadCount: number,
+  workerStats?: { activeCount?: number; failedCount?: number }
 ): SessionAttentionLevel {
-  if (session.status === 'failed') return 'failed';
-  if (session.status === 'idle' && unreadCount > 0) return 'done_unseen';
-  if (session.status === 'running' || session.status === 'queued') return 'working';
+  if (session.status === 'failed' || (workerStats?.failedCount ?? 0) > 0) return 'failed';
+  if (session.status === 'idle' && unreadCount > 0 && (workerStats?.activeCount ?? 0) === 0) {
+    return 'done_unseen';
+  }
+  if (
+    session.status === 'running' ||
+    session.status === 'queued' ||
+    (workerStats?.activeCount ?? 0) > 0
+  ) {
+    return 'working';
+  }
   return 'idle';
 }
 
@@ -132,9 +222,11 @@ export const activityTimeOf = (s: SessionRecord) =>
 export function buildSpaceGroups(
   sessions: SessionRecord[],
   bots: BotConfig[],
-  unreadCounts: Record<string, number> = {}
+  unreadCounts: Record<string, number> = {},
+  globalWorkers: GlobalWorkerPulseItem[] = []
 ): SpaceGroup[] {
   const botsById = new Map(bots.map((b) => [b.id, b] as const));
+  const workerStatsBySession = aggregateWorkerStatsBySession(globalWorkers);
   const groups = new Map<string, SpaceGroup>();
   const ensureGroup = (dir: string): SpaceGroup => {
     let group = groups.get(dir);
@@ -179,7 +271,11 @@ export function buildSpaceGroups(
   for (const group of list) {
     group.sessions.sort((a, b) => activityTimeOf(b) - activityTimeOf(a));
     group.topAttention = group.sessions.reduce<SessionAttentionLevel>((acc, s) => {
-      const level = getSessionAttention(s, unreadCounts[s.id] ?? 0);
+      const level = getSessionAttention(
+        s,
+        unreadCounts[s.id] ?? 0,
+        workerStatsBySession.get(s.id)
+      );
       return ATTENTION_PRIORITY[level] > ATTENTION_PRIORITY[acc] ? level : acc;
     }, 'idle');
   }
@@ -245,6 +341,8 @@ export function buildAssistantEntries(
     for (const s of sessions) {
       if (s.archived || s.parentSessionId) continue;
       if (s.leadBotId !== bot.id) continue;
+      // 中枢总管会话专属中枢模式，不得作为普通分身的单聊预览来源
+      if (isHubAssistantSession(s)) continue;
       allActiveSessions.push(s);
       const dir = resolveSessionWorkspaceDir(s, botsById);
       if (!dir) directSessions.push(s);
@@ -311,6 +409,7 @@ export interface ActivePulseEntry {
 
 /**
  * 全局活跃雷达（纯函数）：收集所有非 idle 的未归档会话（含子代理任务）。
+ * globalWorkers 让「前台 idle 但后台 worker 活跃/失败」的会话同样进入雷达。
  * sortMode='priority' 按 ATTENTION_PRIORITY 降序再按活跃时间降序；
  * sortMode='grouped' 先按容器标签分组（字典序），组内按优先级降序。
  */
@@ -318,14 +417,16 @@ export function buildActivePulseEntries(
   sessions: SessionRecord[],
   bots: BotConfig[],
   unreadCounts: Record<string, number> = {},
-  sortMode: 'priority' | 'grouped' = 'priority'
+  sortMode: 'priority' | 'grouped' = 'priority',
+  globalWorkers: GlobalWorkerPulseItem[] = []
 ): ActivePulseEntry[] {
   const botsById = new Map(bots.map((b) => [b.id, b] as const));
+  const workerStatsBySession = aggregateWorkerStatsBySession(globalWorkers);
   const entries: ActivePulseEntry[] = [];
   for (const session of sessions) {
     if (session.archived) continue;
     const unread = unreadCounts[session.id] ?? 0;
-    const attention = getSessionAttention(session, unread);
+    const attention = getSessionAttention(session, unread, workerStatsBySession.get(session.id));
     if (attention === 'idle') continue;
     const leadBot = botsById.get(session.leadBotId);
     const spacePath = resolveSessionWorkspaceDir(session, botsById);
