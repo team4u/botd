@@ -8,11 +8,6 @@ import {
   type BotdUiSpec,
 } from '../packages/protocol/src/index.js';
 import { BUILTIN_SKILL_MD, BUILTIN_SKILL_VERSION } from '../apps/node/src/builtin-skill.js';
-import { GroupRouter } from '../apps/hub/src/group-router.js';
-import { HubDatabase } from '../apps/hub/src/db.js';
-import { AuthManager } from '../apps/hub/src/auth.js';
-import { NodeConnectionManager } from '../apps/hub/src/ws-hub.js';
-import { SseHub } from '../apps/hub/src/sse.js';
 
 // ---------------------------------------------------------------------------
 // 1. validateUiSpec: Valid Spec with all 15 components, $state, submit action
@@ -469,85 +464,6 @@ test('validateUiSpec 拦截新组件的非法用法：Table 列数不匹配 / mo
   if (!badMono.ok) {
     assert.ok(badMono.errors.some((e) => e.includes('(Callout) props.mono must be a boolean')));
   }
-});
-
-// ---------------------------------------------------------------------------
-// 3. Hub GroupRouter.requestHumanInput: previewType: 'ui' validation
-// ---------------------------------------------------------------------------
-
-test('Hub GroupRouter.requestHumanInput 校验 UI Spec：拒绝非法 Spec，放行合法 Spec', async () => {
-  const db = new HubDatabase({ dbPath: ':memory:' });
-  const auth = new AuthManager();
-  const sse = new SseHub();
-  const connections = new NodeConnectionManager(db, auth, sse);
-  const router = new GroupRouter(db, connections, sse);
-
-  // Seed a user and a session
-  db.createUser({ id: 'user_1', username: 'admin', passwordHash: 'hash', role: 'admin' });
-  db.createSession({
-    id: 'sess_hub_ui',
-    title: 'UI Test Session',
-    leadBotId: 'bot_1',
-    ownerId: 'user_1',
-  });
-
-  // 1. Rejects when previewType: 'ui' but previewContent is missing
-  await assert.rejects(
-    () =>
-      router.requestHumanInput({
-        sessionId: 'sess_hub_ui',
-        botId: 'bot_1',
-        prompt: 'Confirm action',
-        previewType: 'ui',
-      }),
-    /Invalid UI spec: Missing UI previewContent/,
-  );
-
-  // 2. Rejects when previewType: 'ui' with invalid UI Spec
-  await assert.rejects(
-    () =>
-      router.requestHumanInput({
-        sessionId: 'sess_hub_ui',
-        botId: 'bot_1',
-        prompt: 'Confirm action',
-        previewType: 'ui',
-        previewContent: JSON.stringify({ root: 'r', elements: { r: { type: 'InvalidWidget' } } }),
-      }),
-    /Invalid UI spec: Unknown component type "InvalidWidget"/,
-  );
-
-  // 3. Resolves and normalizes valid UI Spec
-  const validSpec = {
-    root: 'card',
-    elements: {
-      card: {
-        type: 'Card',
-        props: { title: 'Hub Validated Card' },
-      },
-    },
-  };
-
-  const askPromise = router.requestHumanInput({
-    sessionId: 'sess_hub_ui',
-    botId: 'bot_1',
-    prompt: 'Confirm action',
-    previewType: 'ui',
-    previewContent: JSON.stringify(validSpec),
-    timeoutSeconds: 10,
-  });
-
-  // Verify pending ask was recorded in DB with normalized JSON
-  const pending = db.getPendingAsksForSession('sess_hub_ui');
-  assert.equal(pending.length, 1);
-  assert.equal(pending[0].previewType, 'ui');
-  assert.match(pending[0].previewContent!, /Hub Validated Card/);
-
-  // Resolve the ask
-  const answered = router.respondToAsk('sess_hub_ui', pending[0].id, JSON.stringify({ decision: 'ok' }));
-  assert.ok(answered);
-
-  const res = await askPromise;
-  assert.equal(res.answer, JSON.stringify({ decision: 'ok' }));
 });
 
 // ---------------------------------------------------------------------------

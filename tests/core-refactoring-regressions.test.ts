@@ -119,8 +119,6 @@ async function createHubFixture(t: TestContext) {
 
   const addNode = async (
     botInputs: (string | BotConfig)[],
-    runTurn?: NodeRpcFunctions['runTurn'],
-    cancelTurn?: NodeRpcFunctions['cancelTurn'],
     extensions: string[] = ['demo-ext'],
     cookieOverride?: string
   ) => {
@@ -199,13 +197,6 @@ async function createHubFixture(t: TestContext) {
         installResource: async (input) => ({ kind: 'skill', id: input.customId || 'installed' }),
         deleteResource: async () => {},
         restartDaemon: async () => ({ ok: true as const, pid: 1234 }),
-        getCommands: async () => [],
-        runTurn: runTurn ?? (async (input) => ({
-          replyText: `Reply from ${input.botId}`,
-          modelBadge: 'openai/gpt-4o',
-        })),
-        cancelTurn: cancelTurn ?? (async () => {}),
-        resetSession: async () => {},
         readResourcePackage: async () => ({ files: [], kind: 'skill', id: 'stub' }),
       },
       {
@@ -544,117 +535,4 @@ test('协议层权威校验原语（isSafeId, isValidBotEnvKey, isBotConfig）�
   assert.equal(isBotConfig('string'), false);
 });
 
-// -------------------------------------------------------------------------------------------------
-// 测试 4：GroupRouter 串/并行统一管线的回合执行与错误隔离验证
-// -------------------------------------------------------------------------------------------------
-test('GroupRouter 串/并行统一管线的回合执行与错误隔离验证', { timeout: 60_000 }, async (t) => {
-  const f = await createHubFixture(t);
 
-  const deliveredIncremental = new Map<string, string[]>();
-  let failingBotId: string | null = null;
-
-  await f.addNode(
-    [
-      {
-        id: 'lead_bot',
-        nodeId: '',
-        name: 'Lead Bot',
-        description: 'Session Leader',
-        modelProvider: 'openai',
-        modelId: 'gpt-4o',
-        thinkingLevel: 'medium',
-        enabledSkills: [],
-        updatedAt: new Date().toISOString(),
-      },
-      {
-        id: 'member_a',
-        nodeId: '',
-        name: 'Member A',
-        description: 'Reviewer A',
-        modelProvider: 'openai',
-        modelId: 'gpt-4o',
-        thinkingLevel: 'medium',
-        enabledSkills: [],
-        updatedAt: new Date().toISOString(),
-      },
-      {
-        id: 'member_b',
-        nodeId: '',
-        name: 'Member B',
-        description: 'Reviewer B',
-        modelProvider: 'openai',
-        modelId: 'gpt-4o',
-        thinkingLevel: 'medium',
-        enabledSkills: [],
-        updatedAt: new Date().toISOString(),
-      },
-    ],
-    async (input) => {
-      const history = deliveredIncremental.get(input.botId) ?? [];
-      history.push(input.incrementalMessages);
-      deliveredIncremental.set(input.botId, history);
-
-      if (input.botId === failingBotId) {
-        throw new Error(`Turn execution exploded for @${input.botId}`);
-      }
-
-      return {
-        replyText: `Review reply from @${input.botId}`,
-        modelBadge: 'openai/gpt-4o',
-      };
-    }
-  );
-
-  // --- Part 4: 单主控 Bot 回合执行与错误隔离验证 ---
-  failingBotId = null;
-  deliveredIncremental.clear();
-
-  const normalSession = await f.json<SessionRecord>('/api/sessions', 'POST', {
-    title: 'Normal Direct Session',
-    leadBotId: 'lead_bot',
-  });
-
-  await f.json(`/api/sessions/${normalSession.id}/messages`, 'POST', {
-    content: 'User message to lead bot',
-  });
-
-  await waitFor(
-    () => f.messages(normalSession.id),
-    (msgs) => msgs.some((m) => m.senderBotId === 'lead_bot')
-  );
-  await f.idle(normalSession.id);
-
-  const normalMessages = await f.messages(normalSession.id);
-  const leadReply = normalMessages.find((m) => m.role === 'assistant' && m.senderBotId === 'lead_bot');
-  assert(leadReply, 'lead_bot reply must exist and succeed');
-  assert.equal(leadReply.content, 'Review reply from @lead_bot');
-
-  const finalNormalSess = (await f.json<SessionRecord[]>('/api/sessions')).find((s) => s.id === normalSession.id);
-  assert.equal(finalNormalSess?.status, 'idle', 'Successful session must end in idle status');
-
-  // 失败隔离验证
-  failingBotId = 'lead_bot';
-  deliveredIncremental.clear();
-
-  const failSession = await f.json<SessionRecord>('/api/sessions', 'POST', {
-    title: 'Failing Direct Session',
-    leadBotId: 'lead_bot',
-  });
-
-  await f.json(`/api/sessions/${failSession.id}/messages`, 'POST', {
-    content: 'User message causing turn error',
-  });
-
-  await waitFor(
-    () => f.json<SessionRecord[]>('/api/sessions'),
-    (list) => list.find((s) => s.id === failSession.id)?.status === 'failed'
-  );
-
-  const failMessages = await f.messages(failSession.id);
-  const sysMsg = failMessages.find((m) => m.role === 'system' && m.content.includes('lead_bot'));
-  assert(sysMsg, 'System error message must be recorded for failed bot turn');
-  assert(sysMsg.content.includes('Turn execution exploded for @lead_bot'));
-
-  const finalFailSess = (await f.json<SessionRecord[]>('/api/sessions')).find((s) => s.id === failSession.id);
-  assert.equal(finalFailSess?.status, 'failed', 'Failing session must terminate with failed status');
-});
