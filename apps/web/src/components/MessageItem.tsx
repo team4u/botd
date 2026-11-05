@@ -15,7 +15,6 @@ import type {
   NodeRecord,
   ToolCallRecord,
   MessageAttachment,
-  SubagentRunRecord,
   TurnBlock,
 } from '@botd/protocol';
 import { Markdown } from './Markdown.js';
@@ -36,12 +35,11 @@ import {
 import {
   ThinkingTrace,
   CollapsedProcessGroup,
-  SubagentRunsPanel,
 } from './MessageItem/ProcessViews.js';
 
 // 子视图组件重导出：既有调用方（MessageTimeline / WorkersDrawer 等）统一从 MessageItem 导入
 export { SingleToolView, ToolGroupView } from './MessageItem/ToolViews.js';
-export { TypingDots, ThinkingTrace, CollapsedProcessGroup, SubagentRunsPanel } from './MessageItem/ProcessViews.js';
+export { TypingDots, ThinkingTrace, CollapsedProcessGroup } from './MessageItem/ProcessViews.js';
 
 
 /**
@@ -321,8 +319,6 @@ interface MessageItemProps {
   onStartEdit?: (message: MessageRecord) => void;
   /** 从该消息（含）分叉出新会话并自动切换（MessageItem 不感知 sessionId，由上层闭包绑定） */
   onForkMessage?: (messageId: string) => void | Promise<void>;
-  /** 点击子代理运行记录打开右侧详情抽屉 */
-  onInspectSubagentRun?: (run: SubagentRunRecord) => void;
 }
 
 
@@ -409,7 +405,6 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   isEditing = false,
   onStartEdit,
   onForkMessage,
-  onInspectSubagentRun,
 }) => {
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
@@ -418,15 +413,6 @@ export const MessageItem: React.FC<MessageItemProps> = ({
 
   const bot = message.senderBotId ? botMap.get(message.senderBotId) : undefined;
   const node = bot ? nodeMap.get(bot.nodeId) : undefined;
-
-  // 历史消息过滤「自己挂自己」的 subagentRuns：
-  // 旧版本会把子代理自己发言的镜像 run（id 以 run_ 开头且 subagentId === 发送者自身）挂到它自己的消息上，
-  // 造成公屏消息头顶出现冗余的自指卡片；真实子代理卡片（其他 bot 的 runs）不受影响。
-  // 注：这里不用 useMemo——既有单测以普通函数方式直接调用 MessageItem，顶层 hooks 会破坏该用法；
-  // 过滤本身是廉价数组操作，外层 MemoizedMessageItem 已隔绝大多数重渲染。
-  const visibleSubagentRuns = (message.subagentRuns || []).filter(
-    (r) => !(r.subagentId === message.senderBotId && r.id.startsWith('run_'))
-  );
 
   // 跨 BOT 回调黄卡：正文包含指向子会话的 #?s=sess_... 链接时，右上角提供「查看对话 / 追问」内联入口
   const callbackChildSessionId = isCallback
@@ -605,11 +591,6 @@ export const MessageItem: React.FC<MessageItemProps> = ({
         )}
       </div>
 
-      {/* 子代理协同面板（过滤历史数据中「自己挂自己」的自指 run 记录） */}
-      {visibleSubagentRuns.length > 0 && (
-        <SubagentRunsPanel runs={visibleSubagentRuns} onInspectSubagentRun={onInspectSubagentRun} />
-      )}
-
       {/* 统一交错时间线渲染器（已落库完成消息：过程块折叠为 1 行摘要） */}
       <AssistantTurnContent
         blocks={message.blocks}
@@ -647,8 +628,7 @@ function areMessageItemPropsEqual(prev: MessageItemProps, next: MessageItemProps
     prev.canEdit !== next.canEdit ||
     prev.isEditing !== next.isEditing ||
     prev.onStartEdit !== next.onStartEdit ||
-    prev.onForkMessage !== next.onForkMessage ||
-    prev.onInspectSubagentRun !== next.onInspectSubagentRun
+    prev.onForkMessage !== next.onForkMessage
   ) {
     return false;
   }

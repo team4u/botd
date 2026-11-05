@@ -7,13 +7,12 @@ interface UseMentionMenuParams {
   setContent: React.Dispatch<React.SetStateAction<string>>;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   memberBots: BotConfig[];
-  isSubagentSession: boolean;
 }
 
 /**
  * @ 提及浮层：触发检测、成员过滤、键盘导航与提及插入。
  */
-export function useMentionMenu({ content, setContent, textareaRef, memberBots, isSubagentSession }: UseMentionMenuParams) {
+export function useMentionMenu({ content, setContent, textareaRef, memberBots }: UseMentionMenuParams) {
   const [showMentions, setShowMentions] = useState(false);
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -55,12 +54,11 @@ export function useMentionMenu({ content, setContent, textareaRef, memberBots, i
 
   /**
    * @ 触发检测（checkTriggers 的提及分支）：命中时开启浮层，未命中时关闭。
-   * 子代理会话中禁止继续 @ 其他智能体。
    */
   const checkMentionTrigger = useCallback((text: string, cursor: number) => {
     const textBefore = text.slice(0, cursor);
     const mentionMatch = /(?:^|\s)@([a-zA-Z0-9_-]*)$/.exec(textBefore);
-    if (!isSubagentSession && mentionMatch && memberBots.length > 0) {
+    if (mentionMatch && memberBots.length > 0) {
       const matchIndex = mentionMatch.index + (mentionMatch[0].startsWith('@') ? 0 : 1);
       setMentionQuery(mentionMatch[1]);
       setMentionPosition({ start: matchIndex, end: cursor });
@@ -69,7 +67,7 @@ export function useMentionMenu({ content, setContent, textareaRef, memberBots, i
     } else {
       setShowMentions(false);
     }
-  }, [isSubagentSession, memberBots.length]);
+  }, [memberBots.length]);
 
   /**
    * 浮层打开时的键盘处理。返回 true 表示事件已消费。

@@ -29,7 +29,6 @@ import type {
   NodeWithBots,
   MessageAttachment,
   PendingAskRecord,
-  SubagentRunRecord,
   ChatCommand,
 } from '@botd/protocol';
 import type { StreamingAssistantState, SessionExtensionUiState, ExtensionWidgetState } from '../types';
@@ -70,8 +69,6 @@ interface ChatViewProps {
   onRefreshNodes?: () => Promise<void>;
   /** 各 BOT 的流式状态；多个成员同时运行时并排展示。 */
   streamingStates: StreamingAssistantState[];
-  /** 各 BOT 当前活跃的子代理协同执行轨迹 */
-  activeSubagentRuns?: Record<string, SubagentRunRecord[]>;
   /** 会话级扩展 UI 状态（ctx.ui 桥接：status 徽标 / workingMessage / composer 挂件） */
   extensionUiState?: SessionExtensionUiState;
   onSendMessage: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
@@ -132,7 +129,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
   nodes,
   onRefreshNodes,
   streamingStates,
-  activeSubagentRuns = {},
   extensionUiState,
   onSendMessage,
   onEditMessage,
@@ -1346,16 +1342,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
         highlightMessageId={highlightMessageId}
         onStartEdit={startEdit}
         onForkMessage={handleForkMessage}
-        onInspectSubagentRun={(run) => {
-          if (run) openWorkersDrawer(run.id);
-        }}
         editingMessage={editingMessage}
         canEdit={canEdit}
         hasEarlierMessages={hasEarlierMessages}
         loadingEarlier={loadingEarlier}
         onLoadEarlier={onLoadEarlier}
         keyboardInset={keyboardInset}
-        activeSubagentRunsFor={activeSubagentRuns}
       />
 
       {/* 人机协同交互卡片：BOT 通过 botd ask 发起的待响应请求，置于输入框上方 */}
@@ -1421,7 +1413,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
       <ChatInput
         sessionId={session.id}
         leadBotId={session.leadBotId}
-        isSubagentSession={false}
         botMap={botMap}
         onSendMessage={onSendMessage}
         memberBots={mentionableBots}

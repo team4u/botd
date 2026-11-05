@@ -1,14 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  Check,
   ChevronRight,
-  Loader2,
   Brain,
-  Square,
-  X,
-  Users,
 } from 'lucide-react';
-import type { SubagentRunRecord, TurnBlock } from '@botd/protocol';
+import type { TurnBlock } from '@botd/protocol';
 import { Markdown } from '../Markdown.js';
 import { formatDuration, type TimelineItem } from '../../message-format.js';
 import { SingleToolView, ToolGroupView } from './ToolViews.js';
@@ -30,136 +25,6 @@ export const TypingDots: React.FC<{ className?: string }> = ({ className = '' })
     />
   </span>
 );
-
-/**
- * 子代理协同执行面板（Web 时间轴步骤流风格）
- * 点击任意子代理行（running / done / error / stopped）打开右侧「子代理运行详情抽屉」
- */
-export const SubagentRunsPanel: React.FC<{
-  runs: SubagentRunRecord[];
-  onInspectSubagentRun?: (run: SubagentRunRecord) => void;
-}> = ({ runs, onInspectSubagentRun }) => {
-  const hasRunning = runs.some((r) => r.status === 'running');
-  const [expanded, setExpanded] = useState(hasRunning);
-
-  React.useEffect(() => {
-    if (hasRunning) {
-      setExpanded(true);
-    }
-  }, [hasRunning]);
-
-  if (!runs || runs.length === 0) return null;
-
-  const names = runs.map((r) => r.subagentName || `@${r.subagentId}`).join('、');
-
-  return (
-    <div className="my-2 max-w-2xl">
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="flex items-center gap-1.5 text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors cursor-pointer select-none min-w-0"
-        title={names}
-      >
-        <Users className="w-3.5 h-3.5 shrink-0" />
-        <span className="font-medium shrink-0">子代理协同</span>
-        <span className="text-zinc-400 dark:text-zinc-500 truncate">
-          {runs.length} 个子代理 · {names}
-        </span>
-        {hasRunning && (
-          <span className="inline-flex items-center gap-1 text-blue-500 dark:text-blue-400 shrink-0">
-            <span className="w-1 h-1 rounded-full bg-blue-500 animate-pulse" />
-            <span>运行中</span>
-          </span>
-        )}
-        <ChevronRight
-          className={`w-3.5 h-3.5 shrink-0 text-zinc-400 transition-transform duration-200 ${
-            expanded ? 'rotate-90' : ''
-          }`}
-        />
-      </button>
-
-      {expanded && (
-        <div className="mt-2 relative">
-          {runs.length > 1 && (
-            <span
-              className="absolute left-[11px] top-2 bottom-2 w-px bg-zinc-200 dark:bg-zinc-800"
-              aria-hidden="true"
-            />
-          )}
-          <div className="space-y-2">
-            {runs.map((run) => {
-              return (
-                <div key={run.id} className="relative flex gap-2">
-                  {/* 状态节点：运行中旋转 / 失败叉 / 停止点 / 完成勾 */}
-                  <span className="z-10 w-6 h-6 rounded-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 flex items-center justify-center shrink-0">
-                    {run.status === 'running' ? (
-                      <Loader2 className="w-3 h-3 text-blue-500 animate-spin-fast" />
-                    ) : run.status === 'error' ? (
-                      <X className="w-3 h-3 text-rose-500" />
-                    ) : run.status === 'stopped' ? (
-                      <Square className="w-3 h-3 text-zinc-400 dark:text-zinc-500" />
-                    ) : (
-                      <Check className="w-3 h-3 text-emerald-500" />
-                    )}
-                  </span>
-
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => onInspectSubagentRun?.(run)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        onInspectSubagentRun?.(run);
-                      }
-                    }}
-                    title="点击查看运行详情"
-                    className="flex-1 min-w-0 cursor-pointer"
-                  >
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="font-medium text-zinc-800 dark:text-zinc-200 text-xs">
-                        {run.subagentName || `@${run.subagentId}`}
-                      </span>
-                      {run.phase && (
-                        <span className="px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
-                          {run.phase}
-                        </span>
-                      )}
-                      {(run as { childSessionId?: string }).childSessionId && (
-                        <span className="px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/50 border border-blue-200/60 dark:border-blue-800/60 text-[10px] font-medium text-blue-600 dark:text-blue-300">
-                          跨BOT子会话
-                        </span>
-                      )}
-                      {typeof run.durationMs === 'number' && (
-                        <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500">
-                          {formatDuration(run.durationMs)}
-                        </span>
-                      )}
-                      {run.status === 'running' && (
-                        <span className="text-[11px] text-blue-500 dark:text-blue-400">
-                          运行中{run.currentTool ? ` · ${run.currentTool}` : ''}
-                        </span>
-                      )}
-                      {run.status === 'error' && (
-                        <span className="text-[11px] text-rose-500 dark:text-rose-400">失败</span>
-                      )}
-                      {run.status === 'stopped' && (
-                        <span className="text-[11px] text-zinc-400 dark:text-zinc-500">已停止</span>
-                      )}
-                      <ChevronRight className="ml-auto w-3.5 h-3.5 text-zinc-300 dark:text-zinc-600 shrink-0" />
-                    </div>
-
-                    <div className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400 truncate">{run.task}</div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
 
 /**
  * 深度思考轨迹（Thinking）：收起态为紫色呼吸胶囊，展开态为柔和卡片

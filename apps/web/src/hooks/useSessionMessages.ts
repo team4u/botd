@@ -4,7 +4,6 @@ import type {
   SessionRecord,
   MessageRecord,
   PendingAskRecord,
-  SubagentRunRecord,
   SessionSseEvent,
   MessageAttachment,
   TurnBlock,
@@ -15,7 +14,6 @@ import {
   type ExtensionWidgetState,
   type SessionExtensionUiState,
   type StreamingAssistantState,
-  type ToolExecutionState,
 } from '../types';
 import {
   mergeMessagesPage,
@@ -67,7 +65,7 @@ export interface SessionMessagesParams {
 }
 
 /**
- * 当前会话消息状态机：历史加载/分页、SSE 实时流式状态（thinking/text/tool/subagent）、
+ * 当前会话消息状态机：历史加载/分页、SSE 实时流式状态（thinking/text/tool）、
  * 人机协同 asks、取消与截断失效，epoch/seq 双计数器防护会话切换与乱序快照竞态。
  * SSE 事件应用入口为 applyLiveSessionEvent（由 useEventStream 按会话分流后调用）。
  */
@@ -94,8 +92,6 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
 
   // 多 BOT 并发流式状态（按 botId 隔离索引，互不覆盖）
   const [streamingStatesMap, setStreamingStatesMap] = useState<Record<string, StreamingAssistantState>>({});
-  // 活跃子代理执行轨迹（按主 BOT ID 隔离索引，供 ChatView 展示实时子代理协同）
-  const [subagentRunsMap, setSubagentRunsMap] = useState<Record<string, SubagentRunRecord[]>>({});
   const [cancelling, setCancelling] = useState(false);
 
   // 当前会话待处理的人机协同交互请求（botd ask）
@@ -302,7 +298,7 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
           return {
             botId: event.botId,
             delta: prev?.delta || '',
-            tools: prev?.tools || [],
+            tools: [],
             blocks: currentBlocks,
           };
         });
@@ -327,7 +323,7 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
           return {
             botId: event.botId,
             delta: (prev?.delta || '') + event.delta,
-            tools: prev?.tools || [],
+            tools: [],
             blocks: currentBlocks,
           };
         });
@@ -336,32 +332,6 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
 
       case 'tool_status': {
         updateStreamingStates(event.botId, (prev) => {
-          const toolItem: ToolExecutionState = {
-            id: event.toolCallId,
-            toolName: event.toolName,
-            status: event.status,
-            summary: event.summary,
-            args: event.args,
-            outputPreview: event.outputPreview,
-            durationMs: event.durationMs,
-            isError: event.isError,
-            ...(event.uiSpec ? { uiSpec: event.uiSpec } : {}),
-            updatedAt: Date.now(),
-          };
-
-          const currentTools = prev?.tools || [];
-          const existingIdx = currentTools.findIndex(
-            (t) =>
-              (event.toolCallId && t.id === event.toolCallId) ||
-              (!event.toolCallId && t.toolName === event.toolName && t.status === 'running')
-          );
-          let nextTools = [...currentTools];
-          if (existingIdx >= 0) {
-            nextTools[existingIdx] = toolItem;
-          } else {
-            nextTools.push(toolItem);
-          }
-
           const currentBlocks: TurnBlock[] = prev?.blocks ? [...prev.blocks] : [];
           const toolBlockId = event.toolCallId || event.toolName;
           const existingBlockIdx = currentBlocks.findIndex(
@@ -399,7 +369,7 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
           return {
             botId: event.botId,
             delta: prev?.delta || '',
-            tools: nextTools,
+            tools: [],
             blocks: currentBlocks,
           };
         });
@@ -481,7 +451,6 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
             }, 600);
             return prevMap;
           });
-          setSubagentRunsMap({});
           // 回合结束：清理 workingMessages（statuses/widgets 保留，由扩展显式清除或用户手动收起）
           setExtensionUiState((prev) =>
             Object.keys(prev.workingMessages).length > 0
@@ -537,39 +506,6 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
             widgets[ui.widgetKey] = widget;
           }
           return { ...prev, widgets };
-        });
-        break;
-      }
-
-      case 'subagent_status': {
-        setSubagentRunsMap((prev) => {
-          const list = prev[event.botId] || [];
-          const idx = list.findIndex((r) => r.id === event.run.id);
-          let nextList: SubagentRunRecord[];
-          if (idx >= 0) {
-            nextList = [...list];
-            nextList[idx] = event.run;
-          } else {
-            nextList = [...list, event.run];
-          }
-          return { ...prev, [event.botId]: nextList };
-        });
-        // 同步更新已落库消息中的 subagentRuns 对应项：后台完成 / resume / stop 更新时，
-        // 已落库消息卡片与打开的 Worker 检视抽屉都能实时热更新
-        setMessages((prev) => {
-          let changed = false;
-          const next = prev.map((msg) => {
-            if (!msg.subagentRuns || msg.subagentRuns.length === 0) return msg;
-            const idx = msg.subagentRuns.findIndex((r) => r.id === event.run.id);
-            if (idx < 0) return msg;
-            const runs = [...msg.subagentRuns];
-            runs[idx] = { ...runs[idx], ...event.run };
-            changed = true;
-            return { ...msg, subagentRuns: runs };
-          });
-          if (!changed) return prev;
-          messagesRef.current = next;
-          return next;
         });
         break;
       }
@@ -780,7 +716,6 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
     // 断线期间回合完成时 message_created/idle 已永久丢失，
     // 半截 streaming 气泡不清理会残留；若回合仍在进行，后续 text_delta 会自然重建
     setStreamingStatesMap(clearStreamingMap());
-    setSubagentRunsMap({});
     const sid = activeSessionIdRef.current;
     if (sid) loadMessagesForSession(sid, sessionEpochRef.current);
   };
@@ -791,7 +726,6 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
     loadingMessages,
     loadError,
     streamingStatesMap,
-    subagentRunsMap,
     cancelling,
     pendingAsks,
     extensionUiState,

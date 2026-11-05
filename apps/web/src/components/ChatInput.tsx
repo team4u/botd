@@ -33,7 +33,6 @@ interface ChatInputProps {
   sessionId?: string;
   leadBotId?: string;
   botMap?: Map<string, BotConfig>;
-  isSubagentSession?: boolean;
   disabled?: boolean;
   isRunning?: boolean;
   cancelling?: boolean;
@@ -57,7 +56,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   sessionId,
   leadBotId,
   botMap,
-  isSubagentSession = false,
   disabled = false,
   isRunning = false,
   cancelling = false,
@@ -85,7 +83,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const { pendingAttachments, setPendingAttachments, uploadingCount, uploadingFile, uploadTrackerRef, fileInputRef, resetOnSessionChange: resetUploadsOnSessionChange, uploadFiles } = uploads;
 
   const slash = useSlashMenu({ content, setContent, textareaRef, leadBotId, memberBots, botMap });
-  const mention = useMentionMenu({ content, setContent, textareaRef, memberBots, isSubagentSession });
+  const mention = useMentionMenu({ content, setContent, textareaRef, memberBots });
 
   // 当前主控 BOT：# 文件补全的工作区归属，也是底栏微操舱的秒切目标
   const currentBot = leadBotId && botMap ? botMap.get(leadBotId) : undefined;
