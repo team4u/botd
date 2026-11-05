@@ -33,6 +33,7 @@ import ThemeToggle from './ThemeToggle.js';
 import { api } from '../api.js';
 import {
   getSessionAttention,
+  aggregateWorkerStatsBySession,
   ATTENTION_VISUALS,
   resolveSessionWorkspaceDir,
   buildSpaceGroups,
@@ -40,7 +41,10 @@ import {
   buildActivePulseEntries,
   activityTimeOf,
   getSpaceDisplayName,
+  HUB_ASSISTANT_TITLE,
+  pickHubAssistantSession,
   type SessionAttentionLevel,
+  type GlobalWorkerPulseItem,
 } from '../session-space.js';
 
 /** 并行话题一键创建的上下文输入 */
@@ -75,6 +79,12 @@ interface SidebarProps {
   onOpenCreateModal?: () => void;
   /** 在指定 Space 或分身名下一键创建并行话题（不归档旧会话） */
   onCreateParallelTopic?: (context: ParallelTopicContext) => Promise<void> | void;
+  /** 全局后台 Worker 脉冲（hub /api/workers 聚合），供中枢模式雷达与子代理任务区消费 */
+  globalWorkers?: GlobalWorkerPulseItem[];
+  /** 打开（或创建）中枢总管会话：中枢模式的自然语言调度入口 */
+  onOpenHubAssistant?: () => Promise<void> | void;
+  /** 点击后台 Worker：跳转其父会话并打开实时时间线抽屉 */
+  onInspectWorker?: (sessionId: string, workerId: string) => void;
 }
 
 /**
@@ -438,6 +448,108 @@ const ChildSessionRow: React.FC<{
   );
 };
 
+/** 后台 Worker 状态的视觉表现：状态灯 + 胶囊文案与配色 */
+const WORKER_STATUS_VISUALS: Record<
+  GlobalWorkerPulseItem['status'],
+  { label: string; pill: string; dot: string; spinning: boolean }
+> = {
+  pending: {
+    label: '待启动',
+    pill: 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400',
+    dot: 'bg-zinc-400 dark:bg-zinc-500',
+    spinning: false,
+  },
+  running: {
+    label: '运行中',
+    pill: 'bg-blue-100 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400',
+    dot: 'bg-blue-500 animate-pulse',
+    spinning: true,
+  },
+  waiting: {
+    label: '运行中',
+    pill: 'bg-blue-100 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400',
+    dot: 'bg-amber-500',
+    spinning: false,
+  },
+  completed: {
+    label: '已完成',
+    pill: 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400',
+    dot: 'bg-emerald-500',
+    spinning: false,
+  },
+  failed: {
+    label: '失败',
+    pill: 'bg-rose-100 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400',
+    dot: 'bg-rose-500',
+    spinning: false,
+  },
+  aborted: {
+    label: '已中止',
+    pill: 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400',
+    dot: 'bg-zinc-400 dark:bg-zinc-500',
+    spinning: false,
+  },
+};
+
+/** 全局后台 Worker 紧凑行：状态灯/旋转 + 标题 + worktree 徽标 + 状态胶囊 + 容器标签 */
+const GlobalWorkerRow: React.FC<{
+  worker: GlobalWorkerPulseItem;
+  onSelect: () => void;
+}> = ({ worker, onSelect }) => {
+  const visual = WORKER_STATUS_VISUALS[worker.status];
+  const relativeTime = formatRelativeTime(worker.updatedAt ?? worker.startedAt);
+  const containerLabel = worker.sessionTitle || worker.parentSessionId;
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      title={`${worker.title}${worker.summary ? `\n${worker.summary}` : ''}`}
+      onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+      className="group min-h-[40px] w-full text-left px-2 py-1.5 rounded-lg border border-transparent hover:bg-zinc-200/50 dark:hover:bg-zinc-800/60 hover:text-zinc-900 dark:hover:text-zinc-200 transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 flex items-center gap-2"
+    >
+      {visual.spinning ? (
+        <Loader2 className="w-3 h-3 shrink-0 animate-spin text-blue-500" />
+      ) : (
+        <span className={`w-2 h-2 rounded-full shrink-0 ${visual.dot}`} title={visual.label} />
+      )}
+      <div className="flex-1 min-w-0 flex items-baseline gap-2">
+        {containerLabel && (
+          <span
+            className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-zinc-200/70 dark:bg-zinc-700/60 text-zinc-600 dark:text-zinc-300 truncate max-w-[88px] leading-none"
+            title={containerLabel}
+          >
+            {containerLabel}
+          </span>
+        )}
+        <span className="truncate text-[13px] font-medium text-zinc-700 dark:text-zinc-300 group-hover:text-zinc-900 dark:group-hover:text-zinc-100">
+          {worker.title}
+        </span>
+        {worker.worktreePath && (
+          <span
+            title={worker.worktreePath}
+            className="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-100/80 dark:bg-violet-950/50 text-violet-600 dark:text-violet-400"
+          >
+            <FolderGit2 className="w-2.5 h-2.5" />
+            worktree
+          </span>
+        )}
+        <span className={`shrink-0 px-1.5 py-0.5 rounded-full text-[10px] font-medium ${visual.pill}`}>
+          {visual.label}
+        </span>
+        {relativeTime && (
+          <span className="ml-auto shrink-0 text-[10px] text-zinc-400 dark:text-zinc-500">{relativeTime}</span>
+        )}
+      </div>
+    </div>
+  );
+};
+
 /** 安静折叠区（子任务/归档）：默认收起，绝不干扰主收件箱 */
 const QuietSection: React.FC<{
   icon: React.ReactNode;
@@ -568,6 +680,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenUsers,
   onOpenCreateModal,
   onCreateParallelTopic,
+  globalWorkers = [],
+  onOpenHubAssistant,
+  onInspectWorker,
 }) => {
   const [filter, setFilter] = useState('');
   // 桌面端极客窄轨折叠（localStorage 持久化，移动端不受影响）
@@ -600,6 +715,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
     } catch {
       // localStorage 不可用时静默忽略
     }
+    // 切入中枢模式即打开中枢总管会话：自然语言调度入口常驻主视图
+    if (mode === 'pulse') onOpenHubAssistant?.();
   };
   // 批量管理（归档区）：multiSelectOn 后整行切换勾选，配合批量删除栏
   const [multiSelectOn, setMultiSelectOn] = useState(false);
@@ -676,9 +793,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const botsById = useMemo(() => new Map(bots.map((b) => [b.id, b] as const)), [bots]);
 
+  // 后台 worker 统计（按父会话聚合）：让前台 idle 但后台活跃的会话获得雷达注意力
+  const workerStatsBySession = useMemo(
+    () => aggregateWorkerStatsBySession(globalWorkers),
+    [globalWorkers]
+  );
+
+  // 中枢总管会话（⚡ 中枢总管）：中枢模式置顶调度入口的定位与高亮依据
+  const hubAssistantSession = useMemo(() => pickHubAssistantSession(sessions), [sessions]);
+
   const attentionOf = useCallback(
-    (s: SessionRecord) => getSessionAttention(s, unreadCounts[s.id] ?? 0),
-    [unreadCounts]
+    (s: SessionRecord) =>
+      getSessionAttention(s, unreadCounts[s.id] ?? 0, workerStatsBySession.get(s.id)),
+    [unreadCounts, workerStatsBySession]
   );
 
   const sessionMatchesQuery = useCallback(
@@ -697,16 +824,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   // ===== 数据派生：四大层次的数据源（全部纯函数 + memo） =====
 
-  // 1. 活跃雷达：全局非 idle 会话（主会话 + 子代理任务）
+  // 1. 活跃雷达：全局非 idle 会话（主会话 + 子代理任务 + 后台 worker 拉起的会话）
   const activePulseEntries = useMemo(
-    () => buildActivePulseEntries(sessions, bots, unreadCounts, pulseSortMode),
-    [sessions, bots, unreadCounts, pulseSortMode]
+    () => buildActivePulseEntries(sessions, bots, unreadCounts, pulseSortMode, globalWorkers),
+    [sessions, bots, unreadCounts, pulseSortMode, globalWorkers]
   );
 
   // 2. 项目空间分组
   const spaceGroups = useMemo(() => {
-    if (!query) return buildSpaceGroups(sessions, bots, unreadCounts);
-    return buildSpaceGroups(sessions, bots, unreadCounts)
+    if (!query) return buildSpaceGroups(sessions, bots, unreadCounts, globalWorkers);
+    return buildSpaceGroups(sessions, bots, unreadCounts, globalWorkers)
       .map((g) => ({
         ...g,
         sessions: g.sessions.filter(sessionMatchesQuery),
@@ -714,7 +841,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       .filter(
         (g) => g.sessions.length > 0 || g.name.toLowerCase().includes(query) || g.path.toLowerCase().includes(query)
       );
-  }, [sessions, bots, unreadCounts, query, sessionMatchesQuery]);
+  }, [sessions, bots, unreadCounts, globalWorkers, query, sessionMatchesQuery]);
 
   // 3. 个人助理通讯录
   const assistantEntries = useMemo(() => {
@@ -727,7 +854,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     });
   }, [sessions, bots, unreadCounts, query, sessionMatchesQuery]);
 
-  // 4. 安静折叠区：子任务 + 已归档
+  // 4. 安静折叠区：子任务 + 已归档；中枢第 2 块另渲染全局后台 Worker 舰队
   const childSessions = useMemo(
     () =>
       sessions
@@ -735,6 +862,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
         .sort((a, b) => activityTimeOf(b) - activityTimeOf(a)),
     [sessions, sessionMatchesQuery]
   );
+
+  // 全局后台 Worker 舰队：按关键词过滤（标题/摘要/父会话标题）
+  const filteredGlobalWorkers = useMemo(() => {
+    if (!query) return globalWorkers;
+    const q = query;
+    return globalWorkers.filter(
+      (w) =>
+        w.title.toLowerCase().includes(q) ||
+        (w.summary || '').toLowerCase().includes(q) ||
+        (w.sessionTitle || '').toLowerCase().includes(q)
+    );
+  }, [globalWorkers, query]);
 
   const archivedSessions = useMemo(
     () =>
@@ -1439,6 +1578,39 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {((sidebarMode === 'coding' && activePulseEntries.length > 0) ||
             sidebarMode === 'pulse') && (
             <section className="mb-2 shrink-0">
+              {sidebarMode === 'pulse' && (
+                /* 置顶中枢总管入口：自然语言调度，点击进入（不存在则创建）持久会话 */
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (hubAssistantSession) handleSelect(hubAssistantSession.id);
+                    else onOpenHubAssistant?.();
+                  }}
+                  title={HUB_ASSISTANT_TITLE}
+                  className={`w-full text-left px-2 py-2 mb-1 rounded-xl border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 flex items-center gap-2.5 ${
+                    hubAssistantSession && hubAssistantSession.id === activeSessionId
+                      ? 'relative bg-white dark:bg-zinc-800/95 border-zinc-200/90 dark:border-zinc-700/80 shadow-xs before:content-[""] before:absolute before:left-0 before:top-2 before:bottom-2 before:w-0.5 before:rounded-full before:bg-zinc-900 dark:before:bg-zinc-100'
+                      : 'border-amber-200/80 dark:border-amber-900/50 bg-amber-50/60 dark:bg-amber-950/20 hover:bg-amber-100/70 dark:hover:bg-amber-950/35 hover:border-amber-300 dark:hover:border-amber-800'
+                  }`}
+                >
+                  <span className="w-8 h-8 rounded-lg bg-zinc-900 dark:bg-zinc-100 flex items-center justify-center text-white dark:text-zinc-900 shrink-0 shadow-xs">
+                    <Zap className="w-4 h-4" />
+                  </span>
+                  <span className="flex-1 min-w-0">
+                    <span className="flex items-center gap-1.5">
+                      <span className="text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">
+                        中枢总管
+                      </span>
+                      <span className="shrink-0 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400">
+                        自然语言调度
+                      </span>
+                    </span>
+                    <span className="block truncate text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400 mt-0.5">
+                      直接对话派发跨项目后台任务，输入 /clear 随时清空上下文
+                    </span>
+                  </span>
+                </button>
+              )}
               <div className="flex items-center gap-1.5 px-2 py-1.5">
                 <Zap className="w-3.5 h-3.5 text-amber-500 animate-pulse shrink-0" />
                 <span className="text-[11px] font-semibold tracking-wide text-zinc-500 dark:text-zinc-400">
@@ -1483,12 +1655,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </section>
           )}
 
-          {/* ===== 中枢模式（第 2 块）：子代理任务，默认展开 ===== */}
-          {sidebarMode === 'pulse' && childSessions.length > 0 && (
+          {/* ===== 中枢模式（第 2 块）：子代理任务（全局后台 Worker 舰队 + 子会话），默认展开 ===== */}
+          {sidebarMode === 'pulse' &&
+            (filteredGlobalWorkers.length > 0 || childSessions.length > 0) && (
             <QuietSection
               icon={<Bot className="w-3.5 h-3.5" />}
               label="子代理任务"
-              count={childSessions.length}
+              count={filteredGlobalWorkers.length + childSessions.length}
               open={effectiveChildrenOpen}
               onToggle={() =>
                 setChildrenOpen((v) => {
@@ -1497,6 +1670,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 })
               }
             >
+              {filteredGlobalWorkers.map((worker) => (
+                <GlobalWorkerRow
+                  key={worker.parentSessionId === worker.workerId ? worker.workerId : `${worker.parentSessionId}:${worker.workerId}`}
+                  worker={worker}
+                  onSelect={() => {
+                    if (onInspectWorker) {
+                      onInspectWorker(worker.parentSessionId, worker.workerId);
+                      onClose();
+                    } else {
+                      handleSelect(worker.parentSessionId);
+                    }
+                  }}
+                />
+              ))}
               {childSessions.map((session) => (
                 <ChildSessionRow
                   key={session.id}

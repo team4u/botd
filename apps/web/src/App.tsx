@@ -17,7 +17,7 @@ import { UsersModal } from './components/UsersModal';
 import { ToastContainer } from './components/Toast';
 import { Loader2, Menu, Bot, Server, ChevronRight, FolderGit2, MessageSquare } from 'lucide-react';
 
-import { buildSpaceGroups } from './session-space';
+import { buildSpaceGroups, type GlobalWorkerPulseItem } from './session-space';
 
 export const App: React.FC = () => {
   // Auth state
@@ -48,6 +48,15 @@ export const App: React.FC = () => {
   const nodesRef = useRef<NodeWithBots[]>([]);
   nodesRef.current = nodes;
   const [loadingNodes, setLoadingNodes] = useState(false);
+
+  // 全局后台 Worker 脉冲（hub /api/workers）：让中枢模式雷达覆盖「前台 idle、后台干活」的会话。
+  // 直接 fetch 而不走 api.ts，避免与并行分支的 api 客户端改动冲突。
+  const [globalWorkers, setGlobalWorkers] = useState<GlobalWorkerPulseItem[]>([]);
+  // Sidebar 点击 Worker 的跳转+开抽屉请求（workerId + 递增 seq，ChatView 合并后消费）
+  const [inspectWorkerRequest, setInspectWorkerRequest] = useState<{
+    workerId: string | null;
+    seq: number;
+  } | null>(null);
 
   const isMountedRef = useRef(true);
 
@@ -270,6 +279,40 @@ export const App: React.FC = () => {
     }
   }, [authenticated, loadInitialData]);
 
+  // 全局后台 Worker 轮询：登录后拉取，页面可见时每 8s 刷新，sessions 更新时即时补拉
+  useEffect(() => {
+    if (!authenticated) {
+      setGlobalWorkers([]);
+      return;
+    }
+    let cancelled = false;
+    const fetchWorkers = async () => {
+      if (cancelled || !isMountedRef.current || document.visibilityState !== 'visible') return;
+      try {
+        const res = await fetch('/api/workers', { credentials: 'include' });
+        if (!res.ok) return;
+        const data = (await res.json()) as { workers?: GlobalWorkerPulseItem[] } | GlobalWorkerPulseItem[];
+        if (cancelled || !isMountedRef.current) return;
+        const workers = Array.isArray(data) ? data : (data.workers ?? []);
+        setGlobalWorkers((prev) => {
+          if (prev.length === workers.length &&
+              prev.every((w, i) => w.workerId === workers[i]?.workerId && w.status === workers[i]?.status && w.parentSessionId === workers[i]?.parentSessionId)) {
+            return prev;
+          }
+          return workers;
+        });
+      } catch {
+        // 静默失败：雷达降级为纯会话注意力，不打断主流程
+      }
+    };
+    void fetchWorkers();
+    const timer = setInterval(fetchWorkers, 8000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [authenticated, sessions]);
+
   // Modest polling every 10s for nodes when authenticated & window focused
   useEffect(() => {
     if (!authenticated) return;
@@ -392,6 +435,12 @@ export const App: React.FC = () => {
         onOpenUsers={() => navigate({ modal: 'users' })}
         onOpenCreateModal={() => navigate({ modal: 'create' })}
         onCreateParallelTopic={sessionActions.handleCreateParallelTopic}
+        globalWorkers={globalWorkers}
+        onOpenHubAssistant={sessionActions.handleOpenHubAssistant}
+        onInspectWorker={(sessionId, workerId) => {
+          navigate({ sessionId, view: 'chat', messageId: null });
+          setInspectWorkerRequest((prev) => ({ workerId, seq: (prev?.seq ?? 0) + 1 }));
+        }}
       />
 
       {/* Main Content Area */}
@@ -443,6 +492,7 @@ export const App: React.FC = () => {
             loadingEarlier={chat.loadingEarlier}
             onLoadEarlier={chat.handleLoadEarlier}
             highlightMessageId={route.messageId}
+            {...(inspectWorkerRequest ? { inspectWorkerRequest } : {})}
             onRespondToAsk={chat.handleRespondToAsk}
             onAddToast={addToast}
           />
