@@ -9,9 +9,24 @@
  * - `AskDoc` — pending and resolved human interaction requests;
  * - `RecallIndexDoc` — the session-wide Chain of Recall index (DeepSeek §3.3).
  */
-import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
+import { defineDoc, defineDocFamily, type ConversationId } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord";
 import type { SessionModelOverride } from "@botd/protocol";
+
+// ---------------------------------------------------------------------------
+// ConversationId <-> string helpers. The branded ids are numbers at run time;
+// the documents store plain strings, so these helpers convert at the edges.
+// ---------------------------------------------------------------------------
+
+export function conversationIdToString(id: ConversationId): string {
+	return String(id);
+}
+
+export function stringToConversationId(value: string): ConversationId {
+	const numeric = Number(value);
+	if (!Number.isInteger(numeric)) throw new Error(`invalid conversation id: ${value}`);
+	return numeric as ConversationId;
+}
 
 /** The role a conversation plays in the super-agent tree. */
 export type BotdRole = "router" | "worker" | "subagent";

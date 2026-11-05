@@ -18,6 +18,7 @@ import { HubDurableRuntime, SecretInjectingEnv, type BotPersonaConfig } from './
 import { createHubCredentialStore, registerStoredProviders, listEffectiveProviderCredentials } from './credential-store.js';
 import { loadDynamicDurableExtension } from './harness/dynamic-extension-loader.js';
 import { TargetDoc, WorkerRegistryDoc } from './harness/docs.js';
+import { releaseLocalWorktree } from './harness/router-extension.js';
 import { registerProviderRoutes } from './providers.js';
 import { registerArtifactRoutes } from './artifacts.js';
 import { registerShareRoutes } from './share.js';
@@ -137,6 +138,17 @@ export function createHub(options?: HubOptions): HubInstance {
     ...(durableRuntime ? { durableRuntime } : {}),
   };
   let durableRuntimeOpening: Promise<HubDurableRuntime> | undefined;
+  /**
+   * 配置面轻量指纹：Bot 行 + bot_files（SYSTEM/MEMORY/env）+ 技能/扩展目录
+   * mtime + 生效凭据的摘要。正常发消息时指纹不变，ensureDurableRuntime
+   * 直接短路返回；直接写 db 的旁路写入（测试）改变指纹后才真正重新同步。
+   */
+  let lastPersonaFingerprint = '';
+  const computePersonaFingerprint = (): string => {
+    const bots = db.getAllBots();
+    const botFiles = bots.map((bot) => [bot.id, bot.updatedAt, db.getBotFile(bot.id, 'system'), db.getBotFile(bot.id, 'memory'), db.getBotFile(bot.id, 'env')] as const);
+    return JSON.stringify([botFiles, db.listExtensions(), db.listSkills(), listEffectiveProviderCredentials(db)]);
+  };
   /** Bot 的生效技能清单：inheritSkills 时继承父 Bot，内置 botd-cli 始终前置（两处消费必须一致，否则系统提示词与分身配置脱节）。 */
   const resolveEffectiveBotSkillIds = (bot: import('@botd/protocol').BotConfig): string[] => {
     const parent = bot.parentBotId ? db.getBot(bot.parentBotId) : undefined;
@@ -154,7 +166,11 @@ export function createHub(options?: HubOptions): HubInstance {
   };
   const ensureDurableRuntime = async (): Promise<HubDurableRuntime> => {
     if (durableRuntime !== undefined) {
-      // Bot 配置可能已更新（新建/改模型/改工作目录）：每次取用都重新同步分身。
+      // 读路径零开销短路：配置面变更经 refreshDurablePersonas（HTTP 写路由必调）
+      // 推送；直接写 db 的测试等旁路写入由下面的轻量指纹兑底感知。
+      const currentFingerprint = computePersonaFingerprint();
+      if (currentFingerprint === lastPersonaFingerprint) return durableRuntime;
+      lastPersonaFingerprint = currentFingerprint;
       await syncBotPersonas(durableRuntime);
       return durableRuntime;
     }
@@ -231,6 +247,9 @@ export function createHub(options?: HubOptions): HubInstance {
                 ...(targetInfo.shellEnv ? { shellEnv: targetInfo.shellEnv } : {}),
               });
             },
+            // 统一 worktree 释放：stopWorker / stop_worker 停止隔离 worker 时清理
+            // 远端节点与本机的 .botd-worktrees，并同步清会话级挂载缓存。
+            releaseWorktree,
           },
         );
         runtime.harness.resume();
@@ -250,6 +269,26 @@ export function createHub(options?: HubOptions): HubInstance {
   };
   /** 会话 → 已挂载 worktree 路径缓存：每个 conversation 只幂等获取一次。 */
   const acquiredWorktrees = new Map<string, string>();
+  /**
+   * 统一的 worktree 释放：远端节点走 envReleaseWorktree RPC（在线才发，离线
+   * 留给节点侧幂等清理），本机走 git worktree remove；两侧都同步清缓存，
+   * 同一会话下次获取时重新挂载。stopWorker 与 stop_worker 工具共用此入口。
+   */
+  const releaseWorktree = async (info: { nodeId: string; cwd: string; worktreePath: string; workerId: string }): Promise<void> => {
+    for (const [key, value] of acquiredWorktrees) {
+      if (value === info.worktreePath) acquiredWorktrees.delete(key);
+    }
+    if (info.nodeId && info.nodeId !== 'local') {
+      const envRpc = connections.getNodeEnvRpc(info.nodeId);
+      if (envRpc?.envReleaseWorktree) {
+        await envRpc.envReleaseWorktree({ repoDir: info.cwd, worktreePath: info.worktreePath, deleteBranch: false });
+        return;
+      }
+      // 节点离线：本机无法代劳远端清理，留待节点重连后的幂等清理。
+      return;
+    }
+    await releaseLocalWorktree(info.cwd, info.worktreePath);
+  };
 
   /**
    * 宿主 Worker 停止钩子（watchdog abort 时调用）：经 TargetDoc.parentConversationId
@@ -430,6 +469,8 @@ export function createHub(options?: HubOptions): HubInstance {
     if (typeof runtime.syncPersonas === 'function') {
       await runtime.syncPersonas(personas);
     }
+    // 同步完成后记录配置面指纹：正常发消息时指纹不变，读路径直接短路。
+    lastPersonaFingerprint = computePersonaFingerprint();
   };
 
   // Durable Router 会话 → botd 会话消息镜像（SSE 桥）：注入的 runtime 直接建，

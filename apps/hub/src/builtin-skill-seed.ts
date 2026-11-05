@@ -231,119 +231,101 @@ lightbulb, info, alert-triangle, alert-circle, check-circle, cpu, database, serv
 
 ## Part 2: Full-Stack Extension Creator
 
-Extension = \`~/.botd/extensions/<id>/index.ts\`, exporting a default factory:
+Extension（Hub 托管，Bot 经 enabledExtensions 挂载）= \`~/.botd/extensions/<id>/index.ts\`，default export 一个 \`defineExtension(...)\` 对象（来自 \`@earendil-works/pi-durable\`）：
 
 \`\`\`typescript
-import type { ExtensionAPI } from 'pi'; // 宿主注入的扩展 API 类型
+import { defineExtension, defineTool } from '@earendil-works/pi-durable';
 
-export default function (pi: ExtensionAPI) {
-  // ... register capabilities
-}
+export default defineExtension({
+  name: 'my-extension', // 必填：Bot 用这个名字挂载；缺省时回落到目录 id
+  tools: [
+    defineTool({
+      name: 'deploy_status',
+      description: '查询部署状态',
+      parameters: {
+        type: 'object',
+        properties: { service: { type: 'string' } },
+        required: ['service'],
+      },
+      async execute(input) {
+        return { output: [{ type: 'text', text: JSON.stringify({ ok: true, service: input.service }) }] };
+      },
+    }),
+  ],
+});
 \`\`\`
 
 核心 API：
 
-- \`pi.on('<event>', handler)\` — intercept hooks: \`session_start\`, \`before_agent_start\`, \`turn_start\`, \`turn_end\`, \`tool_call\` (return \`{ block: true, reason }\` to veto), \`tool_result\`, \`session_shutdown\`.
-- \`pi.registerTool({ name, label, description, parameters (JSON Schema), execute })\` — model-callable tool. \`execute(toolCallId, params, signal, onUpdate, ctx)\` returns \`{ content: [{ type: 'text', text }], isError?, details? }\`.
-- \`pi.registerCommand(name, { description, handler(args, ctx) })\` — \`/\` command.
+- \`defineExtension({ name, tools?, sections?, tasks?, hooks? })\` — 唯一合法入口；default export 必须是 \`defineExtension(...)\` 的结果，或返回它的 \`(helpers) => Extension\` 工厂函数。加载器只认这个形状，其他形状的默认导出会被直接拒绝。
+- \`defineTool({ name, description, parameters (JSON Schema), execute })\` — 模型可调用的工具。\`execute(args, api, context)\` 返回 \`{ output: [{ type: 'text', text }], isError? }\`；\`api\` 提供 \`commit\`（durable 文档读写）、\`snapshot\`、\`conversation\` 等能力，跨重启可重放。
+- \`section(key, render)\` — 会话提示词区块；\`hook(Task, handlers)\` — 任务钩子（如 GenerationTask 的 \`afterRun\`）；\`defineTask\` — 自定义持久化任务。
 
-### ctx.ui — Web 端完整桥接（三个插槽）
+### Generative UI：fenced ui block
 
-**1. 对话框插槽 (\`dialog.ask\` / \`dialog.custom\`)** — 阻塞式人机交互，经 Web 弹窗闭环：
-
-- \`await ctx.ui.confirm(title, msg, { timeout, signal }): Promise<boolean>\`
-- \`await ctx.ui.select(title, options: string[], opts?): Promise<string | undefined>\`
-- \`await ctx.ui.input(title, placeholder?, opts?): Promise<string | undefined>\`
-- \`await ctx.ui.editor(title, prefill?): Promise<string | undefined>\`
-- \`await ctx.ui.custom({ title, prompt, ui: BotdUiSpec })\` — 自定义 Generative UI 弹窗（也可传裸 BotdUiSpec）；提交后返回表单结果
-
-**2. 实时流与挂件插槽 (\`composer.widget\` / \`shell.notify\`)** — 非阻塞，即时推流到 Web 会话：
-
-- \`ctx.ui.notify(msg, 'info' | 'warning' | 'error')\`
-- \`ctx.ui.setStatus(key, text)\`
-- \`ctx.ui.setWorkingMessage(msg)\`
-- \`ctx.ui.setWidget(key, linesOrUiSpec, { placement: 'aboveEditor' | 'belowEditor' })\` — 输入框上方/下方挂件；\`string[]\` 渲染为纯文本行，\`BotdUiSpec\` 渲染为完整组件树，\`undefined\` 清除
-- \`ctx.ui.setEditorText(text)\` / \`ctx.ui.pasteToEditor(text)\`
-
-**3. 自定义工具视图插槽 (\`tool.view\`)** — 工具结果的常驻富视图：
-
-在 \`pi.registerTool\` 的 \`execute()\` 返回值中附上 \`details.ui\`（Web 前端校验通过后渲染在工具调用块下方，组件契约见 \`generative-ui.md\`）：
+工具返回值里以 ui 围栏（三个反引号 + ui）包裹 botd.v1 JSON spec（组件契约见 \`generative-ui.md\`），Web 聊天流原生渲染为完整组件树：
 
 \`\`\`typescript
-return {
-  content: [{ type: 'text', text: JSON.stringify(summary) }],
-  details: {
-    ui: {
-      root: 'card',
-      elements: {
-        card: { type: 'Card', props: { title: '扫描结果' }, children: ['bars'] },
-        bars: { type: 'BarList', props: { items: [{ label: 'errors', value: 3, color: 'rose' }] } },
-      },
+async execute(input) {
+  const uiSpec = {
+    root: 'card',
+    elements: {
+      card: { type: 'Card', props: { title: '扫描结果' }, children: ['bars'] },
+      bars: { type: 'BarList', props: { items: [{ label: 'errors', value: 3, color: 'rose' }] } },
     },
-  },
-};
+  };
+  const fence = String.fromCharCode(96, 96, 96); // 三个反引号，避免嵌套围栏冲突
+  return {
+    output: [{ type: 'text', text: fence + 'ui\n' + JSON.stringify(uiSpec, null, 2) + '\n' + fence }],
+  };
+}
 \`\`\`
-
-### 纯终端 TUI 方法（Web 端不可用）
-
-以下方法依赖终端画布/键盘流，在 botd Web 端调用会显式报错 \`此命令需要终端界面，当前网页不支持\`：\`ctx.ui.custom(fn)\` 传组件工厂函数、\`setFooter\`、\`setHeader\`、\`setEditorComponent\`、\`getEditorComponent\`、\`addAutocompleteProvider\`、\`setTheme\` / \`getTheme\` / \`getAllThemes\`。改用声明式 \`BotdUiSpec\`（\`custom({ ui: spec })\`、\`setWidget(key, spec)\`、\`details.ui\`）。
 
 ### 完整扩展示例（可直接复制运行）
 
 保存为 \`~/.botd/extensions/deploy-guard/index.ts\`：
 
 \`\`\`typescript
-import type { ExtensionAPI } from 'pi'; // 宿主注入的扩展 API 类型
+import { defineExtension, defineTool } from '@earendil-works/pi-durable';
 
-export default function (pi: ExtensionAPI) {
-  // 1. 拦截高危 bash 命令，弹出结构化审批卡片
-  pi.on('tool_call', async (event, ctx) => {
-    if (event.toolName !== 'bash') return;
-    const cmd = String((event.input as { command?: string })?.command || '');
-    if (!/rm\\s+-rf|git\\s+push.*--force/.test(cmd)) return;
-    const ok = await ctx.ui.confirm('高危命令审批', cmd, { timeout: 300_000 });
-    if (!ok) return { block: true, reason: '用户拒绝了该高危命令' };
-  });
-
-  // 2. 模型可调用的工具 + details.ui 富视图 + setWidget 实时挂件
-  pi.registerTool({
-    name: 'deploy_status',
-    label: 'Deploy Status',
-    description: '查询当前部署状态并渲染指标卡片',
-    parameters: {
-      type: 'object',
-      properties: { service: { type: 'string', description: '服务名' } },
-      required: ['service'],
-    } as any,
-    execute: async (_id, params: { service: string }, _signal, _onUpdate, ctx) => {
-      const stats = { replicas: 4, ready: 3, version: 'v1.9.0' };
-      ctx.ui.setWidget('deploy', ['部署监控: ' + params.service], { placement: 'aboveEditor' });
-      ctx.ui.notify('状态已刷新: ' + params.service, 'info');
-      return {
-        content: [{ type: 'text', text: JSON.stringify(stats) }],
-        details: {
-          ui: {
-            root: 'grid',
-            elements: {
-              grid: { type: 'MetricGrid', props: { columns: 3 }, children: ['a', 'b', 'c'] },
-              a: { type: 'MetricCard', props: { label: 'Replicas', value: String(stats.replicas), icon: 'server' } },
-              b: { type: 'MetricCard', props: { label: 'Ready', value: String(stats.ready), status: stats.ready < stats.replicas ? 'warn' : 'ok' } },
-              c: { type: 'MetricCard', props: { label: 'Version', value: stats.version, icon: 'git-branch' } },
-            },
+export default defineExtension({
+  name: 'deploy-guard',
+  tools: [
+    // 1. 部署状态查询 + MetricGrid 富视图卡片
+    defineTool({
+      name: 'deploy_status',
+      description: '查询当前部署状态并渲染指标卡片',
+      parameters: {
+        type: 'object',
+        properties: { service: { type: 'string', description: '服务名' } },
+        required: ['service'],
+      },
+      replay: 'safe',
+      async execute(input) {
+        const stats = { replicas: 4, ready: 3, version: 'v1.9.0' };
+        const fence = String.fromCharCode(96, 96, 96);
+        const spec = {
+          root: 'grid',
+          elements: {
+            grid: { type: 'MetricGrid', props: { columns: 3 }, children: ['a', 'b', 'c'] },
+            a: { type: 'MetricCard', props: { label: 'Replicas', value: String(stats.replicas), icon: 'server' } },
+            b: { type: 'MetricCard', props: { label: 'Ready', value: String(stats.ready), status: stats.ready < stats.replicas ? 'warn' : 'ok' } },
+            c: { type: 'MetricCard', props: { label: 'Version', value: stats.version, icon: 'git-branch' } },
           },
-        },
-      } as any;
-    },
-  });
+        };
+        return { output: [{ type: 'text', text: 'Deploy: ' + input.service + '\n\n' + fence + 'ui\n' + JSON.stringify(spec, null, 2) + '\n' + fence }] };
+      },
+    }),
 
-  // 3. / 命令 + custom(uiSpec) 弹窗表单
-  pi.registerCommand('deploy-ask', {
-    description: '弹出部署参数表单',
-    handler: async (_args, ctx) => {
-      const answer = await ctx.ui.custom({
-        title: '部署参数',
-        prompt: '请填写部署参数',
-        ui: {
+    // 2. 部署审批表单（botd.v1 组件树 + 表单提交）
+    defineTool({
+      name: 'deploy_ask',
+      description: '弹出部署参数审批表单',
+      parameters: { type: 'object', properties: {}, required: [] },
+      replay: 'safe',
+      async execute() {
+        const fence = String.fromCharCode(96, 96, 96);
+        const spec = {
           root: 'form',
           state: { env: 'staging' },
           elements: {
@@ -353,13 +335,15 @@ export default function (pi: ExtensionAPI) {
             go: { type: 'Button', props: { label: '部署', variant: 'primary' },
               on: { press: { action: 'submit', params: { decision: 'deploy' } } } },
           },
-        },
-      });
-      ctx.ui.notify('已提交: ' + JSON.stringify(answer), 'info');
-    },
-  });
-}
+        };
+        return { output: [{ type: 'text', text: fence + 'ui\n' + JSON.stringify(spec, null, 2) + '\n' + fence }] };
+      },
+    }),
+  ],
+});
 \`\`\`
+
+注意：以上是 Hub 托管 durable extension 的写法（Hub 加载目录包、Bot 挂载、durable 会话内执行）。Node 本地 daemon 另有一套基于 \`ExtensionAPI\`（\`pi.on\` / \`pi.registerTool\` / \`pi.registerCommand\` / \`ctx.ui.*\` 对话框、挂件与 \`details.ui\` 工具视图，及 \`setFooter\` / \`setHeader\` / \`setEditorComponent\` 等纯终端 TUI 方法）的扩展体系，两者不互通；为 Hub 写扩展时不要照搬 \`pi.\` / \`ctx.ui\` API，加载器会拒绝非 \`defineExtension\` 形状的默认导出。
 
 ### 安装与热更新
 

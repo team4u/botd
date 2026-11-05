@@ -23,15 +23,20 @@ import {
 	hook,
 	runEndTask,
 	section,
-	type ConversationId,
 	type Extension,
 } from "@earendil-works/pi-durable";
-import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 
-import { RecallIndexDoc, TargetDoc, WorkerRegistryDoc, type TargetState } from "./docs.js";
+import {
+	conversationIdToString,
+	RecallIndexDoc,
+	stringToConversationId,
+	TargetDoc,
+	WorkerRegistryDoc,
+	type TargetState,
+} from "./docs.js";
 import { SpillStoreDoc } from "./event-router.js";
 import { askHumanTool, recallTool, type PersonaListing } from "./router-extension.js";
 import { assistantEntryText } from "./recall-content.js";
@@ -42,16 +47,6 @@ export const WORKER_EXTENSION_NAME = "botd-worker";
 /** Resolves a registered subagent/bot persona into its real agent change (model, instructions, extensions, toolScope). */
 export type SubagentChangeResolver = (agentType: string, cwd?: string) => AgentChange | undefined;
 
-// Branded ConversationId <-> string: documents store plain strings.
-const toId = (value: string): ConversationId => {
-	const numeric = Number(value);
-	if (!Number.isInteger(numeric)) throw new Error(`invalid conversation id: ${value}`);
-	return numeric as ConversationId;
-};
-const idToString = (id: ConversationId): string => String(id);
-const conversationIdToString = idToString;
-const stringToConversationId = toId;
-
 const SUMMARY_LIMIT = 200;
 /** Answers up to this length ride inline in the completion notification; longer ones spill to a local file. */
 const INLINE_LIMIT = 4000;
@@ -60,12 +55,21 @@ const PREVIEW_LIMIT = 800;
 /** One-line summary cap for the recall index node. */
 const SUMMARY_LINE_LIMIT = 160;
 
-/** Write the full report to `<cwd>/.botd/recall/<workerId>.md`; returns the absolute path and byte size. */
-async function spillReportToDisk(cwd: string, workerId: string, answer: string): Promise<{ spillPath: string; spillBytes: number }> {
-	const spillPath = path.resolve(cwd, ".botd", "recall", `${workerId}.md`);
-	await mkdir(path.dirname(spillPath), { recursive: true });
-	await writeFile(spillPath, answer, "utf8");
-	return { spillPath, spillBytes: Buffer.byteLength(answer, "utf8") };
+/** Write the full report to `<cwd>/.botd/recall/<workerId>.md` in the worker's own execution env (remote Node or Hub-local); returns the absolute path and byte size. */
+async function spillReportToDisk(
+	env: import("@earendil-works/pi-durable/env").ExecutionEnv,
+	cwd: string,
+	workerId: string,
+	answer: string,
+	context: import("@earendil-works/chord").Context,
+): Promise<{ spillPath: string; spillBytes: number }> {
+	const joined = await env.joinPath([cwd, ".botd", "recall", `${workerId}.md`], context);
+	if (!joined.ok) throw new Error(joined.error.message);
+	// Absolute path: both NodeExecutionEnv and RemoteExecutionEnv resolve an
+	// absolute argument against the filesystem root, never their own cwd.
+	const result = await env.writeFile(joined.value, answer, context);
+	if (!result.ok) throw new Error(result.error.message);
+	return { spillPath: joined.value, spillBytes: Buffer.byteLength(answer, "utf8") };
 }
 
 /**
@@ -112,7 +116,20 @@ const WorkerReportTask = defineTask<WorkerReportInput, { phase: "report" }, { re
 			} else {
 				const cwd = input.cwd ?? process.cwd();
 				try {
-					({ spillPath, spillBytes } = await spillReportToDisk(cwd, input.workerId, input.answer));
+					// The spill goes to the worker's own machine: a remote-bound cwd is a
+					// path on the remote Node, never a Hub-local directory. Without an env
+					// (no HarnessOptions.env) fall back to Hub-local disk.
+					const env = await runtime.env(context);
+					if (env === undefined) {
+						const { mkdir, writeFile } = await import("node:fs/promises");
+						const local = path.resolve(cwd, ".botd", "recall", `${input.workerId}.md`);
+						await mkdir(path.dirname(local), { recursive: true });
+						await writeFile(local, input.answer, "utf8");
+						spillPath = local;
+						spillBytes = Buffer.byteLength(input.answer, "utf8");
+					} else {
+						({ spillPath, spillBytes } = await spillReportToDisk(env, cwd, input.workerId, input.answer, context));
+					}
 				} catch (error) {
 					const reason = error instanceof Error ? error.message : String(error);
 					body = `${input.answer.slice(0, INLINE_LIMIT)}\n[Spill failed: ${reason}]`;

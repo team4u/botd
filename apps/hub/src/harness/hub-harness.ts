@@ -43,10 +43,10 @@ import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { createPersonaSkillsExtension, PERSONA_SKILLS_EXTENSION, type PersonaSkillsOptions } from "./persona-skills-extension.js";
-import { createRouterExtension, releaseLocalWorktree, type PersonaResolver, ROUTER_EXTENSION, type WorkerAgentFactory, WORKER_EXTENSION } from "./router-extension.js";
+import { createRouterExtension, releaseLocalWorktree, type PersonaResolver, ROUTER_EXTENSION, type WorktreeReleaser, type WorkerAgentFactory, WORKER_EXTENSION } from "./router-extension.js";
 import { createWorkerExtension, WORKER_EXTENSION_NAME } from "./worker-extension.js";
 import { createWorkflowExtension } from "./workflow-extension.js";
-import { RecallIndexDoc, SessionIndexDoc, TargetDoc, WorkerRegistryDoc, type WorkerEntry } from "./docs.js";
+import { conversationIdToString, RecallIndexDoc, SessionIndexDoc, stringToConversationId, TargetDoc, WorkerRegistryDoc, type WorkerEntry } from "./docs.js";
 import { SpillStoreDoc, ThreadSubscriptionsDoc } from "./event-router.js";
 import { capRecallContent, resolveRecallBody } from "./recall-content.js";
 import type { Cursor } from "@earendil-works/pi-durable";
@@ -98,23 +98,21 @@ export interface HubRuntimeOptions {
 	codemode?: boolean;
 	/** Hub-backed skills & memory callbacks for the persona-skills extension. */
 	skills?: PersonaSkillsOptions;
+	/**
+	 * Releases a stopped worker's git worktree wherever it lives: a remote node's
+	 * worktree through `envReleaseWorktree`, a local one through `git worktree
+	 * remove`. Without it both `stopWorker` and the `stop_worker` tool release
+	 * on the Hub's own disk only — a remote Node's `.botd-worktrees/` leaks.
+	 */
+	releaseWorktree?: WorktreeReleaser;
 	onReport?: (report: unknown) => void;
 }
 
 // ---------------------------------------------------------------------------
-// ConversationId <-> string helpers. The branded ids are numbers at run time;
-// the documents store plain strings, so these helpers convert at the edges.
+// ConversationId <-> string helpers live in ./docs (the leaf documents module);
+// re-exported here for existing importers.
 // ---------------------------------------------------------------------------
-
-export function conversationIdToString(id: ConversationId): string {
-	return String(id);
-}
-
-export function stringToConversationId(value: string): ConversationId {
-	const numeric = Number(value);
-	if (!Number.isInteger(numeric)) throw new Error(`invalid conversation id: ${value}`);
-	return numeric as ConversationId;
-}
+export { conversationIdToString, stringToConversationId };
 
 /** The persona prompt section body for a bot's router conversations. */
 function personaInstructions(persona: BotPersonaConfig): string {
@@ -207,6 +205,7 @@ export class HubDurableRuntime {
 		codemodeExtension?: Extension,
 		workflowExtension?: Extension,
 		hostExtensions?: readonly Extension[],
+		releaseWorktree?: WorktreeReleaser,
 	) {
 		this.harness = harness;
 		this.registry = registry;
@@ -218,6 +217,11 @@ export class HubDurableRuntime {
 		this.codemodeExtension = codemodeExtension;
 		this.workflowExtension = workflowExtension ?? createWorkflowExtension();
 		this.hostExtensions = hostExtensions ?? [];
+		this.#releaseWorktree =
+			releaseWorktree ??
+			(async (info) => {
+				await releaseLocalWorktree(info.cwd, info.worktreePath);
+			});
 	}
 
 	static async open(options: HubRuntimeOptions = {}, context: Context = BACKGROUND_CONTEXT): Promise<HubDurableRuntime> {
@@ -290,6 +294,9 @@ export class HubDurableRuntime {
 				const persona = personas.get(botId);
 				if (persona === undefined || runtime === undefined) throw new Error(`unknown persona: ${botId}`);
 				return { ...runtime.workerAgentFor(persona), cwd: cwd ?? persona.cwd };
+			}),
+			releaseWorktree: options.releaseWorktree ?? (async (info) => {
+				await releaseLocalWorktree(info.cwd, info.worktreePath);
 			}),
 		});
 		registry.install(routerExtension);
@@ -365,6 +372,7 @@ export class HubDurableRuntime {
 			codemodeExtension,
 			workflowExtension,
 			options.extensions ?? [],
+			options.releaseWorktree,
 		);
 		// Persona lookups from tools run through this map (set via registerPersona).
 		(runtime as unknown as { personas: Map<string, BotPersonaConfig> }).personas === personas; // keep reference alive
@@ -378,6 +386,8 @@ export class HubDurableRuntime {
 	#personaSource: Map<string, BotPersonaConfig> | undefined;
 	/** Drops a conversation's cached worktree mount (set by `open`, used by `stopWorker`). */
 	#releaseWorktreeCache: ((conversationId: string) => void) | undefined;
+	/** Host hook releasing a stopped worker's worktree (local or remote node); default: local release. */
+	readonly #releaseWorktree: WorktreeReleaser;
 
 	/** Register (or replace) a Bot persona available in this runtime. */
 	registerPersona(persona: BotPersonaConfig): void {
@@ -1035,10 +1045,15 @@ export class HubDurableRuntime {
 		if (conversation !== undefined) await conversation.abort(context, { background: true }).catch(() => undefined);
 		await markAborted();
 		// Release the worktree of an explicitly stopped worker (never on plain
-		// completion: the branch may still be inspected or merged afterwards).
+		// completion: the branch may still be inspected or merged afterwards)
+		// through the host hook: a remote node's worktree releases remotely.
 		if (entry.worktreePath !== undefined && entry.worktreePath !== "") {
-			const baseCwd = entry.cwd === "" ? process.cwd() : entry.cwd;
-			await releaseLocalWorktree(baseCwd, entry.worktreePath, entry.branchName).catch(() => undefined);
+			await this.#releaseWorktree({
+				nodeId: entry.nodeId,
+				cwd: entry.cwd === "" ? process.cwd() : entry.cwd,
+				worktreePath: entry.worktreePath,
+				workerId,
+			}).catch(() => undefined);
 			this.#releaseWorktreeCache?.(entry.conversationId);
 		}
 		return true;

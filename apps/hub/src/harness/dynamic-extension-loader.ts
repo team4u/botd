@@ -120,7 +120,21 @@ function resolveEntryFile(extDir: string): string {
 	throw new Error(`no extension entry file found in ${extDir}`);
 }
 
+/**
+ * Compiled-entry cache keyed by absolute entry path: an unchanged file (same
+ * mtime + size) returns the previously compiled Extension object directly,
+ * instead of re-importing with a fresh cache-busting URL on every sync — each
+ * busted URL is a new module in Node's ESM cache that nothing ever evicts.
+ */
+const compiledEntries = new Map<string, { mtimeMs: number; size: number; extension: Extension }>();
+
 async function importExtensionEntry(extId: string, entryFile: string): Promise<Extension> {
+	const absPath = path.resolve(entryFile);
+	const stat = statSync(absPath);
+	const cached = compiledEntries.get(absPath);
+	if (cached !== undefined && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+		return cached.extension;
+	}
 	const { tsImport } = await import("tsx/esm/api");
 	const url = `${pathToFileURL(entryFile).href}?t=${Date.now()}-${randomUUID()}`;
 	const mod = (await tsImport(url, { parentURL: new URL(import.meta.url).href })) as {
@@ -134,15 +148,18 @@ async function importExtensionEntry(extId: string, entryFile: string): Promise<E
 			`extension "${extId}" must default-export defineExtension(...) or a factory returning an Extension`,
 		);
 	}
-	return { ...resolved, name: resolved.name === "" ? extId : resolved.name };
+	const extension = { ...resolved, name: resolved.name === "" ? extId : resolved.name };
+	compiledEntries.set(absPath, { mtimeMs: stat.mtimeMs, size: stat.size, extension });
+	return extension;
 }
 
 /**
  * Load a user-authored `@earendil-works/pi-durable` extension from a
  * multi-file directory package. The module's default export may be an
  * `Extension` or a factory `(helpers) => Extension`. The resolved extension's
- * `name` defaults to `extId` when missing or blank. Each call re-imports with
- * a cache-busting URL, so reloading updated files never hits stale modules.
+ * `name` defaults to `extId` when missing or blank. An unchanged entry file
+ * (same mtime + size) hits the in-memory compiled-entry cache; a changed file
+ * re-imports with a cache-busting URL, so hot edits never hit stale modules.
  */
 export async function loadDynamicDurableExtensionFromDir(extId: string, extDir: string): Promise<Extension> {
 	await ensureNodeModules(extDir);
