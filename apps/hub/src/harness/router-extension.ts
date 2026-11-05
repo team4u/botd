@@ -16,6 +16,7 @@ import {
 	defineTool,
 	section,
 	type AgentChange,
+	type ConversationId,
 	type Extension,
 	type ToolRegistration,
 } from "@earendil-works/pi-durable";
@@ -394,6 +395,64 @@ function renderWorkers(registry: { workers: Record<string, WorkerEntry> }): stri
 	});
 	if (workers.length > lines.length) lines.push(`… ${workers.length - lines.length} more`);
 	return lines.join("\n");
+}
+
+/** Where a worker's registry entry lives: the owning Router conversation id. */
+interface WorkerTarget {
+	registryConvId: ConversationId;
+	entry: WorkerEntry;
+}
+
+/**
+ * Resolve a worker's registry entry across sessions: the local registry first,
+ * then (for workers spawned by other Router conversations) the
+ * RecallIndexDoc → TargetDoc.parentConversationId chain back to the owning
+ * Router's WorkerRegistryDoc. Lets the Central Hub steer/stop any worker in
+ * the Hub without new tools.
+ */
+async function resolveWorkerTargetRegistry(
+	api: import("@earendil-works/pi-durable").ToolExecutionApi,
+	context: unknown,
+	workerId: string,
+): Promise<WorkerTarget | undefined> {
+	const local = (await api.snapshot(
+		WorkerRegistryDoc as never,
+		api.conversationId,
+		context as never,
+	)) as { workers: Record<string, WorkerEntry> } | undefined;
+	if (local?.workers[workerId] !== undefined) {
+		return { registryConvId: api.conversationId, entry: local.workers[workerId] };
+	}
+	const recall = (await api.snapshot(RecallIndexDoc as never, context as never)) as
+		| { nodes: Record<string, { conversationId?: string }> }
+		| undefined;
+	const node = recall?.nodes[workerId];
+	if (node?.conversationId === undefined) return undefined;
+	let workerConvId: ConversationId;
+	try {
+		workerConvId = stringToConversationId(node.conversationId);
+	} catch {
+		return undefined;
+	}
+	const workerTarget = (await api.snapshot(
+		TargetDoc as never,
+		workerConvId,
+		context as never,
+	)) as { parentConversationId?: string } | undefined;
+	if (workerTarget?.parentConversationId === undefined) return undefined;
+	let parentConvId: ConversationId;
+	try {
+		parentConvId = stringToConversationId(workerTarget.parentConversationId);
+	} catch {
+		return undefined;
+	}
+	const parentReg = (await api.snapshot(
+		WorkerRegistryDoc as never,
+		parentConvId,
+		context as never,
+	)) as { workers: Record<string, WorkerEntry> } | undefined;
+	if (parentReg?.workers[workerId] === undefined) return undefined;
+	return { registryConvId: parentConvId, entry: parentReg.workers[workerId] };
 }
 
 /** Releases a worker's git worktree wherever it lives: local disk or a remote node (see HubDurableRuntimeOptions.releaseWorktree). */
@@ -786,11 +845,11 @@ export function createRouterExtension(options: {
 			mode: opt(oneOf(["steer", "followUp"])),
 		}),
 		async execute(args, api, context) {
-			const registry = await api.snapshot(WorkerRegistryDoc, api.conversationId, context);
-			const entry = registry?.workers[args.workerId];
-			if (entry === undefined) {
+			const target = await resolveWorkerTargetRegistry(api, context, args.workerId);
+			if (target === undefined) {
 				return { isError: true, output: [{ type: "text", text: `Unknown worker: ${args.workerId}` }] };
 			}
+			const { registryConvId, entry } = target;
 			const worker = await api.conversation(stringToConversationId(entry.conversationId), context);
 			if (worker === undefined) {
 				return { isError: true, output: [{ type: "text", text: `Worker conversation missing: ${args.workerId}` }] };
@@ -798,7 +857,7 @@ export function createRouterExtension(options: {
 			// A steer on a finished (or stopped) worker wakes it for another round:
 			// reset its registry status so the second round's report-back is accepted again.
 			await api.commit(async (tx) => {
-				const doc = await tx.doc(WorkerRegistryDoc, api.conversationId);
+				const doc = await tx.doc(WorkerRegistryDoc, registryConvId);
 				const record = doc.workers[args.workerId];
 				if (
 					record !== undefined &&
@@ -831,15 +890,15 @@ export function createRouterExtension(options: {
 		description: "Abort a running background worker.",
 		parameters: obj({ workerId: str() }),
 		async execute(args, api, context) {
-			const registry = await api.snapshot(WorkerRegistryDoc, api.conversationId, context);
-			const entry = registry?.workers[args.workerId];
-			if (entry === undefined) {
+			const target = await resolveWorkerTargetRegistry(api, context, args.workerId);
+			if (target === undefined) {
 				return { isError: true, output: [{ type: "text", text: `Unknown worker: ${args.workerId}` }] };
 			}
+			const { registryConvId, entry } = target;
 			// Mark first, then abort: an explicit stop wins over a completion report
 			// that lands while the abort is in flight.
 			await api.commit(async (tx) => {
-				const doc = await tx.doc(WorkerRegistryDoc, api.conversationId);
+				const doc = await tx.doc(WorkerRegistryDoc, registryConvId);
 				const record = doc.workers[args.workerId];
 				if (record !== undefined && record.status === "running") {
 					record.status = "aborted";
@@ -856,7 +915,7 @@ export function createRouterExtension(options: {
 			// A queued follow-up may have been placed by the abort boundary and started
 			// a new run; stop wins, so re-assert the aborted status after the abort.
 			await api.commit(async (tx) => {
-				const doc = await tx.doc(WorkerRegistryDoc, api.conversationId);
+				const doc = await tx.doc(WorkerRegistryDoc, registryConvId);
 				const record = doc.workers[args.workerId];
 				if (record !== undefined && record.status === "running") {
 					record.status = "aborted";
@@ -897,6 +956,45 @@ export function createRouterExtension(options: {
 			}),
 			section("active_workers", async (input) => {
 				const registry = await input.read.snapshot(WorkerRegistryDoc, input.conversationId, BACKGROUND_CONTEXT);
+				const target = await input.read.snapshot(TargetDoc, input.conversationId, BACKGROUND_CONTEXT);
+				// 中枢总管看全局：合并本会话 registry 与 RecallIndex 里属于其他 Router
+				// 会话的近期 Worker（TargetDoc.parentConversationId 指向别处的），
+				// hub-router 的 active_workers 永远覆盖全 Hub。
+				if (target?.botId === HUB_ROUTER_BOT_ID) {
+					const recall = await input.read.snapshot(RecallIndexDoc, BACKGROUND_CONTEXT);
+					const merged: Record<string, WorkerEntry> = { ...(registry?.workers ?? {}) };
+					for (const node of Object.values(recall?.nodes ?? {})) {
+						if (node.kind !== "worker" || node.conversationId === undefined) continue;
+						if (merged[node.id] !== undefined) continue;
+						let workerConvId: ConversationId;
+						try {
+							workerConvId = stringToConversationId(node.conversationId);
+						} catch {
+							continue;
+						}
+						const workerTarget = await input.read.snapshot(
+							TargetDoc,
+							workerConvId,
+							BACKGROUND_CONTEXT,
+						);
+						const parent = workerTarget?.parentConversationId;
+						if (parent === undefined) continue;
+						let parentConvId: ConversationId;
+						try {
+							parentConvId = stringToConversationId(parent);
+						} catch {
+							continue;
+						}
+						const parentReg = await input.read.snapshot(
+							WorkerRegistryDoc,
+							parentConvId,
+							BACKGROUND_CONTEXT,
+						);
+						const entry = parentReg?.workers[node.id];
+						if (entry !== undefined) merged[node.id] = entry;
+					}
+					return renderWorkers({ workers: merged });
+				}
 				if (registry === undefined) return undefined;
 				return renderWorkers(registry);
 			}),

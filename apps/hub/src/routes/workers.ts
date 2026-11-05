@@ -21,13 +21,13 @@ import {
   type RouteOutcome,
 } from '../harness/event-router.js';
 import { diagnoseSystemHealth, runWatchdogPass } from '../harness/watchdog.js';
+import { HUB_ROUTER_BOT_ID as ROUTER_EXTENSION_HUB_ROUTER_BOT_ID } from '../harness/router-extension.js';
 import {
   ensureRouterConversationId,
   findRouterConversationId,
   getDurablePendingAsks,
   respondToDurableAsk,
 } from '../harness/session-bridge.js';
-import { HUB_ROUTER_BOT_ID as ROUTER_EXTENSION_HUB_ROUTER_BOT_ID } from '../harness/router-extension.js';
 import type { HubApp, HubContext } from './context.js';
 
 // 会话桥接核心逻辑已迁至 harness/session-bridge.ts；此处重导出保持既有导入路径
@@ -46,14 +46,14 @@ export {
 } from '../harness/session-bridge.js';
 export type { DurableSessionMirror } from '../harness/session-bridge.js';
 
-/** 系统内置「⚡ 中枢总管」Router 分身 id（与 harness/router-extension 同源）。 */
+// 系统内置「⚡ 中枢总管」Router 分身 id（与 harness/router-extension 同源）。
 export const HUB_ROUTER_BOT_ID = ROUTER_EXTENSION_HUB_ROUTER_BOT_ID;
 
 /**
  * 构造系统内置「⚡ 中枢总管」（hub-router）虚拟分身配置：
  * - 不写入 SQLite bots 表，绝不污染用户的业务分身列表与「个人助理」通讯录；
  * - 默认模型取首个已配置模型的主分身；
- * - 默认节点取配置分身所在节点（兑底 'local'）。
+ * - 默认节点取配置分身所在节点（兜底 'local'）。
  */
 export function resolveHubRouterBotConfig(db: HubContext['db']): import('@botd/protocol').BotConfig {
   const allBots = db.getAllBots();
