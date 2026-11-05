@@ -69,7 +69,7 @@ export interface BotPersonaConfig {
 	enabledSkills?: string[];
 	/** Dynamic extension names enabled for this persona (mounted on Router and Worker). */
 	enabledExtensions?: string[];
-	/** Thinking effort for the persona's model requests; `'max'` clamps to pi-durable's `'xhigh'`. */
+	/** Thinking effort for the persona's model requests. */
 	thinkingLevel?: ThinkingLevel;
 	/** Extra env vars for the persona's shell commands, merged over the Hub process env. */
 	env?: Record<string, string>;
@@ -131,8 +131,7 @@ type EffectiveModelConfig = Omit<SessionModelOverride, "thinkingLevel"> & { thin
 /** Resolve configuration once so create, update, clear and sync agree. */
 function effectiveModelConfig(persona: BotPersonaConfig, override?: SessionModelOverride): EffectiveModelConfig {
 	const model = override ?? persona.model;
-	const thinking = override?.thinkingLevel ?? persona.thinkingLevel;
-	const thinkingLevel = thinking === "max" ? "xhigh" : thinking;
+	const thinkingLevel = override?.thinkingLevel ?? persona.thinkingLevel;
 	return { provider: model.provider, modelId: model.modelId, ...(thinkingLevel === undefined ? {} : { thinkingLevel }) };
 }
 

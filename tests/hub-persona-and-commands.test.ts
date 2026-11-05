@@ -82,7 +82,7 @@ const persona = (botId: string, overrides: Partial<BotPersonaConfig> = {}): BotP
 // 1. thinkingLevel 与多模态 submitUserMessage
 // ---------------------------------------------------------------------------
 
-test('persona thinkingLevel lands on the router conversation agent; max clamps to xhigh', { timeout: 60_000 }, async () => {
+test('persona thinkingLevel lands on the router conversation agent as-is (max included)', { timeout: 60_000 }, async () => {
   const { runtime } = await openRuntime();
   try {
     runtime.registerPersona(persona('thinker', { thinkingLevel: 'high' }));
@@ -92,7 +92,7 @@ test('persona thinkingLevel lands on the router conversation agent; max clamps t
     assert.equal((await thinker.agent(BACKGROUND_CONTEXT)).thinkingLevel, 'high');
 
     const maxer = await runtime.ensureBotMainSession('maxer');
-    assert.equal((await maxer.agent(BACKGROUND_CONTEXT)).thinkingLevel, 'xhigh', "'max' must clamp to pi-durable's 'xhigh'");
+    assert.equal((await maxer.agent(BACKGROUND_CONTEXT)).thinkingLevel, 'max', "'max' must reach the model as-is (pi-durable natively supports it)");
   } finally {
     await runtime.close();
   }

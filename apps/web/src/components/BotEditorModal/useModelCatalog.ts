@@ -72,14 +72,15 @@ export function useModelCatalog(isOpen: boolean, nodeId: string) {
   };
 }
 
+/** 思考档位直接显示英文原值（off/minimal/low/medium/high/xhigh/max），不做中文映射。 */
 export const THINKING_LEVEL_LABELS: Record<Exclude<ThinkingLevel, ''>, string> = {
-  off: '关闭思考',
-  minimal: '极简思考',
-  low: '轻度思考',
-  medium: '标准思考',
-  high: '深度思考',
-  xhigh: '超深度思考',
-  max: '最大思考',
+  off: 'off',
+  minimal: 'minimal',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  xhigh: 'xhigh',
+  max: 'max',
 };
 
 /** 模型支持的思考档位：优先取目录元数据，缺失时回退全量档位。 */

@@ -32,15 +32,10 @@ export function formatUptime(startedAt?: string): string {
   return `${days}d ${hours}h`;
 }
 
-/** Map thinking level to Chinese */
+/** 思考档位直接显示英文原值（off/minimal/low/medium/high/xhigh/max），不做中文映射。 */
 export function formatThinkingLevel(level?: string) {
   if (!level) return null;
-  const map: Record<string, string> = {
-    low: '轻度思考',
-    medium: '标准思考',
-    high: '深度思考',
-  };
-  return map[level.toLowerCase()] || level;
+  return level.toLowerCase();
 }
 
 /** Get short model name (strip prefix before /) */

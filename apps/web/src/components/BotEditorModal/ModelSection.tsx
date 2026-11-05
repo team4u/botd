@@ -2,7 +2,6 @@ import React from 'react';
 import { Cpu, Loader2, ShieldCheck } from 'lucide-react';
 import type { ProviderCatalogEntry, ModelCatalogEntry, ThinkingLevel, SubagentToolScope } from '@botd/protocol';
 import { SearchableSelect } from '../SearchableSelect';
-import { THINKING_LEVEL_LABELS } from './useModelCatalog';
 
 interface ModelSectionProps {
   isSubagent: boolean;
@@ -142,13 +141,13 @@ export const ModelSection: React.FC<ModelSectionProps> = ({
                 <option value="" className="dark:bg-zinc-900 dark:text-zinc-100">默认（自动）</option>
                 {modelThinkingLevels.map((level) => (
                   <option key={level} value={level} className="dark:bg-zinc-900 dark:text-zinc-100">
-                    {`${THINKING_LEVEL_LABELS[level] || level} (${level})`}
+                    {level}
                   </option>
                 ))}
               </select>
               {modelThinkingLevels.length === 1 ? (
                 <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
-                  {`当前模型固定支持 ${THINKING_LEVEL_LABELS[modelThinkingLevels[0]] || modelThinkingLevels[0]}（${modelThinkingLevels[0]}）`}
+                  {`当前模型固定支持 ${modelThinkingLevels[0]}`}
                 </p>
               ) : currentModelMeta?.thinkingLevels ? (
                 <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
@@ -224,7 +223,7 @@ export const ModelSection: React.FC<ModelSectionProps> = ({
                 {currentModelMeta.reasoning && (
                   <>
                     <span className="text-zinc-300 dark:text-zinc-700">·</span>
-                    <span className="text-zinc-600 dark:text-zinc-400">支持深度思考</span>
+                    <span className="text-zinc-600 dark:text-zinc-400">reasoning</span>
                   </>
                 )}
                 {currentModelMeta.contextWindow && (

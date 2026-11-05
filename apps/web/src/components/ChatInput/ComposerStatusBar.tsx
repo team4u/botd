@@ -2,21 +2,12 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Brain, Check, ChevronDown, Loader2, RotateCcw, Search, Zap } from 'lucide-react';
 import type { BotConfig, ModelCatalog, ModelCatalogEntry, SessionModelConfig, SessionModelOverride, ThinkingLevel } from '@botd/protocol';
 import { api } from '../../api';
-import {
-  THINKING_LEVEL_LABELS,
-  clampThinkingLevel,
-  deriveModelThinkingLevels,
-} from '../BotEditorModal/useModelCatalog';
+import { clampThinkingLevel, deriveModelThinkingLevels } from '../BotEditorModal/useModelCatalog';
 
 /** 模型简称：截取 modelId 中有辨识度的短段（如 claude-sonnet-4-5 / glm-4.6） */
 function shortModelLabel(modelId: string): string {
   if (!modelId) return '未设置';
   return modelId.length > 24 ? `${modelId.slice(0, 22)}…` : modelId;
-}
-
-/** 思考档位短标签：中文 + 代码（如「深度思考 high」） */
-function shortThinkingLabel(level: Exclude<ThinkingLevel, ''>): string {
-  return THINKING_LEVEL_LABELS[level] || level;
 }
 
 interface ComposerStatusBarProps {
@@ -390,13 +381,12 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ sessionId,
             setModelMenuOpen(false);
           }}
           className="inline-flex items-center gap-1 h-6 px-2 rounded-full border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 text-zinc-600 dark:text-zinc-300 hover:border-zinc-300 hover:text-zinc-900 dark:hover:border-zinc-700 dark:hover:text-zinc-100 transition-colors cursor-pointer"
-          title={`推理强度：${shortThinkingLabel(thinkingLevel)}（${thinkingLevel}）${hasOverride ? '，会话覆盖中' : ''}，点击秒切思考档位`}
+          title={`推理强度：${thinkingLevel}${hasOverride ? '，会话覆盖中' : ''}，点击秒切思考档位`}
           aria-haspopup="listbox"
           aria-expanded={thinkingMenuOpen}
         >
           <Brain className="w-3 h-3 text-zinc-400 dark:text-zinc-500 shrink-0" />
-          <span className="truncate">{shortThinkingLabel(thinkingLevel)}</span>
-          <span className="font-mono text-zinc-400 dark:text-zinc-500 shrink-0">{thinkingLevel}</span>
+          <span className="truncate font-mono">{thinkingLevel}</span>
           <ChevronDown className="w-3 h-3 shrink-0 opacity-60" />
         </button>
 
@@ -421,9 +411,8 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ sessionId,
                     role="option"
                     aria-selected={isCurrent}
                   >
-                    <span className="truncate">{THINKING_LEVEL_LABELS[level] || level}</span>
+                    <span className="truncate font-mono">{level}</span>
                     <span className="flex items-center gap-1 shrink-0">
-                      <span className="font-mono text-[10px] text-zinc-400 dark:text-zinc-500">{level}</span>
                       {isCurrent && <Check className="w-3 h-3 text-blue-500" />}
                     </span>
                   </button>
