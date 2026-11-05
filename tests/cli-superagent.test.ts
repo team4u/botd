@@ -97,6 +97,28 @@ test('removed legacy commands are gone from the program', () => {
   }
 });
 
+test('workers list takes an optional [sessionId] and sessions clear accepts --keep-workers', { timeout: 60_000 }, () => {
+  const program = buildProgram();
+
+  // botd workers list [sessionId]：sessionId 可选（省略 → GET /api/workers 跨会话全局列表）
+  const workers = program.commands.find((c) => c.name() === 'workers')!;
+  const list = workers.commands.find((c) => c.name() === 'list')!;
+  const listArgs = list.registeredArguments.map((a) => ({ name: a.name(), required: a.required }));
+  assert.deepEqual(listArgs, [{ name: 'sessionId', required: false }],
+    'workers list sessionId must be optional');
+
+  // botd sessions clear <sessionId> --keep-workers：保留运行中的后台 Worker
+  const sessions = program.commands.find((c) => c.name() === 'sessions')!;
+  const clear = sessions.commands.find((c) => c.name() === 'clear')!;
+  const clearArgs = clear.registeredArguments.map((a) => ({ name: a.name(), required: a.required }));
+  assert.deepEqual(clearArgs, [{ name: 'sessionId', required: true }],
+    'sessions clear sessionId must stay required');
+  const clearOpts = clear.options.map((o) => o.long);
+  assert.ok(clearOpts.includes('--keep-workers'), 'sessions clear must register --keep-workers');
+  const keepWorkers = clear.options.find((o) => o.long === '--keep-workers')!;
+  assert.equal(keepWorkers.mandatory, false, '--keep-workers must be optional');
+});
+
 // ---------------------------------------------------------------------------
 // 2. Full-stack fixture: real Hono app + HubDurableRuntime (faux provider)
 // ---------------------------------------------------------------------------
