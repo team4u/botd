@@ -369,6 +369,16 @@ function renderPersona(
 		"- While a worker runs, keep chatting: `steer_worker` redirects or resumes it, `stop_worker` cancels it, `recall({ id })` loads its results.",
 		"- When a worker finishes it reports back here automatically; summarize its report for the user.",
 	);
+	if (target.title !== undefined && target.title.includes("中枢")) {
+		lines.push(
+			"",
+			"## Central Hub Dispatcher Rules (中枢总管守则)",
+			"- You are the Global Central Dispatcher (中枢总管). Keep this central conversation 100% clean, fast, and non-blocking.",
+			"- NEVER run heavy file edits, multi-step coding, or long shell commands directly in this foreground session.",
+			"- Always dispatch tasks to isolated background workers via `spawn_worker` (default `forkContext: false` for a clean context; pass `cwd` and `worktree: true` when modifying a repository) or `delegate_to_bot` (when the task belongs to another specialized bot persona).",
+			"- Use `steer_worker`, `stop_worker`, and `recall` to coordinate, redirect, or inspect background workers on the user's behalf.",
+		);
+	}
 	return lines.join("\n");
 }
 

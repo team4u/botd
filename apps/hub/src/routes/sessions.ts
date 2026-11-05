@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { isSafeId, isThinkingLevel } from '@botd/protocol';
 import type { CreateSessionInput, SessionModelConfig, SessionModelOverride } from '@botd/protocol';
 import { resolveOwnedSession } from '../http-helpers.js';
-import { cancelDurableSession, forkDurableSession, ensureRouterConversationId, resetDurableSession } from './workers.js';
+import {
+  cancelDurableSession,
+  clearDurableSessionContext,
+  ensureRouterConversationId,
+  forkDurableSession,
+  resetDurableSession,
+} from './workers.js';
 import type { HubDurableRuntime } from '../harness/hub-harness.js';
 import type { HubApp, HubContext } from './context.js';
 
@@ -207,9 +213,18 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
     // 验证后，使用 Router 统一失效旧队列，复用 cancelSession
     await router.cancelSession(id);
 
-    // Durable 侧同步重置：停掉 running Worker / 中止 Router 回合，并清掉会话映射，
-    // 清空后的下一条消息重新懒建全新 Router 会话。
-    if (ctx.durableRuntime) await resetDurableSession(ctx.durableRuntime, id);
+    // Durable 侧同步重置：默认停掉 running Worker / 中止 Router 回合，并清掉会话映射，
+    // 清空后的下一条消息重新懒建全新 Router 会话；`?keepWorkers=1`（/clear）则原地
+    // 清空上下文 —— 仅 pi.reset 边界，保留会话映射与正在运行的后台 Worker。
+    const keepWorkers = c.req.query('keepWorkers') === '1';
+    const rt = ctx.durableRuntime ?? (ctx.getDurableRuntime ? await ctx.getDurableRuntime() : undefined);
+    if (rt) {
+      if (keepWorkers) {
+        await clearDurableSessionContext(rt, id);
+      } else {
+        await resetDurableSession(rt, id);
+      }
+    }
 
     db.clearSessionMessages(id);
     // 同步清空各成员节点的本地会话记忆（best-effort，失败在方法内部吞掉）
