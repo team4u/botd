@@ -26,8 +26,7 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from '
 import { MemoryStorage } from '@earendil-works/pi-durable';
 import type { Extension } from '@earendil-works/pi-durable';
 import { serializeRpcMessage } from '../packages/protocol/src/index.js';
-import type { BotConfig, HubRpcFunctions, NodeRpcFunctions, ProviderLoginState } from '../packages/protocol/src/index.js';
-import { getBuiltinModelCatalog } from '../packages/models/src/index.js';
+import type { BotConfig, HubRpcFunctions, NodeRpcFunctions } from '../packages/protocol/src/index.js';
 
 import { startHub } from '../apps/hub/src/index.js';
 import { HubDurableRuntime, type BotPersonaConfig } from '../apps/hub/src/harness/hub-harness.js';
@@ -189,25 +188,7 @@ async function fixture(t: TestContext): Promise<Fixture> {
     t.after(() => socket.terminate());
     const bots: BotConfig[] = [];
     const rpc = createBirpc<HubRpcFunctions, NodeRpcFunctions>({
-      getModelCatalog: async () => getBuiltinModelCatalog(),
-      startProviderLogin: async (input) => ({
-        id: `login_${input.providerId}`,
-        providerId: input.providerId,
-        method: input.method,
-        status: 'pending' as const,
-        events: [],
-      }),
-      getProviderLogin: async (loginId) => ({ id: loginId } as ProviderLoginState),
-      respondProviderLogin: async (input) => ({ id: input.loginId } as ProviderLoginState),
-      cancelProviderLogin: async () => {},
-      logoutProvider: async () => {},
-      deleteResource: async () => {},
-      saveBot: async () => {},
       deleteBot: async () => {},
-      readFile: async (target) => files.get(`${target.kind}:${target.id}`) ?? '',
-      writeFile: async (target, content) => {
-        files.set(`${target.kind}:${target.id}`, content);
-      },
       installResource: async (input) => {
         const kind = input.kind && input.kind !== 'auto' ? input.kind : input.source.includes('extension') ? 'extension' : 'skill';
         const id = input.customId || (kind === 'skill' ? 'installed-skill' : 'installed-ext');
@@ -215,10 +196,6 @@ async function fixture(t: TestContext): Promise<Fixture> {
         return { kind: kind as 'skill' | 'extension', id };
       },
       restartDaemon: async () => ({ ok: true as const, pid: 4321 }),
-      getCommands: async () => [],
-      runTurn: async (input) => ({ replyText: `Reply from ${input.botId}`, modelBadge: 'faux/main' }),
-      cancelTurn: async () => {},
-      resetSession: async () => {},
       readResourcePackage: async (target: { kind: 'skill' | 'extension'; id: string }) => ({
         kind: target.kind,
         id: target.id,

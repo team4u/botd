@@ -486,29 +486,6 @@ test('Node Local IPC binary stream upload (/artifact/put) & download (/artifact/
   const ctx = await setupTestContext(t);
 
   const socketPath = getDaemonSocketPath(ctx.dir);
-  const rpcUploadCalls: any[] = [];
-  const rpcDownloadCalls: any[] = [];
-
-  const mockHubRpc: any = {
-    uploadArtifact: async (input: any) => {
-      rpcUploadCalls.push(input);
-      return { id: 'art_from_rpc', ...input };
-    },
-    downloadArtifact: async (artifactId: string) => {
-      rpcDownloadCalls.push(artifactId);
-      return {
-        artifact: {
-          id: artifactId,
-          filename: 'rpc.bin',
-          sessionId: ctx.session.id,
-          sizeBytes: 3,
-          mimeType: 'text/plain',
-          createdAt: new Date().toISOString(),
-        },
-        contentBase64: Buffer.from('rpc').toString('base64'),
-      };
-    },
-  };
 
   const ipcDeps: ControlDeps = {
     identity: {
@@ -521,7 +498,6 @@ test('Node Local IPC binary stream upload (/artifact/put) & download (/artifact/
     socketPath,
     startedAt: Date.now(),
     isHubConnected: () => true,
-    getHubRpc: () => mockHubRpc,
     ipcToken: null,
     syncRegistrationWithHub: async () => {},
     handleShutdown: async () => {},
@@ -550,8 +526,6 @@ test('Node Local IPC binary stream upload (/artifact/put) & download (/artifact/
   const uploadedArtId = putRes.json.id || putRes.json.artifact?.id;
   assert.ok(uploadedArtId);
   assert.equal(putRes.json.filename, 'source-upload.bin');
-  // Verify it used HTTP binary stream, NOT mockHubRpc!
-  assert.equal(rpcUploadCalls.length, 0, 'Should have used HTTP stream, NOT RPC upload');
 
   // Verify Hub actually received the file
   const hubSavedPath = path.join(ctx.artifactsDir, uploadedArtId);
@@ -568,7 +542,6 @@ test('Node Local IPC binary stream upload (/artifact/put) & download (/artifact/
   assert.equal(pullRes.status, 200);
   assert.ok(pullRes.json.ok);
   assert.equal(pullRes.json.savedTo, path.resolve(pulledFileDest));
-  assert.equal(rpcDownloadCalls.length, 0, 'Should have used HTTP stream, NOT RPC download');
 
   // Verify content on disk
   assert.ok(fs.existsSync(pulledFileDest));
@@ -582,34 +555,4 @@ test('Node Local IPC binary stream upload (/artifact/put) & download (/artifact/
   assert.equal(pullBase64Res.status, 200);
   assert.ok(pullBase64Res.json.ok);
   assert.equal(pullBase64Res.json.contentBase64, originalFilePayload.toString('base64'));
-
-  // 4. Test fallback to RPC when HTTP fails
-  const failingIpcDeps: ControlDeps = {
-    ...ipcDeps,
-    identity: {
-      ...ipcDeps.identity,
-      hubUrl: 'http://127.0.0.1:1', // Unreachable port
-    },
-  };
-  const failingSocketPath = path.join(ctx.dir, 'failing-agent.sock');
-  const failingServer = createDaemonControlServer(failingIpcDeps);
-  await new Promise<void>((resolve) => failingServer.listen(failingSocketPath, resolve));
-  t.after(async () => {
-    await new Promise<void>((resolve) => failingServer.close(() => resolve()));
-  });
-
-  const fallbackPutRes = await requestOverSocket<any>(failingSocketPath, '/artifact/put', {
-    sessionId: ctx.session.id,
-    botId: ctx.bot.id,
-    filePath: localSourceFile,
-    message: 'Fallback to RPC',
-  });
-  assert.equal(fallbackPutRes.status, 200);
-  assert.equal(rpcUploadCalls.length, 1, 'Should have fallen back to RPC upload');
-
-  const fallbackPullRes = await requestOverSocket<any>(failingSocketPath, '/artifact/pull', {
-    artifactId: 'art_fake_rpc',
-  });
-  assert.equal(fallbackPullRes.status, 200);
-  assert.equal(rpcDownloadCalls.length, 1, 'Should have fallen back to RPC download');
 });

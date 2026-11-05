@@ -237,8 +237,8 @@ test('跨 persona 分叉不泄漏来源覆盖；worktree worker 的 sessionId/wo
 		const fork = await runtime.forkConversation(session.id, latestId, 'architect');
 		const forkCfg = await runtime.getConversationModelConfig(String(fork.id));
 		assert.equal(forkCfg.override?.modelId, 'model-b', 'same-persona user fork inherits the override');
-		assert.equal(forkCfg.effective.thinkingLevel, 'xhigh', "'max' normalizes to 'xhigh'");
-		assert.equal((await fork.agent(BACKGROUND_CONTEXT)).thinkingLevel, 'xhigh');
+		assert.equal(forkCfg.effective.thinkingLevel, 'max', "'max' 保持原值（pi-durable 原生支持，无静默降级）");
+		assert.equal((await fork.agent(BACKGROUND_CONTEXT)).thinkingLevel, 'max');
 		assert.equal((await fork.agent(BACKGROUND_CONTEXT)).model?.modelId, 'model-b');
 
 		// 跨 persona 的用户会话 fork：清覆盖，用 finance 默认。
@@ -256,7 +256,7 @@ test('跨 persona 分叉不泄漏来源覆盖；worktree worker 的 sessionId/wo
 		const historical = await runtime.forkConversation(session.id, latestId, 'architect');
 		assert.equal((await runtime.getConversationModelConfig(String(historical.id))).override?.modelId, 'model-b');
 		assert.equal((await historical.agent(BACKGROUND_CONTEXT)).model?.modelId, 'model-b');
-		assert.equal((await historical.agent(BACKGROUND_CONTEXT)).thinkingLevel, 'xhigh');
+		assert.equal((await historical.agent(BACKGROUND_CONTEXT)).thinkingLevel, 'max');
 	} finally {
 		await runtime.close();
 	}

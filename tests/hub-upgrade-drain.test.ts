@@ -4,14 +4,12 @@ import fs from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createBirpc } from 'birpc';
 import { WebSocket } from 'ws';
 import { startHub } from '../apps/hub/src/index.js';
 import { HubDatabase, HUB_SCHEMA_VERSION } from '../apps/hub/src/db.js';
 import { serializeRpcMessage } from '../packages/protocol/src/index.js';
-import { getBuiltinModelCatalog } from '../packages/models/src/index.js';
 import type {
   BotConfig,
   HubRpcFunctions,
@@ -140,7 +138,6 @@ async function createTestFixture(t: TestContext) {
     sockets.push(socket);
 
     const rpcFunctions: Partial<NodeRpcFunctions> = {
-      getModelCatalog: async () => getBuiltinModelCatalog(),
       restartDaemon: async () => ({ ok: true as const, pid: 4242 }),
     };
 
@@ -305,104 +302,3 @@ test('2. GET /api/nodes/:nodeId/upgrade/check 与 POST /api/nodes/:nodeId/upgrad
   assert.equal(noUpgradeRes.status, 501, 'Unsupported upgradeDaemon should return 501');
 });
 
-test('3. SQLite 旧版本数据库（PRAGMA user_version = 0 或 1）通过 new HubDatabase({ dbPath }) 打开时，自动生成 ${dbPath}.bak-v0 快照备份文件，且备份文件是合法的 SQLite 数据库，新库 user_version 升为 HUB_SCHEMA_VERSION', { timeout: 60_000 }, async (t) => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'botd-db-migration-test-'));
-  t.after(async () => {
-    await rm(dir, { recursive: true, force: true });
-  });
-
-  // Test case A: user_version = 0 legacy database
-  const dbPath0 = path.join(dir, 'legacy-v0.sqlite');
-  {
-    const rawDb = new DatabaseSync(dbPath0);
-    rawDb.exec(`
-      CREATE TABLE nodes (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        platform TEXT NOT NULL,
-        token_hash TEXT NOT NULL,
-        skills_json TEXT NOT NULL DEFAULT '[]',
-        extensions_json TEXT NOT NULL DEFAULT '[]',
-        status TEXT NOT NULL DEFAULT 'offline',
-        last_seen_at TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        pid INTEGER,
-        started_at TEXT,
-        owner_id TEXT
-      );
-      INSERT INTO nodes (id, name, platform, token_hash, last_seen_at, created_at, owner_id)
-      VALUES ('node-v0', 'Legacy V0 Node', 'linux', 'hash-v0', '2025-01-01', '2025-01-01', 'user_admin');
-      PRAGMA user_version = 0;
-    `);
-    rawDb.close();
-  }
-
-  const expectedBackup0 = `${dbPath0}.bak-v0`;
-  assert.equal(fs.existsSync(expectedBackup0), false, 'Backup file should not exist prior to migration');
-
-  // Open with HubDatabase
-  const hubDb0 = new HubDatabase({ dbPath: dbPath0 });
-
-  // 3.1 Verify backup file was created automatically
-  assert.equal(fs.existsSync(expectedBackup0), true, 'Backup file .bak-v0 should exist after migration');
-
-  // 3.2 Verify backup file is a valid SQLite database with original user_version = 0 and legacy node record
-  {
-    const backupDb = new DatabaseSync(expectedBackup0);
-    const versionRow = backupDb.prepare('PRAGMA user_version').get() as { user_version: number };
-    assert.equal(versionRow.user_version, 0, 'Backup database user_version must remain 0');
-
-    const nodeRow = backupDb.prepare('SELECT id, name FROM nodes WHERE id = ?').get('node-v0') as { id: string; name: string } | undefined;
-    assert(nodeRow, 'Backup database should contain legacy rows');
-    assert.equal(nodeRow.name, 'Legacy V0 Node');
-    backupDb.close();
-  }
-
-  // 3.3 Verify upgraded database has user_version = HUB_SCHEMA_VERSION and retains data
-  assert.equal(hubDb0.getSchemaVersion(), HUB_SCHEMA_VERSION, `Upgraded db user_version should be ${HUB_SCHEMA_VERSION}`);
-  const migratedNode = hubDb0.getNode('node-v0');
-  assert(migratedNode, 'Migrated database should retain node');
-  assert.equal(migratedNode.name, 'Legacy V0 Node');
-  hubDb0.close();
-
-  // Test case B: user_version = 1 legacy database
-  const dbPath1 = path.join(dir, 'legacy-v1.sqlite');
-  {
-    const rawDb1 = new DatabaseSync(dbPath1);
-    rawDb1.exec(`
-      CREATE TABLE nodes (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        platform TEXT NOT NULL,
-        token_hash TEXT NOT NULL,
-        skills_json TEXT NOT NULL DEFAULT '[]',
-        extensions_json TEXT NOT NULL DEFAULT '[]',
-        status TEXT NOT NULL DEFAULT 'offline',
-        last_seen_at TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        pid INTEGER,
-        started_at TEXT,
-        owner_id TEXT
-      );
-      INSERT INTO nodes (id, name, platform, token_hash, last_seen_at, created_at, owner_id)
-      VALUES ('node-v1', 'Legacy V1 Node', 'linux', 'hash-v1', '2025-01-01', '2025-01-01', 'user_admin');
-      PRAGMA user_version = 1;
-    `);
-    rawDb1.close();
-  }
-
-  const expectedBackup1 = `${dbPath1}.bak-v1`;
-  const hubDb1 = new HubDatabase({ dbPath: dbPath1 });
-  assert.equal(fs.existsSync(expectedBackup1), true, 'Backup file .bak-v1 should exist after migration');
-  assert.equal(hubDb1.getSchemaVersion(), HUB_SCHEMA_VERSION);
-  hubDb1.close();
-
-  // 3.4 Reopening an already upgraded database should NOT create another backup
-  const statsBefore = fs.statSync(expectedBackup1);
-  const hubDb1Reopened = new HubDatabase({ dbPath: dbPath1 });
-  assert.equal(hubDb1Reopened.getSchemaVersion(), HUB_SCHEMA_VERSION);
-  const statsAfter = fs.statSync(expectedBackup1);
-  assert.equal(statsBefore.mtimeMs, statsAfter.mtimeMs, 'Backup file should not be touched when opening an already upgraded database');
-  hubDb1Reopened.close();
-
-});

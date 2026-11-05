@@ -21,7 +21,6 @@ import { WebSocket } from 'ws';
 import { createModels, fauxProvider } from '@earendil-works/pi-ai';
 import { MemoryStorage } from '@earendil-works/pi-durable';
 import { serializeRpcMessage } from '../packages/protocol/src/index.js';
-import { getBuiltinModelCatalog } from '../packages/models/src/index.js';
 import type { HubRpcFunctions, NodeRpcFunctions } from '../packages/protocol/src/index.js';
 
 import { startHub, type StartHubResult } from '../apps/hub/src/index.js';
@@ -193,24 +192,10 @@ test('2. remote node readResourcePackage round-trip preserves binary bytes and e
   t.after(() => socket.terminate());
   const rpc = createBirpc<HubRpcFunctions, NodeRpcFunctions>(
     {
-      getModelCatalog: async () => getBuiltinModelCatalog(),
-      startProviderLogin: async () => { throw new Error('Not implemented'); },
-      getProviderLogin: async () => { throw new Error('Not implemented'); },
-      respondProviderLogin: async () => { throw new Error('Not implemented'); },
-      cancelProviderLogin: async () => {},
-      logoutProvider: async () => {},
-      saveBot: async () => {},
       deleteBot: async () => {},
-      readFile: async () => '',
-      writeFile: async () => {},
       installResource: async () => ({ kind: 'skill' as const, id: 'remote-skill' }),
-      deleteResource: async () => {},
       restartDaemon: async () => ({ ok: true as const, pid: 1234 }),
-      getCommands: async () => [],
-      runTurn: async () => ({ replyText: 'ok', modelBadge: 'test/model' }),
-      cancelTurn: async () => {},
-      resetSession: async () => {},
-      readResourcePackage: async (target) => await readResourcePackageDir(nodeDataDir, target),
+      readResourcePackage: async (target: { kind: 'skill' | 'extension'; id: string }) => await readResourcePackageDir(nodeDataDir, target),
     },
     {
       post: (data) => socket.send(data),

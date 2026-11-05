@@ -4,7 +4,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { createModels, fauxProvider } from '@earendil-works/pi-ai';
+import { MemoryStorage } from '@earendil-works/pi-durable';
 import { createHub } from '../apps/hub/src/index.js';
+import { HubDurableRuntime } from '../apps/hub/src/harness/hub-harness.js';
+import { createDurableAsk, getDurablePendingAsks, respondToDurableAsk } from '../apps/hub/src/harness/session-bridge.js';
 
 // 本文件验证 outbox 退避重试闭环，统一注入快速重试节奏（须在 createHub 读取前设置）
 process.env.BOTD_OUTBOX_RETRY_MS = process.env.BOTD_OUTBOX_RETRY_MS || '50';
@@ -114,10 +118,16 @@ async function createTestHub(t: test.TestContext) {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-outbox-test-'));
   const dbPath = path.join(dir, 'hub.sqlite');
   const adminPassword = 'admin-password-outbox-test';
-  const hub = createHub({ dbPath, adminPassword });
+  // Ask 统一走 Durable AskDoc：注入 faux provider 的最小运行时支撑 createDurableAsk。
+  const faux = fauxProvider({ models: [{ id: 'main' }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const durableRuntime = await HubDurableRuntime.open({ storage: new MemoryStorage(), models });
+  const hub = createHub({ dbPath, adminPassword, durableRuntime, durableModels: models });
 
   t.after(async () => {
     await hub.close();
+    await durableRuntime.close().catch(() => undefined);
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -166,7 +176,28 @@ async function createTestHub(t: test.TestContext) {
     return { status: res.status, json };
   };
 
-  return { hub, jsonRequest };
+  // 种子 Bot 存量同步进注入的运行时（ensureDurableRuntime 的指纹同步对注入 runtime 生效）
+  await hub.ensureDurableRuntime();
+
+  /** 在会话上创建 pending ask 并广播 interaction_request（生产语义：AskDoc 写入 + SSE 广播）。 */
+  const createPendingAsk = async (sessionId: string, input: { prompt: string; options: string[] }) => {
+    const session = hub.db.getSession(sessionId)!;
+    const record = await createDurableAsk(hub.durableRuntime!, sessionId, {
+      botId: session.leadBotId,
+      prompt: input.prompt,
+      options: input.options,
+    });
+    hub.sseHub.broadcast(sessionId, { type: 'interaction_request', sessionId, ask: record });
+    return record;
+  };
+  /** 回答 pending ask 并广播 interaction_resolved（生产 respondToDurableAsk 同构）。 */
+  const respondAsk = async (sessionId: string, askId: string, answer: string) => {
+    const resolved = await respondToDurableAsk({ rt: hub.durableRuntime!, sseHub: hub.sseHub, sessionId, askId, answer });
+    assert.ok(resolved, `ask ${askId} must resolve`);
+    return resolved;
+  };
+
+  return { hub, jsonRequest, createPendingAsk, respondAsk };
 }
 
 /** 轮询 outbox 接口直到谓词命中某条记录或超时（消除投递异步状态更新的竞态） */
@@ -187,7 +218,7 @@ async function waitForOutboxRow(
 }
 
 test('tellPolicy=needed：仅放行 ask_request 与失败回调，静默普通成功消息', { timeout: 60_000 }, async (t) => {
-  const { hub, jsonRequest } = await createTestHub(t);
+  const { hub, jsonRequest, createPendingAsk, respondAsk } = await createTestHub(t);
   const mock = await startFlakyMockServer();
   t.after(async () => {
     await mock.close();
@@ -249,20 +280,17 @@ test('tellPolicy=needed：仅放行 ask_request 与失败回调，静默普通�
   const failReq = await mock.waitForRequest((r) => r.url === '/needed-hook' && r.body.includes('执行失败'));
   assert.equal(failReq.json.event, 'wakeup');
 
-  // 告警事件 4：ask_request → 应发送
-  const askPromise = hub.router.requestHumanInput({
-    sessionId,
-    botId: 'bot-outbox',
+  // 告警事件 4：ask_request → 应发送（AskDoc 写入 + interaction_request 广播，与生产 ask 同构）
+  const askRecord = await createPendingAsk(sessionId, {
     prompt: '是否继续执行部署？',
     options: ['继续', '终止'],
-    timeoutSeconds: 30,
   });
   const askReq = await mock.waitForRequest((r) => r.url === '/needed-hook' && r.body.includes('是否继续执行部署'));
   assert.equal(askReq.json.event, 'ask_request');
   assert.ok(askReq.json.respondUrls['继续']);
-  // 清理 pending ask，避免悬挂 timer
-  hub.router.respondToAsk(sessionId, askReq.json.ask.id, '终止');
-  await askPromise;
+  // 清理 pending ask，避免悬挂
+  await respondAsk(sessionId, askReq.json.ask.id, '终止');
+  void askRecord;
 
   // 验证 outbox 中只落库了 2 条（失败回调 + ask），且均投递成功
   const askRow = await waitForOutboxRow(jsonRequest, sessionId, (o: any) => o.eventKind === 'ask_request' && o.status === 'sent');
@@ -279,7 +307,7 @@ test('tellPolicy=needed：仅放行 ask_request 与失败回调，静默普通�
 });
 
 test('tellPolicy=never：完全静默不推送', { timeout: 60_000 }, async (t) => {
-  const { hub, jsonRequest } = await createTestHub(t);
+  const { hub, jsonRequest, createPendingAsk, respondAsk } = await createTestHub(t);
   const mock = await startFlakyMockServer();
   t.after(async () => {
     await mock.close();
@@ -301,12 +329,9 @@ test('tellPolicy=never：完全静默不推送', { timeout: 60_000 }, async (t) 
   assert.equal(chanRes.status, 201);
 
   // ask_request 也应被 never 拦截
-  const askPromise = hub.router.requestHumanInput({
-    sessionId,
-    botId: 'bot-outbox',
+  const askRecord = await createPendingAsk(sessionId, {
     prompt: 'never 策略下的确认请求',
     options: ['是'],
-    timeoutSeconds: 30,
   });
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(
@@ -314,13 +339,14 @@ test('tellPolicy=never：完全静默不推送', { timeout: 60_000 }, async (t) 
     false,
     'never 策略不应推送任何事件'
   );
-  const asks = hub.router.getPendingAsks(sessionId);
-  if (asks.length > 0) hub.router.respondToAsk(sessionId, asks[0].id, '是');
-  await askPromise;
+  // 清理 pending ask（GetPendingAsks 确认仍在 pending）
+  const pending = await getDurablePendingAsks(hub.durableRuntime!, sessionId);
+  assert.equal(pending.length, 1, 'ask must stay pending without any channel push');
+  await respondAsk(sessionId, askRecord.id, '是');
 });
 
 test('子会话事件向上继承：命中父会话配置的通知通道', { timeout: 60_000 }, async (t) => {
-  const { hub, jsonRequest } = await createTestHub(t);
+  const { hub, jsonRequest, createPendingAsk, respondAsk } = await createTestHub(t);
   const mock = await startFlakyMockServer();
   t.after(async () => {
     await mock.close();
@@ -365,15 +391,13 @@ test('子会话事件向上继承：命中父会话配置的通知通道', { tim
   assert.ok(failReq.json.content.text.includes('（子会话 sess_child_inherit）'), '继承通知应标注来源子会话');
 
   // 子会话 ask_request → 命中父会话通道，respondUrls 指向子会话（ask 实际所在会话）
-  const askPromise = hub.router.requestHumanInput({
-    sessionId: child.id,
-    botId: 'bot-outbox',
+  const firstAskRecord = await createPendingAsk(child.id, {
     prompt: '子会话请求确认',
     options: ['批准'],
-    timeoutSeconds: 30,
   });
   const askReq = await mock.waitForRequest((r) => r.url === '/parent-feishu' && r.body.includes('子会话请求确认'));
   assert.ok(askReq.json.content.text.includes('批准'));
+  void firstAskRecord;
 
   // 从 webhook 通道再验证 respondUrls 签名指向子会话
   const whChanRes = await jsonRequest(`/api/sessions/${parent.id}/channels`, 'POST', {
@@ -383,12 +407,9 @@ test('子会话事件向上继承：命中父会话配置的通知通道', { tim
     events: ['ask_request'],
   });
   assert.equal(whChanRes.status, 201);
-  const askPromise2 = hub.router.requestHumanInput({
-    sessionId: child.id,
-    botId: 'bot-outbox',
+  const secondAskRecord = await createPendingAsk(child.id, {
     prompt: '子会话二次确认',
     options: ['同意', '拒绝'],
-    timeoutSeconds: 30,
   });
   const whAskReq = await mock.waitForRequest((r) => r.url === '/parent-webhook' && r.body.includes('子会话二次确认'));
   assert.equal(whAskReq.json.sessionId, child.id, 'payload 主体会话应为事件源子会话');
@@ -404,13 +425,12 @@ test('子会话事件向上继承：命中父会话配置的通知通道', { tim
     { method: 'GET' }
   );
   assert.equal(respondRes.status, 200, '继承通知的回调链接必须可用');
-  await askPromise2;
+  void secondAskRecord;
 
   // 清理第一个 ask（飞书 payload 不含 ask id，从 pending 列表获取）
-  const pendingAsks = hub.router.getPendingAsks(child.id);
+  const pendingAsks = await getDurablePendingAsks(hub.durableRuntime!, child.id);
   const firstAsk = pendingAsks.find((a) => a.prompt === '子会话请求确认');
-  if (firstAsk) hub.router.respondToAsk(child.id, firstAsk.id, '批准');
-  await askPromise;
+  if (firstAsk) await respondAsk(child.id, firstAsk.id, '批准');
 
   // 无亲缘关系的会话不应命中父会话通道
   const stranger = hub.db.createSession({

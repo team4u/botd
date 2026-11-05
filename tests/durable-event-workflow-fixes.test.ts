@@ -217,7 +217,7 @@ test('2. SubagentWorkflow worktree gate mounts the worktree on the ExecutionEnv 
 // ---------------------------------------------------------------------------
 
 /** 组装最小 Hub 侧组件：HubDatabase（内存）+ SseHub + 路由桩（旧 GroupRouter 已删除，
- *  TriggerService 仅在 Durable 提交失败时才回退路由，本套件恒走 Durable 主线）。 */
+ *  TriggerService 构造的 router 形参仅为占位，Durable 主线恒不回调）。 */
 async function createHubSide() {
 	const db = new HubDatabase({ dbPath: ':memory:' });
 	const sseHub = new SseHub();
@@ -229,7 +229,7 @@ async function createHubSide() {
 		handleWakeup: async () => {
 			throw new Error('GroupRouter fallback must not be reached on the durable mainline');
 		},
-	} as unknown as import('../apps/hub/src/trigger-service.js').TriggerService['router'];
+	} as unknown as Record<string, unknown>;
 	return { db, sseHub, router };
 }
 

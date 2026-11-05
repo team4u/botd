@@ -14,8 +14,6 @@ import { startHub } from '../apps/hub/src/index.js';
 import { HubDatabase } from '../apps/hub/src/db.js';
 import { HubDurableRuntime } from '../apps/hub/src/harness/hub-harness.js';
 import { serializeRpcMessage } from '../packages/protocol/src/index.js';
-import { getBuiltinModelCatalog } from '../packages/models/src/index.js';
-import type { ProviderLoginState } from '../packages/protocol/src/index.js';
 import type { BotConfig, HubRpcFunctions, MessageRecord, NodeRpcFunctions, SessionRecord, TriggerRecord } from '../packages/protocol/src/index.js';
 
 const PASSWORD = 'integration-password';
@@ -101,40 +99,15 @@ async function fixture(t: TestContext) {
     const identity = await jsonAs('/api/nodes/pairing/exchange', 'POST', { code: pairing.code, name: 'Test node', platform: 'linux' });
     const bots: BotConfig[] = ids.map(id => ({ id, nodeId: identity.nodeId, name: id, description: '', modelProvider: 'faux', modelId: 'main', thinkingLevel: 'medium', enabledSkills: [], updatedAt: new Date().toISOString() }));
     const files = new Map<string, string>();
-    const logins = new Map<string, ProviderLoginState>();
-    const authCalls: string[] = [];
     const socket = new WebSocket(`${base.replace('http:', 'ws:')}/ws/node?nodeId=${identity.nodeId}&token=${identity.token}`);
     sockets.push(socket);
     const rpc = createBirpc<HubRpcFunctions, NodeRpcFunctions>({
-      getModelCatalog: async () => getBuiltinModelCatalog(),
-      startProviderLogin: async input => {
-        const id = `login_${logins.size}`;
-        const state: ProviderLoginState = { id, providerId: input.providerId, method: input.method, status: 'pending', events: [{ type: 'auth_url', url: 'https://example.com/auth' }], prompt: { id: 'prompt_1', type: 'manual_code', message: 'Paste authorization code' } };
-        logins.set(id, state);
-        return state;
-      },
-      getProviderLogin: async id => logins.get(id)!,
-      respondProviderLogin: async input => {
-        const state = logins.get(input.loginId)!;
-        assert.equal(input.promptId, state.prompt?.id);
-        state.status = 'success';
-        delete state.prompt;
-        return state;
-      },
-      cancelProviderLogin: async id => { logins.get(id)!.status = 'cancelled'; },
-      logoutProvider: async providerId => { authCalls.push(providerId); },
-      saveBot: async bot => { const i = bots.findIndex(existing => existing.id === bot.id); if (i < 0) bots.push(bot); else bots[i] = bot; },
       deleteBot: async id => { const index = bots.findIndex(bot => bot.id === id); if (index >= 0) bots.splice(index, 1); },
-      readFile: async target => files.get(`${target.kind}:${target.botId ?? target.id}`) ?? '',
-      writeFile: async (target, content) => { files.set(`${target.kind}:${target.botId ?? target.id}`, content); },
       installResource: async input => {
         const kind = input.kind && input.kind !== 'auto' ? input.kind : (input.source.includes('skill') ? 'skill' : 'extension');
         const id = input.customId || 'installed-res';
         files.set(`${kind}:${id}`, `installed from ${input.source}`);
         return { kind, id };
-      },
-      deleteResource: async target => {
-        files.delete(`${target.kind}:${target.id}`);
       },
       restartDaemon: async () => ({ ok: true as const, pid: 4242 }),
       readResourcePackage: async (target: { kind: 'skill' | 'extension'; id: string }) => ({
@@ -156,7 +129,7 @@ async function fixture(t: TestContext) {
     });
     await once(socket, 'open');
     await rpc.registerNode({ nodeId: identity.nodeId, name: 'Test node', platform: 'linux', bots, skills: ['demo'], extensions });
-    return { identity, bots, socket, rpc, files, authCalls };
+    return { identity, bots, socket, rpc, files };
   };
   const session = (ids: string[], mode = 'direct') => json<SessionRecord>('/api/sessions', 'POST', { title: 'Test session', mode: 'direct', leadBotId: ids[0], memberBotIds: [ids[0]] });
   const messages = (id: string) => json<MessageRecord[]>(`/api/sessions/${id}/messages`);
@@ -352,7 +325,7 @@ test('force removal discards an offline node together with its cached bots', { t
   stale.terminate();
 });
 
-test('force removal of an online node best-effort deletes its local bots', { timeout: 60_000 }, async t => {
+test('force removal of an online node closes the connection and purges hub records', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const node = await f.addNode(['bot-z']);
 
@@ -361,80 +334,10 @@ test('force removal of an online node best-effort deletes its local bots', { tim
     f.json(`/api/nodes/${node.identity.nodeId}?force=1`, 'DELETE'),
   ]);
   assert(closed, 'live node connection must be closed on force removal');
-  assert.deepEqual(node.bots.map(bot => bot.id), [], 'online node is asked to delete its local bots');
+  // Hub 权威存储：节点侧不再下发 deleteBot RPC，Hub 注册表直接清空即可。
   assert.equal((await f.json('/api/nodes')).length, 0);
 });
 
-test('SQLite schema migration adds extensions columns to legacy tables without losing rows', { timeout: 60_000 }, async t => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'botd-hub-migration-'));
-  const dbPath = path.join(dir, 'legacy.sqlite');
-  const setupDb = new DatabaseSync(dbPath);
-  setupDb.exec(`
-    CREATE TABLE nodes (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      platform TEXT NOT NULL,
-      token_hash TEXT NOT NULL,
-      skills_json TEXT NOT NULL DEFAULT '[]',
-      status TEXT NOT NULL DEFAULT 'offline',
-      last_seen_at TEXT NOT NULL,
-      created_at TEXT NOT NULL
-    );
-
-    CREATE TABLE bots (
-      id TEXT PRIMARY KEY,
-      node_id TEXT NOT NULL,
-      name TEXT NOT NULL,
-      description TEXT NOT NULL DEFAULT '',
-      model_provider TEXT NOT NULL,
-      model_id TEXT NOT NULL,
-      thinking_level TEXT DEFAULT 'medium',
-      enabled_skills_json TEXT NOT NULL DEFAULT '[]',
-      updated_at TEXT NOT NULL
-    );
-
-    INSERT INTO nodes (id, name, platform, token_hash, skills_json, status, last_seen_at, created_at)
-    VALUES ('legacy-node', 'Legacy Node', 'linux', 'token-hash-1', '["legacy-skill"]', 'offline', '2025-01-01T00:00:00.000Z', '2025-01-01T00:00:00.000Z');
-
-    INSERT INTO bots (id, node_id, name, description, model_provider, model_id, thinking_level, enabled_skills_json, updated_at)
-    VALUES ('legacy-bot', 'legacy-node', 'Legacy Bot', 'Legacy Bot Description', 'openai', 'test-model', 'medium', '["legacy-skill"]', '2025-01-01T00:00:00.000Z');
-  `);
-  setupDb.close();
-
-  const hubDb = new HubDatabase({ dbPath });
-  t.after(async () => {
-    hubDb.close();
-    await rm(dir, { recursive: true, force: true });
-  });
-
-  const nodeColumns = hubDb.db.prepare(`PRAGMA table_info(nodes)`).all() as Array<{ name: string }>;
-  assert(nodeColumns.some(c => c.name === 'extensions_json'), 'nodes table must have extensions_json column');
-
-  const botColumns = hubDb.db.prepare(`PRAGMA table_info(bots)`).all() as Array<{ name: string }>;
-  assert(botColumns.some(c => c.name === 'enabled_extensions_json'), 'bots table must have enabled_extensions_json column');
-
-  const migratedNode = hubDb.getNode('legacy-node');
-  assert(migratedNode, 'Legacy node must be retained');
-  assert.equal(migratedNode.id, 'legacy-node');
-  assert.equal(migratedNode.name, 'Legacy Node');
-  assert.deepEqual(migratedNode.skills, ['legacy-skill']);
-  assert.deepEqual(migratedNode.extensions, []);
-
-  const migratedBot = hubDb.getBot('legacy-bot');
-  assert(migratedBot, 'Legacy bot must be retained');
-  assert.equal(migratedBot.id, 'legacy-bot');
-  assert.equal(migratedBot.name, 'Legacy Bot');
-  assert.deepEqual(migratedBot.enabledSkills, ['legacy-skill']);
-  assert.deepEqual(migratedBot.enabledExtensions, []);
-
-  const allNodesWithBots = hubDb.getAllNodesWithBots('user_admin');
-  assert.equal(allNodesWithBots.length, 1);
-  assert.equal(allNodesWithBots[0].id, 'legacy-node');
-  assert.deepEqual(allNodesWithBots[0].extensions, []);
-  assert.equal(allNodesWithBots[0].bots.length, 1);
-  assert.equal(allNodesWithBots[0].bots[0].id, 'legacy-bot');
-  assert.deepEqual(allNodesWithBots[0].bots[0].enabledExtensions, []);
-});
 
 test('restarts a node daemon via HTTP', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
@@ -595,11 +498,9 @@ test('session deletion, message clearing and enriched session list', { timeout: 
 
   f.hub.db.updateSessionStatus(busySession.id, 'idle');
 
-  // Clearing wipes messages and resets the incremental cursors
-  f.hub.db.updateSessionCursor(busySession.id, 'solo', 123);
+  // Clearing wipes messages and resets the enriched session fields
   assert.deepEqual(await f.json(`/api/sessions/${busySession.id}/messages`, 'DELETE'), { ok: true });
   assert.deepEqual(await f.messages(busySession.id), []);
-  assert.deepEqual(f.hub.db.getSession(busySession.id)!.cursorMap, {}, 'clearing messages must reset cursor_map');
   const cleared = await f.json<SessionRecord[]>('/api/sessions');
   const clearedItem = cleared.find(s => s.id === busySession.id)!;
   assert.equal(clearedItem.messageCount, 0);
@@ -611,7 +512,7 @@ test('session deletion, message clearing and enriched session list', { timeout: 
   assert.equal((await f.json<SessionRecord[]>('/api/sessions')).length, 0);
 });
 
-test('session archive flag toggles via PATCH, validates input and migrates legacy databases', { timeout: 60_000 }, async t => {
+test('session archive flag toggles via PATCH and validates input', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   await f.addNode(['solo']);
   const session = await f.session(['solo'], 'direct');
@@ -639,46 +540,6 @@ test('session archive flag toggles via PATCH, validates input and migrates legac
   assert.equal(bad.status, 400);
   assert.deepEqual(await bad.json(), { error: 'Invalid archived flag' });
 
-  // 4. Legacy database without the archived column is migrated automatically
-  const dir = await mkdtemp(path.join(tmpdir(), 'botd-hub-archive-migration-'));
-  const dbPath = path.join(dir, 'legacy.sqlite');
-  const setupDb = new DatabaseSync(dbPath);
-  setupDb.exec(`
-    CREATE TABLE sessions (
-      id TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
-      mode TEXT NOT NULL DEFAULT 'direct',
-      lead_bot_id TEXT NOT NULL,
-      member_bot_ids_json TEXT NOT NULL DEFAULT '[]',
-      cursor_map_json TEXT NOT NULL DEFAULT '{}',
-      status TEXT NOT NULL DEFAULT 'idle',
-      active_bot_id TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-
-    INSERT INTO sessions (id, title, mode, lead_bot_id, member_bot_ids_json, cursor_map_json, status, active_bot_id, created_at, updated_at)
-    VALUES ('legacy-sess', 'Legacy Session', 'direct', 'legacy-bot', '[]', '{}', 'idle', NULL, '2025-01-01T00:00:00.000Z', '2025-01-01T00:00:00.000Z');
-  `);
-  setupDb.close();
-
-  const hubDb = new HubDatabase({ dbPath });
-  t.after(async () => {
-    hubDb.close();
-    await rm(dir, { recursive: true, force: true });
-  });
-
-  const columns = hubDb.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
-  assert(columns.some(c => c.name === 'archived'), 'sessions table must gain the archived column');
-
-  const legacySession = hubDb.getSession('legacy-sess')!;
-  assert.equal(legacySession.title, 'Legacy Session');
-  assert.equal(legacySession.archived, false, 'migrated rows default to archived = 0');
-  assert.equal(hubDb.getAllSessions('user_admin')[0].archived, false);
-
-  const migratedUpdate = hubDb.updateSession('legacy-sess', { archived: true })!;
-  assert.equal(migratedUpdate.archived, true);
-  assert.equal(hubDb.getSession('legacy-sess')!.archived, true);
 });
 
 test('session fork clones config and history up to the anchor without touching the source', { timeout: 60_000 }, async t => {
@@ -950,8 +811,8 @@ test('Hub full ownership: Bot CRUD, SYSTEM/MEMORY, env, skills, extensions and p
   assert.deepEqual(await f.json('/api/bots/hub-owned-bot/system'), { content: 'You are hub owned.' });
   await f.json('/api/bots/hub-owned-bot/memory', 'PUT', { content: 'Remember hub ownership.' });
   assert.deepEqual(await f.json('/api/bots/hub-owned-bot/memory'), { content: 'Remember hub ownership.' });
-  // node-dimension alias route reads the same Hub storage
-  assert.deepEqual(await f.json('/api/nodes/local/bots/hub-owned-bot/files/memory'), { content: 'Remember hub ownership.' });
+  // Hub 维度唯一权威路由（节点维度别名路由已随旧引擎删除）
+  assert.deepEqual(await f.json('/api/bots/hub-owned-bot/memory'), { content: 'Remember hub ownership.' });
 
   // env CRUD entirely on Hub
   await f.json('/api/bots/hub-owned-bot/env', 'PUT', { env: { GITHUB_TOKEN: 'gh-token', DB_URL: 'sqlite://x' } });

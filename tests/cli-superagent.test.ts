@@ -6,7 +6,7 @@
  *     旧命令（bg / ask / install / sessions delegate）绝迹；
  *  2. workers list/spawn/steer/stop/recall、events ingest、watchdog health
  *     对真实 Hono app（HubDurableRuntime + faux provider）全链路验证；
- *  3. asks list/respond 走 Hub 的 GroupRouter ask 协调器。
+ *  3. asks list/respond 走 Hub 的 Durable AskDoc（createDurableAsk 同构入口）。
  */
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -19,6 +19,7 @@ import { MemoryStorage } from '@earendil-works/pi-durable';
 
 import { startHub } from '../apps/hub/src/index.js';
 import { HubDurableRuntime, type BotPersonaConfig } from '../apps/hub/src/harness/hub-harness.js';
+import { createDurableAsk } from '../apps/hub/src/harness/session-bridge.js';
 import { buildProgram } from '../apps/node/src/cli/program.js';
 import { HubClient } from '../apps/node/src/cli/hub-client.js';
 
@@ -386,7 +387,7 @@ test('watchdog health returns structured diagnostics via CLI (--run-pass appends
 });
 
 // ---------------------------------------------------------------------------
-// 3. asks: pending human-interaction asks over the Hub GroupRouter
+// 3. asks: pending human-interaction asks over the Hub Durable AskDoc
 // ---------------------------------------------------------------------------
 
 test('asks list/respond answers a pending ask via the Hub', { timeout: 60_000 }, async (t) => {
@@ -434,17 +435,17 @@ test('asks list/respond answers a pending ask via the Hub', { timeout: 60_000 },
     leadBotId: 'bot_ask',
     ownerId: adminUser.id,
   });
+  // Ask 统一走 Durable AskDoc：懒开运行时（同步 bot_ask persona）后直接写入。
+  const durableRuntime = await hub.ensureDurableRuntime();
 
   await HubClient.establish(hubUrl, 'admin', PASSWORD, { dataDir: dir });
   const f: Fixture = { hubUrl, dataDir: dir, sessionId: session.id };
 
-  // 种子一个 pending ask（bot 侧 requestHumanInput 的落库形态）
-  const askPromise = hub.router.requestHumanInput({
-    sessionId: session.id,
+  // 种子一个 pending ask（写入会话 Router 会话的 AskDoc）
+  await createDurableAsk(durableRuntime, session.id, {
     botId: 'bot_ask',
     prompt: '是否发布 v1.2.0？',
     options: ['发布', '暂缓'],
-    timeoutSeconds: 30,
   });
 
   const pending = await waitFor(
@@ -462,9 +463,6 @@ test('asks list/respond answers a pending ask via the Hub', { timeout: 60_000 },
   );
   assert.equal(respondOut.ok, true);
   assert.equal(respondOut.ask.answer, '发布');
-
-  const answered = await askPromise;
-  assert.equal(answered.answer, '发布');
 });
 
 // ---------------------------------------------------------------------------

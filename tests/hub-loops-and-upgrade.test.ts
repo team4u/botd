@@ -27,7 +27,6 @@ import { WebSocket } from 'ws';
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai';
 import { MemoryStorage } from '@earendil-works/pi-durable';
 import { serializeRpcMessage } from '../packages/protocol/src/index.js';
-import { getBuiltinModelCatalog } from '../packages/models/src/index.js';
 import type {
   BotConfig,
   HubRpcFunctions,
@@ -189,29 +188,9 @@ const askHumanResponses = () =>
 const nodeRpcStub = (overrides: {
   upgradeDaemon?: NodeRpcFunctions['upgradeDaemon'];
 }): NodeRpcFunctions => ({
-  getModelCatalog: async () => getBuiltinModelCatalog(),
-  startProviderLogin: async (input) => ({
-    id: `login_${input.providerId}`,
-    providerId: input.providerId,
-    method: input.method,
-    status: 'pending' as const,
-    events: [],
-  }),
-  getProviderLogin: async (loginId) => ({ id: loginId, providerId: 'openai', method: 'api_key', status: 'pending', events: [] }),
-  respondProviderLogin: async (input) => ({ id: input.loginId, providerId: 'openai', method: 'api_key', status: 'success', events: [] }),
-  cancelProviderLogin: async () => {},
-  logoutProvider: async () => {},
-  saveBot: async () => {},
   deleteBot: async () => {},
-  readFile: async () => '',
-  writeFile: async () => {},
   installResource: async (input) => ({ kind: 'skill' as const, id: input.customId ?? 'stub' }),
-  deleteResource: async () => {},
   restartDaemon: async () => ({ ok: true as const, pid: 1111 }),
-  getCommands: async () => [],
-  runTurn: async (input) => ({ replyText: `Reply from ${input.botId}`, modelBadge: 'x/y' }),
-  cancelTurn: async () => {},
-  resetSession: async () => {},
   readResourcePackage: async () => ({ files: [], kind: 'skill', id: 'stub' }),
   ...(overrides.upgradeDaemon ? { upgradeDaemon: overrides.upgradeDaemon } : {}),
 });

@@ -2,13 +2,16 @@
  * Event Inbox（事件收件箱、持久化去重、载荷文件化）与 Trigger subsession 派发测试：
  *  1. automation_events 持久化去重：x-github-delivery / x-botd-dedup 跨重启去重
  *  2. eventFilter：source / types / payloadMatch 匹配与 filter_mismatch 跳过
- *  3. dispatchMode: 'subsession'：自动创建子会话、父会话 callback 通知、完成回传、skillId 前缀
- *  4. 载荷文件化：event_<id>.json 落盘为 Artifact，子会话可读取
+ *  3. dispatchMode: 'subsession'：在父会话 Durable Router 上派生后台 Worker
+ *     （childSessionId 为 Worker conversation id），完成后 WorkerReportTask 自动汇报父 Router
+ *  4. 载荷文件化：event_<id>.json 落盘为 Artifact，Worker 可读取
  *  5. GET /api/sessions/:id/events：事件列表与所有权校验
  *  6. 向后兼容：append 模式行为与响应体保持不变
- *  7. subsession 交付物闭环：子会话新产物完成时零拷贝回传父会话
- *  8. Webhook HMAC 签名校验：配置 secret 后缺失/错误签名 401，正确签名放行
- *  9. markSessionParentNotified 幂等防重：父子会话完成回调绝不重复发送
+ *  7. Webhook HMAC 签名校验：配置 secret 后缺失/错误签名 401，正确签名放行
+ *  8. markSessionParentNotified 幂等防重
+ *
+ * 旧式 SQLite 孤立子会话（parentSessionId 挂接 + 完成后消息拷贝回父会话）已随
+ * subsession 语义重构移除：子任务产物归档由 Worker 的产物与 Recall 机制承担。
  */
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
@@ -77,7 +80,12 @@ async function setupHub(t: TestContext) {
 /** 会话的 Router 会话全部 user 输入文本（验证触发器唤醒真正提交进 Durable 主线）。 */
 const durableUserTexts = async (runtime: HubDurableRuntime, sessionId: string, botId: string): Promise<string[]> => {
   const routerId = await ensureRouterConversationId(runtime, sessionId, botId);
-  const conversation = await runtime.conversation(routerId, BACKGROUND_CONTEXT);
+  return conversationUserTexts(runtime, routerId);
+};
+
+/** 指定 conversation（如 Worker 会话）的全部 user 输入文本（worker-task 初始 prompt 等）。 */
+const conversationUserTexts = async (runtime: HubDurableRuntime, conversationId: string): Promise<string[]> => {
+  const conversation = await runtime.conversation(conversationId, BACKGROUND_CONTEXT);
   if (conversation === undefined) return [];
   const page = await conversation.entries({ order: 'ascending' }, 500, undefined, BACKGROUND_CONTEXT);
   const texts: string[] = [];
@@ -96,6 +104,23 @@ const durableUserTexts = async (runtime: HubDurableRuntime, sessionId: string, b
     }
   }
   return texts;
+};
+
+/**
+ * 通过真实 HTTP 提交一条用户消息，把 Durable mirror attach 到该会话
+ * （生产路径中用户发过消息的会话即如此），随后 Worker 完成汇报才会镜像回 SQLite 公屏。
+ */
+const attachMirrorViaUserMessage = async (
+  hub: ReturnType<typeof createHub>,
+  cookie: string,
+  sessionId: string,
+): Promise<void> => {
+  const res = await hub.app.request(`/api/sessions/${sessionId}/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ content: 'hello' }),
+  });
+  assert.equal(res.status, 202, 'user message must be accepted for mirror attach');
 };
 
 function createSessionFixture(hub: ReturnType<typeof createHub>, userId: string, sessionId: string, botId: string) {
@@ -124,6 +149,8 @@ function createSessionFixture(hub: ReturnType<typeof createHub>, userId: string,
     leadBotId: botId,
     ownerId: userId,
   });
+  // 直写 db 的种子后续要走 Durable 主线：同步分身进注入的运行时。
+  void hub.ensureDurableRuntime();
 }
 
 function createWebhookTrigger(
@@ -163,10 +190,10 @@ const fireWebhook = (
     body: typeof body === 'string' ? body : JSON.stringify(body),
   });
 
-const waitFor = async (predicate: () => boolean, timeout = 5000): Promise<void> => {
+const waitFor = async (predicate: () => boolean | Promise<boolean>, timeout = 5000): Promise<void> => {
   const start = Date.now();
   while (Date.now() - start < timeout) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise((r) => setTimeout(r, 20));
   }
   throw new Error('Timeout waiting for condition');
@@ -515,9 +542,13 @@ test('webhook eventFilter.payloadMatch：JSON 顶层键值精确匹配', { timeo
 // 3. dispatchMode: 'subsession'
 // ---------------------------------------------------------------------------
 
-test('dispatchMode=subsession：Webhook 触发自动派生子会话，完成后回传摘要', { timeout: 60_000 }, async (t) => {
-  const { hub, admin, faux } = await setupHub(t);
+test('dispatchMode=subsession：Webhook 触发自动派生后台 Worker，完成后汇报镜像回父会话', { timeout: 60_000 }, async (t) => {
+  const { hub, cookie, admin, durableRuntime } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_sub', 'bot_sub');
+
+  // 先发一条用户消息把 Durable mirror attach 到会话（生产路径中用户发过消息的
+  // 会话即如此），后续 Worker 完成汇报才会镜像回 SQLite 公屏。
+  await attachMirrorViaUserMessage(hub, cookie, 'sess_sub');
 
   const trigger = createWebhookTrigger(hub, admin.id, 'sess_sub', 'bot_sub', {
     dispatchMode: 'subsession',
@@ -528,71 +559,94 @@ test('dispatchMode=subsession：Webhook 触发自动派生子会话，完成后�
   assert.equal(fire.status, 200);
   const fireJson = await fire.json();
   assert.equal(fireJson.ok, true);
-  assert.ok(fireJson.childSessionId, '响应包含 childSessionId');
   assert.ok(fireJson.eventId, '响应包含 eventId');
+  assert.ok(fireJson.childSessionId, '响应包含 childSessionId');
 
-  const childSessionId = fireJson.childSessionId as string;
+  // childSessionId 是 Durable conversation id（纯数字字符串），不是 sess_* 会话 id
+  const childConversationId = fireJson.childSessionId as string;
+  assert.match(childConversationId, /^\d+$/, 'childSessionId 为 Worker conversation id（纯数字）');
+  assert.equal(hub.db.getSession(childConversationId), undefined, 'Worker 不是 SQLite 会话');
 
-  // 子会话结构：parentSessionId 指向父会话，direct 模式，单成员
-  const childSession = hub.db.getSession(childSessionId)!;
-  assert.equal(childSession.parentSessionId, 'sess_sub');
-  assert.equal(childSession.leadBotId, 'bot_sub');
-  assert.equal(childSession.title, '[自动任务] nightly report');
+  // 父会话公屏收到「已派发给后台 Worker」notice（同步写入，正文含初始 prompt）
+  const notice = hub.db.getMessages('sess_sub').find(
+    (m) => m.role === 'callback' && m.content.includes('自动任务已派发给后台 Worker')
+  );
+  assert.ok(notice, '父会话必须出现派发 notice');
+  assert.ok(notice!.content.includes('nightly report'), 'notice 携带触发器署名');
+  assert.ok(notice!.content.includes('./inbox/event_'), 'notice 正文含初始 prompt（载荷文件化元数据头）');
 
-  // 子会话被真实启动：faux 回复镜像回子会话消息列表
-  await waitFor(() => hub.db.getMessages(childSessionId).some((m) => m.role === 'assistant'));
-  void faux;
+  // automation_events 记录存在且回填了 childSessionId 与载荷 Artifact
+  const events = hub.db.listSessionAutomationEvents('sess_sub');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].childSessionId, childConversationId, '事件回填 Worker conversation id');
+  assert.ok(events[0].payloadArtifactId, '载荷落盘为 Artifact');
 
-  // 子会话完成后父会话收到回传摘要
+  // 初始 prompt 已送达 Worker conversation（元数据头 + 触发器 prompt，不拼接不可信 payload）
+  const workerTexts = await conversationUserTexts(durableRuntime, childConversationId);
+  const workerInitial = workerTexts.find((x) => x.startsWith('[Webhook: nightly report]'));
+  assert.ok(workerInitial, 'Worker 收到初始任务 prompt');
+  assert.ok(workerInitial!.startsWith(`[Webhook: nightly report] 收到事件 ${events[0].id}`), '元数据头引用事件 id');
+  assert.ok(workerInitial!.includes('./inbox/event_'), '指向 inbox 载荷文件');
+  assert.ok(workerInitial!.endsWith('process event'), '元数据头之后拼接触发器 prompt');
+  assert.ok(!workerInitial!.includes('build finished'), '不可信 payload 不得拼入初始 prompt');
+
+  // Worker 完成后：registry 转 completed，父会话公屏镜像出 worker 汇报 callback 消息
+  const routerId = await ensureRouterConversationId(durableRuntime, 'sess_sub', 'bot_sub');
+  await waitFor(async () => {
+    const workers = await durableRuntime.getActiveWorkers(routerId, BACKGROUND_CONTEXT);
+    return workers.some((w) => w.conversationId === childConversationId && w.status === 'completed');
+  }, 15_000);
+  const workerEntry = (await durableRuntime.getActiveWorkers(routerId, BACKGROUND_CONTEXT)).find(
+    (w) => w.conversationId === childConversationId
+  )!;
+  assert.equal(workerEntry.title, '[自动任务] nightly report');
+  assert.equal(workerEntry.botId, 'bot_sub');
+
   await waitFor(() => {
     const msgs = hub.db.getMessages('sess_sub');
-    return msgs.some((m) => m.role === 'callback' && m.content.includes(`✅ 子会话「[${childSession.title}](#?s=${childSessionId})」已完成`));
+    return msgs.some((m) => m.role === 'callback' && m.content.includes('[Worker Completed:'));
   }, 15_000);
-
-  // 子会话消息：初始 user 消息 + assistant 回复
-  // 不可信载荷隔离：初始消息不拼接完整 payload，只引用 inbox/event_<id>.json
-  const events = hub.db.listSessionAutomationEvents('sess_sub');
-  const childMsgs = hub.db.getMessages(childSessionId);
-  assert.equal(childMsgs[0].role, 'user');
-  assert.match(
-    childMsgs[0].content,
-    new RegExp(`^\\[Webhook: nightly report\\] 收到事件 ${events[0].id} \\(webhook: webhook\\.received\\)，原始载荷已存入工作区 \\.\\/inbox\\/event_${events[0].id}\\.json`)
-  );
-  assert.match(childMsgs[0].content, /\n\nprocess event/, '元数据头之后拼接触发器 prompt');
-  assert.doesNotMatch(childMsgs[0].content, /build finished/, '不可信 payload 不得拼入初始消息');
-  assert.ok(childMsgs.some((m) => m.role === 'assistant'), '子会话收到 faux 回复');
-
-  // 事件记录包含 childSessionId 与载荷 Artifact
-  assert.equal(events.length, 1);
-  assert.equal(events[0].childSessionId, childSessionId);
-  assert.ok(events[0].payloadArtifactId, '载荷应落盘为 Artifact');
+  const report = hub.db.getMessages('sess_sub').find(
+    (m) => m.role === 'callback' && m.content.includes('[Worker Completed:')
+  )!;
+  assert.ok(report.content.includes(workerEntry.workerId), '汇报携带 workerId');
+  assert.ok(report.content.includes('[自动任务] nightly report'), '汇报携带任务标题');
 });
 
-test('dispatchMode=subsession + skillId：初始消息加 /skill: 前缀；已以 / 开头则不加', { timeout: 60_000 }, async (t) => {
-  const { hub, admin, faux } = await setupHub(t);
+test('dispatchMode=subsession + skillId：初始 prompt 加 /skill: 前缀，notice 与 Worker 任务均携带前缀', { timeout: 60_000 }, async (t) => {
+  const { hub, admin, durableRuntime } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_skill', 'bot_skill');
-  faux.setResponses([]);
 
   const trigger = createWebhookTrigger(hub, admin.id, 'sess_skill', 'bot_skill', {
     dispatchMode: 'subsession',
     skillId: 'code-review',
+    prompt: 'check diff',
   });
 
-  const fire = await fireWebhook(hub, trigger.token, { message: 'check diff' }, { 'x-botd-dedup': 'skill-1' });
+  const fire = await fireWebhook(hub, trigger.token, { message: 'pr opened' }, { 'x-botd-dedup': 'skill-1' });
   assert.equal(fire.status, 200);
   const { childSessionId } = await fire.json();
 
-  const childMsgs = hub.db.getMessages(childSessionId);
-  assert.equal(childMsgs[0].role, 'user');
-  assert.match(childMsgs[0].content, /^\/skill:code-review /, 'prompt 前加 /skill: 前缀');
+  // 父会话 notice 正文含初始 prompt（带 /skill: 前缀）
+  const notice = hub.db.getMessages('sess_skill').find(
+    (m) => m.role === 'callback' && m.content.includes('自动任务已派发给后台 Worker')
+  );
+  assert.ok(notice, '派发 notice 存在');
+  assert.ok(notice!.content.includes('/skill:code-review'), 'notice 含 /skill: 前缀 prompt');
+  assert.ok(notice!.content.includes('check diff'), 'notice 含原始 prompt 正文');
+
+  // Worker conversation 收到的初始任务同样带 /skill: 前缀
+  const texts = await conversationUserTexts(durableRuntime, childSessionId as string);
+  const workerInitial = texts.find((x) => x.includes('/skill:code-review'));
+  assert.ok(workerInitial, 'Worker 初始 prompt 含 /skill: 前缀');
+  assert.ok(workerInitial!.includes('check diff'), '前缀之后拼接原始 prompt');
 });
 
-test('dispatchMode=subsession：cron/once/手动 run 亦派生子会话', { timeout: 60_000 }, async (t) => {
-  const { hub, cookie, admin, faux } = await setupHub(t);
+test('dispatchMode=subsession：cron/once/手动 run 亦派生后台 Worker', { timeout: 60_000 }, async (t) => {
+  const { hub, cookie, admin, durableRuntime } = await setupHub(t);
   createSessionFixture(hub, admin.id, 'sess_manual', 'bot_manual');
-  faux.setResponses([]);
 
-  // 手动触发 subsession 触发器
+  // 手动触发 subsession 触发器（kind=once 且未到点：验证 run 端点不依赖调度器）
   const trigger = hub.db.createTrigger({
     id: 'trg_manual_sub',
     sessionId: 'sess_manual',
@@ -613,38 +667,79 @@ test('dispatchMode=subsession：cron/once/手动 run 亦派生子会话', { time
   assert.equal(run.status, 200);
   const runJson = await run.json();
   assert.ok(runJson.childSessionId, '手动 run 返回 childSessionId');
+  assert.match(runJson.childSessionId, /^\d+$/, 'childSessionId 为 Worker conversation id（纯数字）');
+  // Worker 不是 SQLite 会话：没有 parentSessionId 挂接（旧式子会话已随重构移除）
+  assert.equal(hub.db.getSession(runJson.childSessionId), undefined);
 
-  const childSession = hub.db.getSession(runJson.childSessionId)!;
-  assert.equal(childSession.parentSessionId, 'sess_manual');
-  assert.equal(childSession.title, '[自动任务] manual sub');
+  // 父会话公屏出现派发 notice
+  const notice = hub.db.getMessages('sess_manual').find(
+    (m) => m.role === 'callback' && m.content.includes('自动任务已派发给后台 Worker')
+  );
+  assert.ok(notice, '手动 run 亦产生派发 notice');
 
-  // 子会话初始消息已落库（Durable 主线提交成功）
-  await waitFor(() => hub.db.getMessages(runJson.childSessionId).length > 0);
-  const childMsgs = hub.db.getMessages(runJson.childSessionId);
-  assert.equal(childMsgs[0].sessionId, runJson.childSessionId);
-  assert.equal(childMsgs[0].role, 'user');
+  // Worker registry 登记：标题为 [自动任务] manual sub，任务为手动触发 prompt
+  const routerId = await ensureRouterConversationId(durableRuntime, 'sess_manual', 'bot_manual');
+  const workers = await durableRuntime.getActiveWorkers(routerId, BACKGROUND_CONTEXT);
+  const entry = workers.find((w) => w.conversationId === runJson.childSessionId);
+  assert.ok(entry, 'Worker 已登记到父 Router 的 registry');
+  assert.equal(entry!.title, '[自动任务] manual sub');
+
+  const texts = await conversationUserTexts(durableRuntime, runJson.childSessionId as string);
+  assert.ok(
+    texts.some((x) => x.includes('[手动触发: manual sub]') && x.includes('do it')),
+    '初始任务携带手动触发署名与 prompt'
+  );
 });
 
-test('dispatchMode=subsession：子会话失败时父会话收到失败回传', { timeout: 60_000 }, async (t) => {
-  const { hub, admin, faux } = await setupHub(t);
-  createSessionFixture(hub, admin.id, 'sess_fail', 'bot_fail');
-  // faux 空队列 → 模型执行异常 → 子会话失败
-  faux.setResponses([]);
+test('dispatchMode=subsession：派发失败时不抛异常，父会话收到失败 notice（Durable 未开启分支）', { timeout: 60_000 }, async (t) => {
+  // 构造一个未注入 Durable runtime 的 Hub：durableActive() 为 false，
+  // dispatchSubsession 走「仅记录不执行」分支（可稳定构造的失败路径）。
+  const dir = await mkdtemp(path.join(tmpdir(), 'botd-sub-fail-'));
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+  const hub = createHub({
+    dbPath: path.join(dir, 'hub.sqlite'),
+    adminPassword: ADMIN_PASSWORD,
+    artifactsDir: path.join(dir, 'artifacts'),
+  });
+  t.after(async () => {
+    await hub.close();
+  });
+  const loginRes = await hub.app.request('/api/auth/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: ADMIN_PASSWORD }),
+  });
+  assert.equal(loginRes.status, 200);
+  const cookie = loginRes.headers.get('set-cookie')!.split(';')[0];
+  const admin = hub.db.getUserWithHash('admin')!;
 
-  const trigger = createWebhookTrigger(hub, admin.id, 'sess_fail', 'bot_fail', {
+  createSessionFixture(hub, admin.id, 'sess_nodurable', 'bot_nodurable');
+  const trigger = createWebhookTrigger(hub, admin.id, 'sess_nodurable', 'bot_nodurable', {
     dispatchMode: 'subsession',
-    name: 'failing task',
+    name: 'offline task',
   });
 
-  const fire = await fireWebhook(hub, trigger.token, { message: 'go' }, { 'x-botd-dedup': 'fail-1' });
-  assert.equal(fire.status, 200);
-  const { childSessionId } = await fire.json();
-  const childSession = hub.db.getSession(childSessionId)!;
+  const fire = await fireWebhook(hub, trigger.token, { message: 'go' }, { 'x-botd-dedup': 'nodurable-1' });
+  assert.equal(fire.status, 200, '派发失败不影响 webhook 响应（fire-and-forget）');
+  const fireJson = await fire.json();
+  assert.equal(fireJson.ok, true);
+  assert.equal(fireJson.childSessionId, undefined, '未派生时响应不带 childSessionId');
 
-  await waitFor(() => {
-    const msgs = hub.db.getMessages('sess_fail');
-    return msgs.some((m) => m.role === 'callback' && m.content.includes(`❌ 子会话「[${childSession.title}](#?s=${childSessionId})」执行失败`));
-  }, 15_000);
+  // 父会话公屏收到「仅记录不执行」notice（含初始 prompt，供用户事后补执行）
+  const notice = hub.db.getMessages('sess_nodurable').find(
+    (m) => m.role === 'callback' && m.content.includes('仅记录不执行')
+  );
+  assert.ok(notice, 'Durable 未开启时必须落 notice');
+  assert.ok(notice!.content.includes('offline task'), 'notice 携带触发器署名');
+  assert.ok(notice!.content.includes('process event'), 'notice 含初始 prompt');
+
+  // 事件仍被记录（审计不受派发失败影响），但无 childSessionId
+  const events = hub.db.listSessionAutomationEvents('sess_nodurable');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].childSessionId, undefined);
+  void cookie;
 });
 
 // ---------------------------------------------------------------------------
@@ -888,72 +983,10 @@ test('db 层：automation_events 唯一索引拦截同 (trigger_id, dedup_key) �
 });
 
 // ---------------------------------------------------------------------------
-// 7. 子会话新产物自动回传父会话（对齐 delegation.ts 交付物闭环）
+// 7. 子会话新产物零拷贝回传父会话：旧 callback 拷贝机制已随 subsession 语义重构
+//    （旧式 SQLite 孤立子会话 → Durable Router 后台 Worker）移除；子任务产物归档
+//    由 Worker 的产物落盘与 Recall 机制承担，不再有「回传父会话」环节。
 // ---------------------------------------------------------------------------
-
-test('dispatchMode=subsession：子会话执行期间新上传的 Artifact 完成时自动零拷贝回传父会话', { timeout: 60_000 }, async (t) => {
-  const { hub, admin, faux } = await setupHub(t);
-  createSessionFixture(hub, admin.id, 'sess_return', 'bot_return');
-
-  // 慢速回复：running 窗口内上传交付物，回合自然结束后回传父会话
-  faux.setResponses([
-    async () => {
-      await new Promise((r) => setTimeout(r, 800));
-      return fauxAssistantMessage('报告已生成，交付物见 analysis_report.md。');
-    },
-  ] as never);
-
-  const trigger = createWebhookTrigger(hub, admin.id, 'sess_return', 'bot_return', {
-    dispatchMode: 'subsession',
-    name: 'report task',
-  });
-
-  const fire = await fireWebhook(hub, trigger.token, { message: 'run report' }, { 'x-botd-dedup': 'return-1' });
-  assert.equal(fire.status, 200);
-  const { childSessionId, eventId } = await fire.json();
-
-  // 子会话执行期间（running 窗口内）直接上传一个交付物（真实 artifact 落库路径）
-  await waitFor(() => hub.db.getSession(childSessionId)!.status === 'running');
-  hub.db.createArtifact({
-    id: 'art_child_new_output',
-    sessionId: childSessionId,
-    filename: 'analysis_report.md',
-    mimeType: 'text/markdown',
-    sizeBytes: 512,
-    senderBotId: 'bot_return',
-    storagePath: '/tmp/botd-test-child-output.md',
-  });
-
-  // 等待父会话收到完成 callback（含 📦 产出交付物清单）
-  await waitFor(() => {
-    const msgs = hub.db.getMessages('sess_return');
-    return msgs.some((m) => m.role === 'callback' && m.content.includes('📦 产出交付物'));
-  }, 15_000);
-
-  const parentMsgs = hub.db.getMessages('sess_return');
-  const completionMsg = parentMsgs.find(
-    (m) => m.role === 'callback' && m.content.includes('✅ 子会话') && m.content.includes('📦 产出交付物')
-  );
-  assert.ok(completionMsg, '父会话完成 callback 必须存在');
-  assert.ok(completionMsg.content.includes('analysis_report.md'), 'callback 消息列出交付物');
-
-  // callback 消息带 attachments
-  assert.ok(completionMsg.attachments, '完成 callback 消息必须带 attachments');
-  assert.equal(completionMsg.attachments!.length, 1);
-  const att = completionMsg.attachments![0];
-  assert.equal(att.filename, 'analysis_report.md');
-  assert.notEqual(att.id, 'art_child_new_output', '回传产物应为父会话中的新引用记录');
-
-  // 父会话产物栏可见回传产物，且为同 storagePath 零拷贝引用
-  const parentArt = hub.db.getArtifactWithStoragePath(att.id)!;
-  assert.equal(parentArt.sessionId, 'sess_return');
-  const childArt = hub.db.getArtifactWithStoragePath('art_child_new_output')!;
-  assert.equal(parentArt.storagePath, childArt.storagePath, '回传必须是同 storagePath 零拷贝引用');
-
-  // 启动时挂载的事件载荷 event_<eventId>.json 不应被回传为父会话新产物
-  const parentArtifacts = hub.db.listSessionArtifacts('sess_return');
-  assert.ok(!parentArtifacts.some((a) => a.filename === `event_${eventId}.json`), '事件载荷不回传');
-});
 
 // ---------------------------------------------------------------------------
 // 8. Webhook HMAC 签名校验（secret）
@@ -1157,101 +1190,11 @@ test('PATCH /api/triggers/:id：更新与清除（null）eventFilter', { timeout
 });
 
 // ---------------------------------------------------------------------------
-// 11. dispatchMode=subsession 静默跳过原语（[PASS] / [IGNORE]）
+// 11. [PASS]/[IGNORE] 静默跳过：旧 callback 拷贝机制已随 subsession 语义重构
+//     （旧式 SQLite 孤立子会话 → Durable Router 后台 Worker）移除；Worker 的
+//     汇报与静默判定由 WorkerReportTask / channel-notifier 自行承担，不再有
+//     「父会话回传抑制」环节（isSilentSkipReply 的纯函数单测仍保留在前文）。
 // ---------------------------------------------------------------------------
-
-test('dispatchMode=subsession：子会话回复 [IGNORE]/[PASS] 且无新产物时，父会话不收到 callback 消息', { timeout: 60_000 }, async (t) => {
-  const { hub, admin, cookie, faux } = await setupHub(t);
-  createSessionFixture(hub, admin.id, 'sess_skip', 'bot_skip');
-  faux.setResponses([fauxAssistantMessage('[IGNORE] 非目标分支，忽略')]);
-
-  const trigger = createWebhookTrigger(hub, admin.id, 'sess_skip', 'bot_skip', {
-    dispatchMode: 'subsession',
-    name: 'skip task',
-  });
-
-  const fire = await fireWebhook(hub, trigger.token, { message: 'watch main only' }, { 'x-botd-dedup': 'skip-1' });
-  assert.equal(fire.status, 200);
-  const { childSessionId } = await fire.json();
-
-  // 子会话自身消息正常落库（user + assistant [IGNORE]）
-  await waitFor(() => hub.db.getMessages(childSessionId).some((m) => m.role === 'assistant'));
-  const childMsgs = hub.db.getMessages(childSessionId);
-  assert.ok(childMsgs.some((m) => m.role === 'assistant' && m.content.startsWith('[IGNORE]')));
-
-  // 等待子会话回合彻底收敛（session idle）
-  await waitFor(() => hub.db.getSession(childSessionId)!.status === 'idle');
-  // 再留足窗口确认父会话未收到任何 callback 消息
-  await new Promise((r) => setTimeout(r, 300));
-  const parentMsgs = hub.db.getMessages('sess_skip');
-  assert.equal(
-    parentMsgs.some((m) => m.role === 'callback'),
-    false,
-    '静默跳过时父会话不应收到 ✅ 子会话 callback'
-  );
-  assert.equal(parentMsgs.length, 0, '父会话不应有任何消息（载荷挂子会话）');
-
-  // [PASS] 纯标记同样静默（新子会话、新 dedup key）
-  faux.setResponses([fauxAssistantMessage('[PASS]')]);
-  await hub.app.request(`/api/triggers/${trigger.id}`, {
-    method: 'PATCH',
-    headers: { 'content-type': 'application/json', cookie: await loginCookie(hub) },
-    body: JSON.stringify({ prompt: 'reset window' }),
-  });
-  const fire2 = await fireWebhook(hub, trigger.token, { message: 'again' }, { 'x-botd-dedup': 'skip-2' });
-  assert.equal(fire2.status, 200);
-  const { childSessionId: child2 } = await fire2.json();
-  await waitFor(() => hub.db.getSession(child2)!.status === 'idle');
-  await new Promise((r) => setTimeout(r, 300));
-  assert.equal(
-    hub.db.getMessages('sess_skip').some((m) => m.role === 'callback'),
-    false,
-    '[PASS] 纯标记同样静默'
-  );
-});
-
-test('dispatchMode=subsession：子会话回复 [IGNORE] 但有新产物时仍正常回传 callback', { timeout: 60_000 }, async (t) => {
-  const { hub, admin, faux } = await setupHub(t);
-  createSessionFixture(hub, admin.id, 'sess_skip_art', 'bot_skip_art');
-  // 慢速回复：running 窗口内上传交付物，回合自然结束后回传父会话
-  faux.setResponses([
-    async () => {
-      await new Promise((r) => setTimeout(r, 800));
-      return fauxAssistantMessage('[IGNORE] 无需人工介入，但产物已生成');
-    },
-  ] as never);
-
-  const trigger = createWebhookTrigger(hub, admin.id, 'sess_skip_art', 'bot_skip_art', {
-    dispatchMode: 'subsession',
-    name: 'skip with artifact',
-  });
-
-  const fire = await fireWebhook(hub, trigger.token, { message: 'run' }, { 'x-botd-dedup': 'skip-art-1' });
-  assert.equal(fire.status, 200);
-  const { childSessionId } = await fire.json();
-
-  // 子会话执行期间（running 窗口内）直接上传一个交付物（真实 artifact 落库路径）
-  await waitFor(() => hub.db.getSession(childSessionId)!.status === 'running');
-  hub.db.createArtifact({
-    id: `art_skip_${Math.random().toString(36).slice(2, 8)}`,
-    sessionId: childSessionId,
-    filename: 'report.md',
-    mimeType: 'text/markdown',
-    sizeBytes: 64,
-    senderBotId: 'bot_skip_art',
-    storagePath: '/tmp/botd-test-skip.md',
-  });
-
-  await waitFor(() => {
-    const msgs = hub.db.getMessages('sess_skip_art');
-    return msgs.some((m) => m.role === 'callback' && m.content.includes('📦 产出交付物'));
-  }, 15_000);
-  const callback = hub.db.getMessages('sess_skip_art').find((m) => m.role === 'callback')!;
-  assert.ok(callback.attachments, '回传产物作为附件');
-  assert.equal(callback.attachments!.length, 1);
-  assert.equal(callback.attachments![0].filename, 'report.md');
-  void childSessionId;
-});
 
 // ---------------------------------------------------------------------------
 // 12. channel-notifier：[PASS]/[IGNORE] 助手回复不推送外部通道

@@ -4,8 +4,8 @@
  * 1. `createHub()` 在 `BOTD_DB_PATH` 指定且 `options.dbPath` 缺省（与生产 startHub
  *    相同）时，`ensureDurableRuntime()` 与业务表共用同一个 `hub.sqlite`
  *    （pi_* 前缀表单库共存，无第二个数据库文件），且 Hub 重启后会话仍在；
- * 2. Durable 主线启用时 `requestWakeupTurn`（不带 noTurn）先落 `[Wake-up]` callback，
- *    再把唤醒回合提交给 Durable Router 会话，而不是向节点下发已废弃的 runTurn；
+ * 2. Durable 主线启用时 botd wake（daemon IPC /wake → Hub HTTP 消息面）把唤醒回合
+ *    提交给 Durable Router 会话，而不是向节点下发已废弃的 runTurn；
  * 3. `hub.drain()` 等待 Durable 运行时中的活跃任务排空。
  */
 import assert from 'node:assert/strict';
@@ -208,10 +208,10 @@ test('ensureDurableRuntime shares hub.sqlite via pi_* tables and survives Hub re
 });
 
 // ---------------------------------------------------------------------------
-// 2. botd wake（requestWakeupTurn）走 Durable Router 会话
+// 2. botd wake（daemon IPC /wake → Hub HTTP 消息面）走 Durable Router 会话
 // ---------------------------------------------------------------------------
 
-test('requestWakeupTurn routes the wake turn through the durable runtime (no runTurn RPC)', { timeout: 60_000 }, async (t: TestContext) => {
+test('node wake request routes the wake turn through the durable runtime (no runTurn RPC)', { timeout: 60_000 }, async (t: TestContext) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-durable-wake-'));
   t.after(async () => {
     await rm(dir, { recursive: true, force: true });
@@ -283,27 +283,15 @@ test('requestWakeupTurn routes the wake turn through the durable runtime (no run
   assert(created.ok, `session create failed: ${created.status}`);
   const session = (await created.json()) as SessionRecord;
 
-  // 节点侧 WebSocket：连接 → registerNode
-  const runTurnCalls: unknown[] = [];
+  // 节点侧 WebSocket：连接 → registerNode；runTurn 已从协议面删除，
+  // 若任何路径仍试图向节点下发回合 RPC，mock 缺失会直接抛错使测试失败。
   const nodeSocket = new WebSocket(`${base.replace('http:', 'ws:')}/ws/node?nodeId=${identity.nodeId}&token=${identity.token}`);
   t.after(() => nodeSocket.terminate());
   const nodeRpc = createBirpc<HubRpcFunctions, NodeRpcFunctions>({
-    getModelCatalog: async () => ({ providers: [], models: [] }) as never,
-    saveBot: async () => {},
     deleteBot: async () => {},
-    readFile: async () => '',
-    writeFile: async () => {},
-    getCommands: async () => [],
-    runTurn: async (input) => {
-      runTurnCalls.push(input);
-      throw new Error('runTurn is no longer served by node');
-    },
-    cancelTurn: async () => {},
-    resetSession: async () => {},
-    restartDaemon: async () => ({ ok: true as const, pid: 4242 }),
     installResource: async () => ({ kind: 'skill', id: 'stub' }),
+    restartDaemon: async () => ({ ok: true as const, pid: 4242 }),
     readResourcePackage: async () => ({ files: [], kind: 'skill', id: 'stub' }),
-    deleteResource: async () => {},
   }, {
     post: (data) => nodeSocket.send(data),
     on: (callback) => nodeSocket.on('message', (data) => callback(data.toString())),
@@ -321,32 +309,27 @@ test('requestWakeupTurn routes the wake turn through the durable runtime (no run
     extensions: [],
   });
 
-  // botd wake：节点 CLI 请求唤醒回合（noTurn 未设置）
+  // botd wake：daemon IPC /wake 与生产同构——节点凭据向 Hub 消息面提交
+  // [Wake-up] 正文，由 Hub 侧 Durable Router 驱动回合。
   faux.setResponses([fauxAssistantMessage('wake handled by durable router')]);
-  const result = await nodeRpc.requestWakeupTurn({
-    sessionId: session.id,
-    botId: 'architect',
-    wakeupMessage: 'background job finished',
+  const wakeRes = await fetch(`${base}/api/sessions/${session.id}/messages`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-botd-node-id': identity.nodeId,
+      'x-botd-node-token': identity.token,
+    },
+    body: JSON.stringify({ content: '[Wake-up] background job finished' }),
   });
-  assert.ok(result && (result as { ok: true }).ok === true);
+  assert.ok(wakeRes.ok, `wake message submit failed: ${wakeRes.status}`);
 
-  // 1. [Wake-up] callback 消息照常落库并广播
-  const messages = await waitFor(
-    () => db.getMessages(session.id),
-    (list) => list.some((m) => m.role === 'callback' && m.content.includes('[Wake-up] background job finished')),
-  );
-  const callback = messages.find((m) => m.role === 'callback')!;
-  assert.equal(callback.senderBotId, 'architect');
-  assert.ok(callback.content.startsWith('[Wake-up]'));
-
-  // 2. 唤醒回合由 Durable Router 会话执行（faux 回复被镜像回时间线），
-  //    且绝不向节点下发 runTurn（该 RPC 已废弃，节点侧会抛错）
+  // 唤醒回合由 Durable Router 会话执行（faux 回复被镜像回时间线）；
+  // 全程无任何向节点下发的回合 RPC（runTurn 已从协议面删除）
   const finalMessages = await waitFor(
     () => db.getMessages(session.id),
     (list) => list.some((m) => m.role === 'assistant' && m.content === 'wake handled by durable router'),
   );
   assert.ok(finalMessages.some((m) => m.role === 'assistant' && m.content === 'wake handled by durable router'));
-  assert.equal(runTurnCalls.length, 0, 'wake must not invoke the removed node runTurn RPC');
 
   // 排空等待 durable 任务完成后再进入清理（hub.close 在 t.after 中调用）
   const drained = await hub.drain(10_000);

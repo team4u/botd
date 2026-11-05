@@ -5,7 +5,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { createModels, fauxProvider } from '@earendil-works/pi-ai';
+import { MemoryStorage } from '@earendil-works/pi-durable';
 import { createHub } from '../apps/hub/src/index.js';
+import { HubDurableRuntime } from '../apps/hub/src/harness/hub-harness.js';
+import { createDurableAsk } from '../apps/hub/src/harness/session-bridge.js';
 import { buildEventPayload, extractAskUiSummary } from '../apps/hub/src/channel-payloads.js';
 import type { BotdUiSpec } from '../packages/protocol/src/index.js';
 
@@ -164,12 +168,19 @@ test('外部消息通道桥接：通道 CRUD、测试推送、事件自动推送
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-channels-test-'));
   const dbPath = path.join(dir, 'hub.sqlite');
   const adminPassword = 'admin-password-test';
-  const hub = createHub({ dbPath, adminPassword });
+  // Ask 统一走 Durable AskDoc：注入 faux provider 的最小运行时支撑 createDurableAsk。
+  const faux = fauxProvider({ models: [{ id: 'main' }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const durableRuntime = await HubDurableRuntime.open({ storage: new MemoryStorage(), models });
+  const hub = createHub({ dbPath, adminPassword, durableRuntime, durableModels: models });
+  void faux;
 
   const mockServer = await startMockHttpServer();
 
   t.after(async () => {
     await hub.close();
+    await durableRuntime.close().catch(() => undefined);
     await mockServer.close();
     await rm(dir, { recursive: true, force: true });
   });
@@ -241,6 +252,20 @@ test('外部消息通道桥接：通道 CRUD、测试推送、事件自动推送
   assert.equal(sessionRes.status, 200, 'create session failed');
   const session = sessionRes.json;
   const sessionId = session.id;
+
+  // 种子 Bot 同步进注入的运行时（createDurableAsk 需要已注册 persona）
+  await hub.ensureDurableRuntime();
+
+  /** 在会话上创建 pending ask 并广播 interaction_request（生产语义同构）。 */
+  const createPendingAsk = async (prompt: string, options: string[]) => {
+    const record = await createDurableAsk(hub.durableRuntime!, sessionId, {
+      botId: 'bot-lead',
+      prompt,
+      options,
+    });
+    hub.sseHub.broadcast(sessionId, { type: 'interaction_request', sessionId, ask: record });
+    return record;
+  };
 
   // 3. 通道创建输入校验
   const invalidKindRes = await jsonRequest(
@@ -383,13 +408,7 @@ test('外部消息通道桥接：通道 CRUD、测试推送、事件自动推送
   // 7. botd ask 交互请求推送与手机端免登录一键点击回调确认
   mockServer.requests.length = 0;
 
-  const askPromise = hub.router.requestHumanInput({
-    sessionId,
-    botId: 'bot-lead',
-    prompt: '是否立即发布部署版本 v1.2.0 至生产集群？',
-    options: ['确认发布', '暂缓操作'],
-    timeoutSeconds: 30,
-  });
+  await createPendingAsk('是否立即发布部署版本 v1.2.0 至生产集群？', ['确认发布', '暂缓操作']);
 
   // 验证出站通道收到了 ask_request 推送
   const feishuAskReq = await mockServer.waitForRequest((r) => r.url === '/feishu' && r.body.includes('是否立即发布部署版本'));
@@ -440,10 +459,6 @@ test('外部消息通道桥接：通道 CRUD、测试推送、事件自动推送
   assert.equal(callbackRes.status, 200, 'public ask respond should return 200');
   assert.ok(callbackRes.text.includes('已确认提交'), 'HTML should show confirmation text');
   assert.ok(callbackRes.text.includes('确认发布'), 'HTML should display the selected answer');
-
-  // 验证 askPromise 顺利 resolve
-  const askResult = await askPromise;
-  assert.equal(askResult.answer, '确认发布');
 
   // 再次调用已被确认的 ask 回调，应当返回 404
   const secondCallbackRes = await jsonRequest(
@@ -501,12 +516,7 @@ test('外部消息通道桥接：通道 CRUD、测试推送、事件自动推送
   assert.ok(tgReq.json.text.includes('多通道通知格式测试'));
 
   // 10. 测试 POST 请求免登录一键回答 botd ask
-  const askPromise2 = hub.router.requestHumanInput({
-    sessionId,
-    botId: 'bot-lead',
-    prompt: '是否重启服务？',
-    options: ['立即重启', '稍后提醒'],
-  });
+  await createPendingAsk('是否重启服务？', ['立即重启', '稍后提醒']);
   const webhookAskReq2 = await mockServer.waitForRequest(
     (r) => r.url === '/webhook' && r.body.includes('是否重启服务')
   );
@@ -527,8 +537,6 @@ test('外部消息通道桥接：通道 CRUD、测试推送、事件自动推送
   assert.equal(postRespondRes.status, 200);
   assert.equal(postRespondRes.json.ok, true);
   assert.equal(postRespondRes.json.ask.answer, '立即重启');
-  const askResult2 = await askPromise2;
-  assert.equal(askResult2.answer, '立即重启');
 
   // 11. 测试通道停用时不会触发推送
   await jsonRequest(

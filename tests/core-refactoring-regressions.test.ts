@@ -21,7 +21,6 @@ import {
   type SessionRecord,
   type ThinkingLevel,
 } from '../packages/protocol/src/index.js';
-import { getBuiltinModelCatalog } from '../packages/models/src/index.js';
 
 const PASSWORD = 'integration-password';
 
@@ -159,43 +158,11 @@ async function createHubFixture(t: TestContext) {
 
     const rpc = createBirpc<HubRpcFunctions, NodeRpcFunctions>(
       {
-        getModelCatalog: async () => getBuiltinModelCatalog(),
-        startProviderLogin: async () => ({
-          id: 'mock_login',
-          providerId: 'openai',
-          method: 'api_key',
-          status: 'success',
-          events: [],
-        }),
-        getProviderLogin: async () => ({
-          id: 'mock_login',
-          providerId: 'openai',
-          method: 'api_key',
-          status: 'success',
-          events: [],
-        }),
-        respondProviderLogin: async () => ({
-          id: 'mock_login',
-          providerId: 'openai',
-          method: 'api_key',
-          status: 'success',
-          events: [],
-        }),
-        cancelProviderLogin: async () => {},
-        logoutProvider: async () => {},
-        saveBot: async (bot) => {
-          const idx = bots.findIndex((b) => b.id === bot.id);
-          if (idx < 0) bots.push(bot);
-          else bots[idx] = bot;
-        },
-        deleteBot: async (id) => {
+        deleteBot: async (id: string) => {
           const idx = bots.findIndex((b) => b.id === id);
           if (idx >= 0) bots.splice(idx, 1);
         },
-        readFile: async () => '',
-        writeFile: async () => {},
-        installResource: async (input) => ({ kind: 'skill', id: input.customId || 'installed' }),
-        deleteResource: async () => {},
+        installResource: async (input: { customId?: string }) => ({ kind: 'skill' as const, id: input.customId || 'installed' }),
         restartDaemon: async () => ({ ok: true as const, pid: 1234 }),
         readResourcePackage: async () => ({ files: [], kind: 'skill', id: 'stub' }),
       },

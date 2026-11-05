@@ -7,7 +7,7 @@ import {
   validateUiSpec,
   type BotdUiSpec,
 } from '../packages/protocol/src/index.js';
-import { BUILTIN_SKILL_MD, BUILTIN_SKILL_VERSION } from '../apps/node/src/builtin-skill.js';
+import { BUILTIN_SKILL_MD, BUILTIN_SKILL_VERSION } from '../apps/hub/src/builtin-skill-seed.js';
 
 // ---------------------------------------------------------------------------
 // 1. validateUiSpec: Valid Spec with all 15 components, $state, submit action
