@@ -16,7 +16,6 @@ import {
 import type { BotConfig, MessageRecord, NodeRecord, SessionRecord } from '@botd/protocol';
 import {
   MemoizedMessageItem,
-  SubagentRunsPanel,
   TypingDots,
   AssistantTurnContent,
 } from './MessageItem';
@@ -66,7 +65,6 @@ export interface MessageTimelineProps {
   /** 消息操作回调（不传则隐藏对应按钮） */
   onStartEdit?: (message: MessageRecord) => void;
   onForkMessage?: (messageId: string) => void | Promise<void>;
-  onInspectSubagentRun?: (run: import('@botd/protocol').SubagentRunRecord) => void;
   /** 编辑态目标消息（Slack 式编辑由使用方的输入框承载，此处只做标记与失效防御） */
   editingMessage?: MessageRecord | null;
   /** 运行中的会话禁止编辑（与后端 409 拦截对齐）；抽屉检视场景不传（合成消息不可编辑） */
@@ -77,8 +75,6 @@ export interface MessageTimelineProps {
   onLoadEarlier?: () => void;
   /** 移动端软键盘垫片高度变化时保持贴底 */
   keyboardInset?: number;
-  /** 流式块上方叠加的子代理协同面板数据（主对话传入；抽屉场景不传） */
-  activeSubagentRunsFor?: Record<string, import('@botd/protocol').SubagentRunRecord[]>;
   /** 时间线容器自定义类（抽屉内收敛最大宽度） */
   className?: string;
 }
@@ -95,14 +91,12 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
   highlightMessageId,
   onStartEdit,
   onForkMessage,
-  onInspectSubagentRun,
   editingMessage,
   canEdit = false,
   hasEarlierMessages = false,
   loadingEarlier = false,
   onLoadEarlier,
   keyboardInset = 0,
-  activeSubagentRunsFor,
   className = 'max-w-4xl px-3 sm:px-5',
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -223,7 +217,7 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
   }, [
     messages.length,
     effectiveStreamingStates.length,
-    effectiveStreamingStates.map((s) => `${s.botId}:${s.delta.length}:${s.tools.length}`).join(','),
+    effectiveStreamingStates.map((s) => `${s.botId}:${s.delta.length}:${s.blocks?.length ?? 0}`).join(','),
   ]);
 
   // 移动端软键盘联动：键盘弹起垫片高度变化时，若用户在底部则保持贴底可见
@@ -263,10 +257,7 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
   const renderStreamingBlock = (state: StreamingAssistantState) => {
     const bot = botMap.get(state.botId);
     const shortModel = formatShortModel(bot?.modelId);
-    const hasContent = Boolean(
-      (state.blocks && state.blocks.length > 0) || state.delta || state.tools.length > 0
-    );
-    const subRuns = activeSubagentRunsFor?.[state.botId];
+    const hasContent = Boolean((state.blocks && state.blocks.length > 0) || state.delta);
 
     return (
       <div
@@ -293,25 +284,10 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
           </span>
         </div>
 
-        {/* 子代理协同运行中轨迹 */}
-        {subRuns && subRuns.length > 0 && (
-          <SubagentRunsPanel runs={subRuns} onInspectSubagentRun={onInspectSubagentRun} />
-        )}
-
-        {/* 统一交错时间线渲染器 */}
+        {/* 统一交错时间线渲染器（blocks 为唯一流式块序列） */}
         {hasContent ? (
           <AssistantTurnContent
             blocks={state.blocks}
-            toolCalls={state.tools.map((t, idx) => ({
-              id: t.id || `${t.toolName}_${idx}`,
-              name: t.toolName,
-              status: t.status,
-              summary: t.summary,
-              args: t.args,
-              outputPreview: t.outputPreview,
-              durationMs: t.durationMs,
-              isError: t.isError,
-            }))}
             content={state.delta}
           />
         ) : (
@@ -426,7 +402,6 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
                       isEditing={editingMessage?.id === msg.id}
                       onStartEdit={onStartEdit}
                       onForkMessage={onForkMessage}
-                      onInspectSubagentRun={onInspectSubagentRun}
                     />
                   </div>
                 </React.Fragment>

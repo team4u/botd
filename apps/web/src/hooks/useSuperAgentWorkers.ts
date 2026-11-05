@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SubagentRunRecord, ToolCallRecord, TurnBlock } from '@botd/protocol';
-import { api } from '../api';
 import { onGlobalEvent } from '../events';
 
 /**
@@ -343,11 +342,11 @@ async function jsonRequest(
   }
 }
 
-/** 从列表载荷中提取 workers / runs 数组（兼容裸数组与 { workers: [] } 包装） */
-function extractList(payload: unknown, listKey: 'workers' | 'runs'): unknown[] {
+/** 从列表载荷中提取 workers 数组（兼容裸数组与 { workers: [] } 包装） */
+function extractList(payload: unknown): unknown[] {
   if (Array.isArray(payload)) return payload;
   if (payload && typeof payload === 'object') {
-    const wrapped = (payload as Record<string, unknown>)[listKey];
+    const wrapped = (payload as Record<string, unknown>).workers;
     if (Array.isArray(wrapped)) return wrapped;
   }
   return [];
@@ -384,32 +383,21 @@ export function useSuperAgentWorkers(sessionId: string | null): UseSuperAgentWor
   }, []);
 
   /**
-   * 刷新工作单元列表：专用 /workers 端点 → 最近已落库消息的 subagentRuns 兑底。
+   * 刷新工作单元列表：专用 /workers 端点为唯一数据源，
+   * 拉取失败保持现状，等待下一轮轮询 / SSE 事件热更新。
    */
   const refresh = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid) return;
 
+    const dedicated = await jsonRequest(`/api/sessions/${encodeURIComponent(sid)}/workers`);
+    if (!dedicated.ok) return;
+
     const collected = new Map<string, SuperAgentWorkerItem>();
-    const ingest = (raw: unknown) => {
+    for (const raw of extractList(dedicated.data)) {
       const worker = normalizeWorker(raw, sid);
       if (worker) collected.set(worker.workerId, worker);
-    };
-
-    const dedicated = await jsonRequest(`/api/sessions/${encodeURIComponent(sid)}/workers`);
-    if (dedicated.ok) {
-      extractList(dedicated.data, 'workers').forEach(ingest);
-    } else {
-      try {
-        const page = await api.getSessionMessagesPage(sid, { limit: 30 });
-        for (const message of page.messages) {
-          (message.subagentRuns ?? []).forEach(ingest);
-        }
-      } catch {
-        // 拉取失败保持现状，等待下一轮轮询 / SSE 事件
-      }
     }
-
     upsertWorkers(Array.from(collected.values()));
   }, [upsertWorkers]);
 
