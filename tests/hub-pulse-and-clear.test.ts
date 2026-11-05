@@ -15,7 +15,7 @@
  * 模型走确定性 faux provider，不触真实 LLM。
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -63,6 +63,7 @@ async function fixture(t: TestContext): Promise<Fixture> {
     await rm(dir, { recursive: true, force: true });
   });
 
+  await mkdir(path.join(dir, 'arch-space'), { recursive: true });
   const faux = fauxProvider({ models: [{ id: 'main' }] });
   const models = createModels();
   models.setProvider(faux.provider);
@@ -125,7 +126,8 @@ async function fixture(t: TestContext): Promise<Fixture> {
     thinkingLevel: 'medium',
     enabledSkills: [],
     // 显式工作目录：Peer Bots 提示词的 cwd 断言不依赖 process.cwd()，避免环境相关性。
-    workspaceDir: '/tmp/arch-space',
+    // 目录真实存在（fixture 临时目录），Worker 的 bash 工具才能正常执行。
+    workspaceDir: path.join(dir, 'arch-space'),
     updatedAt: now,
   });
   db.setBotFile('architect', 'system', 'You are the architect bot.');
@@ -442,13 +444,15 @@ test('6. hub-router sees, steers, stops and recalls a worker spawned in another 
   });
   // Worker 剧本：第一轮「文本 + 快速 bash」，第二轮长命令 sleep → 回合卡在工具
   // 执行中，registry 停留 running，会话里留下文本 + 工具调用两类 assistant entry。
+  // sleep 必须长于全部断言阶段：Worker 与 Session B 共用同一个 faux 队列，
+  // Worker 若提前进入下一轮会偷走 Session B 的 capture 响应导致停转。
   f.faux.setResponses([
     fauxAssistantMessage(
       [fauxToolCall('bash', { command: 'echo step-1' })],
       { stopReason: 'toolUse' },
     ),
     fauxAssistantMessage(
-      [fauxToolCall('bash', { command: 'sleep 8' })],
+      [fauxToolCall('bash', { command: 'sleep 20' })],
       { stopReason: 'toolUse' },
     ),
   ]);
@@ -620,7 +624,7 @@ test('5. hub-router built-in persona: session creation, commands, end-to-end mes
   assert.match(prompt, /## Peer Bots \(cross-workspace \/ cross-node\)/);
   const peerLine = prompt.split('\n').find((l) => l.includes('- architect')) ?? '';
   assert.ok(peerLine, 'peer bots section must list the user-created architect bot');
-  assert.match(peerLine, /cwd \/tmp\/arch-space/);
+  assert.match(peerLine, /cwd .+arch-space/);
   assert.match(peerLine, /node node-1/);
   assert.match(peerLine, /You design systems\./);
 
