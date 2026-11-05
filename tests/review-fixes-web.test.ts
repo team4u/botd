@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { SessionRecord, BotConfig } from '../packages/protocol/src/index.js';
 
 // 拦截 CSS 导入（ChatView -> Markdown -> katex.min.css），避免 Node.js 原生 ESM 报 ERR_UNKNOWN_FILE_EXTENSION
@@ -264,6 +266,73 @@ test('resolveContextTabGroup: Space 会话与 Assistant 会话分别聚合平级
 
   assert.equal(resolveContextTabGroup(null, [], bots), null, '无活跃会话返回 null');
 });
+
+// ==========================================
+// 三场景正交编排：助理（通讯录）/ 编程（Spaces+雷达）/ 中枢（脉冲+归档治理）
+// ==========================================
+
+test('Sidebar 三场景正交编排：编程模式 Spaces 在雷达上方，中枢模式零 Space/助理且有零活跃空态', async () => {
+  const sidebarPath = fileURLToPath(
+    new URL('../apps/web/src/components/Sidebar.tsx', import.meta.url)
+  );
+  const source = readFileSync(sidebarPath, 'utf-8');
+
+  // 定位可滚动主体区内各区块的满引注释行号，断言编排顺序与归属
+  const idxOf = (marker: string) => {
+    const idx = source.indexOf(marker);
+    assert.ok(idx >= 0, `源码应包含标记：${marker}`);
+    return idx;
+  };
+
+  const assistantBlock = idxOf("===== 助理模式：纯 IM 通讯录");
+  const codingSpaces = idxOf("===== 编程模式（上半区）：项目空间");
+  const codingPulse = idxOf("===== 编程模式（下半区）/ 中枢模式（第 1 块）：活跃任务雷达");
+  const pulseChildren = idxOf("===== 中枢模式（第 2 块）：子代理任务");
+  const pulseArchived = idxOf("===== 中枢模式（第 3 块）：已归档");
+
+  // 编程模式：项目空间（第 1 块）必须在活跃任务雷达（第 2 块）上方（Herdr 上 Spaces 下 Agents）
+  assert.ok(
+    codingSpaces < codingPulse,
+    '编程模式「项目空间」必须置于「活跃任务雷达」上方'
+  );
+
+  // 中枢模式：活跃脉冲 -> 子代理任务 -> 已归档 依次往下
+  assert.ok(codingPulse < pulseChildren, '中枢模式「子代理任务」应在「活跃雷达」下方');
+  assert.ok(pulseChildren < pulseArchived, '中枢模式「已归档」应在「子代理任务」下方');
+
+  // 正交性一：项目空间区块仅属于编程模式（sidebarMode === 'coding' 才渲染）
+  const spacesSection = source.slice(codingSpaces, codingPulse);
+  assert.match(spacesSection, /\{sidebarMode === 'coding' && \(/, '项目空间仅编程模式渲染');
+  assert.doesNotMatch(
+    spacesSection,
+    /sidebarMode === 'pulse'/,
+    '项目空间不得在中枢模式渲染（正交分离）'
+  );
+
+  // 正交性二：个人助理通讯录仅属于助理模式
+  const assistantSection = source.slice(assistantBlock, codingSpaces);
+  assert.match(assistantSection, /\{sidebarMode === 'assistant' && \(/, '个人助理仅助理模式渲染');
+  assert.doesNotMatch(
+    assistantSection,
+    /ListChecks/,
+    '助理模式不再携带批量管理按钮（已移交中枢「已归档」区块）'
+  );
+
+  // 正交性三：中枢模式零活跃时常驻空态卡片，而非隐藏整块
+  const pulseSection = source.slice(codingPulse, pulseChildren);
+  assert.match(pulseSection, /sidebarMode === 'pulse'/, '活跃雷达中枢模式常驻渲染');
+  assert.match(pulseSection, /所有智能体空闲待命/, '中枢模式应含零活跃空态卡片');
+  assert.match(
+    pulseSection,
+    /跨项目的运行中、待决策、待验收与异常任务会实时汇聚于此/,
+    '空态卡片应说明中枢定位'
+  );
+
+  // 中枢已归档区块携带批量清理入口（ListChecks 从助理标题栏迁移至此）
+  const archivedSection = source.slice(pulseArchived);
+  assert.match(archivedSection, /ListChecks/, '已归档区块应提供批量勾选删除入口');
+  assert.match(archivedSection, /sidebarMode === 'pulse'/, '已归档区块仅中枢模式渲染');
+}, { timeout: 60_000 });
 
 // ==========================================
 // 3. 回调通知卡：语义化标题 + 长回执默认折叠

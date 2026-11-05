@@ -1032,8 +1032,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [batchConfirmOpen, setBatchConfirmOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<SessionRecord | null>(null);
   const [deleting, setDeleting] = useState(false);
-  // 安静折叠区：默认收起
+  // 安静折叠区：默认收起（中枢模式下子代理任务默认展开，用户手动切换后尊重用户选择）
   const [childrenOpen, setChildrenOpen] = useState(false);
+  const [childrenTouched, setChildrenTouched] = useState(false);
   const [archivedOpen, setArchivedOpen] = useState(false);
   // 用户手动收起的 Space（Set<path>）；当前会话所在 Space 自动展开
   const [collapsedSpaces, setCollapsedSpaces] = useState<Set<string>>(new Set());
@@ -1170,8 +1171,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   // 批量管理作用域：已归档区可见会话
   const visibleSessions = archivedSessions;
 
-  // 搜索时强制展开安静区，保证命中可见
-  const effectiveChildrenOpen = childrenOpen || !!query;
+  // 搜索时强制展开安静区，保证命中可见；中枢模式下子代理任务默认展开
+  const effectiveChildrenOpen =
+    (childrenTouched ? childrenOpen : sidebarMode === 'pulse') || !!query;
   const effectiveArchivedOpen = archivedOpen || !!query;
 
   const handleSelect = useCallback(
@@ -1588,7 +1590,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
 
-        {/* 可滚动主体区：活跃雷达 / 项目空间 / 个人助理 / 安静折叠区 */}
+        {/* 可滚动主体区：三场景严格正交 —— 助理（通讯录）/ 编程（Spaces+雷达）/ 中枢（脉冲+归档治理） */}
         <div className="flex-1 overflow-y-auto px-2 pb-2">
           {/* 全局消息搜索结果 */}
           {searchActive && (
@@ -1601,65 +1603,140 @@ export const Sidebar: React.FC<SidebarProps> = ({
             />
           )}
 
-          {/* ===== 1. 活跃雷达（ACTIVE）：编程模式下常驻下半区；中枢模式主体展示 ===== */}
-          {(sidebarMode === 'coding' || sidebarMode === 'pulse') && activePulseEntries.length > 0 && (
-            <section className="mb-2 shrink-0">
-              <div className="flex items-center gap-1.5 px-2 py-1.5">
-                <Zap className="w-3.5 h-3.5 text-amber-500 animate-pulse shrink-0" />
-                <span className="text-[11px] font-semibold tracking-wide text-zinc-500 dark:text-zinc-400">
-                  活跃任务
-                </span>
-                <span className="text-[11px] text-zinc-400 dark:text-zinc-500 font-normal">
-                  · {activePulseEntries.length}
-                </span>
-                <span className="ml-auto flex items-center gap-0.5 shrink-0">
-                  {pulseSortButton('priority', '优先级')}
-                  {pulseSortButton('grouped', '按空间')}
-                </span>
-              </div>
+          {/* ===== 助理模式：纯 IM 通讯录（仅个人助理，零工程噪音） ===== */}
+          {sidebarMode === 'assistant' && (
+          <section className="mb-2 shrink-0">
+            <div className="flex items-center gap-1.5 px-2 py-1.5">
+              <MessageSquare className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 shrink-0" />
+              <span className="text-[11px] font-semibold tracking-wide text-zinc-500 dark:text-zinc-400">
+                个人助理
+              </span>
+              <span className="text-[11px] text-zinc-400 dark:text-zinc-500 font-normal">
+                · {assistantEntries.length}
+              </span>
+            </div>
+            {assistantEntries.length === 0 ? (
+              <p className="px-2 py-1.5 text-[11px] text-zinc-400 dark:text-zinc-500 leading-relaxed">
+                {query ? '未找到匹配的助理' : '暂无个人助理，先到「节点与分身管理」创建'}
+              </p>
+            ) : (
               <div className="space-y-0.5">
-                {activePulseEntries.map((entry) => {
-                  const isActive = entry.session.id === activeSessionId;
+                {assistantEntries.map((entry) => {
+                  const bot = entry.bot;
+                  const nodeOnline = nodeMap.get(bot.nodeId)?.status === 'online';
+                  const running = entry.allActiveSessions.some((s) => s.status === 'running');
+                  // 状态点优先级：运行中蓝点呼吸 > 待验收/异常状态色 > 节点在线绿点 > 离线灰点
+                  const dotClass = running
+                    ? 'bg-blue-500 animate-pulse'
+                    : entry.topAttention === 'failed' || entry.topAttention === 'done_unseen' || entry.topAttention === 'working'
+                      ? ATTENTION_VISUALS[entry.topAttention].dot
+                      : nodeOnline
+                        ? 'bg-emerald-500'
+                        : 'bg-zinc-300 dark:bg-zinc-600';
+                  const dotTitle = running
+                    ? '会话运行中'
+                    : entry.topAttention !== 'idle'
+                      ? ATTENTION_VISUALS[entry.topAttention].label
+                      : nodeOnline
+                        ? '节点在线'
+                        : '节点离线';
+                  const relativeTime = formatRelativeTime(
+                    entry.currentSession?.lastMessageAt ??
+                      entry.currentSession?.updatedAt ??
+                      (entry.lastActivityAt > 0 ? new Date(entry.lastActivityAt).toISOString() : undefined)
+                  );
+                  const isActive =
+                    !!entry.currentSession && entry.currentSession.id === activeSessionId;
+                  const defaultSpaceDir = resolveSessionWorkspaceDir(
+                    entry.currentSession ?? ({ leadBotId: bot.id } as SessionRecord),
+                    botsById
+                  );
+                  const preview =
+                    entry.lastMessagePreview ||
+                    (defaultSpaceDir ? getSpaceDisplayName(defaultSpaceDir) : null) ||
+                    (nodeOnline ? '节点在线' : '节点离线');
+
                   return (
-                    <button
-                      key={entry.session.id}
-                      type="button"
-                      onClick={() => handleSelect(entry.session.id)}
-                      title={entry.session.title}
-                      className={`w-full text-left px-2 py-1.5 rounded-lg border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
+                    <div
+                      key={bot.id}
+                      role="button"
+                      tabIndex={0}
+                      title={`@${bot.id} · ${dotTitle}`}
+                      onClick={() => {
+                        // 点击直接切入该分身当前单聊，不存在则静默创建
+                        if (entry.currentSession) handleSelect(entry.currentSession.id);
+                        else {
+                          onOpenBotChat(bot);
+                          onClose();
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          if (entry.currentSession) handleSelect(entry.currentSession.id);
+                          else {
+                            onOpenBotChat(bot);
+                            onClose();
+                          }
+                        }
+                      }}
+                      className={`group min-h-[54px] w-full text-left px-2 py-2 rounded-xl border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 flex items-center gap-2.5 ${
                         isActive
-                          ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70'
+                          ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs'
                           : 'border-transparent hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80'
                       }`}
                     >
-                      {/* 第 1 行：状态灯 + 容器 · 会话标题 + 状态胶囊 + 未读 */}
-                      <span className="flex items-center gap-1.5 min-w-0">
-                        <AttentionDot level={entry.attention} />
+                      <span className="relative shrink-0">
+                        <BotTile bot={bot} className="w-9 h-9 text-sm" />
                         <span
-                          className="shrink-0 text-[10px] text-zinc-400 dark:text-zinc-500 truncate max-w-[80px]"
-                          title={entry.leadBot ? `${entry.leadBot.name}${entry.spaceName ? ` · ${entry.spaceName}` : ''}` : entry.containerLabel}
-                        >
-                          {entry.spaceName || entry.leadBot?.name || '会话'}
-                        </span>
-                        <span className="truncate text-xs font-semibold text-zinc-800 dark:text-zinc-200 flex-1">
-                          {sessionDisplayTitle(entry.session, botsById)}
-                        </span>
-                        <span
-                          className={`shrink-0 px-1.5 py-0.5 rounded-full text-[10px] font-medium ${ATTENTION_VISUALS[entry.attention].pill}`}
-                        >
-                          {ATTENTION_VISUALS[entry.attention].label}
-                        </span>
-                        <UnreadBadge count={entry.unread} />
+                          title={dotTitle}
+                          className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-zinc-50 dark:border-zinc-900 ${dotClass}`}
+                        />
                       </span>
-                    </button>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-baseline gap-1.5">
+                          <span className="truncate text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">
+                            {bot.name}
+                          </span>
+                          {entry.subagentCount > 0 && (
+                            <span
+                              title={`${entry.subagentCount} 个子代理`}
+                              className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border border-zinc-200/80 dark:border-zinc-800"
+                            >
+                              +{entry.subagentCount}
+                            </span>
+                          )}
+                          {relativeTime && (
+                            <span className="ml-auto shrink-0 text-[10px] text-zinc-400 dark:text-zinc-500">
+                              {relativeTime}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5 mt-1 min-w-0">
+                          <span className="truncate text-[11px] text-zinc-500 dark:text-zinc-400 flex-1">
+                            {preview}
+                          </span>
+                          <UnreadBadge count={entry.unreadCount} />
+                          {entry.directSessions.length > 1 && (
+                            <span
+                              title={`${entry.directSessions.length} 个活跃话题`}
+                              className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border border-zinc-200/80 dark:border-zinc-800"
+                            >
+                              {entry.directSessions.length} 话题
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
                   );
                 })}
               </div>
-            </section>
-          )}
+            )}
+          </section>
+          )}{/* /个人助理（仅助理模式） */}
 
-          {/* ===== 2. 项目空间（SPACES）：编程/中枢模式展示，助理模式隐藏 ===== */}
-          {(sidebarMode === 'coding' || sidebarMode === 'pulse') && (
+          {/* ===== 编程模式（上半区）：项目空间（SPACES）置顶 ===== */}
+          {sidebarMode === 'coding' && (
           <section className="mb-2 shrink-0">
             <div className="flex items-center gap-1.5 px-2 py-1.5">
               <FolderGit2 className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 shrink-0" />
@@ -1782,163 +1859,90 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </div>
             )}
           </section>
-          )}{/* /项目空间（仅编程/中枢模式） */}
+          )}{/* /项目空间（仅编程模式） */}
 
-          {/* ===== 3. 个人助理（ASSISTANTS）：助理模式主体；编程模式隐藏纯闲聊 ===== */}
-          {sidebarMode !== 'coding' && (
-          <section className="mb-2 shrink-0">
-            <div className="flex items-center gap-1.5 px-2 py-1.5">
-              <MessageSquare className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 shrink-0" />
-              <span className="text-[11px] font-semibold tracking-wide text-zinc-500 dark:text-zinc-400">
-                个人助理
-              </span>
-              <span className="text-[11px] text-zinc-400 dark:text-zinc-500 font-normal">
-                · {assistantEntries.length}
-              </span>
-              {onDeleteSessions && archivedSessions.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => toggleMultiSelect()}
-                  aria-pressed={multiSelectOn}
-                  title={multiSelectOn ? '退出批量管理' : '批量管理归档会话'}
-                  className={`ml-auto p-1 rounded-md transition-colors cursor-pointer shrink-0 ${
-                    multiSelectOn
-                      ? 'text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40'
-                      : 'text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800'
-                  }`}
-                >
-                  <ListChecks className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-            {assistantEntries.length === 0 ? (
-              <p className="px-2 py-1.5 text-[11px] text-zinc-400 dark:text-zinc-500 leading-relaxed">
-                {query ? '未找到匹配的助理' : '暂无可用分身，先到「节点与分身管理」创建'}
-              </p>
-            ) : (
-              <div className="space-y-0.5">
-                {assistantEntries.map((entry) => {
-                  const bot = entry.bot;
-                  const nodeOnline = nodeMap.get(bot.nodeId)?.status === 'online';
-                  const running = entry.allActiveSessions.some((s) => s.status === 'running');
-                  // 状态点优先级：运行中蓝点呼吸 > 待验收/异常状态色 > 节点在线绿点 > 离线灰点
-                  const dotClass = running
-                    ? 'bg-blue-500 animate-pulse'
-                    : entry.topAttention === 'failed' || entry.topAttention === 'done_unseen' || entry.topAttention === 'working'
-                      ? ATTENTION_VISUALS[entry.topAttention].dot
-                      : nodeOnline
-                        ? 'bg-emerald-500'
-                        : 'bg-zinc-300 dark:bg-zinc-600';
-                  const dotTitle = running
-                    ? '会话运行中'
-                    : entry.topAttention !== 'idle'
-                      ? ATTENTION_VISUALS[entry.topAttention].label
-                      : nodeOnline
-                        ? '节点在线'
-                        : '节点离线';
-                  const relativeTime = formatRelativeTime(
-                    entry.currentSession?.lastMessageAt ??
-                      entry.currentSession?.updatedAt ??
-                      (entry.lastActivityAt > 0 ? new Date(entry.lastActivityAt).toISOString() : undefined)
-                  );
-                  const isActive =
-                    !!entry.currentSession && entry.currentSession.id === activeSessionId;
-                  const defaultSpaceDir = resolveSessionWorkspaceDir(
-                    entry.currentSession ?? ({ leadBotId: bot.id } as SessionRecord),
-                    botsById
-                  );
-                  const preview =
-                    entry.lastMessagePreview ||
-                    (defaultSpaceDir ? getSpaceDisplayName(defaultSpaceDir) : null) ||
-                    (nodeOnline ? '节点在线' : '节点离线');
-
+          {/* ===== 编程模式（下半区）/ 中枢模式（第 1 块）：活跃任务雷达（ACTIVE） =====
+             Herdr 经典上下分栏：上 Spaces 树、下 Agents 雷达；
+             编程模式仅有任务时渲染；中枢模式常驻（零活跃时空态卡片替位列表，绝不整块消失）。 */}
+          {((sidebarMode === 'coding' && activePulseEntries.length > 0) ||
+            sidebarMode === 'pulse') && (
+            <section className="mb-2 shrink-0">
+              <div className="flex items-center gap-1.5 px-2 py-1.5">
+                <Zap className="w-3.5 h-3.5 text-amber-500 animate-pulse shrink-0" />
+                <span className="text-[11px] font-semibold tracking-wide text-zinc-500 dark:text-zinc-400">
+                  活跃任务
+                </span>
+                <span className="text-[11px] text-zinc-400 dark:text-zinc-500 font-normal">
+                  · {activePulseEntries.length}
+                </span>
+                <span className="ml-auto flex items-center gap-0.5 shrink-0">
+                  {pulseSortButton('priority', '优先级')}
+                  {pulseSortButton('grouped', '按空间')}
+                </span>
+              </div>
+              {activePulseEntries.length === 0 ? (
+                <div className="mx-1 mb-1 px-3 py-5 rounded-xl border border-dashed border-zinc-300/80 dark:border-zinc-700/80 bg-zinc-100/50 dark:bg-zinc-800/40 text-center">
+                  <p className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">✨ 所有智能体空闲待命</p>
+                  <p className="mt-1 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+                    跨项目的运行中、待决策、待验收与异常任务会实时汇聚于此
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-0.5">
+                {activePulseEntries.map((entry) => {
+                  const isActive = entry.session.id === activeSessionId;
                   return (
-                    <div
-                      key={bot.id}
-                      role="button"
-                      tabIndex={0}
-                      title={`@${bot.id} · ${dotTitle}`}
-                      onClick={() => {
-                        // 点击直接切入该分身当前单聊，不存在则静默创建
-                        if (entry.currentSession) handleSelect(entry.currentSession.id);
-                        else {
-                          onOpenBotChat(bot);
-                          onClose();
-                        }
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          if (entry.currentSession) handleSelect(entry.currentSession.id);
-                          else {
-                            onOpenBotChat(bot);
-                            onClose();
-                          }
-                        }
-                      }}
-                      className={`group min-h-[54px] w-full text-left px-2 py-2 rounded-xl border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 flex items-center gap-2.5 ${
+                    <button
+                      key={entry.session.id}
+                      type="button"
+                      onClick={() => handleSelect(entry.session.id)}
+                      title={entry.session.title}
+                      className={`w-full text-left px-2 py-1.5 rounded-lg border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
                         isActive
-                          ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs'
+                          ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70'
                           : 'border-transparent hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80'
                       }`}
                     >
-                      <span className="relative shrink-0">
-                        <BotTile bot={bot} className="w-9 h-9 text-sm" />
+                      {/* 第 1 行：状态灯 + 容器 · 会话标题 + 状态胶囊 + 未读 */}
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <AttentionDot level={entry.attention} />
                         <span
-                          title={dotTitle}
-                          className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-zinc-50 dark:border-zinc-900 ${dotClass}`}
-                        />
+                          className="shrink-0 text-[10px] text-zinc-400 dark:text-zinc-500 truncate max-w-[80px]"
+                          title={entry.leadBot ? `${entry.leadBot.name}${entry.spaceName ? ` · ${entry.spaceName}` : ''}` : entry.containerLabel}
+                        >
+                          {entry.spaceName || entry.leadBot?.name || '会话'}
+                        </span>
+                        <span className="truncate text-xs font-semibold text-zinc-800 dark:text-zinc-200 flex-1">
+                          {sessionDisplayTitle(entry.session, botsById)}
+                        </span>
+                        <span
+                          className={`shrink-0 px-1.5 py-0.5 rounded-full text-[10px] font-medium ${ATTENTION_VISUALS[entry.attention].pill}`}
+                        >
+                          {ATTENTION_VISUALS[entry.attention].label}
+                        </span>
+                        <UnreadBadge count={entry.unread} />
                       </span>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-baseline gap-1.5">
-                          <span className="truncate text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">
-                            {bot.name}
-                          </span>
-                          {entry.subagentCount > 0 && (
-                            <span
-                              title={`${entry.subagentCount} 个子代理`}
-                              className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border border-zinc-200/80 dark:border-zinc-800"
-                            >
-                              +{entry.subagentCount}
-                            </span>
-                          )}
-                          {relativeTime && (
-                            <span className="ml-auto shrink-0 text-[10px] text-zinc-400 dark:text-zinc-500">
-                              {relativeTime}
-                            </span>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-1.5 mt-1 min-w-0">
-                          <span className="truncate text-[11px] text-zinc-500 dark:text-zinc-400 flex-1">
-                            {preview}
-                          </span>
-                          <UnreadBadge count={entry.unreadCount} />
-                          {entry.directSessions.length > 1 && (
-                            <span
-                              title={`${entry.directSessions.length} 个活跃话题`}
-                              className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border border-zinc-200/80 dark:border-zinc-800"
-                            >
-                              {entry.directSessions.length} 话题
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
+                    </button>
                   );
                 })}
-              </div>
-            )}
-          </section>
-          )}{/* /个人助理（助理/中枢模式） */}
+                </div>
+              )}
+            </section>
+          )}
 
-          {/* ===== 4. 安静折叠区：子代理任务（全模式）+ 已归档（中枢模式管理） ===== */}
-          {childSessions.length > 0 && (
+          {/* ===== 中枢模式（第 2 块）：子代理任务，默认展开 ===== */}
+          {sidebarMode === 'pulse' && childSessions.length > 0 && (
             <QuietSection
               icon={<Bot className="w-3.5 h-3.5" />}
               label="子代理任务"
               count={childSessions.length}
               open={effectiveChildrenOpen}
-              onToggle={() => setChildrenOpen((v) => !v)}
+              onToggle={() =>
+                setChildrenOpen((v) => {
+                  setChildrenTouched(true);
+                  return !v;
+                })
+              }
             >
               {childSessions.map((session) => (
                 <ChildSessionRow
@@ -1954,64 +1958,81 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </QuietSection>
           )}
 
-          {archivedSessions.length > 0 && (
-            <QuietSection
-              icon={<Archive className="w-3.5 h-3.5" />}
-              label="已归档"
-              count={archivedSessions.length}
-              open={effectiveArchivedOpen}
-              onToggle={() => setArchivedOpen((v) => !v)}
-            >
-              {/* 批量操作栏 */}
-              {multiSelectOn && (
-                <div className="flex items-center justify-between gap-2 px-2 py-1.5 mb-1 rounded-lg bg-zinc-100/70 dark:bg-zinc-800/60">
+          {/* ===== 中枢模式（第 3 块）：已归档 + 批量清理 ===== */}
+          {sidebarMode === 'pulse' && archivedSessions.length > 0 && (
+            <div>
+              <div className="flex items-center gap-1 px-2 py-1.5">
+                <button
+                  type="button"
+                  onClick={() => setArchivedOpen((v) => !v)}
+                  aria-expanded={effectiveArchivedOpen}
+                  className="flex items-center gap-1.5 text-[11px] font-semibold tracking-wide text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors cursor-pointer"
+                >
+                  <Archive className="w-3.5 h-3.5" />
+                  <span>已归档</span>
+                  <span className="font-normal">· {archivedSessions.length}</span>
+                  <ChevronDown
+                    className={`w-3.5 h-3.5 transition-transform duration-200 ${
+                      effectiveArchivedOpen ? '' : '-rotate-90'
+                    }`}
+                  />
+                </button>
+                {onDeleteSessions && (
                   <button
                     type="button"
-                    onClick={toggleSelectAllVisible}
-                    className="flex items-center gap-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 cursor-pointer"
+                    onClick={() => toggleMultiSelect()}
+                    aria-pressed={multiSelectOn}
+                    title={multiSelectOn ? '退出批量管理' : '批量管理归档会话'}
+                    className={`ml-auto p-1 rounded-md transition-colors cursor-pointer shrink-0 ${
+                      multiSelectOn
+                        ? 'text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40'
+                        : 'text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                    }`}
                   >
-                    {allVisibleSelected ? (
-                      <CheckSquare className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-                    ) : (
-                      <Square className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500" />
-                    )}
-                    <span>{allVisibleSelected ? '取消全选' : '全选'}</span>
+                    <ListChecks className="w-3.5 h-3.5" />
                   </button>
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
-                      已选 {selectedIds.size} 项
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setBatchConfirmOpen(true)}
-                      disabled={selectedIds.size === 0}
-                      className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors cursor-pointer"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                      <span>删除</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-              {archivedSessions.map((session) => renderSessionRow(session, true))}
-            </QuietSection>
-          )}
-
-          {/* 全空态：按当前模式给出对应引导 */}
-          {!query &&
-            (sidebarMode !== 'coding' || spaceGroups.length === 0) &&
-            (sidebarMode === 'coding' || assistantEntries.length === 0) &&
-            childSessions.length === 0 &&
-            archivedSessions.length === 0 && (
-              <div className="py-8 px-4 text-center">
-                <MessageSquare className="w-8 h-8 text-zinc-300 dark:text-zinc-600 mx-auto mb-2" />
-                <p className="text-xs text-zinc-400 dark:text-zinc-500">
-                  {sidebarMode === 'coding'
-                    ? '暂无项目空间，新建会话时绑定项目目录即可归入此处'
-                    : '暂无会话，点击上方分身即可开始'}
-                </p>
+                )}
               </div>
-            )}
+              {effectiveArchivedOpen && (
+                <>
+                  {/* 批量操作栏 */}
+                  {multiSelectOn && (
+                    <div className="flex items-center justify-between gap-2 px-2 py-1.5 mb-1 rounded-lg bg-zinc-100/70 dark:bg-zinc-800/60">
+                      <button
+                        type="button"
+                        onClick={toggleSelectAllVisible}
+                        className="flex items-center gap-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 cursor-pointer"
+                      >
+                        {allVisibleSelected ? (
+                          <CheckSquare className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                        ) : (
+                          <Square className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500" />
+                        )}
+                        <span>{allVisibleSelected ? '取消全选' : '全选'}</span>
+                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                          已选 {selectedIds.size} 项
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setBatchConfirmOpen(true)}
+                          disabled={selectedIds.size === 0}
+                          className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors cursor-pointer"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>删除</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  <div className="space-y-0.5">
+                    {archivedSessions.map((session) => renderSessionRow(session, true))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Section 5: 底部用户条 */}
