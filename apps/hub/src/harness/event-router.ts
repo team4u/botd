@@ -139,6 +139,12 @@ export interface RouterStats {
 	passthroughDeliveries: number;
 }
 
+/** handleEvent 的可选参数：触发器侧（webhook/cron）与常规路由共用的统一入口配置。 */
+export interface HandleEventOptions {
+	/** 调用方已推导的 threadKey（如 webhook 的 GitHub 约定推导），优先于 threadKeyOf(event)。 */
+	explicitThreadKey?: string;
+}
+
 /**
  * 事件路由器。用法：
  *   const router = new EventRouter(deps);
@@ -187,10 +193,52 @@ export class EventRouter {
 	}
 
 	/**
+	 * 仅线程直通（无慢路径）：threadKey 命中活跃 Worker 订阅时，把事件经
+	 * Inline & Spill 格式化后投递给全部订阅 Worker（requestId 基于去重键，
+	 * 基于 event.id 幂等）；无订阅或订阅会话已不存在时返回 undefined，
+	 * 调用方自行走慢路径。供触发器侧（webhook/cron）复用统一管线。
+	 */
+	async tryThreadPassthrough(
+		threadKey: string,
+		event: IncomingEvent,
+		context: Context,
+	): Promise<string[] | undefined> {
+		const subscribers = await this.subscriptions(threadKey, context);
+		if (subscribers.length === 0) return undefined;
+		const reqKey = eventKey(event);
+		const formatted = await formatEventInlineAndSpill(this.#deps.harness, event, context);
+		const delivered: string[] = [];
+		for (const id of subscribers) {
+			const worker = await this.#deps.harness.conversation(Number(id) as ConversationId, context);
+			if (worker === undefined) continue;
+			await worker.submit(
+				{
+					type: 'input',
+					content: formatted.inline,
+					whenBusy: 'steer',
+					requestId: `event:${threadKey}:${reqKey}`,
+				},
+				context,
+			);
+			delivered.push(id);
+		}
+		if (delivered.length === 0) return undefined;
+		this.#stats.passthroughDeliveries += delivered.length;
+		return delivered;
+	}
+
+	/**
 	 * 事件主入口：快速过滤 → 直通（已订阅）→ 慢路径 Router。
 	 * candidate 模式的事件同时触发投机执行。
+	 * options.explicitThreadKey 允许触发器侧传入已推导的线程键；事件路由、
+	 * 线程直通与 Inline & Spill（含 RecallIndex 登记）在这里统一。
 	 */
-	async handleEvent(event: IncomingEvent, policy: EventFilterPolicy, context: Context): Promise<RouteOutcome> {
+	async handleEvent(
+		event: IncomingEvent,
+		policy: EventFilterPolicy,
+		context: Context,
+		options?: HandleEventOptions,
+	): Promise<RouteOutcome> {
 		const verdict = filterEventFastPath(event, policy);
 		if (verdict.action === 'drop') throw new EventDropped(verdict.reason);
 
@@ -198,31 +246,11 @@ export class EventRouter {
 			void this.#deps.speculative(event, policy, context).catch(() => undefined);
 		}
 
-		const threadKey = threadKeyOf(event);
+		const threadKey = options?.explicitThreadKey ?? threadKeyOf(event);
 		if (threadKey !== undefined) {
-			const subscribers = await this.subscriptions(threadKey, context);
-		if (subscribers.length > 0) {
-				const reqKey = eventKey(event);
-				const formatted = await formatEventInlineAndSpill(this.#deps.harness, event, context);
-				const delivered: string[] = [];
-				for (const id of subscribers) {
-					const worker = await this.#deps.harness.conversation(Number(id) as ConversationId, context);
-					if (worker === undefined) continue;
-					await worker.submit(
-						{
-							type: 'input',
-							content: formatted.inline,
-							whenBusy: 'steer',
-							requestId: `event:${threadKey}:${reqKey}`,
-						},
-						context,
-					);
-					delivered.push(id);
-				}
-				if (delivered.length > 0) {
-					this.#stats.passthroughDeliveries += delivered.length;
-					return { action: 'passthrough', threadKey, deliveredTo: delivered, routerLlmCalls: 0 };
-				}
+			const delivered = await this.tryThreadPassthrough(threadKey, event, context);
+			if (delivered !== undefined) {
+				return { action: 'passthrough', threadKey, deliveredTo: delivered, routerLlmCalls: 0 };
 			}
 		}
 

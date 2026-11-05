@@ -4,7 +4,6 @@ import type { Hono } from 'hono';
 import { isValidCronExpr, parseDelayDuration } from '@botd/protocol';
 import type { SessionRecord, TriggerEventFilter, TriggerKind, UserRecord } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
-import type { GroupRouter } from './group-router.js';
 import { TriggerService, type OwnedTrigger, type TriggerSchedulerHandle, type TriggerServiceOptions } from './trigger-service.js';
 import { resolveOwnedSession, type AuthContext } from './http-helpers.js';
 
@@ -254,7 +253,7 @@ function resolveOwnedTrigger(
 export function registerTriggerRoutes(
   app: Hono<{ Variables: { user: UserRecord } }>,
   db: HubDatabase,
-  router: GroupRouter,
+  router: unknown,
   getSessionOwnerId?: (sessionId: string) => string | undefined,
   options?: TriggerRoutesOptions
 ): TriggerSchedulerHandle {
