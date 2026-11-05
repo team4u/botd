@@ -40,12 +40,11 @@ export function registerProviderRoutes(
     const credentials = new Map(
       listEffectiveProviderCredentials(db).map((c) => [c.providerId, c.authType])
     );
-    const usedProviders = new Set(db.getAllBots().map((bot) => bot.modelProvider));
 
     // 合并：内置目录为基底，存储 provider（models-store.json / models.json）
     // 已存在同名则用其模型覆盖（非空时），否则追加；最后按名称排序。
-    // builtin 的 configured 仅由凭据决定（保持注销语义）；存储 provider 有
-    // 模型或被任何 Bot 引用即可选（无凭据也可先选型）。
+    // builtin 的 configured 仅由凭据决定（保持注销语义）；存储 provider 需有
+    // 凭据或存有模型目录才算可选（无凭据也无模型绝不可用）。
     const storedById = new Map(storedCatalog.providers.map((p) => [p.id, p]));
     const providers = builtin.providers.map((provider) => {
       const authType = credentials.get(provider.id);
@@ -65,7 +64,8 @@ export function registerProviderRoutes(
       // 与内置目录同名的 provider 已在上面的 map 中合并（模型覆盖），这里只追加新 provider
       if (builtin.providers.some((p) => p.id === stored.id)) continue;
       const authType = credentials.get(stored.id);
-      const usable = authType !== undefined || stored.models.length > 0 || usedProviders.has(stored.id);
+      // 无凭据也无存储模型的动态 provider 不算可用：绝不能仅因被 Bot 引用就标成 configured
+      const usable = authType !== undefined || stored.models.length > 0;
       providers.push({
         ...stored,
         configured: usable,
@@ -149,6 +149,19 @@ export function registerProviderRoutes(
     db.deleteProviderCredential(providerId);
     // 同时清理 `.agent/auth.json` 里的旧凭据，避免注销后仍从旧文件回读
     removeLegacyProviderAuth(db.getDataDir(), providerId);
+    // 联动清理：把仍指向该 provider 的 Bot 模型置空（该 provider 已无凭据，
+    // 保留引用只会造成「未配置却在用」的死引用），前端会引导用户重新选型。
+    for (const bot of db.getAllBots()) {
+      if (bot.modelProvider !== providerId) continue;
+      db.saveBot({
+        ...bot,
+        modelProvider: '',
+        modelId: '',
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    // 通知 Durable Runtime 重新同步分身（模型目录/凭据按需重读）
+    options?.onCredentialSaved?.();
   };
 
   // --- 模型目录与 Provider 登录（Hub 全局路由） ---

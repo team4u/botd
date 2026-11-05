@@ -32,12 +32,15 @@ interface SettingsModalProps {
   isOpen: boolean;
   nodes?: NodeWithBots[];
   onClose: () => void;
+  /** 凭据登录/注销成功后回调：刷新节点与分身列表，让 Bot 模型显示立即同步 */
+  onCredentialsChanged?: () => void | Promise<void>;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   nodes: propNodes,
   onClose,
+  onCredentialsChanged,
 }) => {
   // Online nodes state
   const [nodesList, setNodesList] = useState<NodeWithBots[]>(propNodes || []);
@@ -225,6 +228,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       await fetchCatalog(selectedNodeId);
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
+      // 注销联动：后端已把相关 Bot 的模型置空，通知全局刷新让界面立即同步
+      await onCredentialsChanged?.();
     } catch (err: any) {
       setError(err?.message || '清除节点凭据失败');
     } finally {
@@ -726,6 +731,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             setSuccess(true);
             await fetchCatalog(selectedNodeId);
             setTimeout(() => setSuccess(false), 3000);
+            // 登录联动：刷新节点与分身列表，让可选模型立即出现
+            await onCredentialsChanged?.();
           }}
         />
       )}

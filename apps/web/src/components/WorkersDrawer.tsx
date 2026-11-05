@@ -653,13 +653,21 @@ export const WorkersDrawer: React.FC<WorkersDrawerProps> = ({
     if (isOpen && workers.length === 0 && onSpawnWorker) setShowSpawnForm(true);
   }, [isOpen, workers.length, onSpawnWorker]);
 
-  // 选中目标已不存在（会话切换 / 列表刷新）：回落列表
+  // 选中目标已不存在（会话切换 / 列表刷新）：回落列表。
+  // 但首次加载中（workers 为空）或刚传入 initialWorkerId 定位时不得回落，
+  // 否则点开特定 Worker 详情会被闪回空白列表。
   useEffect(() => {
-    if (view === 'detail' && selectedWorkerId && !workers.some((w) => w.workerId === selectedWorkerId)) {
+    if (
+      view === 'detail' &&
+      selectedWorkerId &&
+      workers.length > 0 &&
+      !workers.some((w) => w.workerId === selectedWorkerId) &&
+      selectedWorkerId !== initialWorkerId
+    ) {
       setView('list');
       setSelectedWorkerId(null);
     }
-  }, [workers, view, selectedWorkerId]);
+  }, [workers, view, selectedWorkerId, initialWorkerId]);
 
   // Esc：详情返回列表，列表关闭抽屉
   useEffect(() => {

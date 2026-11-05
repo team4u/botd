@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Brain, Check, ChevronDown, Loader2, Search, Zap } from 'lucide-react';
-import type { BotConfig, ModelCatalog, ModelCatalogEntry, ProviderCatalogEntry, ThinkingLevel } from '@botd/protocol';
+import type { BotConfig, ModelCatalog, ModelCatalogEntry, ThinkingLevel } from '@botd/protocol';
 import { api } from '../../api';
 import {
   THINKING_LEVEL_LABELS,
@@ -115,57 +115,43 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
     };
   }, [modelMenuOpen, thinkingMenuOpen]);
 
-  // 模型扁平列表：优先已配置/当前 BOT 服务商，全空时回退到有模型的服务商，保证始终可选
+  // 模型扁平列表：严格只从已配置凭据的服务商提取（与设置页「已配置」同口径），
+  // 绝不把未配置的 modelProvider 塞进去，也绝不回退到未配置的内置服务商
   const catalogModels = useMemo<CatalogModelEntry[]>(() => {
     const providers = catalog?.providers || [];
-    const pick = (list: ProviderCatalogEntry[]): CatalogModelEntry[] =>
-      list.flatMap((p) =>
-        (p.models || []).map((m) => ({ providerId: p.id, providerName: p.name, model: m })),
-      );
-    const primary = providers.filter(
-      (p) => p.configured || p.credentialType || p.id === modelProvider,
+    const configured = providers.filter((p) => p.configured || p.credentialType);
+    return configured.flatMap((p) =>
+      (p.models || []).map((m) => ({ providerId: p.id, providerName: p.name, model: m })),
     );
-    const primaryModels = pick(primary);
-    if (primaryModels.length > 0) return primaryModels;
-    return pick(providers.filter((p) => (p.models?.length ?? 0) > 0));
-  }, [catalog, modelProvider]);
+  }, [catalog]);
 
-  // 当前模型不在目录时合成回退条目置顶，保证当前模型始终可见可选
-  const catalogModelsWithFallback = useMemo<CatalogModelEntry[]>(() => {
-    if (!modelId) return catalogModels;
-    const exists = catalogModels.some(
-      (e) => (e.providerId === modelProvider && e.model.id === modelId) || e.model.id === modelId,
-    );
-    if (exists) return catalogModels;
-    return [
-      {
-        providerId: modelProvider,
-        providerName: modelProvider,
-        model: { id: modelId, name: modelId, reasoning: false, input: [], contextWindow: 0, maxTokens: 0 },
-      },
-      ...catalogModels,
-    ];
-  }, [catalogModels, modelProvider, modelId]);
+  // 当前 BOT 的模型是否可用：provider/model 任一为空，或 provider 未配置凭据，都视为未就绪
+  const currentProviderConfigured = useMemo(
+    () => catalog?.providers.some((p) => p.id === modelProvider && (p.configured || p.credentialType)) ?? false,
+    [catalog, modelProvider],
+  );
+  const modelMissing =
+    !loadingCatalog && catalog !== null && (!modelId || !modelProvider || !currentProviderConfigured);
 
   const filteredCatalogModels = useMemo(() => {
-    if (!modelSearch.trim()) return catalogModelsWithFallback;
+    if (!modelSearch.trim()) return catalogModels;
     const q = modelSearch.trim().toLowerCase();
-    return catalogModelsWithFallback.filter(
+    return catalogModels.filter(
       (entry) =>
         entry.model.id.toLowerCase().includes(q) ||
         entry.model.name.toLowerCase().includes(q) ||
         entry.providerId.toLowerCase().includes(q),
     );
-  }, [catalogModelsWithFallback, modelSearch]);
+  }, [catalogModels, modelSearch]);
 
   // 当前模型元数据：先精确匹配 provider+model，再退化为仅 model 匹配
   const currentModelMeta = useMemo(() => {
-    const exact = catalogModelsWithFallback.find(
+    const exact = catalogModels.find(
       (e) => e.providerId === modelProvider && e.model.id === modelId,
     );
     if (exact) return exact.model;
-    return catalogModelsWithFallback.find((e) => e.model.id === modelId)?.model ?? null;
-  }, [catalogModelsWithFallback, modelProvider, modelId]);
+    return catalogModels.find((e) => e.model.id === modelId)?.model ?? null;
+  }, [catalogModels, modelProvider, modelId]);
 
   // 当前模型支持的思考档位（目录缺失时回退全量）
   const supportedThinkingLevels = useMemo(
@@ -200,10 +186,10 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
     setModelSearch('');
     // 模型感知：目标模型不支持当前思考档位时，收敛到最近的支持档位并一并保存
     const nextMeta =
-      catalogModelsWithFallback.find(
+      catalogModels.find(
         (e) => e.providerId === providerId && e.model.id === selectedModelId,
       )?.model ??
-      catalogModelsWithFallback.find((e) => e.model.id === selectedModelId)?.model ??
+      catalogModels.find((e) => e.model.id === selectedModelId)?.model ??
       null;
     const nextSupported = deriveModelThinkingLevels(nextMeta);
     const clamped = clampThinkingLevel(thinkingLevel, nextSupported);
@@ -223,7 +209,7 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
 
   return (
     <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
-      {/* 模型秒切胶囊 */}
+      {/* 模型秒切胶囊：未配置模型时呈现醒目琥珀色警告态，引导用户先选型 */}
       <div className="relative" ref={modelMenuRef}>
         <button
           type="button"
@@ -231,13 +217,25 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
             setModelMenuOpen((v) => !v);
             setThinkingMenuOpen(false);
           }}
-          className="inline-flex items-center gap-1 h-6 px-2 rounded-full border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 font-mono text-zinc-600 dark:text-zinc-300 hover:border-zinc-300 hover:text-zinc-900 dark:hover:border-zinc-700 dark:hover:text-zinc-100 transition-colors cursor-pointer max-w-[13rem]"
-          title={`模型：${modelProvider} / ${modelId}${modelOverride ? '（保存中/已切换）' : '，点击秒切模型'}`}
+          className={`inline-flex items-center gap-1 h-6 px-2 rounded-full border font-mono transition-colors cursor-pointer max-w-[13rem] ${
+            modelMissing
+              ? 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 hover:border-amber-400 dark:hover:border-amber-600'
+              : 'border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 text-zinc-600 dark:text-zinc-300 hover:border-zinc-300 hover:text-zinc-900 dark:hover:border-zinc-700 dark:hover:text-zinc-100'
+          }`}
+          title={
+            modelMissing
+              ? `⚠️ 未配置模型：${modelProvider ? `${modelProvider}/${modelId || '未设置'}` : '未设置'}，点击选择已就绪的模型`
+              : `模型：${modelProvider} / ${modelId}${modelOverride ? '（保存中/已切换）' : '，点击秒切模型'}`
+          }
           aria-haspopup="listbox"
           aria-expanded={modelMenuOpen}
         >
-          <Zap className="w-3 h-3 text-zinc-400 dark:text-zinc-500 shrink-0" />
-          <span className="truncate">{shortModelLabel(modelId)}</span>
+          <Zap
+            className={`w-3 h-3 shrink-0 ${
+              modelMissing ? 'text-amber-500 dark:text-amber-400' : 'text-zinc-400 dark:text-zinc-500'
+            }`}
+          />
+          <span className="truncate">{modelMissing ? '⚠️ 未配置模型' : shortModelLabel(modelId)}</span>
           {savingModel ? (
             <Loader2 className="w-3 h-3 animate-spin-fast shrink-0" />
           ) : (
@@ -267,8 +265,10 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
                 </div>
               )}
               {!loadingCatalog && filteredCatalogModels.length === 0 && (
-                <div className="py-4 text-center text-xs text-zinc-400 dark:text-zinc-500">
-                  {catalog ? '没有匹配的模型' : '模型目录不可用'}
+                <div className="py-4 px-3 text-center text-xs text-zinc-400 dark:text-zinc-500 leading-relaxed">
+                  {catalog
+                    ? '暂未配置任何模型服务商凭据，请前往右上角 系统设置 → 模型服务商 配置 API Key'
+                    : '模型目录不可用，请检查网络或节点状态'}
                 </div>
               )}
               {!loadingCatalog &&

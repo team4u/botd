@@ -11,7 +11,13 @@ import {
 } from './workers.js';
 import type { HubDurableRuntime } from '../harness/hub-harness.js';
 import type { HubApp, HubContext } from './context.js';
-import { listEffectiveProviderCredentials } from '../credential-store.js';
+import { listEffectiveProviderCredentials, loadStoredProviders } from '../credential-store.js';
+
+/** 构造「未配置模型/凭据」的系统错误消息文本 */
+function unconfiguredModelMessage(botName: string, provider: string, modelId: string): string {
+  const current = provider ? `${provider}/${modelId || '未设置'}` : '未设置';
+  return `⚠️ 消息未能发送：智能体「${botName}」尚未配置可用的模型或服务商凭据（当前：${current}）。请在输入框左下角切换已就绪的模型，或前往「系统设置 → 模型服务商」配置 API Key。`;
+}
 
 const DATA_URL_PATTERN = /^data:([^;]+);base64,([\s\S]+)$/;
 
@@ -249,6 +255,30 @@ export function registerMessageRoutes(
       type: 'message_created',
       message: msgResult.message,
     });
+
+    // 前置校验：目标 Bot 未配置模型，或其服务商无任何凭据时，立即显式报错，
+    // 绝不静默挂起（测试注入 runtime 的场景不拦截，交由注入方自行验证）。
+    if (!ctx.durableInjected && targetBotId) {
+      const bot = db.getBot(targetBotId);
+      if (
+        bot &&
+        (!bot.modelProvider?.trim() ||
+          !bot.modelId?.trim() ||
+          !listEffectiveProviderCredentials(db).some((c) => c.providerId === bot.modelProvider) &&
+            !loadStoredProviders(db.getDataDir()).some((p) => p.id === bot.modelProvider))
+      ) {
+        const errorMsg = db.createMessage({
+          id: `msg_${randomUUID()}`,
+          sessionId: id,
+          role: 'system',
+          content: unconfiguredModelMessage(bot.name || targetBotId, bot.modelProvider || '', bot.modelId || ''),
+        });
+        sseHub.broadcast(id, { type: 'message_created', message: errorMsg.message });
+        sseHub.broadcast(id, { type: 'session_status', sessionId: id, status: 'failed' });
+        db.updateSessionStatus(id, 'failed');
+        return c.json(msgResult.message, 202);
+      }
+    }
 
     // 主线切流：显式注入 runtime 或已配置 Provider 凭据时，用户消息直接提交给会话的
     // Router 会话（全双工 whenBusy: "steer"），assistant 回复经镜像回写时间线；

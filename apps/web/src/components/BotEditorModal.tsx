@@ -123,7 +123,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
     );
   }, [availableSkills, skillSearch, enabledSkillSet]);
 
-  const { loadingCatalog, catalogError, catalogProviders } = useModelCatalog(isOpen, nodeId, modelProvider);
+  const { loadingCatalog, catalogError, catalogProviders } = useModelCatalog(isOpen, nodeId);
 
   // Current selected provider object
   const activeProvider = useMemo(() => {
@@ -151,6 +151,24 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
       setThinkingLevel(next);
     }
   }, [modelThinkingLevels]);
+
+  // 目录加载完成（或弹窗打开）时校正选中服务商：当前 modelProvider 不在已配置的
+  // catalogProviders 中（凭据被注销 / 默认种子为空）时自动切换；无任何可用服务商则置空，
+  // 由表单校验引导用户先去配置凭据。
+  useEffect(() => {
+    if (!isOpen || loadingCatalog || catalogProviders.length === 0) {
+      if (isOpen && !loadingCatalog && catalogProviders.length === 0 && modelProvider) {
+        setModelProvider('');
+        setModelId('');
+      }
+      return;
+    }
+    if (!modelProvider || !catalogProviders.some((p) => p.id === modelProvider)) {
+      const first = catalogProviders[0];
+      setModelProvider(first.id);
+      setModelId((current) => (first.models.some((m) => m.id === current) ? current : first.models[0]?.id || ''));
+    }
+  }, [isOpen, loadingCatalog, catalogProviders, modelProvider]);
 
   // Initialize form ONLY on modal open or bot id switch.
   // DO NOT depend on nodes prop (which refreshes every 10s via node polling)!
@@ -490,8 +508,9 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
           </button>
         </div>
 
-        {/* Form Body */}
-        <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 flex flex-col">
+        {/* Form Body：外层弹性容器（表单占满剩余高度），中段滚动，底部操作栏吸底 */}
+        <form onSubmit={handleSubmit} className="flex-1 min-h-0 flex flex-col overflow-hidden">
+          <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 space-y-4">
           {error && (
             <div className="p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-rose-700 dark:text-rose-300 text-xs rounded-xl flex items-start gap-2 shrink-0">
               <AlertCircle className="w-4 h-4 text-rose-500 dark:text-rose-400 shrink-0 mt-0.5" />
@@ -675,7 +694,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
 
               {/* Tab 2: System Persona */}
               {activeTab === 'system' && (
-                <div className="flex-1 flex flex-col space-y-2">
+                <div className="flex flex-col space-y-2">
                   <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
                     <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate">
                       ~/.botd/bots/{id || '<唯一标识>'}/SYSTEM.md
@@ -693,7 +712,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                     aria-label="SYSTEM.md 人设提示词"
                     onChange={(e) => setSystemMd(e.target.value)}
                     placeholder="输入智能体的角色定位、协作规范与提示词..."
-                    className="w-full flex-1 min-h-[300px] p-2.5 text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono leading-relaxed text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                    className="w-full flex-1 min-h-[200px] sm:min-h-[260px] p-2.5 text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono leading-relaxed text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
                     required
                   />
                 </div>
@@ -701,7 +720,7 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
 
               {/* Tab 3: Long-term Memory */}
               {activeTab === 'memory' && (
-                <div className="flex-1 flex flex-col space-y-2">
+                <div className="flex flex-col space-y-2">
                   <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
                     <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate">
                       ~/.botd/bots/{id || '<唯一标识>'}/MEMORY.md
@@ -722,15 +741,17 @@ export const BotEditorModal: React.FC<BotEditorModalProps> = ({
                     aria-label="MEMORY.md 长期记忆"
                     onChange={(e) => setMemoryMd(e.target.value)}
                     placeholder="输入智能体的跨会话长期记忆内容..."
-                    className="w-full flex-1 min-h-[280px] p-2.5 text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono leading-relaxed text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
+                    className="w-full flex-1 min-h-[200px] sm:min-h-[260px] p-2.5 text-xs bg-zinc-50/80 dark:bg-zinc-900/80 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-mono leading-relaxed text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500"
                   />
                 </div>
               )}
             </>
           )}
 
-          {/* Footer controls */}
-          <div className="pt-2 flex items-center justify-end gap-2 border-t border-zinc-100 dark:border-zinc-800/60 shrink-0">
+          </div>{/* /滚动主体 */}
+
+          {/* Footer controls：移出滚动区，吸底常驻 */}
+          <div className="px-4 sm:px-6 py-3 flex items-center justify-end gap-2 border-t border-zinc-100 dark:border-zinc-800/60 bg-white dark:bg-zinc-950 shrink-0">
             <button
               type="button"
               onClick={onClose}

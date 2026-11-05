@@ -458,6 +458,13 @@ export const useSessionMessages = (params: SessionMessagesParams) => {
       case 'session_status': {
         setSessions((prev) => patchSessionStatus(prev, event));
 
+        if (event.status === 'running' && event.activeBotId) {
+          // 占位流式状态：提交即亮起「正在思考」，不必等首条 thinking/text 事件
+          updateStreamingStates(event.activeBotId, (prev) =>
+            prev ?? { botId: event.activeBotId!, delta: '', tools: [], blocks: [] },
+          );
+        }
+
         if (event.status === 'idle' || event.status === 'failed') {
           // 取消场景：cancelSession 立即广播 idle，但节点随后才返回部分输出（message_created）。
           // 立即清空会闪空屏；延迟一拍清理，若期间部分输出/新流式事件到达则自然接管。
