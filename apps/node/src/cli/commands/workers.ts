@@ -35,33 +35,18 @@ export function registerWorkersCommands(program: Command): void {
   const workers = program.command('workers').description('Super-agent background workers (list/spawn/steer/stop/recall)');
 
   workers
-<<<<<<< HEAD
     .command('list [sessionId]')
     .description('List background workers (of a session, or globally across all sessions when sessionId is omitted)')
-    .action((sessionId: string | undefined, options: Record<string, unknown>, command: Command) =>
-      cliAction(async (_opts, cmd) => {
-        const g = readGlobals(cmd);
-        const client = await HubClient.connect(g);
-        const path =
-          typeof sessionId === 'string' && sessionId.trim()
-            ? `/api/sessions/${encodeURIComponent(sessionId.trim())}/workers`
-            : '/api/workers';
-        const result = await client.get<WorkersListResult>(path);
-        printResult(result.workers, g.json);
-      })(options, command),
-    );
-=======
-    .command('list <sessionId>')
-    .description('List background workers of a session')
-    .action(cliAction(async (sessionId: string, _options: Record<string, unknown>, command: Command) => {
+    .action(cliAction(async (sessionId: string | undefined, _options: Record<string, unknown>, command: Command) => {
       const g = readGlobals(command);
       const client = await HubClient.connect(g);
-      const result = await client.get<WorkersListResult>(
-        `/api/sessions/${encodeURIComponent(sessionId)}/workers`,
-      );
+      const path =
+        typeof sessionId === 'string' && sessionId.trim()
+          ? `/api/sessions/${encodeURIComponent(sessionId.trim())}/workers`
+          : '/api/workers';
+      const result = await client.get<WorkersListResult>(path);
       printResult(result.workers, g.json);
     }));
->>>>>>> pi-agent-2eef9335-42e4-48c
 
   workers
     .command('spawn <sessionId>')

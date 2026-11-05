@@ -77,7 +77,7 @@ test('WorkersDrawer SSR（列表）: 有 Worker 时渲染任务行与巡检按�
   // 手动派发按钮与表单不再渲染
   assert.doesNotMatch(html, /派发后台 Worker/, '不应再渲染手动派发按钮');
   assert.doesNotMatch(html, /立即派发/, '不应再渲染手动派发表单提交');
-}, { timeout: 60_000 });
+});
 
 test('WorkersDrawer SSR（列表）: 零 Worker 时空态引导自然语言派发，仍可巡检', { timeout: 60_000 }, () => {
   const html = renderWorkersDrawer({ workers: [] });
@@ -85,12 +85,12 @@ test('WorkersDrawer SSR（列表）: 零 Worker 时空态引导自然语言派�
   assert.match(html, /暂无后台任务/, '空态应提示暂无后台任务');
   assert.match(html, /自然语言/, '空态应引导在对话中用自然语言派发');
   assert.doesNotMatch(html, /派发后台 Worker/, '不应再渲染手动派发按钮');
-}, { timeout: 60_000 });
+});
 
 test('WorkersDrawer SSR（列表）: 未传入回调时不渲染巡检入口', { timeout: 60_000 }, () => {
   const html = renderWorkersDrawer({ onRunWatchdog: undefined });
   assert.doesNotMatch(html, /运行 Watchdog 巡检/, '未提供 onRunWatchdog 时不应渲染巡检按钮');
-}, { timeout: 60_000 });
+});
 
 test('WorkersDrawer 源码: 手动派发表单与 onSpawnWorker 已彻底移除', { timeout: 60_000 }, () => {
   // SSR 无法点击；直接验证源码结构（派发表单、状态与提交行为全部清理干净）
@@ -105,7 +105,7 @@ test('WorkersDrawer 源码: 手动派发表单与 onSpawnWorker 已彻底移除'
   // Watchdog 巡检与详情干预保持完整
   assert.match(source, /title="运行 Watchdog 巡检"/, '巡检按钮应保留');
   assert.match(source, /人工干预记录/, '详情视图 Steer/Follow-up 时间线应保留');
-}, { timeout: 60_000 });
+});
 
 test('WorkersDrawer SSR（列表）: 失败置顶，终态折叠为分组头', { timeout: 60_000 }, () => {
   const html = renderWorkersDrawer({
@@ -124,7 +124,7 @@ test('WorkersDrawer SSR（列表）: 失败置顶，终态折叠为分组头', {
   const doneGroupIdx = html.indexOf('已完成 · 1');
   assert.ok(failedIdx >= 0, '失败任务应渲染');
   assert.ok(doneGroupIdx > failedIdx, '失败任务应排在终态分组之前');
-}, { timeout: 60_000 });
+});
 
 // ============================================================
 // 2. WorkersDrawer SSR（详情视图）：Watchdog 巡检动作 + 遥测徽标
@@ -155,7 +155,7 @@ test('WorkersDrawer SSR（详情）: initialWorkerId 直达详情并渲染 Watch
   // 遥测徽标仍正常渲染
   assert.match(html, /3 次工具调用/, '工具调用次数徽标应渲染');
   assert.match(html, /Tokens 1,234/, 'Token 徽标应渲染');
-}, { timeout: 60_000 });
+});
 
 test('WorkersDrawer SSR: isOpen=false 时不渲染', { timeout: 60_000 }, () => {
   const noop = () => {};
@@ -171,7 +171,7 @@ test('WorkersDrawer SSR: isOpen=false 时不渲染', { timeout: 60_000 }, () => 
     })
   );
   assert.equal(html, '');
-}, { timeout: 60_000 });
+});
 
 // ============================================================
 // 3. Node 死桩清理 + ChatView 接线
@@ -191,7 +191,7 @@ test('daemon.ts: Node 侧废弃 RPC 死桩已全部移除', { timeout: 60_000 },
   ]) {
     assert.ok(!source.includes(name), `daemon.ts 不应再包含死桩 ${name}`);
   }
-}, { timeout: 60_000 });
+});
 
 test('ChatView.tsx: 巡检回调与外部 Worker 检视已接线到后台子任务抽屉', { timeout: 60_000 }, () => {
   const source = readFileSync(path.join(webSrc, 'components/ChatView.tsx'), 'utf-8');
@@ -213,7 +213,7 @@ test('ChatView.tsx: 巡检回调与外部 Worker 检视已接线到后台子任�
   );
   assert.doesNotMatch(source, /ActiveWorkersBar/, 'ActiveWorkersBar 横栏应彻底移除');
   assert.doesNotMatch(source, /showWorkerToolsBar/, 'showWorkerToolsBar 状态应彻底清理');
-}, { timeout: 60_000 });
+});
 
 test('ChatView.tsx: 顶栏 ⚡ 子任务角标已接线，回执卡不再提供死链入口', { timeout: 60_000 }, () => {
   const source = readFileSync(path.join(webSrc, 'components/ChatView.tsx'), 'utf-8');
@@ -224,7 +224,7 @@ test('ChatView.tsx: 顶栏 ⚡ 子任务角标已接线，回执卡不再提供�
   assert.match(source, /superAgent\.setSelectedWorkerId\(workerId\);/, '单 worker 点击应水合 recall');
   // Worker 轨迹存在内存，历史会话不可回看：回执卡不提供「查看详情」死链
   assert.doesNotMatch(source, /onOpenWorker/, '回执卡 onOpenWorker 接线应移除');
-}, { timeout: 60_000 });
+});
 
 test('MessageItem.tsx: Worker 完成回执卡是纯凭条（无链接、无截断摘要折叠）', { timeout: 60_000 }, () => {
   const source = readFileSync(path.join(webSrc, 'components/MessageItem.tsx'), 'utf-8');
@@ -232,20 +232,20 @@ test('MessageItem.tsx: Worker 完成回执卡是纯凭条（无链接、无截�
   assert.match(source, /const isWorkerReceipt = title === '后台任务完成';/, 'Worker 回执凭条判定');
   assert.match(source, /!isWorkerReceipt && childSessionId/, 'Worker 回执不渲染子会话链接');
   assert.match(source, /detailBody !== null && !isWorkerReceipt/, 'Worker 回执省略 200 字截断摘要折叠区');
-}, { timeout: 60_000 });
+});
 
 // ============================================================
 // 4. /clear 内置斜杠命令：原地清空会话消息与上下文（保留 Worker）
 // ============================================================
 
-test('slash.ts: BUILTIN_SESSION_COMMANDS 含 /clear（清空会话消息与上下文）', () => {
+test('slash.ts: BUILTIN_SESSION_COMMANDS 含 /clear（清空会话消息与上下文）', { timeout: 60_000 }, () => {
   const source = readFileSync(path.join(webSrc, 'components/ChatInput/slash.ts'), 'utf-8');
   assert.match(source, /name: 'clear',/, '/clear 命令应注册');
   assert.match(source, /清空当前会话消息与上下文/, '/clear 描述应说明原地清空语义');
   assert.match(source, /保留当前会话与后台任务/, '/clear 描述应说明保留会话与后台任务');
-}, { timeout: 60_000 });
+});
 
-test('useSessionMessages.ts: /clear 走 handleClearMessages(sid, { keepWorkers: true })', () => {
+test('useSessionMessages.ts: /clear 走 handleClearMessages(sid, { keepWorkers: true })', { timeout: 60_000 }, () => {
   const source = readFileSync(path.join(webSrc, 'hooks/useSessionMessages.ts'), 'utf-8');
   // 命令分支：紧跟 /new 之后，原地清空不换会话
   assert.match(
@@ -265,4 +265,4 @@ test('useSessionMessages.ts: /clear 走 handleClearMessages(sid, { keepWorkers: 
     /options\?\.keepWorkers \? '\?keepWorkers=1' : ''/,
     'clearSessionMessages 应拼装 keepWorkers=1 查询参数'
   );
-}, { timeout: 60_000 });
+});
