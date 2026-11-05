@@ -34,11 +34,6 @@ import { EnvEditorSection, type EnvPair } from './BotEditorModal/EnvEditorSectio
 import { ModelSection } from './BotEditorModal/ModelSection';
 import { IdentitySection } from './BotEditorModal/IdentitySection';
 
-// 保持既有测试与调用方从主文件导入纯函数/常量
-export { resolveBotEditorOpenStep, SUBAGENT_COLOR_OPTIONS, shouldSaveBotMemory } from './BotEditorModal/shared';
-export type { ResolveBotEditorOpenStepParams } from './BotEditorModal/shared';
-export { DEFAULT_SYSTEM_MD, DEFAULT_MEMORY_MD } from './BotEditorModal/shared';
-
 export interface BotEditorModalProps {
   isOpen: boolean;
   /** Owning node, fixed by the entry point — bots are created/edited in node context. */

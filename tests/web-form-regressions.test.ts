@@ -14,9 +14,9 @@ import {
   orderBotsAsTree,
 } from '../apps/web/src/utils/bots.js';
 
-// Dynamically import BotEditorModal so tsc in tsconfig.tests.json does not traverse into
+// Dynamically import so tsc in tsconfig.tests.json does not traverse into
 // sibling web components (it uses bundler-style extensionless imports).
-const { shouldSaveBotMemory } = await import('../apps/web/src/components/BotEditorModal.js' as any) as {
+const { shouldSaveBotMemory } = await import('../apps/web/src/components/BotEditorModal/shared.js' as any) as {
   shouldSaveBotMemory: (isEditing: boolean, memoryMd: string, initialMemoryMd: string | null) => boolean;
 };
 

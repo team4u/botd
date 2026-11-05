@@ -619,7 +619,7 @@ export const ProviderAuthModal: React.FC<ProviderAuthModalProps> = ({
                   <div>
                     <div className="font-bold">认证成功！</div>
                     <p className="text-emerald-700 dark:text-emerald-400 mt-0.5">
-                      凭据已成功写入节点 <code>~/.botd/.agent/auth.json</code>，后续推理可直接使用。
+                      凭据已成功保存至 Hub 凭据库，后续推理可直接使用。
                     </p>
                   </div>
                 </div>
@@ -654,7 +654,7 @@ export const ProviderAuthModal: React.FC<ProviderAuthModalProps> = ({
 
               <div className="p-3 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl flex items-start gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
                 <ShieldAlert className="w-4 h-4 text-zinc-400 dark:text-zinc-500 shrink-0 mt-0.5" />
-                <span>凭据保存在所选节点。授权完成后，此页面仅接收登录状态。</span>
+                <span>凭据统一保存在 Hub 凭据库。授权完成后，此页面仅接收登录状态。</span>
               </div>
             </>
           )}

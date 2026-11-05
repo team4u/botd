@@ -1,20 +1,4 @@
-import type { BotConfig, SubagentColor } from '@botd/protocol';
-
-export interface ResolveBotEditorOpenStepParams {
-  isOpen: boolean;
-  wasOpen?: boolean;
-  bot?: BotConfig | null;
-  parentBot?: BotConfig | null;
-}
-
-export function resolveBotEditorOpenStep(params: ResolveBotEditorOpenStepParams) {
-  const isSubagent = Boolean(params.bot?.parentBotId || params.parentBot?.id);
-  const parentBotId = params.bot?.parentBotId || params.parentBot?.id;
-  return {
-    isSubagent,
-    parentBotId,
-  };
-}
+import type { SubagentColor } from '@botd/protocol';
 
 export const SUBAGENT_COLOR_OPTIONS: { id: SubagentColor; label: string; bg: string }[] = [
   { id: 'blue', label: '蓝色', bg: 'bg-blue-500' },
