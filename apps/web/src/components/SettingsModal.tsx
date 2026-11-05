@@ -171,10 +171,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     return catalog?.providers ? [...catalog.providers] : [];
   }, [catalog]);
 
-  // 节点凭据判定：仅依据节点目录返回的 credentialType / configured
+  // 凭据判定：凭据已由 Hub 权威存储，目录返回的 credentialType / configured 即为权威信号
+  // （不再要求选中在线节点；“全部（内置目录）”或零在线节点时 Hub 已配的 API Key 也能显示与管理）
   const providerHasNodeAuth = useCallback((p: ProviderCatalogEntry) => {
-    return Boolean(selectedNodeId && !catalogError && (p.credentialType || p.configured));
-  }, [selectedNodeId, catalogError]);
+    return Boolean(!catalogError && (p.credentialType || p.configured));
+  }, [catalogError]);
 
   // Filtered providers
   const filteredProviders = useMemo(() => {
@@ -241,14 +242,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     provider: ProviderCatalogEntry,
     method: { type: ProviderAuthType; label: string; interactive: boolean; subscription: boolean }
   ) => {
-    if (!selectedNodeId) {
-      setError('请先在上方选择一个在线节点以执行授权');
-      return;
-    }
+    // 凭据存 Hub 全局表：未选节点（内置目录）时也允许发起，路由用 'hub'；
+    // 已选节点时沿节点维度路由（后端仅校验归属，凭据仍落 Hub 同一张表）
+    const targetNodeId = selectedNodeId || 'hub';
     const node = nodesList.find((n) => n.id === selectedNodeId);
     setActiveAuthTarget({
-      nodeId: selectedNodeId,
-      nodeName: node?.name || selectedNodeId,
+      nodeId: targetNodeId,
+      nodeName: selectedNodeId ? node?.name || selectedNodeId : 'Hub',
       providerId: provider.id,
       providerName: provider.name,
       authMethod: method,
@@ -524,13 +524,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </div>
                   </div>
 
-                  {/* Section: Node SDK Native Auth */}
+                  {/* Section: SDK Native Auth (Hub 权威存储) */}
                   <div className="p-4 bg-zinc-50/70 dark:bg-zinc-900/70 border border-zinc-200/90 dark:border-zinc-800/90 rounded-2xl space-y-3.5">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                         <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                          节点专属凭据
+                          服务凭据
                         </span>
                       </div>
 
@@ -544,21 +544,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           </span>
                         </span>
                       ) : (
-                        <span className="text-[11px] text-zinc-400 dark:text-zinc-500">节点无本地凭据</span>
+                        <span className="text-[11px] text-zinc-400 dark:text-zinc-500">未配置凭据</span>
                       )}
                     </div>
 
                     <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                      通过 SDK 原生交互完成授权登录，凭据隔离保存在选定节点的 <code>~/.botd/.agent/auth.json</code> 中。
+                      通过 SDK 原生交互完成授权登录，凭据统一保存在 Hub 凭据库，全部节点共享使用。
                     </p>
 
-                    {/* Node selection & actions */}
-                    {onlineNodes.length === 0 ? (
-                      <div className="p-3 bg-white dark:bg-zinc-950 border border-dashed border-zinc-200 dark:border-zinc-800 rounded-xl text-center text-xs text-zinc-400 dark:text-zinc-500">
-                        暂无在线的计算节点可执行本地登录，请先接入并保持节点在线。
-                      </div>
-                    ) : (
-                      <div className="space-y-3">
+                    <div className="space-y-3">
+                      {onlineNodes.length > 0 && (
                         <div className="flex items-center gap-2">
                           <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">操作目标节点:</span>
                           <select
@@ -567,7 +562,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             onChange={(e) => handleNodeChange(e.target.value)}
                             className="px-2.5 py-1 text-xs bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 font-medium text-zinc-800 dark:text-zinc-200"
                           >
-                            <option value="" className="dark:bg-zinc-900 dark:text-zinc-100">请选择节点</option>
+                            <option value="" className="dark:bg-zinc-900 dark:text-zinc-100">Hub（全局）</option>
                             {onlineNodes.map((n) => (
                               <option key={n.id} value={n.id} className="dark:bg-zinc-900 dark:text-zinc-100">
                                 {n.name} ({n.platform})
@@ -575,68 +570,68 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             ))}
                           </select>
                         </div>
+                      )}
 
-                        {/* Auth method buttons */}
-                        <div className="flex flex-wrap gap-2 pt-1">
-                          {selectedProvider.authMethods && selectedProvider.authMethods.length > 0 ? (
-                            selectedProvider.authMethods
-                              .filter((method) => method.interactive)
-                              .map((method, mIdx) => (
-                                <button
-                                  key={mIdx}
-                                  type="button"
-                                  onClick={() => handleStartNodeLogin(selectedProvider, method)}
-                                  className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-2xs ${
-                                    method.type === 'oauth'
-                                      ? 'bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white'
-                                      : 'bg-white hover:bg-zinc-100 text-zinc-800 border border-zinc-200 dark:bg-zinc-900 dark:hover:bg-zinc-800 dark:text-zinc-200 dark:border-zinc-700'
-                                  }`}
-                                >
-                                  {method.type === 'oauth' ? (
-                                    <ExternalLink className="w-3.5 h-3.5" />
-                                  ) : (
-                                    <Key className="w-3.5 h-3.5 text-zinc-600 dark:text-zinc-400" />
-                                  )}
-                                  <span>
-                                    {method.label ||
-                                      (method.type === 'oauth' ? 'OAuth 授权登录' : '本地 API Key 配置')}
+                      {/* Auth method buttons */}
+                      <div className="flex flex-wrap gap-2 pt-1">
+                        {selectedProvider.authMethods && selectedProvider.authMethods.length > 0 ? (
+                          selectedProvider.authMethods
+                            .filter((method) => method.interactive)
+                            .map((method, mIdx) => (
+                              <button
+                                key={mIdx}
+                                type="button"
+                                onClick={() => handleStartNodeLogin(selectedProvider, method)}
+                                className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-2xs ${
+                                  method.type === 'oauth'
+                                    ? 'bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white'
+                                    : 'bg-white hover:bg-zinc-100 text-zinc-800 border border-zinc-200 dark:bg-zinc-900 dark:hover:bg-zinc-800 dark:text-zinc-200 dark:border-zinc-700'
+                                }`}
+                              >
+                                {method.type === 'oauth' ? (
+                                  <ExternalLink className="w-3.5 h-3.5" />
+                                ) : (
+                                  <Key className="w-3.5 h-3.5 text-zinc-600 dark:text-zinc-400" />
+                                )}
+                                <span>
+                                  {method.label ||
+                                    (method.type === 'oauth' ? 'OAuth 授权登录' : 'API Key 配置')}
+                                </span>
+                                {method.subscription && (
+                                  <span className="text-[11px] px-1 py-0.2 bg-zinc-200 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 rounded font-medium">
+                                    订阅
                                   </span>
-                                  {method.subscription && (
-                                    <span className="text-[11px] px-1 py-0.2 bg-zinc-200 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 rounded font-medium">
-                                      订阅
-                                    </span>
-                                  )}
-                                </button>
-                              ))
-                          ) : (
-                            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                              该服务商未提供可交互的授权方式，请直接在所选节点上完成配置。
-                            </p>
-                          )}
+                                )}
+                              </button>
+                            ))
+                        ) : (
+                          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                            该服务商未提供可交互的授权方式。
+                          </p>
+                        )}
 
-                          {hasNodeCredential && (
-                            <button
-                              type="button"
-                              onClick={() => handleClearNodeAuth(selectedProvider.id)}
-                              disabled={clearingAuth}
-                              className="px-3 py-2 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors"
-                              title="清除该节点本地保存的凭据"
-                            >
-                              {clearingAuth ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : (
-                                <LogOut className="w-3.5 h-3.5" />
-                              )}
-                              <span>清除该节点凭据</span>
-                            </button>
-                          )}
-                        </div>
-
-                        <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
-                          提示：模型服务凭据均以节点为单位配置与保存；部分第三方服务商 OAuth 需外部网络连通与账号授权。
-                        </p>
+                        {hasNodeCredential && selectedNodeId && (
+                          <button
+                            type="button"
+                            onClick={() => handleClearNodeAuth(selectedProvider.id)}
+                            disabled={clearingAuth}
+                            className="px-3 py-2 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors"
+                            title="清除已保存的凭据"
+                          >
+                            {clearingAuth ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <LogOut className="w-3.5 h-3.5" />
+                            )}
+                            <span>清除凭据</span>
+                          </button>
+                        )}
                       </div>
-                    )}
+
+                      <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                        提示：凭据保存在 Hub 凭据库，全部节点共享；部分第三方服务商 OAuth 需外部网络连通与账号授权。
+                      </p>
+                    </div>
                   </div>
 
                   {/* Section: SDK Models preview */}
@@ -700,7 +695,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {/* Modal Footer */}
           <div className="px-5 sm:px-6 py-3.5 border-t border-zinc-200/80 dark:border-zinc-800/80 bg-zinc-50/60 dark:bg-zinc-900/60 flex items-center justify-between shrink-0">
             <div className="text-[11px] text-zinc-500 dark:text-zinc-400 hidden sm:block">
-              凭据仅保存在所选节点本地，清除后需重新授权
+              凭据统一保存在 Hub 凭据库，全部节点共享，清除后需重新授权
             </div>
 
             <div className="flex items-center gap-2 ml-auto">
@@ -737,13 +732,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         />
       )}
 
-      {/* Submodal: 清除节点凭据确认 */}
+      {/* Submodal: 清除凭据确认 */}
       <ConfirmDialog
         isOpen={Boolean(clearAuthProviderId)}
-        title="清除节点凭据"
+        title="清除凭据"
         message={
           <>
-            确定要清除节点 “{selectedNode?.name || selectedNodeId}” 上的 {clearAuthProviderId} 专属凭据吗？
+            确定要清除 {clearAuthProviderId} 的服务凭据吗（Hub 凭据库，全部节点共享）？
             <br />
             清除后该服务商需重新授权才能继续使用。
           </>

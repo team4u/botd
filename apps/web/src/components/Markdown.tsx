@@ -23,7 +23,7 @@ const extractText = (node: React.ReactNode): string => {
  * （react-markdown 会额外传入 hast 的 node 属性，需从 DOM props 中剔除）
  * ```mermaid 代码块在此层拦截，交给 MermaidBlock 渲染（避免 div 嵌套进 pre）
  */
-export const PreBlock: React.FC<React.ComponentPropsWithoutRef<'pre'> & { node?: unknown }> = ({
+const PreBlock: React.FC<React.ComponentPropsWithoutRef<'pre'> & { node?: unknown }> = ({
   node: _node,
   children,
   ...props

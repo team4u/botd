@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -250,7 +250,8 @@ const WorkerListRow: React.FC<{
   );
 };
 
-/** 详情视图：检视台主体（顶栏 + 元信息徽标行 + 时间线 + 全双工 composer） */
+/** 详情视图：检视台主体（顶栏 + 元信息徽标行 + 时间线 + 全双工 composer）
+ *  Watchdog 巡检状态由父组件 WorkersDrawer 持有（与列表视图共享），经 props 传入。 */
 const WorkerDetailView: React.FC<{
   worker: SuperAgentWorkerItem;
   botMap: Map<string, BotConfig>;
@@ -261,12 +262,26 @@ const WorkerDetailView: React.FC<{
   onClose: () => void;
   onStop: (workerId: string) => void;
   onSteer?: (workerId: string, message: string, mode: SuperAgentWorkerSteerMode) => Promise<boolean>;
-  onRunWatchdog?: () => Promise<{ healthy: boolean; summary: string } | null>;
-}> = ({ worker, botMap, nodeMap, now, stopping, onBack, onClose, onStop, onSteer, onRunWatchdog }) => {
+  /** 触发父组件的 Watchdog 巡检（状态由父持有，与列表视图共享） */
+  onTriggerWatchdog?: () => void;
+  watchdogRunning?: boolean;
+  watchdogSummary?: string | null;
+}> = ({
+  worker,
+  botMap,
+  nodeMap,
+  now,
+  stopping,
+  onBack,
+  onClose,
+  onStop,
+  onSteer,
+  onTriggerWatchdog,
+  watchdogRunning = false,
+  watchdogSummary = null,
+}) => {
   const [inputValue, setInputValue] = useState('');
   const [sending, setSending] = useState(false);
-  const [watchdogRunning, setWatchdogRunning] = useState(false);
-  const [watchdogSummary, setWatchdogSummary] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
 
@@ -296,17 +311,6 @@ const WorkerDetailView: React.FC<{
       if (ok) setInputValue('');
     } finally {
       setSending(false);
-    }
-  };
-
-  const handleRunWatchdog = async () => {
-    if (!onRunWatchdog || watchdogRunning) return;
-    setWatchdogRunning(true);
-    try {
-      const result = await onRunWatchdog();
-      setWatchdogSummary(result ? result.summary : '巡检请求失败');
-    } finally {
-      setWatchdogRunning(false);
     }
   };
 
@@ -344,10 +348,10 @@ const WorkerDetailView: React.FC<{
           </div>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
-          {onRunWatchdog && (
+          {onTriggerWatchdog && (
             <button
               type="button"
-              onClick={() => void handleRunWatchdog()}
+              onClick={onTriggerWatchdog}
               disabled={watchdogRunning}
               title="运行 Watchdog 巡检"
               className="inline-flex items-center gap-1 h-8 px-2.5 rounded-lg border border-zinc-200/80 dark:border-zinc-700/80 bg-white dark:bg-zinc-900 hover:border-blue-300 dark:hover:border-blue-700 disabled:opacity-50 text-zinc-600 dark:text-zinc-300 text-xs font-medium transition-colors cursor-pointer"
@@ -599,7 +603,7 @@ export const WorkersDrawer: React.FC<WorkersDrawerProps> = ({
   const [view, setView] = useState<'list' | 'detail'>(() => (initialWorkerId ? 'detail' : 'list'));
   const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(() => initialWorkerId ?? null);
 
-  // Watchdog 巡检状态（列表视图持有；详情视图另有独立巡检状态）
+  // Watchdog 巡检状态（列表 ⇄ 详情视图共享同一套，巡检结果互通）
   const [watchdogRunning, setWatchdogRunning] = useState(false);
   const [watchdogSummary, setWatchdogSummary] = useState<string | null>(null);
 
@@ -659,7 +663,7 @@ export const WorkersDrawer: React.FC<WorkersDrawerProps> = ({
     return () => window.removeEventListener('keydown', onKey);
   }, [isOpen, view, onClose]);
 
-  const handleRunWatchdog = async () => {
+  const handleRunWatchdog = useCallback(async () => {
     if (!onRunWatchdog || watchdogRunning) return;
     setWatchdogRunning(true);
     try {
@@ -668,7 +672,7 @@ export const WorkersDrawer: React.FC<WorkersDrawerProps> = ({
     } finally {
       setWatchdogRunning(false);
     }
-  };
+  }, [onRunWatchdog, watchdogRunning]);
 
   const enterDetail = (workerId: string) => {
     onSelectWorker(workerId);
@@ -739,7 +743,9 @@ export const WorkersDrawer: React.FC<WorkersDrawerProps> = ({
             onClose={onClose}
             onStop={onStopWorker}
             onSteer={onSteer}
-            onRunWatchdog={onRunWatchdog}
+            onTriggerWatchdog={onRunWatchdog ? () => void handleRunWatchdog() : undefined}
+            watchdogRunning={watchdogRunning}
+            watchdogSummary={watchdogSummary}
           />
         ) : (
           <>

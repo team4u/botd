@@ -299,7 +299,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [extensionCommands, setExtensionCommands] = useState<ChatCommand[]>([]);
   useEffect(() => {
     setExtensionCommands([]);
-    if (!session.leadBotId || !isDirectNodeOnline) return;
+    // Hub SQLite 在节点离线时也能返回技能命令，离线时斜杠菜单依然可用
+    if (!session.leadBotId) return;
     let cancelled = false;
     api
       .getBotCommands(session.leadBotId)
@@ -313,7 +314,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [session.leadBotId, isDirectNodeOnline]);
+  }, [session.leadBotId]);
 
   const handleExtensionPillClick = (cmd: ChatCommand) => {
     // 带参数或会话运行中：仅预填到输入框供用户补充/确认，不直接发送
@@ -473,12 +474,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setArtifactsUnseen(false);
   }, []);
 
+  // 用 ref 避免订阅 effect 依赖抽屉开关导致反复重订阅
+  const artifactsOpenRef = useRef(false);
+  artifactsOpenRef.current = artifactsOpen;
+
+  // 全局 SSE：本会话 artifact_created —— 增量去重追加计数，抽屉未开时同步置红点
   useEffect(() => {
     const unsubscribe = onGlobalEvent((e) => {
       if (e.type !== 'artifact_created' || e.sessionId !== session.id) return;
       setArtifactItems((prev) =>
         prev.some((a) => a.id === e.artifact.id) ? prev : [...prev, { id: e.artifact.id }]
       );
+      if (!artifactsOpenRef.current) setArtifactsUnseen(true);
     });
     return unsubscribe;
   }, [session.id]);
@@ -634,20 +641,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
-
-  // 用 ref 避免订阅 effect 依赖抽屉开关导致反复重订阅
-  const artifactsOpenRef = useRef(false);
-  artifactsOpenRef.current = artifactsOpen;
-
-  // 全局 SSE：本会话 artifact_created 且抽屉未开时置红点
-  useEffect(() => {
-    const unsubscribe = onGlobalEvent((e) => {
-      if (e.type === 'artifact_created' && e.sessionId === session.id) {
-        if (!artifactsOpenRef.current) setArtifactsUnseen(true);
-      }
-    });
-    return unsubscribe;
-  }, [session.id]);
 
   // 切换会话时重置头部交互状态
   useEffect(() => {
@@ -1032,9 +1025,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                       setMenuOpen(false);
                       setBotEditorOpen(true);
                     }}
-                    disabled={!isDirectNodeOnline}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                    title={!isDirectNodeOnline ? '节点离线，无法编辑配置' : undefined}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
                   >
                     <SettingsIcon className="w-3.5 h-3.5" />
                     <span className="whitespace-nowrap">{directBot.parentBotId ? '子代理设置' : '智能体设置'}</span>

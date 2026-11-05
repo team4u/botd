@@ -1,40 +1,8 @@
 import React from 'react';
 import { Server, Lock, Users, FolderGit2 } from 'lucide-react';
 import type { NodeWithBots, SubagentColor } from '@botd/protocol';
-import { SUBAGENT_COLOR_OPTIONS } from './shared';
-
-/** 节点本地 Git 仓库扫描结果（与 CreateSessionModal 保持同形，静默容错拉取） */
-export interface NodeSpaceEntry {
-  path: string;
-  name: string;
-  branch?: string;
-  isGitRepo: boolean;
-}
-
-/** 轻量 spaces 拉取：失败静默返回空列表（仅保留手动输入） */
-export async function fetchNodeSpaces(nodeId: string): Promise<NodeSpaceEntry[]> {
-  try {
-    const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/spaces`, {
-      credentials: 'include',
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    if (!Array.isArray(data)) return [];
-    return data
-      .filter(
-        (item): item is NodeSpaceEntry =>
-          item && typeof item.path === 'string' && typeof item.name === 'string'
-      )
-      .map((item) => ({
-        path: item.path,
-        name: item.name,
-        branch: typeof item.branch === 'string' ? item.branch : undefined,
-        isGitRepo: Boolean(item.isGitRepo),
-      }));
-  } catch {
-    return [];
-  }
-}
+import { type NodeSpaceEntry, fetchNodeSpaces } from '../../create-session-draft.js';
+import { SUBAGENT_COLOR_OPTIONS } from './shared.js';
 
 interface IdentitySectionProps {
   isSubagent: boolean;
