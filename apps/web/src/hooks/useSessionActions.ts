@@ -2,7 +2,11 @@ import { useCallback, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import type { SessionRecord, BotConfig, CreateSessionInput } from '@botd/protocol';
 import { api, AuthRequiredError } from '../api';
-import { pickCurrentDirectSession } from '../components/Sidebar';
+import {
+  pickCurrentDirectSession,
+  getSpaceDisplayName,
+  normalizeWorkspaceDir,
+} from '../components/Sidebar';
 import type { AddToastFn } from './useToasts';
 import type { NavigateFn } from './useHashRoute';
 
@@ -106,6 +110,50 @@ export const useSessionActions = (params: SessionActionsParams) => {
       addToast('error', err?.message || '开启新话题失败');
     }
   }, [sessions, setSessions, botMap, navigate, addToast, onAuthLostRef]);
+
+  // 并行话题一键创建：与 handleNewTopic（归档旧会话）不同，不归档旧会话，
+  // 直接在指定 leadBotId / workspaceDir 下并列新建一个会话 Tab 并自动切换
+  const handleCreateParallelTopic = useCallback(
+    async (context: { leadBotId: string; workspaceDir?: string; title?: string }) => {
+      const { leadBotId, workspaceDir: rawDir, title } = context;
+      const workspaceDir = normalizeWorkspaceDir(rawDir) ?? undefined;
+      const leadBot = botMap.get(leadBotId);
+      try {
+        // 默认标题：Space 名或分身名 + 序号（同容器已有活跃主会话数 + 1）
+        const siblingCount = sessions.filter(
+          (s) =>
+            !s.archived &&
+            !s.parentSessionId &&
+            s.leadBotId === leadBotId &&
+            normalizeWorkspaceDir(
+              (s as SessionRecord & { workspaceDir?: string }).workspaceDir
+            ) === (workspaceDir ?? null)
+        ).length;
+        const resolvedTitle =
+          title ||
+          (workspaceDir
+            ? `${getSpaceDisplayName(workspaceDir)} #${siblingCount + 1}`
+            : `${leadBot?.name || leadBotId} #${siblingCount + 1}`);
+
+        const input: CreateSessionInput = {
+          title: resolvedTitle,
+          leadBotId,
+          ...(workspaceDir ? { workspaceDir } : {}),
+        } as CreateSessionInput;
+
+        const created = await api.createSession(input);
+        setSessions((prev) => [created, ...prev]);
+        navigate({ sessionId: created.id, view: 'chat', modal: null });
+      } catch (err: any) {
+        if (err instanceof AuthRequiredError || err?.status === 401) {
+          onAuthLostRef.current();
+          return;
+        }
+        addToast('error', err?.message || '创建并行话题失败');
+      }
+    },
+    [sessions, setSessions, botMap, navigate, addToast, onAuthLostRef]
+  );
 
   // 从指定消息（含）分叉出新会话并自动切换：原会话不动，运行中也允许（只读源 + 新建）
   const handleForkMessage = useCallback(async (sessionId: string, messageId: string) => {
@@ -236,6 +284,7 @@ export const useSessionActions = (params: SessionActionsParams) => {
   return {
     handleOpenBotChat,
     handleNewTopic,
+    handleCreateParallelTopic,
     handleForkMessage,
     handleCreateSession,
     handleRenameSession,

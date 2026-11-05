@@ -19,6 +19,7 @@ import {
   History as HistoryIcon,
   FolderGit2,
   Zap,
+  Plus,
 } from 'lucide-react';
 import type {
   SessionRecord,
@@ -45,6 +46,12 @@ import { WorkerInspectDrawer } from './WorkerInspectDrawer';
 import { useSuperAgentWorkers } from '../hooks/useSuperAgentWorkers';
 import { BotEditorModal } from './BotEditorModal';
 import { BotAvatarBadge } from './MessageItem';
+import {
+  resolveContextTabGroup,
+  getSessionAttention,
+  ATTENTION_VISUALS,
+  type ContextTabGroup,
+} from './Sidebar';
 import { BotdUiRenderer } from './generative-ui/BotdUiRenderer';
 import { api } from '../api';
 import { onGlobalEvent } from '../events';
@@ -96,6 +103,20 @@ interface ChatViewProps {
   onLoadEarlier?: () => void;
   /** 搜索跳转定位高亮的消息 id */
   highlightMessageId?: string | null;
+  /** 全部会话列表（顶栏 Context Tab Bar 数据源） */
+  sessions?: SessionRecord[];
+  /** sessionId -> 未读消息数 */
+  unreadCounts?: Record<string, number>;
+  /** 切换到同容器下的另一个会话 Tab */
+  onSelectSession?: (sessionId: string) => void;
+  /** 归档（关闭）一个会话 Tab */
+  onSetArchived?: (sessionId: string, archived: boolean) => Promise<void> | void;
+  /** 在当前空间/助理下并列新建话题 Tab（不归档旧会话） */
+  onCreateParallelTopic?: (input: {
+    leadBotId: string;
+    workspaceDir?: string;
+    title?: string;
+  }) => Promise<void> | void;
 }
 
 export const ChatView: React.FC<ChatViewProps> = ({
@@ -129,6 +150,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
   loadingEarlier = false,
   onLoadEarlier,
   highlightMessageId = null,
+  sessions: sessionListProp,
+  unreadCounts = {},
+  onSelectSession,
+  onSetArchived,
+  onCreateParallelTopic,
 }) => {
   const keyboardInset = useKeyboardInset();
 
@@ -498,6 +524,37 @@ export const ChatView: React.FC<ChatViewProps> = ({
     ? sessionWorkspaceDir.split('/').filter(Boolean).pop() || sessionWorkspaceDir
     : '';
 
+  // ===== 顶栏 Context Tab Bar（Herdr 风格水平多标签工作台）=====
+  // 当前会话所属容器（Space 或个人助理）与平级未归档主会话 Tabs；
+  // Space 会话或 >= 2 个并行话题时才渲染标签栏，单聊保持纯净 IM 顶栏
+  const contextGroup: ContextTabGroup | null = useMemo(
+    () =>
+      resolveContextTabGroup(
+        session,
+        sessionListProp && sessionListProp.length > 0 ? sessionListProp : [session],
+        Array.from(botMap.values())
+      ),
+    [session, sessionListProp, botMap]
+  );
+  const showContextTabs = Boolean(
+    contextGroup && (contextGroup.kind === 'space' || contextGroup.tabs.length > 1)
+  );
+
+  // 关闭 Tab：归档目标会话；若关的是当前激活 Tab 则切到相邻 Tab
+  const handleCloseTab = useCallback(
+    (tabId: string) => {
+      if (!contextGroup) return;
+      const idx = contextGroup.tabs.findIndex((t) => t.id === tabId);
+      if (idx < 0) return;
+      void onSetArchived?.(tabId, true);
+      if (tabId === session.id && onSelectSession && contextGroup.tabs.length > 1) {
+        const neighbor = contextGroup.tabs[idx + 1] || contextGroup.tabs[idx - 1];
+        if (neighbor && neighbor.id !== tabId) onSelectSession(neighbor.id);
+      }
+    },
+    [contextGroup, onSetArchived, session.id, onSelectSession]
+  );
+
   // ===== 全局开发快捷键 =====
   // Cmd/Ctrl+Shift+O 开启新话题；经 ref 调用最新回调，避免依赖变化导致监听反复拆建
   const newTopicRef = useRef(() => void onNewTopic(session.id));
@@ -864,6 +921,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <span className="whitespace-nowrap">派发后台任务 / 巡检</span>
                 </button>
 
+                {onCreateParallelTopic && (
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      void onCreateParallelTopic({
+                        leadBotId: session.leadBotId,
+                        workspaceDir: contextGroup?.spacePath || undefined,
+                      });
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span className="whitespace-nowrap">新建并行话题标签页</span>
+                  </button>
+                )}
+
                 <button
                   role="menuitem"
                   onClick={() => {
@@ -967,6 +1041,115 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         </div>
       </header>
+
+      {/* 顶栏 Context Tab Bar（Herdr 风格水平多标签工作台）：
+          Space 会话或当前助理有 >= 2 个并行话题时展示 */}
+      {showContextTabs && contextGroup && (
+        <div className="h-9 px-2.5 sm:px-4 bg-zinc-50/90 dark:bg-zinc-900/80 border-b border-zinc-200/70 dark:border-zinc-800/70 flex items-center gap-1 overflow-x-auto shrink-0">
+          {/* 左侧容器徽标：Space 可点击弹出目录绑定浮层；Assistant 显示头像 */}
+          {contextGroup.kind === 'space' ? (
+            <button
+              type="button"
+              onClick={() => setSpaceMenuOpen(true)}
+              title={`${contextGroup.label}（${contextGroup.spacePath}）· 点击绑定目录`}
+              className="shrink-0 inline-flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] font-mono font-semibold text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+            >
+              <FolderGit2 className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" />
+              <span className="max-w-[120px] truncate">{contextGroup.label}</span>
+            </button>
+          ) : (
+            contextGroup.leadBot && (
+              <span className="shrink-0 inline-flex items-center gap-1 px-1 py-0.5">
+                <BotAvatarBadge
+                  botId={contextGroup.leadBot.id}
+                  name={contextGroup.leadBot.name}
+                  color={contextGroup.leadBot.color}
+                  className="w-4.5 h-4.5 text-[9px]"
+                />
+                <span className="text-[11px] font-mono font-semibold text-zinc-600 dark:text-zinc-300 max-w-[100px] truncate">
+                  {contextGroup.label}
+                </span>
+              </span>
+            )
+          )}
+          <span className="shrink-0 text-zinc-300 dark:text-zinc-600 select-none" aria-hidden="true">
+            |
+          </span>
+
+          {/* 平级会话 Tabs：状态灯 + 标题 + 未读 + 关闭归档 */}
+          {contextGroup.tabs.map((tab) => {
+            const isCurrent = tab.id === session.id;
+            const tabAttention = getSessionAttention(tab, unreadCounts[tab.id] ?? 0);
+            const tabUnread = isCurrent ? 0 : unreadCounts[tab.id] ?? 0;
+            return (
+              <div
+                key={tab.id}
+                className={`group/tab shrink-0 inline-flex items-center gap-1.5 h-7 pl-2 pr-1 rounded-md border text-xs transition-all cursor-pointer max-w-[180px] ${
+                  isCurrent
+                    ? 'bg-white dark:bg-zinc-800 border-zinc-300/80 dark:border-zinc-600 text-zinc-900 dark:text-zinc-100 shadow-xs'
+                    : 'bg-transparent border-transparent text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60'
+                }`}
+                onClick={() => {
+                  if (!isCurrent) onSelectSession?.(tab.id);
+                }}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if ((e.key === 'Enter' || e.key === ' ') && !isCurrent) {
+                    e.preventDefault();
+                    onSelectSession?.(tab.id);
+                  }
+                }}
+                title={tab.title}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                    tabAttention === 'idle'
+                      ? 'bg-zinc-300 dark:bg-zinc-600'
+                      : ATTENTION_VISUALS[tabAttention].dot
+                  }`}
+                />
+                <span className="truncate">{tab.title}</span>
+                {tabUnread > 0 && (
+                  <span className="shrink-0 bg-red-500 text-white text-[9px] font-semibold rounded-full min-w-[14px] h-3.5 px-1 flex items-center justify-center">
+                    {tabUnread > 99 ? '99+' : tabUnread}
+                  </span>
+                )}
+                {contextGroup.tabs.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCloseTab(tab.id);
+                    }}
+                    title="归档关闭该标签页"
+                    aria-label={`关闭标签页 ${tab.title}`}
+                    className="shrink-0 w-4 h-4 flex items-center justify-center rounded text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/80 transition-colors cursor-pointer"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+
+          {/* 末尾 [+]：在当前空间/助理下并列新建标签页 */}
+          <button
+            type="button"
+            onClick={() =>
+              onCreateParallelTopic?.({
+                leadBotId: session.leadBotId,
+                workspaceDir: contextGroup.spacePath || undefined,
+              })
+            }
+            title="在当前空间/助理下新建并行标签页"
+            aria-label="新建并行标签页"
+            className="shrink-0 w-7 h-7 flex items-center justify-center rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+          >
+            <Plus className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* 工作区目录绑定浮层：锚定顶栏左侧（更多菜单入口），编辑当前会话的项目目录 */}
       {spaceMenuOpen && (
