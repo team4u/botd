@@ -423,18 +423,8 @@ export const WorkerInspectDrawer: React.FC<WorkerInspectDrawerProps> = ({
           )}
         </div>
 
-        {/* 实时执行时间线 */}
+        {/* 实时执行时间线（初始任务全文即 blocks 首个 text 块，顶部标题栏已有任务名，不再重复展示卡片） */}
         <div ref={bodyRef} className="flex-1 overflow-y-auto px-4 py-3 min-h-0">
-          {/* 初始任务指令（纯文本：summary 是 200 字截断的摘要，Markdown 渲染会因语法残缺退化，待后端语义纠偏后再启用） */}
-          <div className="flex gap-2 justify-end mb-3">
-            <div className="max-w-[85%] px-2.5 py-1.5 rounded-xl rounded-tr-sm bg-zinc-100 dark:bg-zinc-800">
-              <div className="text-[10px] font-medium text-zinc-500 dark:text-zinc-400 mb-0.5">初始任务</div>
-              <div className="text-xs text-zinc-800 dark:text-zinc-100 whitespace-pre-wrap break-words">
-                {worker.summary || worker.title}
-              </div>
-            </div>
-          </div>
-
           {/* 执行过程：与主会话共享 AssistantTurnContent（Markdown / 思考 / 工具分组 / 返回值，同一渲染体系） */}
           {timelineBlocks ? (
             <AssistantTurnContent blocks={timelineBlocks} collapseCompletedProcess />
