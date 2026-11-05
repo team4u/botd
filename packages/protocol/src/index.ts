@@ -56,31 +56,8 @@ export interface TurnUsage {
   cacheWriteTokens?: number;
 }
 
-export interface IncomingArtifactRef {
-  id: string;
-  filename: string;
-  mimeType?: string;
-  sizeBytes?: number;
-  url?: string;
-  fromBotName?: string;
-}
-
 export type AskPreviewType = 'diff' | 'markdown' | 'text' | 'ui';
 export type ResourceVisibility = 'private' | 'team';
-
-export type OutboundTaskStatus = 'queued_offline' | 'dispatched' | 'expired' | 'failed';
-
-export interface OutboundTaskRecord {
-  id: string;
-  nodeId: string;
-  botId: string;
-  sessionId: string;
-  taskType: string;
-  payloadJson: string;
-  status: OutboundTaskStatus;
-  createdAt: string;
-  expiresAt: string;
-}
 
 export interface ArtifactRecord {
   id: string;
@@ -652,92 +629,16 @@ export interface HubSessionRpcFunctions {
     version?: string;
   }): Promise<void>;
   heartbeat(nodeId: string): Promise<void>;
-  onSessionStream(event: {
-    sessionId: string;
-    botId: string;
-    deltaText?: string;
-    thinkingDelta?: string;
-    thinkingStatus?: 'running' | 'done';
-    thinkingDurationMs?: number;
-    toolCallId?: string;
-    toolName?: string;
-    toolStatus?: 'running' | 'done' | 'error';
-    toolSummary?: string;
-    toolArgs?: Record<string, unknown>;
-    toolOutput?: string;
-    toolDurationMs?: number;
-    toolIsError?: boolean;
-    toolUiSpec?: BotdUiSpec;
-    extensionUiEvent?: ExtensionUiStreamPayload;
-    subagentEvent?: {
-      id: string;
-      subagentId: string;
-      task: string;
-      status: 'running' | 'done' | 'error' | 'stopped';
-      result?: string;
-      error?: string;
-      durationMs?: number;
-      toolUses?: number;
-      currentTool?: string;
-      phase?: string;
-      childSessionId?: string;
-      blocks?: TurnBlock[];
-      toolCalls?: ToolCallRecord[];
-      steers?: SubagentSteerRecord[];
-    };
-  }): void;
-  requestWakeupTurn(input: {
-    sessionId: string;
-    botId: string;
-    wakeupMessage: string;
-    replyToBotId?: string;
-    /** 若为 true，仅向公屏插入消息并广播 SSE，不触发大模型推理回合 */
-    noTurn?: boolean;
-    /** 若指定正整数秒数，则在 Hub 上创建一个 once 延时触发器，到点再唤醒 */
-    delaySeconds?: number;
-  }): Promise<{ ok: true; scheduledTriggerId?: string } | void>;
-  requestHumanInput(input: {
-    sessionId: string;
-    botId: string;
-    prompt: string;
-    options?: string[];
-    timeoutSeconds?: number;
-    previewType?: AskPreviewType;
-    previewContent?: string;
-  }): Promise<{ answer: string }>;
-  uploadArtifact(input: {
-    sessionId: string;
-    botId?: string;
-    filename: string;
-    mimeType?: string;
-    contentBase64: string;
-    message?: string;
-  }): Promise<ArtifactRecord>;
-  downloadArtifact(artifactId: string): Promise<{
-    artifact: ArtifactRecord;
-    contentBase64: string;
-  }>;
-  listSessionArtifacts(sessionId: string): Promise<ArtifactRecord[]>;
 }
 
-/** Hub 侧 RPC：既有会话/产物函数 + Node 侧流式输出回调（envExec 分块回传）。 */
+/** Hub 侧 RPC：Node 连接管理函数 + Node 侧流式输出回调（envExec 分块回传）。 */
 export interface HubRpcFunctions extends HubSessionRpcFunctions, Partial<HubEnvStreamFunctions> {}
 
 export interface NodeSessionRpcFunctions {
   restartDaemon(): Promise<{ ok: true; pid: number }>;
   checkUpgrade?(options?: { registryUrl?: string }): Promise<NodeUpgradeCheckResult>;
   upgradeDaemon?(options?: { targetVersion?: string; registryUrl?: string }): Promise<NodeUpgradeResult>;
-  getModelCatalog?(): Promise<ModelCatalog>;
-  getCommands?(botId: string): Promise<ChatCommand[]>;
-  startProviderLogin?(input: { providerId: string; method: ProviderAuthType }): Promise<ProviderLoginState>;
-  getProviderLogin?(loginId: string): Promise<ProviderLoginState>;
-  respondProviderLogin?(input: { loginId: string; promptId: string; value: string }): Promise<ProviderLoginState>;
-  cancelProviderLogin?(loginId: string): Promise<void>;
-  logoutProvider?(providerId: string): Promise<void>;
-  saveBot(bot: BotConfig, systemMd: string): Promise<void>;
   deleteBot(botId: string): Promise<void>;
-  readFile(target: { kind: 'system' | 'memory' | 'env' | 'skill' | 'extension'; botId?: string; id: string }): Promise<string>;
-  writeFile(target: { kind: 'system' | 'memory' | 'env' | 'skill' | 'extension'; botId?: string; id: string }, content: string): Promise<void>;
   installResource(input: {
     source: string;
     kind?: 'auto' | 'skill' | 'extension';
@@ -751,46 +652,6 @@ export interface NodeSessionRpcFunctions {
     kind: 'skill' | 'extension';
     id: string;
   }): Promise<ResourcePackage>;
-  deleteResource(target: {
-    kind: 'skill' | 'extension';
-    id: string;
-  }): Promise<void>;
-  runTurn(input: {
-    sessionId: string;
-    botId: string;
-    groupContextPrompt: string;
-    incrementalMessages: string;
-    /** Current user command without sender/mention prefixes; history remains separate. */
-    commandText?: string;
-    /** Attachments sent in incremental user messages for this turn */
-    attachments?: MessageAttachment[];
-    /** Upstream artifacts automatically synced across nodes for this turn */
-    incomingArtifacts?: IncomingArtifactRef[];
-    /** 会话/Bot 绑定的真实项目目录（Space）：作为回合 cwd */
-    workspaceDir?: string;
-  }): Promise<{
-    replyText: string;
-    modelBadge: string;
-    toolCalls?: ToolCallRecord[];
-    blocks?: TurnBlock[];
-    usage?: TurnUsage;
-    subagentRuns?: SubagentRunRecord[];
-    /** 回合被用户中止时为 true：调用方应持久化已收集的部分输出而非当作失败丢弃 */
-    aborted?: boolean;
-  }>;
-  cancelTurn(sessionId: string, botId: string): Promise<void>;
-  /** 删除该 BOT 在指定会话的本地 Pi 会话文件（.jsonl），下一回合将从 Hub 历史全量重建上下文 */
-  resetSession(sessionId: string, botId: string): Promise<void>;
-  /** 扫描节点上可绑定的项目 Space（真实项目目录 + Git 分支信息） */
-  listSpaces?(): Promise<WorkspaceSpaceInfo[]>;
-  /** 工作区文件模糊检索（前端 # 文件补全）：返回相对路径列表 */
-  listWorkspaceFiles?(input: {
-    botId: string;
-    sessionId?: string;
-    workspaceDir?: string;
-    query?: string;
-    limit?: number;
-  }): Promise<string[]>;
 }
 
 /** Node 侧 RPC：既有回合/资源函数 + 远端执行环境函数（birpc 双向通道的 Node 端；env 方法可选以兼容旧连接/测试 mock）。 */

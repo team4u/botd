@@ -1,52 +1,30 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, writeFile, access } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import test from 'node:test';
-import { BUILTIN_SKILL_ID, BUILTIN_SKILL_MD, BUILTIN_SKILL_REFERENCES, BUILTIN_SKILL_VERSION, ensureBuiltinSkill } from '../apps/node/src/builtin-skill.js';
-import { readSkill } from '../apps/node/src/storage.js';
+import {
+  BUILTIN_SKILL_ID,
+  BUILTIN_SKILL_MD,
+  BUILTIN_SKILL_REFERENCES,
+  BUILTIN_SKILL_VERSION,
+} from '../apps/hub/src/builtin-skill-seed.js';
 import { parseGitSource } from '../apps/node/src/installer.js';
-import { cleanupEphemeralAgents } from '../apps/node/src/runtime/bot-context.js';
 
-const skillFile = (dir: string) => path.join(dir, 'skills', BUILTIN_SKILL_ID, 'SKILL.md');
-const referenceFile = (dir: string, name: string) =>
-  path.join(dir, 'skills', BUILTIN_SKILL_ID, 'references', name);
-
-test('ensureBuiltinSkill seeds the builtin CLI skill and stays idempotent', async t => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'botd-builtin-skill-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-
-  // 1. Fresh data dir: skill is created with the version marker
-  await ensureBuiltinSkill(dir);
-  assert.equal(await readSkill(dir, BUILTIN_SKILL_ID), BUILTIN_SKILL_MD);
-
-  // 2. User edits at the same version are preserved (no rewrite)
-  const edited = BUILTIN_SKILL_MD.replace('## Rules', '## Rules (customized)');
-  await writeFile(skillFile(dir), edited, 'utf8');
-  await ensureBuiltinSkill(dir);
-  assert.equal(await readFile(skillFile(dir), 'utf8'), edited);
-
-  // 3. Older-version content (marker mismatch) is upgraded to the shipped one
-  await writeFile(skillFile(dir), `<!-- botd-skill: ${BUILTIN_SKILL_ID} v${BUILTIN_SKILL_VERSION - 1} -->\nold`, 'utf8');
-  await ensureBuiltinSkill(dir);
-  assert.equal(await readFile(skillFile(dir), 'utf8'), BUILTIN_SKILL_MD);
-});
-
-test('ensureBuiltinSkill writes all three references/ files beside SKILL.md', async t => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'botd-builtin-references-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-
-  await ensureBuiltinSkill(dir);
-
-  const names = ['subagents-and-workflows.md', 'generative-ui.md', 'extension-and-skill-dev.md'];
-  for (const name of names) {
-    assert.equal(await readFile(referenceFile(dir, name), 'utf8'), BUILTIN_SKILL_REFERENCES[name]);
+test('builtin skill seed exposes coherent id, version and file inventory', { timeout: 60_000 }, () => {
+  assert.equal(BUILTIN_SKILL_ID, 'botd-cli');
+  assert.equal(typeof BUILTIN_SKILL_VERSION, 'number');
+  assert.ok(BUILTIN_SKILL_VERSION > 0);
+  // 主文件与全部 references 都携带一致的版本标记
+  const marker = `<!-- botd-skill: ${BUILTIN_SKILL_ID} v${BUILTIN_SKILL_VERSION} -->`;
+  assert.ok(BUILTIN_SKILL_MD.startsWith(marker), 'SKILL.md must start with the version marker');
+  for (const name of Object.keys(BUILTIN_SKILL_REFERENCES)) {
+    assert.ok(
+      (BUILTIN_SKILL_REFERENCES[name] as string).startsWith(marker),
+      `references/${name} must start with the version marker`,
+    );
   }
-
-  // A deleted reference self-heals on the next call, without touching SKILL.md
-  await rm(referenceFile(dir, 'generative-ui.md'), { force: true });
-  await ensureBuiltinSkill(dir);
-  assert.equal(await readFile(referenceFile(dir, 'generative-ui.md'), 'utf8'), BUILTIN_SKILL_REFERENCES['generative-ui.md']);
+  // 三份参考文档齐备
+  for (const name of ['subagents-and-workflows.md', 'generative-ui.md', 'extension-and-skill-dev.md']) {
+    assert.ok(typeof BUILTIN_SKILL_REFERENCES[name] === 'string' && BUILTIN_SKILL_REFERENCES[name].length > 0, `missing reference: ${name}`);
+  }
 });
 
 test('builtin skill documents the Super-agent toolset at version 16', { timeout: 60_000 }, () => {
@@ -108,21 +86,22 @@ test('builtin skill main file is lean and points at references (progressive disc
   }
 });
 
-test('extension reference covers full-stack ctx.ui bridging and details.ui', { timeout: 60_000 }, () => {
+test('extension reference covers Hub durable extensions and the Node ExtensionAPI boundary', { timeout: 60_000 }, () => {
   const dev = BUILTIN_SKILL_REFERENCES['extension-and-skill-dev.md'];
-  // ctx.ui 桥接方法（对话框 / 实时流与挂件 / 自定义工具视图三个插槽）
-  for (const api of ['ctx.ui.confirm', 'ctx.ui.select', 'ctx.ui.input', 'ctx.ui.editor', 'ctx.ui.custom', 'ctx.ui.notify', 'ctx.ui.setStatus', 'ctx.ui.setWorkingMessage', 'ctx.ui.setWidget', 'ctx.ui.setEditorText', 'ctx.ui.pasteToEditor', 'details.ui']) {
-    assert.ok(dev.includes(api), `reference missing API: ${api}`);
-  }
-  // Web 端不可用的纯 TUI 方法说明
+  // Hub 托管 durable extension 的唯一合法入口与工具定义
+  assert.match(dev, /defineExtension\(/);
+  assert.match(dev, /defineTool\(/);
+  assert.match(dev, /export default defineExtension/);
+  assert.match(dev, /parameters: \{/);
+  // Node 本地 daemon 的 ExtensionAPI 体系（不互通，需明示边界）
+  assert.match(dev, /ExtensionAPI/);
+  assert.match(dev, /ctx\.ui\.\*/);
   assert.match(dev, /setFooter/);
   assert.match(dev, /setHeader/);
   assert.match(dev, /setEditorComponent/);
-  // 可直接复制运行的完整 TypeScript 扩展
-  assert.match(dev, /export default function \(pi: ExtensionAPI\)/);
-  assert.match(dev, /pi\.registerTool\(/);
-  assert.match(dev, /pi\.registerCommand\(/);
-  assert.match(dev, /pi\.on\('tool_call'/);
+  // 安装与热更新命令面
+  assert.match(dev, /botd nodes install/);
+  assert.match(dev, /botd reload/);
 });
 
 test('generative-ui reference documents all 17 botd.v1 components with state binding', { timeout: 60_000 }, () => {
@@ -154,30 +133,6 @@ test('worker reference documents spawn_worker lifecycle and the memoized workflo
   assert.ok(!sub.includes('sessions delegate'), 'must not teach sessions delegate');
   assert.ok(!sub.includes('--tool-scope'), 'must not teach --tool-scope');
   assert.ok(!sub.includes('resumeFromRunId'), 'must not teach journal-based resume');
-});
-
-test('cleanupEphemeralAgents removes tmp-*.md but keeps persistent agent files', async t => {
-  const agentDir = await mkdtemp(path.join(tmpdir(), 'botd-ephemeral-agents-'));
-  t.after(() => rm(agentDir, { recursive: true, force: true }));
-  const agentsDir = path.join(agentDir, 'agents');
-  await mkdir(agentsDir, { recursive: true });
-
-  const persistent = '# reviewer\n你是一名严谨的代码审查专家。';
-  await writeFile(path.join(agentsDir, 'tmp-skeptic.md'), '---\nname: tmp-skeptic\n---\n红队', 'utf8');
-  await writeFile(path.join(agentsDir, 'tmp-architect_1.md'), '---\nname: tmp-architect_1\n---\n架构', 'utf8');
-  await writeFile(path.join(agentsDir, 'reviewer.md'), persistent, 'utf8');
-
-  await cleanupEphemeralAgents(agentDir);
-
-  await assert.rejects(access(path.join(agentsDir, 'tmp-skeptic.md')));
-  await assert.rejects(access(path.join(agentsDir, 'tmp-architect_1.md')));
-  assert.equal(await readFile(path.join(agentsDir, 'reviewer.md'), 'utf8'), persistent);
-});
-
-test('cleanupEphemeralAgents tolerates a missing agents dir', async () => {
-  const agentDir = await mkdtemp(path.join(tmpdir(), 'botd-no-agents-'));
-  await rm(agentDir, { recursive: true, force: true });
-  await cleanupEphemeralAgents(agentDir); // must not throw
 });
 
 test('parseGitSource understands Pi git: prefixes and @ref suffixes', { timeout: 60_000 }, () => {

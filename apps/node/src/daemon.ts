@@ -16,7 +16,6 @@ import {
 import {
   assertSafeId,
   deleteBot,
-  deleteResource,
   ensureDir,
   ensureIpcToken,
   getDataDir,
@@ -26,21 +25,12 @@ import {
   listSkills,
   readIpcToken,
   readResourcePackageDir,
-  readFileTarget,
-  readBot,
   readNodeIdentity,
-  saveBot,
-  seedStorageIfEmpty,
-  writeFileTarget,
 } from './storage.js';
-import {
-  buildBotShellEnv,
-  ensureBotdBinWrapper,
-} from './runtime.js';
+import { ensureBotdBinWrapper } from './runtime.js';
 import { installResourceToNode } from './installer.js';
-import { ensureBuiltinSkill } from './builtin-skill.js';
 import { createNodeEnvRpcServer } from './env-rpc-server.js';
-import { ensureWindowsShell, isWindows } from './windows-shell.js';
+import { ensureWindowsShell, isWindows, windowsShellPathPrefix } from './windows-shell.js';
 import { notifyDaemonReady, spawnReplacementDaemon } from './daemon-launch.js';
 import {
   getNodeVersion,
@@ -115,7 +105,6 @@ export interface ControlDeps {
   identity: { nodeId: string; name: string; hubUrl: string; token?: string };
   ipcToken?: string | null;
   isHubConnected: () => boolean;
-  getHubRpc: () => BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null;
   syncRegistrationWithHub: () => Promise<void>;
   handleShutdown: () => void;
   /** 在途 envExec（bash 命令）计数：升级排空等待的依据；缺省视为 0。 */
@@ -162,16 +151,6 @@ function readJsonBody(req: http.IncomingMessage, res: http.ServerResponse, maxBy
     });
     req.on('error', () => resolve(null));
   });
-}
-
-function requireHubRpc(deps: ControlDeps): BirpcReturn<HubRpcFunctions, NodeRpcFunctions> {
-  const hubRpc = deps.getHubRpc();
-  if (!hubRpc || !deps.isHubConnected()) {
-    const error: any = new Error('Hub connection not established');
-    error.statusCode = 503;
-    throw error;
-  }
-  return hubRpc;
 }
 
 /** 创建本地守护进程控制面服务器（Unix socket / Windows 命名管道上的极简 HTTP）。 */
@@ -256,16 +235,31 @@ export function createDaemonControlServer(deps: ControlDeps): http.Server {
     assertSafeId(sessionId, 'Session ID');
     assertSafeId(botId, 'Bot ID');
     if (replyToBotId !== undefined) assertSafeId(String(replyToBotId), 'Reply-To Bot ID');
-    const hubRpc = requireHubRpc(deps);
-    const wakeRes = await hubRpc.requestWakeupTurn({
-      sessionId,
-      botId,
-      wakeupMessage: String(message),
-      ...(replyToBotId ? { replyToBotId: String(replyToBotId) } : {}),
-      ...(noTurn ? { noTurn: true } : {}),
-      ...(delaySeconds ? { delaySeconds: Math.floor(delaySeconds) } : {}),
+    // 唤醒走 Hub HTTP 会话消息面（与 Web/CLI 同权）：节点凭据认证，
+    // 提交 [Wake-up] 消息由 Hub 侧路由/持久运行时驱动回合。
+    if (!deps.identity.token || !deps.identity.hubUrl) {
+      throw new Error('Node is not paired with a Hub; cannot wake sessions');
+    }
+    let content = `[Wake-up] ${message}`;
+    if (replyToBotId && !message.includes(`@${replyToBotId}`)) {
+      content += ` (cc @${replyToBotId})`;
+    }
+    const resp = await fetch(`${deps.identity.hubUrl.replace(/\/$/, '')}/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-botd-node-id': deps.identity.nodeId,
+        'x-botd-node-token': deps.identity.token,
+        ...(noTurn ? { 'x-botd-no-turn': '1' } : {}),
+      },
+      body: JSON.stringify({ content, senderBotId: botId }),
+      signal: AbortSignal.timeout(30_000),
     });
-    sendJson(res, 200, { ok: true, ...(wakeRes && typeof wakeRes === 'object' ? wakeRes : {}) });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      throw new Error(`Hub wake request failed with HTTP ${resp.status}: ${text}`);
+    }
+    sendJson(res, 200, { ok: true });
   };
 
   const handleArtifactPut = async (_req: http.IncomingMessage, res: http.ServerResponse, { body }: { body: any }) => {
@@ -291,40 +285,27 @@ export function createDaemonControlServer(deps: ControlDeps): http.Server {
       return;
     }
 
-    let uploadedArtifact: any = null;
-    if (deps.identity.token && deps.identity.hubUrl) {
-      try {
-        const uploadUrl = `${deps.identity.hubUrl.replace(/\/$/, '')}/api/sessions/${encodeURIComponent(sessionId)}/artifacts`;
-        const resp = await fetch(uploadUrl, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/octet-stream',
-            'x-botd-node-id': deps.identity.nodeId,
-            'x-botd-node-token': deps.identity.token,
-            'x-artifact-filename': encodeURIComponent(filename),
-            ...(mimeType ? { 'x-artifact-mime-type': String(mimeType) } : {}),
-            ...(botId ? { 'x-artifact-bot-id': String(botId) } : {}),
-            ...(message ? { 'x-artifact-message': encodeURIComponent(String(message)) } : {}),
-          },
-          body: new Uint8Array(fileBuffer),
-        });
-        if (resp.ok) uploadedArtifact = await resp.json();
-      } catch {
-        // Network or HTTP error -> fallback to hubRpc
-      }
+    if (!deps.identity.token || !deps.identity.hubUrl) {
+      throw new Error('Node is not paired with a Hub; cannot upload artifacts');
     }
-    if (!uploadedArtifact) {
-      const hubRpc = requireHubRpc(deps);
-      const base64Content = typeof contentBase64 === 'string' ? contentBase64 : fileBuffer.toString('base64');
-      uploadedArtifact = await hubRpc.uploadArtifact({
-        sessionId,
-        ...(botId ? { botId: String(botId) } : {}),
-        filename: String(filename),
-        ...(mimeType ? { mimeType: String(mimeType) } : {}),
-        contentBase64: base64Content,
-        ...(message ? { message: String(message) } : {}),
-      });
+    const uploadUrl = `${deps.identity.hubUrl.replace(/\/$/, '')}/api/sessions/${encodeURIComponent(sessionId)}/artifacts`;
+    const resp = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/octet-stream',
+        'x-botd-node-id': deps.identity.nodeId,
+        'x-botd-node-token': deps.identity.token,
+        'x-artifact-filename': encodeURIComponent(filename),
+        ...(mimeType ? { 'x-artifact-mime-type': String(mimeType) } : {}),
+        ...(botId ? { 'x-artifact-bot-id': String(botId) } : {}),
+        ...(message ? { 'x-artifact-message': encodeURIComponent(String(message)) } : {}),
+      },
+      body: new Uint8Array(fileBuffer),
+    });
+    if (!resp.ok) {
+      throw new Error(`Hub artifact upload failed with HTTP ${resp.status}`);
     }
+    const uploadedArtifact = await resp.json();
     sendJson(res, 200, { ok: true, artifact: uploadedArtifact, ...uploadedArtifact });
   };
 
@@ -361,55 +342,33 @@ export function createDaemonControlServer(deps: ControlDeps): http.Server {
       return;
     }
 
-    let fileBuffer: Buffer | null = null;
-    let artifactRecord: any = null;
-    if (deps.identity.token && deps.identity.hubUrl) {
-      try {
-        const pullUrl = `${deps.identity.hubUrl.replace(/\/$/, '')}/api/artifacts/${encodeURIComponent(artifactId)}/content`;
-        const resp = await fetch(pullUrl, {
-          method: 'GET',
-          headers: {
-            'x-botd-node-id': deps.identity.nodeId,
-            'x-botd-node-token': deps.identity.token,
-          },
-        });
-        if (resp.ok) {
-          const arrayBuf = await resp.arrayBuffer();
-          fileBuffer = Buffer.from(arrayBuf);
-          artifactRecord = artifactRecordFromResponse(artifactId, fileBuffer, resp);
-        }
-      } catch {
-        // Network or HTTP error -> fallback to hubRpc
-      }
+    if (!deps.identity.token || !deps.identity.hubUrl) {
+      throw new Error('Node is not paired with a Hub; cannot download artifacts');
     }
+    const pullUrl = `${deps.identity.hubUrl.replace(/\/$/, '')}/api/artifacts/${encodeURIComponent(artifactId)}/content`;
+    const resp = await fetch(pullUrl, {
+      method: 'GET',
+      headers: {
+        'x-botd-node-id': deps.identity.nodeId,
+        'x-botd-node-token': deps.identity.token,
+      },
+    });
+    if (!resp.ok) {
+      throw new Error(`Hub artifact download failed with HTTP ${resp.status}`);
+    }
+    const fileBuffer = Buffer.from(await resp.arrayBuffer());
+    const artifactRecord = artifactRecordFromResponse(artifactId, fileBuffer, resp);
 
     let savedTo: string | undefined;
     let contentBase64: string | undefined;
-    if (fileBuffer && artifactRecord) {
-      if (outputPath) {
-        savedTo = path.resolve(String(outputPath));
-        await ensureDir(path.dirname(savedTo));
-        await fs.writeFile(savedTo, fileBuffer);
-      } else {
-        contentBase64 = fileBuffer.toString('base64');
-      }
-      sendJson(res, 200, { ok: true, artifact: artifactRecord, ...artifactRecord, ...(savedTo ? { savedTo } : { contentBase64 }) });
-      return;
-    }
-
-    const hubRpc = requireHubRpc(deps);
-    const result = await hubRpc.downloadArtifact(String(artifactId));
     if (outputPath) {
       savedTo = path.resolve(String(outputPath));
       await ensureDir(path.dirname(savedTo));
-      await fs.writeFile(savedTo, Buffer.from(result.contentBase64, 'base64'));
+      await fs.writeFile(savedTo, fileBuffer);
+    } else {
+      contentBase64 = fileBuffer.toString('base64');
     }
-    sendJson(res, 200, {
-      ok: true,
-      artifact: result.artifact,
-      ...result.artifact,
-      ...(savedTo ? { savedTo } : { contentBase64: result.contentBase64 }),
-    });
+    sendJson(res, 200, { ok: true, artifact: artifactRecord, ...artifactRecord, ...(savedTo ? { savedTo } : { contentBase64 }) });
   };
 
   const handleArtifactList = async (req: http.IncomingMessage, res: http.ServerResponse, { url }: { url: URL }) => {
@@ -420,8 +379,22 @@ export function createDaemonControlServer(deps: ControlDeps): http.Server {
       return;
     }
     assertSafeId(sessionId, 'Session ID');
-    const hubRpc = requireHubRpc(deps);
-    const artifacts = await hubRpc.listSessionArtifacts(sessionId);
+    if (!deps.identity.token || !deps.identity.hubUrl) {
+      throw new Error('Node is not paired with a Hub; cannot list artifacts');
+    }
+    const listUrl = `${deps.identity.hubUrl.replace(/\/$/, '')}/api/sessions/${encodeURIComponent(sessionId)}/artifacts`;
+    const resp = await fetch(listUrl, {
+      method: 'GET',
+      headers: {
+        'x-botd-node-id': deps.identity.nodeId,
+        'x-botd-node-token': deps.identity.token,
+      },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!resp.ok) {
+      throw new Error(`Hub artifact list failed with HTTP ${resp.status}`);
+    }
+    const artifacts = await resp.json();
     sendJson(res, 200, { ok: true, artifacts });
   };
 
@@ -480,8 +453,6 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
     throw new Error(`Node is not paired. Run "botd join <hubUrl> --code <code> --name <name>" first.`);
   }
 
-  await seedStorageIfEmpty(dataDir, identity.nodeId);
-  await ensureBuiltinSkill(dataDir);
   const binDir = await ensureBotdBinWrapper(dataDir);
 
   // Windows needs a resolvable bash.exe for the Pi bash tool; resolve or
@@ -527,18 +498,18 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
   const startedAtIso = new Date(startedAt).toISOString();
 
   // 远端执行环境 RPC 服务端（Brain in Hub, Hands on Node）：文件/shell/worktree
-  // 能力在 Node 本机执行，流式输出经 onExecOutput 回传 Hub。
+  // 能力在 Node 本机执行，流式输出经 onEnvOutput 回传 Hub。
   // shellEnv 注入 botd CLI 包装器（~/.botd/bin → PATH 头部）与 BOTD_DATA_DIR，
   // 让 durable Worker 在回合内跑 bash 时开箱即用 `botd` 命令。
+  const shellPathPrefix = isWindows ? windowsShellPathPrefix(dataDir) : [];
+  const shellEnv: Record<string, string | undefined> = {
+    ...process.env,
+    PATH: [binDir, ...shellPathPrefix, ...(process.env.PATH || '').split(path.delimiter).filter(Boolean)].join(path.delimiter),
+    BOTD_DATA_DIR: dataDir,
+  };
   const envRpcServer = createNodeEnvRpcServer({
     defaultCwd: dataDir,
-    shellEnv: buildBotShellEnv(process.env, {
-      dataDir,
-      binDir,
-      sessionId: '',
-      botId: '',
-      botEnv: {},
-    }),
+    shellEnv,
     onExecOutput: (event) => {
       try {
         hubRpc?.onEnvExecOutput?.(event);
@@ -589,7 +560,6 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
     identity,
     ipcToken,
     isHubConnected: () => Boolean(rws && rws.readyState === ReconnectingWebSocket.OPEN),
-    getHubRpc: () => hubRpc,
     syncRegistrationWithHub: () => syncRegistrationWithHub(),
     handleShutdown: () => handleShutdown(),
     getActiveExecCount: () => envRpcServer.getActiveExecCount?.() ?? 0,
@@ -674,47 +644,14 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
           },
         });
       },
-      getCommands: async (botId) => {
-        // Phase 3A：回合与命令已内联到 Hub Durable Runtime；Node 不再编排回合。
-        assertSafeId(botId, 'Bot ID');
-        const data = await readBot(dataDir, botId);
-        if (!data || data.bot.nodeId !== identity.nodeId) throw new Error(`Bot "${botId}" not found on node`);
-        return [];
-      },
-      saveBot: async (bot, systemMd) => {
-        if (bot.nodeId !== identity.nodeId) {
-          throw new Error(`Cannot save bot belonging to node "${bot.nodeId}" on node "${identity.nodeId}"`);
-        }
-        await saveBot(dataDir, bot, systemMd);
-      },
       deleteBot: async (botId) => {
         await deleteBot(dataDir, botId);
-      },
-      readFile: async (target) => {
-        return await readFileTarget(dataDir, target as Parameters<typeof readFileTarget>[1]);
-      },
-      writeFile: async (target, content) => {
-        await writeFileTarget(dataDir, target as Parameters<typeof writeFileTarget>[1], content);
       },
       installResource: async (input) => {
         return await installResourceToNode(dataDir, input);
       },
       readResourcePackage: async (target) => {
         return await readResourcePackageDir(dataDir, target);
-      },
-      deleteResource: async (target) => {
-        await deleteResource(dataDir, target);
-      },
-      runTurn: async () => {
-        // Phase 3A：回合执行已迁至 Hub Durable Runtime（Brain in Hub, Hands on Node）。
-        // 保留协议占位，拒绝新的回合请求，历史调用方会收到明确错误。
-        throw new Error('runTurn is no longer served by node: turns run in the Hub durable runtime');
-      },
-      cancelTurn: async () => {
-        // 回合在 Hub 侧执行，取消由 Hub 直接处理；Node 无本地回合可取消。
-      },
-      resetSession: async () => {
-        // 回合已迁至 Hub；Node 无本地会话文件可清理。
       },
       ...envRpcServer,
     },

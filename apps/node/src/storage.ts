@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { isSafeId, isValidBotEnvKey, type BotConfig, type NodeIdentity } from '@botd/protocol';
+import { isSafeId, type BotConfig, type NodeIdentity } from '@botd/protocol';
 import {
   encodePackageFile,
   type ResourcePackage,
@@ -11,42 +11,6 @@ import {
 } from '@botd/protocol';
 
 export { isValidBotEnvKey } from '@botd/protocol';
-
-export async function readBotEnv(dataDir: string, botId: string): Promise<Record<string, string>> {
-  assertSafeId(botId, 'Bot ID');
-  const envPath = path.join(getBotDir(dataDir, botId), 'env.json');
-  try {
-    const raw = await fs.readFile(envPath, 'utf-8');
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    const env: Record<string, string> = {};
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof value === 'string' && isValidBotEnvKey(key)) {
-        env[key] = value;
-      }
-    }
-    return env;
-  } catch {
-    return {};
-  }
-}
-
-export async function writeBotEnv(
-  dataDir: string,
-  botId: string,
-  env: Record<string, string>
-): Promise<Record<string, string>> {
-  assertSafeId(botId, 'Bot ID');
-  const sanitized: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (!isValidBotEnvKey(key)) {
-      throw new Error(`Invalid or reserved environment variable key: "${key}"`);
-    }
-    sanitized[key] = value;
-  }
-  await writeSecureFile(path.join(getBotDir(dataDir, botId), 'env.json'), JSON.stringify(sanitized, null, 2));
-  return sanitized;
-}
 
 export function assertSafeId(id: string, label = 'Identifier'): string {
   if (!isSafeId(id)) {
@@ -359,26 +323,6 @@ export async function writeExtension(dataDir: string, extId: string, content: st
   await writeAtomicFile(path.join(extDir, 'index.ts'), content);
 }
 
-export async function deleteResource(
-  dataDir: string,
-  target: { kind: 'skill' | 'extension'; id: string }
-): Promise<void> {
-  assertSafeId(target.id, `${target.kind === 'skill' ? 'Skill' : 'Extension'} ID`);
-  if (target.kind === 'skill') {
-    await fs.rm(getSkillDir(dataDir, target.id), { recursive: true, force: true });
-    // Discovery also surfaces copies under the Agent Skills standard dirs.
-    await fs.rm(path.join(dataDir, '.agents', 'skills', target.id), { recursive: true, force: true });
-    await fs.rm(path.join(dataDir, '.agent', 'skills', target.id), { recursive: true, force: true });
-    return;
-  }
-  if (target.kind === 'extension') {
-    const extDir = getExtensionDir(dataDir, target.id);
-    await fs.rm(extDir, { recursive: true, force: true });
-    return;
-  }
-  throw new Error(`Unsupported resource kind: ${(target as any).kind}`);
-}
-
 async function fileExists(target: string): Promise<boolean> {
   try {
     await fs.access(target);
@@ -446,132 +390,4 @@ export async function readResourcePackageDir(
     ...(packageName ? { packageName } : {}),
     ...(target.kind === 'skill' ? { entry: 'SKILL.md' } : {}),
   };
-}
-
-export async function readFileTarget(
-  dataDir: string,
-  target: { kind: 'system' | 'memory' | 'env' | 'skill' | 'extension'; botId?: string; id: string }
-): Promise<string> {
-  if (target.kind === 'env') {
-    const botId = target.botId || target.id;
-    if (!botId) throw new Error('Bot ID required');
-    const env = await readBotEnv(dataDir, botId);
-    return JSON.stringify(env, null, 2);
-  }
-  if (target.kind === 'skill') {
-    const skillId = target.id || target.botId;
-    if (!skillId) throw new Error('Skill ID required');
-    return readSkill(dataDir, skillId);
-  }
-  if (target.kind === 'extension') {
-    const extId = target.id || target.botId;
-    if (!extId) throw new Error('Extension ID required');
-    return readExtension(dataDir, extId);
-  }
-
-  const botId = target.botId || target.id;
-  if (!botId) throw new Error('Bot ID required');
-  assertSafeId(botId, 'Bot ID');
-  const botDir = getBotDir(dataDir, botId);
-
-  if (target.kind === 'system') {
-    return fs.readFile(path.join(botDir, 'SYSTEM.md'), 'utf8').catch(() => '');
-  }
-  if (target.kind === 'memory') {
-    return fs.readFile(path.join(botDir, 'MEMORY.md'), 'utf8').catch(() => '');
-  }
-
-  throw new Error(`Unsupported read target kind: ${target.kind}`);
-}
-
-export async function writeFileTarget(
-  dataDir: string,
-  target: { kind: 'system' | 'memory' | 'env' | 'skill' | 'extension'; botId?: string; id: string },
-  content: string
-): Promise<void> {
-  if (target.kind === 'env') {
-    const botId = target.botId || target.id;
-    if (!botId) throw new Error('Bot ID required');
-    const parsed = content.trim() ? (JSON.parse(content) as Record<string, string>) : {};
-    await writeBotEnv(dataDir, botId, parsed);
-    return;
-  }
-  if (target.kind === 'skill') {
-    const skillId = target.id || target.botId;
-    if (!skillId) throw new Error('Skill ID required');
-    await writeSkill(dataDir, skillId, content);
-    return;
-  }
-  if (target.kind === 'extension') {
-    const extId = target.id || target.botId;
-    if (!extId) throw new Error('Extension ID required');
-    await writeExtension(dataDir, extId, content);
-    return;
-  }
-
-  const botId = target.botId || target.id;
-  if (!botId) throw new Error('Bot ID required');
-  assertSafeId(botId, 'Bot ID');
-  const botDir = getBotDir(dataDir, botId);
-  await ensureDir(botDir);
-
-  if (target.kind === 'system') {
-    await writeAtomicFile(path.join(botDir, 'SYSTEM.md'), content);
-    return;
-  }
-  if (target.kind === 'memory') {
-    await writeAtomicFile(path.join(botDir, 'MEMORY.md'), content);
-    return;
-  }
-
-  throw new Error(`Unsupported write target kind: ${target.kind}`);
-}
-
-export async function seedStorageIfEmpty(dataDir: string, nodeId: string): Promise<void> {
-  await ensureDir(dataDir);
-  await ensureDir(path.join(dataDir, 'skills'));
-  await ensureDir(path.join(dataDir, 'extensions'));
-  await ensureDir(path.join(dataDir, 'bots'));
-
-  // 1. Seed example skill if the primary skills dir has none. Discovery also
-  // surfaces ~/.agents/skills etc., so check <dataDir>/skills directly: the
-  // default bot enables cli-helper and seeding always targets the primary dir.
-  if ((await listSkillEntriesInDir(path.join(dataDir, 'skills'))).length === 0) {
-    const exampleSkill = `# CLI Helper Skill
-
-This node executes tasks using local CLI tools.
-
-## Guidelines
-- When learning a new CLI tool, run \`<command> --help\` first.
-- Execute bash commands directly to perform operations.
-- Long-running background jobs can asynchronously wake the current session using:
-  \`botd wake --session "$BOTD_SESSION_ID" --bot "$BOTD_BOT_ID" --message "Result"\`
-`;
-    await writeSkill(dataDir, 'cli-helper', exampleSkill);
-  }
-
-  // 2. Seed default bot if none exists
-  const bots = await listBots(dataDir);
-  if (bots.length === 0) {
-    const safeNodeSuffix = nodeId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const defaultBotId = `assistant-${safeNodeSuffix}`;
-    const defaultBot: BotConfig = {
-      id: defaultBotId,
-      nodeId,
-      name: '默认助手',
-      description: 'Default personal assistant for this node',
-      // 不预填任何模型：等用户在已配置凭据的服务商中选型，避免「未配置却在用」的假象
-      modelProvider: '',
-      modelId: '',
-      thinkingLevel: 'medium',
-      enabledSkills: ['cli-helper'],
-      enabledExtensions: [],
-      updatedAt: new Date().toISOString(),
-    };
-
-    const systemPrompt = `You are a helpful AI assistant operating on node "${nodeId}".
-You have access to local tools and command-line execution to solve user problems concisely and accurately.`;
-
-    await saveBot(dataDir, defaultBot, systemPrompt);
-  }
 }

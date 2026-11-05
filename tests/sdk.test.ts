@@ -8,13 +8,11 @@ import test from 'node:test';
 import { ensureBotdBinWrapper } from '../apps/node/src/runtime.js';
 import { createNodeEnvRpcServer } from '../apps/node/src/env-rpc-server.js';
 import {
-  deleteResource,
   getSkillSearchDirs,
   listSkills,
   readSkill,
   resolveSkillDir,
   saveBot,
-  seedStorageIfEmpty,
   writeExtension,
   writeSkill,
 } from '../apps/node/src/storage.js';
@@ -178,27 +176,11 @@ test('skill discovery reads .agents/skills and .agent/skills with precedence and
   assert((await listSkills(isolated)).includes('env-skill'));
   assert.equal(await readSkill(isolated, 'env-skill'), 'ENV_DIR_SKILL_BODY');
 
-  // Deleting removes the discovered copy under the standard dirs too.
-  await deleteResource(dataDir, { kind: 'skill', id: 'shared-skill' });
+  // Removing the primary + standard-dir copies takes the skill out of discovery
+  await rm(path.join(dataDir, 'skills', 'shared-skill'), { recursive: true, force: true });
+  await rm(path.join(dataDir, '.agents', 'skills', 'shared-skill'), { recursive: true, force: true });
   const afterDelete = await listSkills(dataDir);
   assert(!afterDelete.includes('shared-skill'), `primary + standard copies must both be gone, got: ${afterDelete.join(', ')}`);
-});
-
-test('seedStorageIfEmpty seeds cli-helper into the primary dir even when .agents/skills already has skills', { timeout: 60_000 }, async t => {
-  const home = await mkdtemp(path.join(tmpdir(), 'botd-skill-seed-'));
-  const dataDir = path.join(home, '.botd');
-  t.after(() => rm(home, { recursive: true, force: true }));
-
-  await mkdir(path.join(home, '.agents', 'skills', 'preexisting'), { recursive: true });
-  await writeFile(path.join(home, '.agents', 'skills', 'preexisting', 'SKILL.md'), 'PREEXISTING_SKILL');
-
-  await seedStorageIfEmpty(dataDir, 'node_seed');
-
-  assert.equal(await readFile(path.join(dataDir, 'skills', 'cli-helper', 'SKILL.md'), 'utf-8').then(s => s.includes('CLI Helper'), () => false), true,
-    'cli-helper must be seeded into <dataDir>/skills');
-  const skills = await listSkills(dataDir);
-  assert(skills.includes('cli-helper'));
-  assert(skills.includes('preexisting'));
 });
 
 test('installResourceToNode installs local skill dirs and nested git skill layouts', { timeout: 60_000 }, async t => {
