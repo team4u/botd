@@ -1,7 +1,7 @@
 /**
  * In-memory zero-leakage secret stash for generative-UI asks.
  *
- * When a `botd.v1` UI form contains `TextInput` elements marked `secret: true`,
+ * When a `botd.v1` UI form marks an input with `secret: true`,
  * the raw plaintext the user submitted must never reach SQLite (AskDoc.answer),
  * SSE broadcasts, or the LLM transcript. Instead `respondToDurableAsk`:
  *
@@ -25,7 +25,7 @@ const DEFAULT_TTL_MS = 5 * 60 * 1000;
 interface StashedSecret {
 	value: string;
 	expiresAt: number;
-	scopeId?: string;
+	scopeId: string;
 }
 
 /** Redaction placeholder written into persisted/broadcast answers. */
@@ -34,12 +34,11 @@ export const redactionPlaceholder = (envKey: string): string => `[REDACTED:$${en
 export class SecretStash {
 	#entries = new Map<string, StashedSecret>();
 
-	/** Stash a plaintext value; returns the generated env var name. Optional scopeId binds the secret to one session. */
-	stash(value: string, ttlMsOrScopeId?: number | string, scopeId?: string): string {
-		const ttlMs = typeof ttlMsOrScopeId === 'number' ? ttlMsOrScopeId : DEFAULT_TTL_MS;
-		const effectiveScopeId = typeof ttlMsOrScopeId === 'string' ? ttlMsOrScopeId : scopeId;
+	/** Stash a plaintext value for one session; an empty scope is invalid. */
+	stash(value: string, scopeId: string, ttlMs: number = DEFAULT_TTL_MS): string {
+		if (typeof scopeId !== 'string' || scopeId.trim().length === 0) throw new Error('SecretStash.stash requires a non-empty scopeId');
 		const envKey = `BOTD_SECRET_${randomBytes(4).toString('hex').toUpperCase()}`;
-		this.#entries.set(envKey, { value, expiresAt: Date.now() + ttlMs, ...(effectiveScopeId ? { scopeId: effectiveScopeId } : {}) });
+		this.#entries.set(envKey, { value, expiresAt: Date.now() + ttlMs, scopeId });
 		return envKey;
 	}
 
@@ -50,35 +49,34 @@ export class SecretStash {
 	}
 
 	/**
-	 * Active secrets as an env record ({ BOTD_SECRET_XXXX: plaintext }); prunes expired entries.
-	 * With a scopeId, only unscoped entries and entries bound to that session are returned —
-	 * a secret stashed by session A is never leaked into session B's environment.
+	 * Active secrets for exactly one session scope, as an env record
+	 * ({ BOTD_SECRET_XXXX: plaintext }); prunes expired entries. The scope is
+	 * required and matched strictly: a secret stashed by session A is never
+	 * returned for session B, and there is deliberately no all-entries read.
 	 */
-	getEnvRecord(scopeId?: string): Record<string, string> {
+	getEnvRecord(scopeId: string): Record<string, string> {
 		this.#prune(Date.now());
 		return Object.fromEntries(
-			[...this.#entries]
-				.filter(([_, entry]) => scopeId === undefined || entry.scopeId === undefined || entry.scopeId === scopeId)
-				.map(([key, entry]) => [key, entry.value]),
+			[...this.#entries].filter(([_, entry]) => entry.scopeId === scopeId).map(([key, entry]) => [key, entry.value]),
 		);
 	}
 
-	/** Read (keep) a stashed value; undefined when missing, expired, or scoped to another session. */
-	peek(envKey: string, scopeId?: string): string | undefined {
+	/** Read (keep) a stashed value; undefined when missing, expired, or bound to another session. */
+	peek(envKey: string, scopeId: string): string | undefined {
 		const entry = this.#entries.get(envKey);
 		if (entry === undefined) return undefined;
 		if (entry.expiresAt <= Date.now()) {
 			this.#entries.delete(envKey);
 			return undefined;
 		}
-		if (scopeId !== undefined && entry.scopeId !== undefined && entry.scopeId !== scopeId) return undefined;
+		if (entry.scopeId !== scopeId) return undefined;
 		return entry.value;
 	}
 
-	/** Read and drop a stashed value (one-shot use). */
-	consume(envKey: string): string | undefined {
-		const value = this.peek(envKey);
-		this.#entries.delete(envKey);
+	/** Read and drop a stashed value (one-shot use); undefined unless the scope matches exactly. */
+	consume(envKey: string, scopeId: string): string | undefined {
+		const value = this.peek(envKey, scopeId);
+		if (value !== undefined) this.#entries.delete(envKey);
 		return value;
 	}
 }
@@ -86,16 +84,20 @@ export class SecretStash {
 /** Hub-wide default stash (process-local, TTL-bounded). */
 export const globalSecretStash = new SecretStash();
 
-/** Merge active secret env vars into `options.env`; explicit entries win. Scope defaults to the session id in env. */
+/**
+ * Merge the session's active secret env vars into `env`; explicit entries win.
+ * The scope must come from a trusted caller (the env's own BOTD_SESSION_ID is
+ * deliberately never consulted — a per-call env is attacker-controllable).
+ * Without a trusted scope no secret is injected at all (fail closed).
+ */
 export const withSecretEnv = (
 	env: Record<string, string> | undefined,
+	scopeId: string | undefined,
 	stash: SecretStash = globalSecretStash,
-	scopeId?: string,
 ): Record<string, string> | undefined => {
-	const effectiveScope = scopeId ?? env?.BOTD_SESSION_ID;
-	const secrets = stash.getEnvRecord(effectiveScope);
-	const keys = Object.keys(secrets);
-	if (keys.length === 0) return env;
+	if (scopeId === undefined || scopeId === '') return env;
+	const secrets = stash.getEnvRecord(scopeId);
+	if (Object.keys(secrets).length === 0) return env;
 	return { ...secrets, ...(env ?? {}) };
 };
 
@@ -133,10 +135,10 @@ export interface RedactedAskAnswer {
  */
 export function redactSecretAskAnswer(
 	answer: string,
+	scopeId: string,
 	previewType?: string,
 	previewContent?: string,
 	stash: SecretStash = globalSecretStash,
-	scopeId?: string,
 ): RedactedAskAnswer {
 	const stashedEnvKeys: Record<string, string> = {};
 	const secretPaths = previewType === 'ui' && previewContent ? extractSecretStatePaths(previewContent) : [];
@@ -163,7 +165,7 @@ export function redactSecretAskAnswer(
 		if (located === undefined) continue;
 		const raw = located.parent[located.key];
 		if (typeof raw !== 'string' || raw.length === 0) continue;
-		const envKey = stash.stash(raw, DEFAULT_TTL_MS, scopeId);
+		const envKey = stash.stash(raw, scopeId, DEFAULT_TTL_MS);
 		located.parent[located.key] = redactionPlaceholder(envKey);
 		stashedEnvKeys[path] = envKey;
 	}

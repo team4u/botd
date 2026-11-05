@@ -139,30 +139,38 @@ test('extractSecretStatePaths 提取 secret TextInput 的 $bindState/$state 路�
 // 2. SecretStash unit behavior
 // ---------------------------------------------------------------------------
 
-test('SecretStash：stash 生成 BOTD_SECRET_* 键，getEnvRecord 注入，peek/consume 与 TTL 过期', async () => {
+test('SecretStash：stash 生成 BOTD_SECRET_* 键，getEnvRecord 按会话注入，peek/consume 与 TTL 过期', async () => {
   const stash = new SecretStash();
-  const key = stash.stash('hunter2', 60);
+  const key = stash.stash('hunter2', 'sess_1');
   assert.match(key, /^BOTD_SECRET_[0-9A-F]{8}$/);
-  assert.equal(stash.peek(key), 'hunter2');
-  assert.deepEqual(stash.getEnvRecord(), { [key]: 'hunter2' });
-  assert.equal(stash.consume(key), 'hunter2');
-  assert.equal(stash.consume(key), undefined, 'consume is one-shot');
+  assert.equal(stash.peek(key, 'sess_1'), 'hunter2');
+  assert.equal(stash.peek(key, 'sess_2'), undefined, 'another session cannot peek');
+  assert.deepEqual(stash.getEnvRecord('sess_1'), { [key]: 'hunter2' });
+  assert.equal(stash.consume(key, 'sess_1'), 'hunter2');
+  assert.equal(stash.consume(key, 'sess_1'), undefined, 'consume is one-shot');
 
-  const short = stash.stash('ephemeral', 5);
-  assert.equal(stash.peek(short), 'ephemeral');
+  const short = stash.stash('ephemeral', 'sess_1', 5);
+  assert.equal(stash.peek(short, 'sess_1'), 'ephemeral');
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(stash.peek(short), undefined, 'expired entry is pruned');
-  assert.deepEqual(stash.getEnvRecord(), {}, 'expired entries disappear from env record');
+  assert.equal(stash.peek(short, 'sess_1'), undefined, 'expired entry is pruned');
+  assert.deepEqual(stash.getEnvRecord('sess_1'), {}, 'expired entries disappear from env record');
 });
 
-test('withSecretEnv：机密并入 env，显式 env 优先；无活动机密时原样返回', () => {
+test('withSecretEnv：机密按可信作用域并入 env，显式 env 优先；无作用域/无机密时原样返回', () => {
   const stash = new SecretStash();
-  const key = stash.stash('s3cret');
-  assert.deepEqual(withSecretEnv(undefined, stash), { [key]: 's3cret' });
-  assert.deepEqual(withSecretEnv({ [key]: 'override', OTHER: '1' }, stash), { [key]: 'override', OTHER: '1' });
+  const key = stash.stash('s3cret', 'sess_1');
+  assert.deepEqual(withSecretEnv(undefined, 'sess_1', stash), { [key]: 's3cret' });
+  assert.deepEqual(withSecretEnv({ [key]: 'override', OTHER: '1' }, 'sess_1', stash), { [key]: 'override', OTHER: '1' });
+  // 无信任作用域不注入，也不从 env 推断会话。
+  assert.equal(withSecretEnv(undefined, undefined, stash), undefined);
+  assert.deepEqual(withSecretEnv({ BOTD_SESSION_ID: 'sess_1' }, undefined, stash), { BOTD_SESSION_ID: 'sess_1' });
+  // 作用域不匹配：拿到自己的机密，拿不到别人的。
+  const other = stash.stash('other', 'sess_2');
+  assert.deepEqual(withSecretEnv({ A: '1' }, 'sess_1', stash), { A: '1', [key]: 's3cret' });
+  assert.deepEqual(withSecretEnv({ A: '1' }, 'sess_2', stash), { A: '1', [other]: 'other' });
   const empty = new SecretStash();
-  assert.equal(withSecretEnv(undefined, empty), undefined);
-  assert.deepEqual(withSecretEnv({ A: '1' }, empty), { A: '1' });
+  assert.equal(withSecretEnv(undefined, 'sess_1', empty), undefined);
+  assert.deepEqual(withSecretEnv({ A: '1' }, 'sess_1', empty), { A: '1' });
 });
 
 // ---------------------------------------------------------------------------
@@ -176,7 +184,7 @@ test('redactSecretAskAnswer：UI 机密字段替换为 REDACTED 占位符，明�
     decision: '提交',
     state: { credentials: { username: 'deploy', password: 'super-secret-password-123' }, config: { token: 'tok-abc' } },
   });
-  const { redactedAnswer, stashedEnvKeys } = redactSecretAskAnswer(answer, 'ui', specJson, stash);
+  const { redactedAnswer, stashedEnvKeys } = redactSecretAskAnswer(answer, 'sess_1', 'ui', specJson, stash);
   assert.ok(!redactedAnswer.includes('super-secret-password-123'), 'plaintext password must not survive');
   assert.ok(!redactedAnswer.includes('tok-abc'), 'plaintext token must not survive');
   assert.ok(redactedAnswer.includes('deploy'), 'non-secret fields survive');
@@ -185,14 +193,15 @@ test('redactSecretAskAnswer：UI 机密字段替换为 REDACTED 占位符，明�
   const passKey = stashedEnvKeys['/credentials/password'];
   const tokenKey = stashedEnvKeys['/config/token'];
   assert.ok(passKey && tokenKey);
-  assert.equal(stash.peek(passKey), 'super-secret-password-123');
-  assert.equal(stash.peek(tokenKey), 'tok-abc');
+  assert.equal(stash.peek(passKey, 'sess_1'), 'super-secret-password-123');
+  assert.equal(stash.peek(tokenKey, 'sess_1'), 'tok-abc');
+  assert.equal(stash.peek(passKey, 'sess_2'), undefined, 'another session cannot peek the stashed secret');
 });
 
 test('redactSecretAskAnswer：非 UI / 无机密路径 / 非 JSON / 空 state 原样透传', () => {
   const stash = new SecretStash();
   assert.deepEqual(
-    redactSecretAskAnswer('{"state":{"a":"b"}}', 'text', 'plain', stash),
+    redactSecretAskAnswer('{"state":{"a":"b"}}', 'sess_1', 'text', 'plain', stash),
     { redactedAnswer: '{"state":{"a":"b"}}', stashedEnvKeys: {} },
   );
   const noSecretSpec = JSON.stringify({
@@ -200,17 +209,18 @@ test('redactSecretAskAnswer：非 UI / 无机密路径 / 非 JSON / 空 state �
     elements: { i: { type: 'TextInput', props: { label: 'x', value: { $state: '/plain' } } } },
   });
   assert.deepEqual(
-    redactSecretAskAnswer('{"state":{"plain":"keep"}}', 'ui', noSecretSpec, stash),
+    redactSecretAskAnswer('{"state":{"plain":"keep"}}', 'sess_1', 'ui', noSecretSpec, stash),
     { redactedAnswer: '{"state":{"plain":"keep"}}', stashedEnvKeys: {} },
   );
-  assert.deepEqual(redactSecretAskAnswer('not json', 'ui', JSON.stringify(secretUiSpec), stash).stashedEnvKeys, {});
+  assert.deepEqual(redactSecretAskAnswer('not json', 'sess_1', 'ui', JSON.stringify(secretUiSpec), stash).stashedEnvKeys, {});
   assert.deepEqual(
-    redactSecretAskAnswer('{"decision":"cancel"}', 'ui', JSON.stringify(secretUiSpec), stash).stashedEnvKeys,
+    redactSecretAskAnswer('{"decision":"cancel"}', 'sess_1', 'ui', JSON.stringify(secretUiSpec), stash).stashedEnvKeys,
     {},
   );
   // 空字符串机密值不 stash、不替换
   const r = redactSecretAskAnswer(
     JSON.stringify({ state: { credentials: { username: 'u', password: '' }, config: { token: '' } } }),
+    'sess_1',
     'ui',
     JSON.stringify(secretUiSpec),
     stash,
@@ -223,11 +233,12 @@ test('redactSecretAskAnswer：非 UI / 无机密路径 / 非 JSON / 空 state �
 // ---------------------------------------------------------------------------
 
 test('SecretInjectingEnv：shell 子进程经 process.env 读到机密，命令行不含明文', { timeout: 30_000 }, async () => {
-  // SecretInjectingEnv 默认从 globalSecretStash 注入（hub 生产路径同源）。
+  // SecretInjectingEnv 默认从 globalSecretStash 注入（hub 生产路径同源），
+  // 作用域来自构造时信任的会话 shellEnv。
   const { globalSecretStash } = await import('../apps/hub/src/harness/secret-stash.js');
-  const envKey = globalSecretStash.stash('super-secret-password-123');
+  const envKey = globalSecretStash.stash('super-secret-password-123', 'sess_secret_inject');
 
-  const env = new SecretInjectingEnv({ cwd: process.cwd() });
+  const env = new SecretInjectingEnv({ cwd: process.cwd(), shellEnv: { BOTD_SESSION_ID: 'sess_secret_inject' } });
   // 命令行只引用环境变量名，明文永不出现在命令里。
   const command = `node -e "process.stdout.write(process.env.${envKey} || '')"`;
   const chunks: string[] = [];
@@ -242,7 +253,7 @@ test('SecretInjectingEnv：shell 子进程经 process.env 读到机密，命令�
   assert.equal(result.value.exitCode, 0);
   assert.equal(chunks.join(''), 'super-secret-password-123', 'child process reads the stashed secret via env');
   assert.ok(!command.includes('{{SECRET'), 'plaintext must not appear in the command line');
-  globalSecretStash.consume(envKey);
+  globalSecretStash.consume(envKey, 'sess_secret_inject');
 });
 
 // ---------------------------------------------------------------------------
@@ -462,11 +473,11 @@ test('全链路：ask_human UI 机密表单零泄漏（AskDoc/SSE/LLM 上下文�
   assert.ok(envKeyMatch, 'stored answer names the stashed env key');
   const envKey = envKeyMatch[0];
   const { globalSecretStash } = await import('../apps/hub/src/harness/secret-stash.js');
-  assert.ok(globalSecretStash.peek(envKey), 'env key resolves in the global stash');
-  const envRecord = globalSecretStash.getEnvRecord();
+  assert.ok(globalSecretStash.peek(envKey, sid), 'env key resolves in the global stash for this session');
+  const envRecord = globalSecretStash.getEnvRecord(sid);
   assert.equal(envRecord[envKey], SECRET_PLAINTEXT);
 
-  const env = new SecretInjectingEnv({ cwd: process.cwd() });
+  const env = new SecretInjectingEnv({ cwd: process.cwd(), shellEnv: { BOTD_SESSION_ID: sid } });
   const chunks: string[] = [];
   const exec = await env.exec(
     `node -e "process.stdout.write(process.env.${envKey} || '')"`,

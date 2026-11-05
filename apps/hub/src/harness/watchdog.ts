@@ -69,12 +69,14 @@ export interface RunFailureClassification {
 	summary: string;
 }
 
-/** 永久（非重试）错误类别：任意命中即判非重试。 */
-const PERMANENT_FAILURE_PATTERNS: ReadonlyArray<{ category: Exclude<RunFailureClassification['category'], 'transient'>; patterns: RegExp[] }> = [
+/** 永久（非重试）错误关键词：任意命中即判非重试。 */
+const PERMANENT_FAILURE_KEYWORDS: ReadonlyArray<{
+	category: Exclude<RunFailureClassification['category'], 'transient'>;
+	patterns: RegExp[];
+}> = [
 	{
 		category: 'auth',
 		patterns: [
-			/(?<![0-9])40[13](?![0-9])/,
 			/invalid_api_key/,
 			/authentication_error/,
 			/unauthorized/,
@@ -87,7 +89,6 @@ const PERMANENT_FAILURE_PATTERNS: ReadonlyArray<{ category: Exclude<RunFailureCl
 	{
 		category: 'quota',
 		patterns: [
-			/(?<![0-9])402(?![0-9])/,
 			/insufficient_quota/,
 			/out of credit/,
 			/余额不足/,
@@ -97,14 +98,10 @@ const PERMANENT_FAILURE_PATTERNS: ReadonlyArray<{ category: Exclude<RunFailureCl
 			/monthly limit/,
 		],
 	},
-	{
-		category: 'not_found',
-		patterns: [/(?<![0-9])404(?![0-9])/, /model_not_found/, /does not exist/],
-	},
+	{ category: 'not_found', patterns: [/model_not_found/, /does not exist/] },
 	{
 		category: 'request',
 		patterns: [
-			/(?<![0-9])4(00|13|22)(?![0-9])/,
 			/context_length_exceeded/,
 			/maximum context length/,
 			/prompt is too long/,
@@ -115,10 +112,26 @@ const PERMANENT_FAILURE_PATTERNS: ReadonlyArray<{ category: Exclude<RunFailureCl
 	},
 ];
 
+/** 只认 HTTP 状态位置的 4xx/5xx（"HTTP 400"/"Status: 401"…），正文里的裸数字（配额余量、请求 ID）不算。 */
+const HTTP_STATUS_PATTERN = /(?:^|[^0-9])([45]\d\d)(?![0-9])/;
+
+/** 永久错误的状态码 → 类别；429 / 5xx 不在表中，即瞬态。 */
+const PERMANENT_STATUS_CATEGORIES: Readonly<Record<string, Exclude<RunFailureClassification['category'], 'transient'>>> = {
+	'401': 'auth',
+	'403': 'auth',
+	'402': 'quota',
+	'404': 'not_found',
+	'400': 'request',
+	'413': 'request',
+	'422': 'request',
+};
+
 /**
  * 纯分类器：判定一个 runFailure 是否值得自动 continue。
  * 鉴权 / 配额 / 404 / 请求构造错误是永久错误，重试无意义；
- * 429、5xx、网络中断等瞬态错误值得有界重试。
+ * 429、5xx、网络中断等瞬态错误值得有界重试。状态码只在 HTTP 状态位置识别
+ * 且只取第一处："429 Rate limit reached. Limit 400, Used 400" 的第一处状态是 429，
+ * 正文中的 400 是配额数字，不得误判为永久 400。
  */
 export function classifyRunFailure(runFailure: { reason?: string; detail?: string } | undefined): RunFailureClassification {
 	if (runFailure === undefined) return { retryable: false, category: 'request', summary: 'none' };
@@ -130,10 +143,14 @@ export function classifyRunFailure(runFailure: { reason?: string; detail?: strin
 	}
 	// 解码 \uXXXX 转义：部分网关返回 JSON 转义后的中文（如 \u4f59\u989d\u4e0d\u8db3 = 余额不足）
 	const detail = (runFailure.detail ?? '').replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
-	for (const group of PERMANENT_FAILURE_PATTERNS) {
+	for (const group of PERMANENT_FAILURE_KEYWORDS) {
 		if (group.patterns.some((pattern) => pattern.test(detail))) {
 			return { retryable: false, category: group.category, summary: detail || 'model_error' };
 		}
+	}
+	const status = detail.match(HTTP_STATUS_PATTERN)?.[1];
+	if (status !== undefined && PERMANENT_STATUS_CATEGORIES[status] !== undefined) {
+		return { retryable: false, category: PERMANENT_STATUS_CATEGORIES[status], summary: detail || 'model_error' };
 	}
 	return { retryable: true, category: 'transient', summary: detail || 'model_error' };
 }

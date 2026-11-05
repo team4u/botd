@@ -155,7 +155,10 @@ export interface NodeRpcResolver {
 export interface RemoteExecutionEnvOptions {
   nodeId: string;
   cwd: string;
-  /** 附加 shell 环境变量（会话/分身上下文注入，如 BOTD_SESSION_ID / BOTD_BOT_ID），逐调用 env 可覆盖。 */
+  /**
+   * 附加 shell 环境变量（会话/分身上下文注入，如 BOTD_SESSION_ID / BOTD_BOT_ID），逐调用 env 可覆盖。
+   * 其中 BOTD_SESSION_ID 是机密注入的唯一信任作用域来源。
+   */
   shellEnv?: Record<string, string>;
 }
 
@@ -450,8 +453,10 @@ export class RemoteExecutionEnv implements ExecutionEnv {
         execId,
         command,
         ...(this.cwd === undefined ? {} : { cwd: this.cwd }),
-        // SecretStash：机密以环境变量注入远端子进程（明文不进命令行/上下文），按会话隔离。
-        env: withSecretEnv(mergedEnv, undefined, this.#shellEnv?.BOTD_SESSION_ID),
+        // SecretStash：机密以环境变量注入远端子进程（明文不进命令行/上下文）。
+        // 作用域只收信任的会话 shellEnv，绝不从逐调用 env 推断（可伪造）；
+        // 无可信作用域时不注入任何机密（fail-closed）。
+        env: withSecretEnv(mergedEnv, this.#shellEnv?.BOTD_SESSION_ID),
         ...(options?.inheritEnv === undefined ? {} : { inheritEnv: options.inheritEnv }),
         ...(options?.timeout === undefined ? {} : { timeout: options.timeout }),
         ...(options?.spill === undefined ? {} : { spill: options.spill }),

@@ -136,16 +136,21 @@ const SessionIndex = SessionIndexDoc;
 
 /**
  * NodeExecutionEnv with SecretStash injection: every shell exec receives the
- * active `BOTD_SECRET_*` env vars, so stashed secrets are consumable
+ * session's active `BOTD_SECRET_*` env vars, so stashed secrets are consumable
  * cross-platform via process.env without appearing in command lines or LLM
  * context. Explicit per-call env entries win over the injected secrets.
+ *
+ * The injection scope is fixed at construction from the trusted session
+ * shellEnv (BOTD_SESSION_ID); a per-call `options.env` can never change it,
+ * and without a trusted scope no secret is injected at all (fail closed).
  */
 export class SecretInjectingEnv extends NodeExecutionEnv {
-	readonly #scopeId?: string;
+	readonly #scopeId: string | undefined;
 
 	constructor(options: ConstructorParameters<typeof NodeExecutionEnv>[0]) {
 		super(options);
-		this.#scopeId = options.shellEnv?.BOTD_SESSION_ID;
+		const sessionId = options.shellEnv?.BOTD_SESSION_ID;
+		this.#scopeId = typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
 	}
 
 	async exec(
@@ -153,7 +158,7 @@ export class SecretInjectingEnv extends NodeExecutionEnv {
 		options: import("@earendil-works/pi-durable/env").ShellExecOptions | undefined,
 		context: Context,
 	): Promise<import("@earendil-works/pi-durable/env").Result<import("@earendil-works/pi-durable/env").ShellExecResult, import("@earendil-works/pi-durable/env").ExecutionError>> {
-		return super.exec(command, { ...options, env: withSecretEnv(options?.env, undefined, this.#scopeId) }, context);
+		return super.exec(command, { ...options, env: withSecretEnv(options?.env, this.#scopeId) }, context);
 	}
 }
 
