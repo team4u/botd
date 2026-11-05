@@ -15,8 +15,9 @@ import { NodesBotsView } from './components/NodesBotsView';
 import { SettingsModal } from './components/SettingsModal';
 import { UsersModal } from './components/UsersModal';
 import { ToastContainer } from './components/Toast';
-import { Loader2, Menu, Bot, Server, ChevronRight } from 'lucide-react';
+import { Loader2, Menu, Bot, Server, ChevronRight, FolderGit2, MessageSquare } from 'lucide-react';
 import { BotAvatarBadge } from './components/MessageItem';
+import { buildSpaceGroups } from './components/Sidebar';
 
 export const App: React.FC = () => {
   // Auth state
@@ -96,6 +97,16 @@ export const App: React.FC = () => {
   const primaryBots = useMemo(
     () => allBots.filter((bot) => !bot.parentBotId || !allBots.some((b) => b.id === bot.parentBotId)),
     [allBots]
+  );
+
+  // 空态直达数据：项目空间分组（绑定 workspaceDir 的主分身）+ 纯个人助理
+  const welcomeSpaceGroups = useMemo(
+    () => buildSpaceGroups([], allBots),
+    [allBots]
+  );
+  const welcomeAssistantBots = useMemo(
+    () => primaryBots.filter((bot) => !welcomeSpaceGroups.some((g) => g.botIds.includes(bot.id))),
+    [primaryBots, welcomeSpaceGroups]
   );
 
   const activeSession = useMemo(
@@ -379,6 +390,8 @@ export const App: React.FC = () => {
         onClose={() => setSidebarOpen(false)}
         currentUser={currentUser || undefined}
         onOpenUsers={() => navigate({ modal: 'users' })}
+        onOpenCreateModal={() => navigate({ modal: 'create' })}
+        onCreateParallelTopic={sessionActions.handleCreateParallelTopic}
       />
 
       {/* Main Content Area */}
@@ -416,6 +429,11 @@ export const App: React.FC = () => {
             onDeleteSessions={sessionActions.handleDeleteSessions}
             onNewTopic={sessionActions.handleNewTopic}
             onForkMessage={sessionActions.handleForkMessage}
+            sessions={sessions}
+            unreadCounts={notifications.unreadCounts}
+            onSelectSession={(id) => navigate({ sessionId: id, view: 'chat', messageId: null })}
+            onSetArchived={sessionActions.handleSetArchived}
+            onCreateParallelTopic={sessionActions.handleCreateParallelTopic}
             cancelling={chat.cancelling}
             pendingAsks={chat.pendingAsks}
             hasEarlierMessages={chat.hasEarlierMessages}
@@ -453,38 +471,96 @@ export const App: React.FC = () => {
                 欢迎使用 botd
               </h2>
               <p className="text-xs sm:text-sm text-zinc-500 dark:text-zinc-400 max-w-sm leading-relaxed mb-6">
-                选一个角色分身即可开始 24/7 协同对话。
+                从项目空间或个人助理开始 24/7 协同对话。
               </p>
 
-              {/* 分身直达卡片：一键开聊 */}
-              {primaryBots.length > 0 ? (
-                <div className="w-full max-w-md grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {primaryBots.slice(0, 6).map((bot) => {
-                    const node = nodeMap.get(bot.nodeId);
-                    return (
-                      <button
-                        key={bot.id}
-                        type="button"
-                        onClick={() => sessionActions.handleOpenBotChat(bot)}
-                        title={`@${bot.id}`}
-                        className="group flex items-center gap-3 p-3 rounded-xl border border-zinc-200/80 dark:border-zinc-800/80 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800/80 hover:border-zinc-300 dark:hover:border-zinc-700 transition-all text-left cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500"
-                      >
-                        <BotAvatarBadge botId={bot.id} name={bot.name} color={bot.color} className="!w-9 !h-9 !text-sm" />
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                            {bot.name}
+              {/* 📁 项目空间直达：绑定 workspaceDir 的主分身聚合为 Space 卡片 */}
+              {welcomeSpaceGroups.length > 0 && (
+                <div className="w-full max-w-md mb-4">
+                  <div className="flex items-center gap-1.5 mb-2 px-1">
+                    <FolderGit2 className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500" />
+                    <span className="text-[11px] font-semibold tracking-wide text-zinc-500 dark:text-zinc-400">
+                      项目空间 · {welcomeSpaceGroups.length}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {welcomeSpaceGroups.slice(0, 6).map((group) => {
+                      const leadBotId = group.botIds[0];
+                      const leadBot = leadBotId ? botMap.get(leadBotId) : undefined;
+                      const node = leadBot ? nodeMap.get(leadBot.nodeId) : undefined;
+                      return (
+                        <button
+                          key={group.path}
+                          type="button"
+                          onClick={() =>
+                            leadBotId &&
+                            void sessionActions.handleCreateParallelTopic({
+                              leadBotId,
+                              workspaceDir: group.path,
+                            })
+                          }
+                          title={group.path}
+                          className="group flex items-center gap-3 p-3 rounded-xl border border-zinc-200/80 dark:border-zinc-800/80 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800/80 hover:border-zinc-300 dark:hover:border-zinc-700 transition-all text-left cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500"
+                        >
+                          <span className="w-9 h-9 rounded-lg bg-zinc-100 dark:bg-zinc-800 border border-zinc-200/80 dark:border-zinc-800 flex items-center justify-center shrink-0">
+                            <FolderGit2 className="w-4.5 h-4.5 text-zinc-600 dark:text-zinc-300" />
                           </span>
-                          <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-500">
-                            {node?.name || bot.nodeId}
-                            {node?.status === 'online' ? ' · 在线' : ' · 离线'}
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                              {group.name}
+                            </span>
+                            <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-500">
+                              {leadBot?.name || group.path}
+                              {node?.status === 'online' ? ' · 在线' : ''}
+                            </span>
                           </span>
-                        </span>
-                        <ChevronRight className="w-4 h-4 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-400 shrink-0 transition-colors" />
-                      </button>
-                    );
-                  })}
+                          <ChevronRight className="w-4 h-4 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-400 shrink-0 transition-colors" />
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-              ) : (
+              )}
+
+              {/* 💬 个人助理直达：未绑定 Space 的主分身 */}
+              {welcomeAssistantBots.length > 0 && (
+                <div className="w-full max-w-md">
+                  <div className="flex items-center gap-1.5 mb-2 px-1">
+                    <MessageSquare className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500" />
+                    <span className="text-[11px] font-semibold tracking-wide text-zinc-500 dark:text-zinc-400">
+                      个人助理 · {welcomeAssistantBots.length}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {welcomeAssistantBots.slice(0, 6).map((bot) => {
+                      const node = nodeMap.get(bot.nodeId);
+                      return (
+                        <button
+                          key={bot.id}
+                          type="button"
+                          onClick={() => sessionActions.handleOpenBotChat(bot)}
+                          title={`@${bot.id}`}
+                          className="group flex items-center gap-3 p-3 rounded-xl border border-zinc-200/80 dark:border-zinc-800/80 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800/80 hover:border-zinc-300 dark:hover:border-zinc-700 transition-all text-left cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500"
+                        >
+                          <BotAvatarBadge botId={bot.id} name={bot.name} color={bot.color} className="!w-9 !h-9 !text-sm" />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                              {bot.name}
+                            </span>
+                            <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-500">
+                              {node?.name || bot.nodeId}
+                              {node?.status === 'online' ? ' · 在线' : ' · 离线'}
+                            </span>
+                          </span>
+                          <ChevronRight className="w-4 h-4 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-400 shrink-0 transition-colors" />
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {welcomeSpaceGroups.length === 0 && welcomeAssistantBots.length === 0 && (
                 <p className="text-xs text-zinc-400 dark:text-zinc-500 mb-4">还没有可用分身，先去创建一个。</p>
               )}
 
