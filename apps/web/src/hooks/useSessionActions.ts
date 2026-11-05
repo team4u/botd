@@ -8,6 +8,7 @@ import {
   getSpaceDisplayName,
   normalizeWorkspaceDir,
   HUB_ASSISTANT_TITLE,
+  HUB_ROUTER_BOT_ID,
 } from '../session-space';
 import type { AddToastFn } from './useToasts';
 import type { NavigateFn } from './useHashRoute';
@@ -47,23 +48,27 @@ export const useSessionActions = (params: SessionActionsParams) => {
   // 中枢总管创建并发防抖：创建进行中忽略重复点击
   const creatingHubRef = useRef(false);
 
-  // 打开中枢总管会话：存在则直接进入，不存在则以主分身创建（中枢模式的自然语言调度入口）
+  // 打开中枢总管会话：存在则直接进入（遗留会话静默迁移到 hub-router），不存在则以系统内置 hub-router 身份创建
   const handleOpenHubAssistant = useCallback(async () => {
     const existing = pickHubAssistantSession(sessions);
     if (existing) {
       navigate({ sessionId: existing.id, view: 'chat', messageId: null });
+      // 遗留会话（hub-router 存在之前以随机主分身创建）：后台静默迁移到系统内置总管身份
+      if (existing.leadBotId !== HUB_ROUTER_BOT_ID) {
+        api.updateSession(existing.id, { leadBotId: HUB_ROUTER_BOT_ID })
+          .then((updated) =>
+            setSessions((prev) => prev.map((s) => (s.id === existing.id ? { ...s, ...updated } : s)))
+          )
+          .catch(() => {});
+      }
       return;
     }
     if (creatingHubRef.current) return;
-    const primaryBot =
-      [...botMap.values()].find((b) => !b.parentBotId || !botMap.has(b.parentBotId)) ??
-      [...botMap.values()][0];
-    if (!primaryBot) return;
     creatingHubRef.current = true;
     try {
       const created = await api.createSession({
         title: HUB_ASSISTANT_TITLE,
-        leadBotId: primaryBot.id,
+        leadBotId: HUB_ROUTER_BOT_ID,
       });
       setSessions((prev) => [created, ...prev]);
       navigate({ sessionId: created.id, view: 'chat', modal: null });
@@ -76,7 +81,7 @@ export const useSessionActions = (params: SessionActionsParams) => {
     } finally {
       creatingHubRef.current = false;
     }
-  }, [sessions, setSessions, botMap, navigate, addToast, onAuthLostRef]);
+  }, [sessions, setSessions, navigate, addToast, onAuthLostRef]);
 
   // 点击通讯录中的智能体：进入其当前单聊，不存在则静默创建
   const handleOpenBotChat = useCallback(async (bot: BotConfig) => {

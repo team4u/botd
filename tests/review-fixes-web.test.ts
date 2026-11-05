@@ -352,6 +352,189 @@ test('中枢总管会话：isHubAssistantSession/pickHubAssistantSession 识别�
   );
 });
 
+// ==========================================
+// 方案 A：中枢总管绑定系统内置 hub-router 身份（HUB_ROUTER_BOT_ID）
+// ==========================================
+
+test('方案 A 常量与虚拟分身：HUB_ROUTER_BOT_ID / buildHubRouterVirtualBot 继承回退模型且不污染通讯录', { timeout: 60_000 }, async () => {
+  const mod = (await import('../apps/web/src/session-space.js' as any)) as {
+    HUB_ROUTER_BOT_ID: string;
+    buildHubRouterVirtualBot: typeof import('../apps/web/src/session-space.js').buildHubRouterVirtualBot;
+    buildAssistantEntries: typeof import('../apps/web/src/session-space.js').buildAssistantEntries;
+  };
+  const { HUB_ROUTER_BOT_ID, buildHubRouterVirtualBot, buildAssistantEntries } = mod;
+
+  // 1. 常量固定为 'hub-router'
+  assert.equal(HUB_ROUTER_BOT_ID, 'hub-router');
+
+  // 2. 从可用分身继承回退模型与节点
+  const botA = mkBot({
+    id: 'bot_a',
+    name: '助理 A',
+    nodeId: 'node_remote',
+    modelProvider: 'anthropic',
+    modelId: 'claude-sonnet-4-5',
+  });
+  const botB = mkBot({
+    id: 'bot_b',
+    name: '助理 B',
+    nodeId: 'node_other',
+    modelProvider: 'openai',
+    modelId: 'gpt-5.2',
+  });
+  const virtualFromBots = buildHubRouterVirtualBot([botA, botB]);
+  assert.equal(virtualFromBots.id, 'hub-router');
+  assert.equal(virtualFromBots.name, '中枢总管');
+  assert.equal(virtualFromBots.nodeId, 'node_remote', '回退节点取首个有 nodeId 的分身');
+  assert.equal(virtualFromBots.modelProvider, 'anthropic', '回退模型服务商取首个有模型的分身');
+  assert.equal(virtualFromBots.modelId, 'claude-sonnet-4-5');
+  assert.equal(virtualFromBots.thinkingLevel, 'medium');
+  assert.deepEqual(virtualFromBots.enabledSkills, []);
+  assert.deepEqual(virtualFromBots.enabledExtensions, []);
+
+  // 3. 无可用分身时安全降级：nodeId='local'，模型留空
+  const virtualEmpty = buildHubRouterVirtualBot([]);
+  assert.equal(virtualEmpty.id, 'hub-router');
+  assert.equal(virtualEmpty.nodeId, 'local');
+  assert.equal(virtualEmpty.modelProvider, '');
+  assert.equal(virtualEmpty.modelId, '');
+  const virtualUndef = buildHubRouterVirtualBot(undefined);
+  assert.equal(virtualUndef.nodeId, 'local');
+
+  // 4. 虚拟分身只在前端构造，绝不出现在个人助理通讯录（buildAssistantEntries 只收用户主分身）
+  const entries = buildAssistantEntries([], [botA, botB, virtualFromBots], {});
+  assert.equal(entries.length, 2, '虚拟 hub-router 不是主分身，不占通讯录行');
+  assert.ok(!entries.some((e) => e.bot.id === 'hub-router'));
+});
+
+test('方案 A 会话识别：isHubAssistantSession 匹配 leadBotId=hub-router，任意标题均生效', { timeout: 60_000 }, async () => {
+  const mod = (await import('../apps/web/src/session-space.js' as any)) as {
+    isHubAssistantSession: typeof import('../apps/web/src/session-space.js').isHubAssistantSession;
+    pickHubAssistantSession: typeof import('../apps/web/src/session-space.js').pickHubAssistantSession;
+    pickCurrentDirectSession: typeof import('../apps/web/src/session-space.js').pickCurrentDirectSession;
+  };
+  const { isHubAssistantSession, pickHubAssistantSession, pickCurrentDirectSession } = mod;
+
+  // 1. leadBotId 绑定 hub-router：无论标题如何都是中枢总管会话
+  assert.ok(
+    isHubAssistantSession(mkSession({ id: 'hub_1', leadBotId: 'hub-router', title: '随便的标题' }))
+  );
+  assert.ok(isHubAssistantSession(mkSession({ id: 'hub_2', leadBotId: 'hub-router' })));
+
+  // 2. 归档/子会话即使绑定 hub-router 也不算
+  assert.ok(
+    !isHubAssistantSession(mkSession({ id: 'hub_arch', leadBotId: 'hub-router', archived: true }))
+  );
+  assert.ok(
+    !isHubAssistantSession(
+      mkSession({ id: 'hub_child', leadBotId: 'hub-router', parentSessionId: 'hub_1' })
+    )
+  );
+
+  // 3. 遗留路径保留：标题精确匹配 ⚡ 中枢总管（任意 leadBotId）仍识别为中枢总管
+  assert.ok(
+    isHubAssistantSession(mkSession({ id: 'hub_legacy', leadBotId: 'bot_a', title: '⚡ 中枢总管' }))
+  );
+  assert.ok(
+    !isHubAssistantSession(mkSession({ id: 'plain', leadBotId: 'bot_a', title: '普通单聊' }))
+  );
+
+  // 4. pickHubAssistantSession 同样识别 leadBotId 绑定，且不篡位普通单聊
+  const hubRouterSession = mkSession({
+    id: 'hub_pick',
+    leadBotId: 'hub-router',
+    title: '总管',
+    updatedAt: new Date(Date.now() - 10_000).toISOString(),
+  });
+  assert.equal(pickHubAssistantSession([hubRouterSession])?.id, 'hub_pick');
+  assert.equal(
+    pickCurrentDirectSession([hubRouterSession], 'hub-router'),
+    undefined,
+    '中枢总管会话不得成为任何分身的默认单聊'
+  );
+});
+
+test('方案 A 会话创建：handleOpenHubAssistant 用 hub-router 创建且不随机取 botMap 主分身，遗留会话静默迁移', { timeout: 60_000 }, async () => {
+  const path = await import('node:path');
+  const fs = await import('node:fs/promises');
+  const source = await fs.readFile(
+    path.join(process.cwd(), 'apps/web/src/hooks/useSessionActions.ts'),
+    'utf-8'
+  );
+
+  // 1. 创建路径：固定以 HUB_ROUTER_BOT_ID 为 leadBotId，绝不再从 botMap 挑随机主分身
+  const createBlock = source.slice(
+    source.indexOf('const handleOpenHubAssistant'),
+    source.indexOf('// 点击通讯录中的智能体')
+  );
+  assert.ok(createBlock.length > 0, '应能定位 handleOpenHubAssistant 实现块');
+  assert.match(
+    createBlock,
+    /leadBotId: HUB_ROUTER_BOT_ID/,
+    '创建中枢总管必须固定绑定系统内置 hub-router 身份'
+  );
+  assert.doesNotMatch(
+    createBlock,
+    /primaryBot/,
+    '不得再从 botMap 随机挑选主分身作为中枢总管的 leadBotId'
+  );
+
+  // 2. 遗留迁移：存在旧标题会话且 leadBotId 未绑定 hub-router 时后台静默迁移
+  assert.match(
+    createBlock,
+    /existing\.leadBotId !== HUB_ROUTER_BOT_ID/,
+    '应检测遗留会话的 leadBotId'
+  );
+  assert.match(
+    createBlock,
+    /api\.updateSession\(existing\.id, \{ leadBotId: HUB_ROUTER_BOT_ID \}\)/,
+    '遗留会话应通过 PATCH 静默迁移到 hub-router'
+  );
+  assert.match(
+    createBlock,
+    /\.catch\(\(\) => \{\}\)/,
+    '迁移失败静默吞掉，不打断导航'
+  );
+
+  // 3. useSessionActions 正确从 session-space 导入 hub-router 常量
+  assert.match(
+    source,
+    /import \{[\s\S]*?HUB_ROUTER_BOT_ID,[\s\S]*?\} from '\.\.\/session-space';/,
+    '应从 session-space 导入 HUB_ROUTER_BOT_ID'
+  );
+});
+
+test('方案 A 渲染链路：ChatView/ChatInput/useSlashMenu 为 hub-router 虚拟身份接线', { timeout: 60_000 }, async () => {
+  const path = await import('node:path');
+  const fs = await import('node:fs/promises');
+  const read = (rel: string) => fs.readFile(path.join(process.cwd(), rel), 'utf-8');
+
+  // 1. ChatView：识别 hub-router 会话，副标题展示「系统内置总管」，不为虚拟分身打开编辑器
+  const chatView = await read('apps/web/src/components/ChatView.tsx');
+  assert.match(chatView, /isHubAssistantSession\(session\)/, '应以会话级判定识别中枢总管');
+  assert.match(chatView, /系统内置总管/, '顶栏副标题展示系统内置总管而非 @hub-router');
+  assert.match(chatView, /buildHubRouterVirtualBot/, '总管会话应构造虚拟分身用于展示');
+
+  // 2. ChatInput：currentBot 回退到 hub-router 虚拟分身，底栏 ComposerStatusBar 可秒切模型
+  const chatInput = await read('apps/web/src/components/ChatInput.tsx');
+  assert.match(
+    chatInput,
+    /leadBotId === HUB_ROUTER_BOT_ID \? buildHubRouterVirtualBot\(botMap\?\.values\(\)\) : undefined/,
+    'leadBotId=hub-router 时 currentBot 应构造虚拟分身'
+  );
+
+  // 3. useSlashMenu：hub-router 为合法斜杠目标，目标名称显示「中枢总管」
+  const slashMenu = await read('apps/web/src/components/ChatInput/useSlashMenu.ts');
+  assert.match(slashMenu, /HUB_ROUTER_BOT_ID/, 'useSlashMenu 应识别 hub-router');
+  assert.match(slashMenu, /name: '中枢总管'/, 'hub-router 斜杠目标名称为中枢总管');
+  // hub-router 为虚拟身份：不请求命令目录，只展示内建会话命令
+  assert.match(
+    slashMenu,
+    /targetId !== HUB_ROUTER_BOT_ID/,
+    'hub-router 不应请求命令目录 API'
+  );
+});
+
 test('getSessionAttention/buildActivePulseEntries：后台 worker 让 idle 会话进入雷达', { timeout: 60_000 }, async () => {
   const now = Date.now();
   const mod = (await import('../apps/web/src/session-space.js' as any)) as {

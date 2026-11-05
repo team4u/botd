@@ -11,11 +11,47 @@ import type { SessionRecord, BotConfig } from '@botd/protocol';
 /** 中枢总管会话的固定标题（⚡ 中枢总管）：全局唯一、跨会话复用的持久会话 */
 export const HUB_ASSISTANT_TITLE = '⚡ 中枢总管';
 
-/** 判定是否为中枢总管会话：未归档、无父会话、标题精确匹配 */
+/** 系统内置中枢路由身份：中枢总管会话的 leadBotId 固定绑定值，不属于任何用户分身 */
+export const HUB_ROUTER_BOT_ID = 'hub-router';
+
+/**
+ * 构造系统内置「⚡ 中枢总管」（hub-router）前端虚拟 BotConfig：
+ * 不出现在「节点与分身管理」或「个人助理」通讯录中，仅供中枢总管会话顶栏与底栏模型选择器使用。
+ */
+export function buildHubRouterVirtualBot(bots?: Iterable<BotConfig>): BotConfig {
+  let fallbackProvider = '';
+  let fallbackModelId = '';
+  let fallbackNodeId = 'local';
+  if (bots) {
+    for (const b of bots) {
+      if (b.nodeId && fallbackNodeId === 'local') fallbackNodeId = b.nodeId;
+      if (!fallbackProvider && b.modelProvider && b.modelId) {
+        fallbackProvider = b.modelProvider;
+        fallbackModelId = b.modelId;
+        break;
+      }
+    }
+  }
+  return {
+    id: HUB_ROUTER_BOT_ID,
+    name: '中枢总管',
+    description: '系统内置全局调度总管（自然语言派发跨项目与跨分身后台任务）',
+    nodeId: fallbackNodeId,
+    modelProvider: fallbackProvider,
+    modelId: fallbackModelId,
+    thinkingLevel: 'medium',
+    enabledSkills: [],
+    enabledExtensions: [],
+    updatedAt: '',
+  };
+}
+
+/** 判定是否为中枢总管会话：未归档、无父会话，且 leadBotId 绑定 hub-router 或标题精确匹配（遗留会话） */
 export function isHubAssistantSession(
-  session: Pick<SessionRecord, 'title' | 'archived' | 'parentSessionId'>
+  session: Pick<SessionRecord, 'title' | 'archived' | 'parentSessionId'> & { leadBotId?: string }
 ): boolean {
-  return !session.archived && !session.parentSessionId && session.title === HUB_ASSISTANT_TITLE;
+  if (session.archived || session.parentSessionId) return false;
+  return session.leadBotId === HUB_ROUTER_BOT_ID || session.title === HUB_ASSISTANT_TITLE;
 }
 
 /** 选取当前中枢总管会话（同标题存在多条时取最近活跃的一条） */
@@ -326,8 +362,11 @@ export function buildAssistantEntries(
   unreadCounts: Record<string, number> = {}
 ): AssistantEntry[] {
   const botsById = new Map(bots.map((b) => [b.id, b] as const));
+  // hub-router 为系统内置虚拟身份（仅中枢总管会话使用），绝不占据个人助理通讯录行
   const primaryBots = bots.filter(
-    (bot) => !bot.parentBotId || !bots.some((b) => b.id === bot.parentBotId)
+    (bot) =>
+      bot.id !== HUB_ROUTER_BOT_ID &&
+      (!bot.parentBotId || !bots.some((b) => b.id === bot.parentBotId))
   );
   const subagentCountByParent = new Map<string, number>();
   for (const bot of bots) {
@@ -438,7 +477,10 @@ export function buildActivePulseEntries(
       leadBot,
       spaceName,
       spacePath,
-      containerLabel: spaceName || leadBot?.name || session.leadBotId,
+      containerLabel:
+        spaceName ||
+        leadBot?.name ||
+        (session.leadBotId === HUB_ROUTER_BOT_ID ? '中枢总管' : session.leadBotId),
       isChild: Boolean(session.parentSessionId),
     });
   }
@@ -519,7 +561,9 @@ export function resolveContextTabGroup(
   return {
     kind: 'assistant',
     key: activeSession.leadBotId,
-    label: leadBot?.name || activeSession.leadBotId,
+    label:
+      leadBot?.name ||
+      (activeSession.leadBotId === HUB_ROUTER_BOT_ID ? '中枢总管' : activeSession.leadBotId),
     spacePath: null,
     leadBot,
     tabs,
