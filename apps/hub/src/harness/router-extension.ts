@@ -16,15 +16,16 @@ import {
 	defineTool,
 	section,
 	type AgentChange,
-	type ConversationId,
 	type Extension,
 	type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import {
 	AskDoc,
+	conversationIdToString,
 	RecallIndexDoc,
 	type RecallIndexState,
 	type RecallNode,
+	stringToConversationId,
 	TargetDoc,
 	WorkerRegistryDoc,
 	type WorkerEntry,
@@ -76,16 +77,6 @@ const fallbackWorkerAgent: WorkerAgentFactory = ({ cwd }) => ({
 });
 
 /** Cap for `contentPreview` / `summary` strings stored in the recall index. */
-// Branded ConversationId <-> string: documents store plain strings.
-const toId = (value: string): ConversationId => {
-	const numeric = Number(value);
-	if (!Number.isInteger(numeric)) throw new Error(`invalid conversation id: ${value}`);
-	return numeric as ConversationId;
-};
-const idToString = (id: ConversationId): string => String(id);
-const conversationIdToString = idToString;
-const stringToConversationId = toId;
-
 const PREVIEW_LIMIT = 240;
 
 export const preview = (text: string, limit = PREVIEW_LIMIT): string =>
@@ -385,11 +376,26 @@ function renderWorkers(registry: { workers: Record<string, WorkerEntry> }): stri
 	return lines.join("\n");
 }
 
+/** Releases a worker's git worktree wherever it lives: local disk or a remote node (see HubDurableRuntimeOptions.releaseWorktree). */
+export type WorktreeReleaser = (info: {
+	nodeId: string;
+	cwd: string;
+	worktreePath: string;
+	workerId: string;
+}) => Promise<void>;
+
+/** Default release: best-effort local `git worktree remove` + prune (never throws). */
+const defaultWorktreeRelease: WorktreeReleaser = async (info) => {
+	await releaseLocalWorktree(info.cwd, info.worktreePath);
+};
+
 export function createRouterExtension(options: {
 	resolvePersona: PersonaResolver;
 	/** All registered personas, so the Router prompt can list its subagents and peer bots. */
 	listPersonas?: () => ReadonlyArray<PersonaListing>;
 	workerAgent?: WorkerAgentFactory;
+	/** Host hook releasing a stopped worker's worktree (local `git worktree remove` or a remote node RPC); default: local release only. */
+	releaseWorktree?: WorktreeReleaser;
 }): Extension {
 	const workerAgent = options.workerAgent ?? fallbackWorkerAgent;
 
@@ -836,11 +842,17 @@ export function createRouterExtension(options: {
 				}
 			}, context);
 			// An explicitly aborted worktree worker is nobody's to inspect: release its
-			// git worktree so `.botd-worktrees/` does not accumulate dead checkouts.
-			// (A completed worker's worktree survives: its branch may be merged later.)
+			// git worktree (local or remote per the worker's node) so `.botd-worktrees/`
+			// does not accumulate dead checkouts. (A completed worker's worktree
+			// survives: its branch may be merged later.)
 			if (entry.worktreePath !== undefined && entry.worktreePath !== "") {
-				const baseCwd = entry.cwd === "" ? process.cwd() : entry.cwd;
-				await releaseLocalWorktree(baseCwd, entry.worktreePath, entry.branchName).catch(() => undefined);
+				const release = options.releaseWorktree ?? defaultWorktreeRelease;
+				await release({
+					nodeId: entry.nodeId,
+					cwd: entry.cwd === "" ? process.cwd() : entry.cwd,
+					worktreePath: entry.worktreePath,
+					workerId: args.workerId,
+				}).catch(() => undefined);
 			}
 			return {
 				output: [{ type: "text", text: `Worker ${args.workerId} aborted.` }],
