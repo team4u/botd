@@ -37,6 +37,12 @@ pnpm dev:web
 - 单元测试单个用例最长 60s：写新用例一律显式声明 `{ timeout: 60_000 }`（runner 为 `tsx --test`），避免 await 挂起导致死锁卡死整个测试进程。
 - 纯逻辑单测应在毫秒级完成；确需等待异步（真实子进程、SSE 流等）才允许逼近上限。
 
+## 前端组件导出规范（保 Fast Refresh）
+
+- `.tsx` 组件文件**只导出组件**：不得混合导出函数、常量等非组件内容，否则 React Fast Refresh 失效（`Could not Fast Refresh ... export is incompatible`），热更新退化为整树 remount，所有页面状态丢失（弹窗关闭、输入清空），体感即「每次改代码都刷新」。
+- 需要导出的纯函数/常量放进独立领域模块（如 `src/session-space.ts`、`src/message-format.ts`），组件文件内部 import 消费；无外部引用的 helper 直接去掉 export 私有化。
+- Vite 日志出现 `Could not Fast Refresh` 即为违规信号，当场修掉，不留到事后。
+
 ## 版本发布与分发规范
 
 - **触发事实源**：以 GitHub Release 作为唯一触发源，由 `scripts/release.ts` 驱动全流程（版本同步 → 质量检验 → 规范提交 → 创建 Release）。本地不手工打 Git 标签，禁止脱离发行流程直接 `npm publish`。

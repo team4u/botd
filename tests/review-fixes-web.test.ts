@@ -17,7 +17,7 @@ export async function load(url, context, nextLoad) {
 );
 
 test('2. pickCurrentDirectSession: 严格排除 parentSessionId 子会话与归档会话', async () => {
-  const sidebarModule = (await import('../apps/web/src/components/Sidebar.js' as any)) as {
+  const sidebarModule = (await import('../apps/web/src/session-space.js' as any)) as {
     pickCurrentDirectSession: (sessions: SessionRecord[], botId: string) => SessionRecord | undefined;
   };
   const { pickCurrentDirectSession } = sidebarModule;
@@ -115,8 +115,8 @@ const mkBot = (over: Partial<BotConfig> & { id: string; name: string }): BotConf
 } as unknown as BotConfig);
 
 test('buildAssistantEntries: 每个主分身聚合为 1 条记录，汇总未读/最高注意力/directSessions', async () => {
-  const { buildAssistantEntries } = (await import('../apps/web/src/components/Sidebar.js' as any)) as {
-    buildAssistantEntries: typeof import('../apps/web/src/components/Sidebar.js').buildAssistantEntries;
+  const { buildAssistantEntries } = (await import('../apps/web/src/session-space.js' as any)) as {
+    buildAssistantEntries: typeof import('../apps/web/src/session-space.js').buildAssistantEntries;
   };
 
   const botA = mkBot({ id: 'bot_a', name: '助理 A' });
@@ -163,8 +163,8 @@ test('buildAssistantEntries: 每个主分身聚合为 1 条记录，汇总未读
 });
 
 test('buildActivePulseEntries: 仅含非 idle 未归档会话，支持 priority 与 grouped 排序', async () => {
-  const { buildActivePulseEntries } = (await import('../apps/web/src/components/Sidebar.js' as any)) as {
-    buildActivePulseEntries: typeof import('../apps/web/src/components/Sidebar.js').buildActivePulseEntries;
+  const { buildActivePulseEntries } = (await import('../apps/web/src/session-space.js' as any)) as {
+    buildActivePulseEntries: typeof import('../apps/web/src/session-space.js').buildActivePulseEntries;
   };
 
   const botDev = mkBot({ id: 'bot_dev', name: 'Dev Bot', workspaceDir: '/root/code/botd' });
@@ -207,8 +207,8 @@ test('buildActivePulseEntries: 仅含非 idle 未归档会话，支持 priority 
 });
 
 test('resolveContextTabGroup: Space 会话与 Assistant 会话分别聚合平级未归档主会话 Tabs', async () => {
-  const { resolveContextTabGroup } = (await import('../apps/web/src/components/Sidebar.js' as any)) as {
-    resolveContextTabGroup: typeof import('../apps/web/src/components/Sidebar.js').resolveContextTabGroup;
+  const { resolveContextTabGroup } = (await import('../apps/web/src/session-space.js' as any)) as {
+    resolveContextTabGroup: typeof import('../apps/web/src/session-space.js').resolveContextTabGroup;
   };
 
   const botDev = mkBot({ id: 'bot_dev', name: 'Dev Bot' });
@@ -270,7 +270,7 @@ test('resolveContextTabGroup: Space 会话与 Assistant 会话分别聚合平级
 // ==========================================
 
 test('deriveCallbackTitle: 按正文语义推导回调卡标题', async () => {
-  const { deriveCallbackTitle } = (await import('../apps/web/src/components/MessageItem.js' as any)) as {
+  const { deriveCallbackTitle } = (await import('../apps/web/src/message-format.js' as any)) as {
     deriveCallbackTitle: (content: string) => string;
   };
   assert.equal(deriveCallbackTitle('[Background Job `build`] 已退出'), '后台进程完成');
@@ -282,7 +282,7 @@ test('deriveCallbackTitle: 按正文语义推导回调卡标题', async () => {
 });
 
 test('splitCallbackReceipt: 剥离 [Wake-up] 前缀并拆分 headline / detailBody', async () => {
-  const { splitCallbackReceipt } = (await import('../apps/web/src/components/MessageItem.js' as any)) as {
+  const { splitCallbackReceipt } = (await import('../apps/web/src/message-format.js' as any)) as {
     splitCallbackReceipt: (content: string) => { headline: string; detailBody: string | null };
   };
 

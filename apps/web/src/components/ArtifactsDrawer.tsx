@@ -13,7 +13,7 @@ import {
 import type { ArtifactRecord, BotConfig, MessageAttachment } from '@botd/protocol';
 import { api } from '../api';
 import { onGlobalEvent } from '../events';
-import { formatFileSize } from './MessageItem';
+import { formatFileSize } from '../message-format';
 import { AttachmentPreviewModal } from './AttachmentPreviewModal';
 
 /** 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前，超过 7 天退化为本地日期 */

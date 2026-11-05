@@ -28,7 +28,7 @@ export async function load(url, context, nextLoad) {
 async function loadSidebarModule(): Promise<{
   pickCurrentDirectSession: (sessions: SessionRecord[], botId: string) => SessionRecord | undefined;
 }> {
-  const sidebarModule = (await import('../apps/web/src/components/Sidebar.js' as any)) as any;
+  const sidebarModule = (await import('../apps/web/src/session-space.js' as any)) as any;
   return sidebarModule;
 }
 

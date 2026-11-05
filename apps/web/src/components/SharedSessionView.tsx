@@ -15,7 +15,8 @@ import type {
   NodeRecord,
 } from '@botd/protocol';
 import { api } from '../api';
-import { MessageItem, formatShortModel, formatChatDayLabel, isSameCalendarDay } from './MessageItem';
+import { MessageItem } from './MessageItem';
+import { formatShortModel, formatChatDayLabel, isSameCalendarDay } from '../message-format';
 import ThemeToggle from './ThemeToggle';
 
 interface SharedSessionViewProps {

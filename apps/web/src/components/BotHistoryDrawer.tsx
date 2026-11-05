@@ -13,7 +13,7 @@ import {
 import type { BotConfig, SessionRecord } from '@botd/protocol';
 import { api } from '../api';
 import { ConfirmDialog } from './ConfirmDialog';
-import { pickCurrentDirectSession } from './Sidebar';
+import { pickCurrentDirectSession } from '../session-space';
 
 /** 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前，超过 7 天退化为本地日期 */
 function formatRelativeTime(iso?: string): string | null {

@@ -30,11 +30,20 @@ import type { SessionRecord, BotConfig, NodeRecord, UserRecord } from '@botd/pro
 import type { MessageSearchHit } from '@botd/protocol';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import ThemeToggle from './ThemeToggle.js';
-import { botAccentFor, subagentColorStyles } from './MessageItem.js';
 import { api } from '../api.js';
+import {
+  getSessionAttention,
+  ATTENTION_VISUALS,
+  resolveSessionWorkspaceDir,
+  buildSpaceGroups,
+  buildAssistantEntries,
+  buildActivePulseEntries,
+  activityTimeOf,
+  type SessionAttentionLevel,
+} from '../session-space.js';
 
 /** 并行话题一键创建的上下文输入 */
-export interface ParallelTopicContext {
+interface ParallelTopicContext {
   leadBotId: string;
   workspaceDir?: string;
   title?: string;
@@ -72,427 +81,6 @@ interface SidebarProps {
  * 在未归档、主控为该 bot 的会话中，取 updatedAt 最新的一个。
  * 分身快捷入口、active 高亮与 App 的 handleOpenBotChat 共用此规则，避免逻辑漂移。
  */
-export function pickCurrentDirectSession(
-  sessions: SessionRecord[],
-  botId: string
-): SessionRecord | undefined {
-  let latest: SessionRecord | undefined;
-  let latestTime = -Infinity;
-  for (const s of sessions) {
-    if (s.archived) continue;
-    if (s.parentSessionId) continue;
-    if (s.leadBotId !== botId) continue;
-    const time = new Date(s.updatedAt).getTime();
-    if (Number.isFinite(time) && time > latestTime) {
-      latest = s;
-      latestTime = time;
-    }
-  }
-  return latest;
-}
-
-// ---------------------------------------------------------------------------
-// 注意力优先级（Attention Priority）：纯函数，可独立测试
-// ---------------------------------------------------------------------------
-
-/** 会话注意力级别：idle（静默）之上的三级才值得开发者分神去看 */
-export type SessionAttentionLevel = 'failed' | 'done_unseen' | 'working' | 'idle';
-
-/** 需要打断/吸引注意力的活跃级别 */
-export type ActiveAttention = Exclude<SessionAttentionLevel, 'idle'>;
-
-/** 注意力优先级数值：越大越值得优先关注（failed > done_unseen > working > idle） */
-export const ATTENTION_PRIORITY: Record<SessionAttentionLevel, number> = {
-  failed: 4,
-  done_unseen: 3,
-  working: 2,
-  idle: 1,
-};
-
-/** 各注意力级别的视觉表现：状态灯圆点 + 文案 + 状态胶囊配色 */
-export const ATTENTION_VISUALS: Record<
-  ActiveAttention,
-  { dot: string; label: string; pill: string }
-> = {
-  failed: {
-    dot: 'bg-rose-500',
-    label: '异常',
-    pill: 'bg-rose-100 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400',
-  },
-  done_unseen: {
-    dot: 'bg-emerald-500',
-    label: '待验收',
-    pill: 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400',
-  },
-  working: {
-    dot: 'bg-blue-500 animate-pulse',
-    label: '运行中',
-    pill: 'bg-blue-100 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400',
-  },
-};
-
-/**
- * 会话注意力优先级判定（纯函数）：
- * failed(4) > done_unseen(3，刚干完活还没验收) > working(2) > idle(1)。
- */
-export function getSessionAttention(
-  session: Pick<SessionRecord, 'status'>,
-  unreadCount: number
-): SessionAttentionLevel {
-  if (session.status === 'failed') return 'failed';
-  if (session.status === 'idle' && unreadCount > 0) return 'done_unseen';
-  if (session.status === 'running' || session.status === 'queued') return 'working';
-  return 'idle';
-}
-
-// workspaceDir 字段由并行分支写入 protocol，此处以结构化类型扩展安全读取，避免耦合
-interface WorkspaceAware {
-  workspaceDir?: string;
-}
-
-/** 规范化工作区目录：去首尾空白与多余尾部斜杠；空值返回 null */
-export function normalizeWorkspaceDir(dir?: string | null): string | null {
-  if (typeof dir !== 'string') return null;
-  const trimmed = dir.trim();
-  if (!trimmed) return null;
-  if (trimmed === '/') return '/';
-  return trimmed.replace(/\/+$/, '');
-}
-
-/** Space 展示名取路径最后一段（/root/code/botd -> botd），根目录显示为 / */
-export function getSpaceDisplayName(dir: string): string {
-  const segment = dir.split('/').filter(Boolean).pop();
-  return segment || '/';
-}
-
-/** 会话归属的项目目录：会话自身 workspaceDir 优先，其次其主控 BOT 的默认工作区 */
-export function resolveSessionWorkspaceDir(
-  session: SessionRecord,
-  botsById: Map<string, BotConfig>
-): string | null {
-  const own = normalizeWorkspaceDir((session as SessionRecord & WorkspaceAware).workspaceDir);
-  if (own) return own;
-  const leadBot = botsById.get(session.leadBotId);
-  if (!leadBot) return null;
-  return normalizeWorkspaceDir((leadBot as BotConfig & WorkspaceAware).workspaceDir);
-}
-
-/** 项目空间分组：Space 头部状态灯取组内会话的最高注意力级别 */
-export interface SpaceGroup {
-  /** 规范化后的目录路径（分组 key） */
-  path: string;
-  /** 展示名（路径最后一段） */
-  name: string;
-  /** 组内未归档主控会话（含当前单聊），按活跃时间倒序 */
-  sessions: SessionRecord[];
-  /** 绑定到该 Space 的主 BOT（可能尚无会话） */
-  botIds: string[];
-  /** 组内最高注意力级别 */
-  topAttention: SessionAttentionLevel;
-  /** 组内最近活跃时间戳（ms），无会话时取 BOT 更新时间 */
-  lastActivityAt: number;
-}
-
-const activityTimeOf = (s: SessionRecord) =>
-  new Date(s.lastMessageAt ?? s.updatedAt).getTime() || 0;
-
-/** 从未归档主控会话与主 BOT 的 workspaceDir 提取项目 Space 分组（纯函数） */
-export function buildSpaceGroups(
-  sessions: SessionRecord[],
-  bots: BotConfig[],
-  unreadCounts: Record<string, number> = {}
-): SpaceGroup[] {
-  const botsById = new Map(bots.map((b) => [b.id, b] as const));
-  const groups = new Map<string, SpaceGroup>();
-  const ensureGroup = (dir: string): SpaceGroup => {
-    let group = groups.get(dir);
-    if (!group) {
-      group = {
-        path: dir,
-        name: getSpaceDisplayName(dir),
-        sessions: [],
-        botIds: [],
-        topAttention: 'idle',
-        lastActivityAt: 0,
-      };
-      groups.set(dir, group);
-    }
-    return group;
-  };
-
-  // 先登记绑定了 workspaceDir 的主 BOT，保证「有 Bot 无会话」的 Space 也可被发现
-  for (const bot of bots) {
-    const isSubagent = bot.parentBotId && bots.some((b) => b.id === bot.parentBotId);
-    if (isSubagent) continue;
-    const dir = normalizeWorkspaceDir((bot as BotConfig & WorkspaceAware).workspaceDir);
-    if (!dir) continue;
-    const group = ensureGroup(dir);
-    group.botIds.push(bot.id);
-    group.lastActivityAt = Math.max(
-      group.lastActivityAt,
-      new Date(bot.updatedAt).getTime() || 0
-    );
-  }
-
-  for (const session of sessions) {
-    if (session.archived || session.parentSessionId) continue;
-    const dir = resolveSessionWorkspaceDir(session, botsById);
-    if (!dir) continue;
-    const group = ensureGroup(dir);
-    group.sessions.push(session);
-    group.lastActivityAt = Math.max(group.lastActivityAt, activityTimeOf(session));
-  }
-
-  const list = [...groups.values()];
-  for (const group of list) {
-    group.sessions.sort((a, b) => activityTimeOf(b) - activityTimeOf(a));
-    group.topAttention = group.sessions.reduce<SessionAttentionLevel>((acc, s) => {
-      const level = getSessionAttention(s, unreadCounts[s.id] ?? 0);
-      return ATTENTION_PRIORITY[level] > ATTENTION_PRIORITY[acc] ? level : acc;
-    }, 'idle');
-  }
-  // 排序：先按汇总注意力优先级降序，再按最近活跃时间降序
-  list.sort(
-    (a, b) =>
-      ATTENTION_PRIORITY[b.topAttention] - ATTENTION_PRIORITY[a.topAttention] ||
-      b.lastActivityAt - a.lastActivityAt
-  );
-  return list;
-}
-
-// ---------------------------------------------------------------------------
-// 个人助理通讯录聚合（AssistantEntry）：每个主分身固定一行，零会话平铺
-// ---------------------------------------------------------------------------
-
-/** 主分身通讯录条目：微信/Telegram 式置顶联系人卡片的数据源 */
-export interface AssistantEntry {
-  bot: BotConfig;
-  /** 该分身当前的默认单聊会话（未绑定 Space 的最新主会话） */
-  currentSession?: SessionRecord;
-  /** 归属该分身且未绑定 Space 的未归档主会话列表（按活跃时间倒序） */
-  directSessions: SessionRecord[];
-  /** 该分身关联的所有未归档主会话（含 Space 内会话，用于计算未读/注意力） */
-  allActiveSessions: SessionRecord[];
-  /** 汇总最高注意力级别 */
-  topAttention: SessionAttentionLevel;
-  /** 汇总未读消息数 */
-  unreadCount: number;
-  /** 最新消息预览（仅统计未绑定 Space 的纯个人助理单聊，绝不与项目空间重复） */
-  lastMessagePreview?: string;
-  /** 最新活跃时间戳（ms，仅统计纯个人助理单聊） */
-  lastActivityAt: number;
-  /** 麾下子代理数量 */
-  subagentCount: number;
-}
-
-/**
- * 把每个主分身聚合为一条 AssistantEntry（纯函数）：
- * - directSessions 只收未归档、无 parentSessionId、未绑定 Space 的主会话；
- * - currentSession / lastMessagePreview / lastActivityAt 严格来自 directSessions，
- *   保证绑定了项目目录的会话 100% 只归属项目空间，绝不在助理列表重复预览；
- * - 未读数与注意力级别为全部活跃会话汇总（含 Space 内未读，保证通知不遗漏）。
- */
-export function buildAssistantEntries(
-  sessions: SessionRecord[],
-  bots: BotConfig[],
-  unreadCounts: Record<string, number> = {}
-): AssistantEntry[] {
-  const botsById = new Map(bots.map((b) => [b.id, b] as const));
-  const primaryBots = bots.filter(
-    (bot) => !bot.parentBotId || !bots.some((b) => b.id === bot.parentBotId)
-  );
-  const subagentCountByParent = new Map<string, number>();
-  for (const bot of bots) {
-    if (!bot.parentBotId) continue;
-    subagentCountByParent.set(bot.parentBotId, (subagentCountByParent.get(bot.parentBotId) ?? 0) + 1);
-  }
-
-  const entries: AssistantEntry[] = primaryBots.map((bot) => {
-    const directSessions: SessionRecord[] = [];
-    const allActiveSessions: SessionRecord[] = [];
-    for (const s of sessions) {
-      if (s.archived || s.parentSessionId) continue;
-      if (s.leadBotId !== bot.id) continue;
-      allActiveSessions.push(s);
-      const dir = resolveSessionWorkspaceDir(s, botsById);
-      if (!dir) directSessions.push(s);
-    }
-    directSessions.sort((a, b) => activityTimeOf(b) - activityTimeOf(a));
-    // 当前单聊与预览/活跃时间严格来自纯个人助理会话（directSessions 已按活跃时间倒序）
-    const currentSession = directSessions[0];
-
-    let topAttention: SessionAttentionLevel = 'idle';
-    let unreadCount = 0;
-    for (const s of allActiveSessions) {
-      const unread = unreadCounts[s.id] ?? 0;
-      unreadCount += unread;
-      const level = getSessionAttention(s, unread);
-      if (ATTENTION_PRIORITY[level] > ATTENTION_PRIORITY[topAttention]) topAttention = level;
-    }
-    const latestDirect = directSessions.reduce<SessionRecord | undefined>(
-      (acc, s) => (acc === undefined || activityTimeOf(s) > activityTimeOf(acc) ? s : acc),
-      undefined,
-    );
-    const lastActivityAt = Math.max(
-      new Date(bot.updatedAt).getTime() || 0,
-      latestDirect ? activityTimeOf(latestDirect) : 0,
-    );
-
-    return {
-      bot,
-      currentSession,
-      directSessions,
-      allActiveSessions,
-      topAttention,
-      unreadCount,
-      lastMessagePreview: latestDirect?.lastMessagePreview,
-      lastActivityAt,
-      subagentCount: subagentCountByParent.get(bot.id) ?? 0,
-    };
-  });
-
-  // 排序：有活跃态的浮顶（注意力优先级降序），再按最近活跃时间降序
-  entries.sort(
-    (a, b) =>
-      ATTENTION_PRIORITY[b.topAttention] - ATTENTION_PRIORITY[a.topAttention] ||
-      b.lastActivityAt - a.lastActivityAt
-  );
-  return entries;
-}
-
-// ---------------------------------------------------------------------------
-// 动态注意力脉冲（Active Pulse）：全局跨容器的实时雷达
-// ---------------------------------------------------------------------------
-
-/** 活跃雷达条目：一条值得关注的会话（主会话或子代理任务） */
-export interface ActivePulseEntry {
-  session: SessionRecord;
-  attention: ActiveAttention;
-  unread: number;
-  leadBot?: BotConfig;
-  spaceName: string | null;
-  spacePath: string | null;
-  /** 容器标签：spaceName || leadBot?.name || session.leadBotId */
-  containerLabel: string;
-  isChild: boolean;
-}
-
-/**
- * 全局活跃雷达（纯函数）：收集所有非 idle 的未归档会话（含子代理任务）。
- * sortMode='priority' 按 ATTENTION_PRIORITY 降序再按活跃时间降序；
- * sortMode='grouped' 先按容器标签分组（字典序），组内按优先级降序。
- */
-export function buildActivePulseEntries(
-  sessions: SessionRecord[],
-  bots: BotConfig[],
-  unreadCounts: Record<string, number> = {},
-  sortMode: 'priority' | 'grouped' = 'priority'
-): ActivePulseEntry[] {
-  const botsById = new Map(bots.map((b) => [b.id, b] as const));
-  const entries: ActivePulseEntry[] = [];
-  for (const session of sessions) {
-    if (session.archived) continue;
-    const unread = unreadCounts[session.id] ?? 0;
-    const attention = getSessionAttention(session, unread);
-    if (attention === 'idle') continue;
-    const leadBot = botsById.get(session.leadBotId);
-    const spacePath = resolveSessionWorkspaceDir(session, botsById);
-    const spaceName = spacePath ? getSpaceDisplayName(spacePath) : null;
-    entries.push({
-      session,
-      attention,
-      unread,
-      leadBot,
-      spaceName,
-      spacePath,
-      containerLabel: spaceName || leadBot?.name || session.leadBotId,
-      isChild: Boolean(session.parentSessionId),
-    });
-  }
-
-  const byPriorityDesc = (a: ActivePulseEntry, b: ActivePulseEntry) =>
-    ATTENTION_PRIORITY[b.attention] - ATTENTION_PRIORITY[a.attention] ||
-    activityTimeOf(b.session) - activityTimeOf(a.session);
-  if (sortMode === 'grouped') {
-    entries.sort(
-      (a, b) =>
-        a.containerLabel.localeCompare(b.containerLabel, 'zh-Hans-CN') || byPriorityDesc(a, b)
-    );
-  } else {
-    entries.sort(byPriorityDesc);
-  }
-  return entries;
-}
-
-// ---------------------------------------------------------------------------
-// 顶栏上下文 Tab 分组（Context Tab Group）：ChatView 水平标签栏的数据源
-// ---------------------------------------------------------------------------
-
-/** 当前会话所属容器（Space 或个人助理）与其平级未归档主会话 Tabs */
-export interface ContextTabGroup {
-  kind: 'space' | 'assistant';
-  /** spacePath 或 botId */
-  key: string;
-  /** space 展示名 或 bot 名称 */
-  label: string;
-  spacePath: string | null;
-  leadBot?: BotConfig;
-  /** 当前容器下的未归档主会话列表（按 createdAt 升序，保证 Tab 位置稳定） */
-  tabs: SessionRecord[];
-}
-
-/**
- * 解析当前会话所属容器与平级 Tabs（纯函数）：
- * - 绑定了 workspaceDir（会话自身或主控 BOT）-> kind='space'；
- * - 否则 -> kind='assistant'，聚合该主控下所有未绑定 Space 的主会话。
- * Tabs 一律按 createdAt 升序，切换 Tab 时标签位置稳定不乱跳。
- */
-export function resolveContextTabGroup(
-  activeSession: SessionRecord | null,
-  sessions: SessionRecord[],
-  bots: BotConfig[]
-): ContextTabGroup | null {
-  if (!activeSession) return null;
-  const botsById = new Map(bots.map((b) => [b.id, b] as const));
-
-  const dir = resolveSessionWorkspaceDir(activeSession, botsById);
-  const leadBot = botsById.get(activeSession.leadBotId);
-
-  if (dir) {
-    const tabs = sessions
-      .filter(
-        (s) => !s.archived && !s.parentSessionId && resolveSessionWorkspaceDir(s, botsById) === dir
-      )
-      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-    return {
-      kind: 'space',
-      key: dir,
-      label: getSpaceDisplayName(dir),
-      spacePath: dir,
-      leadBot,
-      tabs,
-    };
-  }
-
-  const tabs = sessions
-    .filter(
-      (s) =>
-        !s.archived &&
-        !s.parentSessionId &&
-        s.leadBotId === activeSession.leadBotId &&
-        !resolveSessionWorkspaceDir(s, botsById)
-    )
-    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-  return {
-    kind: 'assistant',
-    key: activeSession.leadBotId,
-    label: leadBot?.name || activeSession.leadBotId,
-    spacePath: null,
-    leadBot,
-    tabs,
-  };
-}
-
 // ---------------------------------------------------------------------------
 // 内部工具与展示组件
 // ---------------------------------------------------------------------------
@@ -576,20 +164,23 @@ const AttentionDot: React.FC<{ level: SessionAttentionLevel; title?: string }> =
   );
 };
 
-/** 分身/会话首字母色块：取色规则与聊天区 BotAvatarBadge 完全一致（子代理色优先，否则按 ID 哈希） */
-const BotTile: React.FC<{ bot?: BotConfig; className?: string }> = ({ bot, className = '' }) => {
-  const accent =
-    bot?.color && subagentColorStyles[bot.color] ? bot.color : botAccentFor(bot?.id || bot?.name || 'bot');
-  const letter = (bot?.name || bot?.id || 'B').trim().charAt(0).toUpperCase() || 'B';
-  return (
-    <span
-      aria-hidden="true"
-      className={`rounded-lg border flex items-center justify-center font-bold select-none shrink-0 ${subagentColorStyles[accent].iconBg} ${className}`}
-    >
-      {letter}
-    </span>
-  );
-};
+/** 分身/会话导航图标：Zinc 单色线性 Bot 符号，选中态反转呼应品牌标；离线由行级降透明度表达 */
+export const BotTile: React.FC<{
+  className?: string;
+  iconClassName?: string;
+  active?: boolean;
+}> = ({ className = '', iconClassName = 'w-3.5 h-3.5', active = false }) => (
+  <span
+    aria-hidden="true"
+    className={`rounded-md border flex items-center justify-center shrink-0 transition-colors ${
+      active
+        ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-zinc-900 dark:border-zinc-100'
+        : 'bg-zinc-100 dark:bg-zinc-800/90 border-zinc-200/80 dark:border-zinc-700/80 text-zinc-500 dark:text-zinc-400'
+    } ${className}`}
+  >
+    <Bot className={iconClassName} />
+  </span>
+);
 
 /** 会话行「⋯」操作菜单：归档/恢复 + 删除。点击外部 / Esc 关闭 */
 const SessionItemMenu: React.FC<{
@@ -681,10 +272,9 @@ const SessionItemMenu: React.FC<{
   );
 };
 
-/** 会话行（Space 树内 / 归档区）：min-h-[48px] 触达 + 状态灯 / 相对时间 / 未读 / 快捷菜单 */
+/** 会话行（Space 树内 / 活跃雷达 / 归档区）：紧凑单行，状态灯 / 胶囊 / 时间 / 未读 / 快捷菜单 */
 const SessionRow: React.FC<{
   session: SessionRecord;
-  leadBot?: BotConfig;
   botsById: Map<string, BotConfig>;
   isActive: boolean;
   attention: SessionAttentionLevel;
@@ -693,13 +283,14 @@ const SessionRow: React.FC<{
   selected: boolean;
   dimmed?: boolean;
   treeConnector?: string | null;
+  /** 容器归属前缀（雷达行用）：空间名或助理名，如 botd / 随手记 */
+  contextLabel?: string | null;
   onSelect: () => void;
   onToggleSelect: () => void;
   onSetArchived?: (sessionId: string, archived: boolean) => void;
   onDelete: (session: SessionRecord) => void;
 }> = ({
   session,
-  leadBot,
   botsById,
   isActive,
   attention,
@@ -708,6 +299,7 @@ const SessionRow: React.FC<{
   selected,
   dimmed = false,
   treeConnector = null,
+  contextLabel = null,
   onSelect,
   onToggleSelect,
   onSetArchived,
@@ -733,7 +325,7 @@ const SessionRow: React.FC<{
           handleClick();
         }
       }}
-      className={`group min-h-[48px] w-full text-left px-2 py-1.5 rounded-xl border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 flex items-center gap-2 ${
+      className={`group min-h-[40px] w-full text-left px-2 py-1.5 rounded-lg border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 flex items-center gap-2 ${
         dimmed ? 'opacity-70 hover:opacity-100' : ''
       } ${
         batchMode && selected
@@ -758,50 +350,39 @@ const SessionRow: React.FC<{
           <Square className="w-4 h-4 shrink-0 text-zinc-400 dark:text-zinc-500" />
         )
       ) : (
-        <span className="relative shrink-0">
-          <BotTile bot={leadBot} className="w-7 h-7 text-xs" />
-          {attention !== 'idle' && (
-            <span
-              title={ATTENTION_VISUALS[attention].label}
-              className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-zinc-50 dark:border-zinc-900 ${
-                ATTENTION_VISUALS[attention].dot
-              }`}
-            />
-          )}
-        </span>
+        <AttentionDot level={attention} />
       )}
 
-      <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-2">
+      <div className="flex-1 min-w-0 flex items-baseline gap-2">
+        {contextLabel && (
           <span
-            className={`truncate text-[13px] font-semibold ${
-              isActive ? 'text-zinc-900 dark:text-zinc-100' : 'text-zinc-800 dark:text-zinc-200'
+            className="shrink-0 font-mono text-[10px] text-zinc-400 dark:text-zinc-500 truncate max-w-[80px]"
+            title={contextLabel}
+          >
+            {contextLabel}
+          </span>
+        )}
+        <span
+          className={`truncate text-[13px] font-semibold ${
+            isActive ? 'text-zinc-900 dark:text-zinc-100' : 'text-zinc-800 dark:text-zinc-200'
+          }`}
+        >
+          {title}
+        </span>
+        {attention !== 'idle' && (
+          <span
+            className={`shrink-0 px-1.5 py-0.5 rounded-full text-[10px] font-medium ${
+              ATTENTION_VISUALS[attention].pill
             }`}
           >
-            {title}
+            {ATTENTION_VISUALS[attention].label}
           </span>
-          {relativeTime && (
-            <span className="ml-auto shrink-0 text-[10px] text-zinc-400 dark:text-zinc-500">
-              {relativeTime}
-            </span>
-          )}
-        </div>
-        {attention !== 'idle' && (
-          <div className="flex items-center gap-1.5 mt-0.5 min-w-0">
-            <span
-              className={`shrink-0 px-1.5 py-0.5 rounded-full text-[10px] font-medium ${
-                ATTENTION_VISUALS[attention].pill
-              }`}
-            >
-              {ATTENTION_VISUALS[attention].label}
-            </span>
-            <UnreadBadge count={unread} />
-          </div>
         )}
-        {attention === 'idle' && unread > 0 && (
-          <div className="mt-0.5">
-            <UnreadBadge count={unread} />
-          </div>
+        <UnreadBadge count={unread} />
+        {relativeTime && (
+          <span className="ml-auto shrink-0 text-[10px] text-zinc-400 dark:text-zinc-500">
+            {relativeTime}
+          </span>
         )}
       </div>
 
@@ -812,15 +393,14 @@ const SessionRow: React.FC<{
   );
 };
 
-/** 子任务会话紧凑行（44px 触达）：色块 + 标题 + 时间 + 状态点/未读 */
+/** 子任务会话紧凑行：状态灯 + 标题 + 时间 + 未读 */
 const ChildSessionRow: React.FC<{
   session: SessionRecord;
-  leadBot?: BotConfig;
   isActive: boolean;
   attention: SessionAttentionLevel;
   unread: number;
   onSelect: () => void;
-}> = ({ session, leadBot, isActive, attention, unread, onSelect }) => {
+}> = ({ session, isActive, attention, unread, onSelect }) => {
   const relativeTime = formatRelativeTime(session.lastMessageAt ?? session.updatedAt);
   return (
     <div
@@ -840,17 +420,11 @@ const ChildSessionRow: React.FC<{
           : 'border-transparent hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80'
       }`}
     >
-      <span className="relative shrink-0">
-        <BotTile bot={leadBot} className="w-6 h-6 text-[10px]" />
-        {attention !== 'idle' && (
-          <span
-            title={ATTENTION_VISUALS[attention].label}
-            className={`absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border-2 border-zinc-50 dark:border-zinc-900 ${
-              ATTENTION_VISUALS[attention].dot
-            }`}
-          />
-        )}
-      </span>
+      {attention !== 'idle' ? (
+        <AttentionDot level={attention} />
+      ) : (
+        <span className="w-2 h-2 shrink-0" aria-hidden="true" />
+      )}
       <span className="truncate text-xs text-zinc-700 dark:text-zinc-300 flex-1 min-w-0">
         {session.title}
       </span>
@@ -960,7 +534,7 @@ const SIDEBAR_COLLAPSED_KEY = 'botd-sidebar-collapsed';
 const SIDEBAR_MODE_KEY = 'botd-sidebar-mode';
 
 /** 侧边栏场景模式：助理（纯通讯录）/ 编程（Spaces+雷达）/ 中枢（全局任务流） */
-export type SidebarMode = 'assistant' | 'coding' | 'pulse';
+type SidebarMode = 'assistant' | 'coding' | 'pulse';
 
 const readSidebarMode = (): SidebarMode => {
   try {
@@ -1276,7 +850,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <SessionRow
       key={session.id}
       session={session}
-      leadBot={botsById.get(session.leadBotId)}
       botsById={botsById}
       isActive={session.id === activeSessionId}
       attention={attentionOf(session)}
@@ -1378,11 +951,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 }}
                 className={`relative w-10 h-10 mx-auto rounded-xl border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
                   isActiveAssistant
-                    ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs'
-                    : 'bg-white/70 dark:bg-zinc-900/70 border-zinc-200/80 dark:border-zinc-800/80 hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80'
+                    ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-zinc-900 dark:border-zinc-100 shadow-xs'
+                    : 'bg-zinc-100 dark:bg-zinc-800/90 text-zinc-500 dark:text-zinc-400 border-zinc-200/80 dark:border-zinc-700/80 hover:bg-zinc-200/80 dark:hover:bg-zinc-800'
                 }`}
               >
-                <BotTile bot={entry.bot} className="w-full h-full text-sm" />
+                <Bot className="w-4.5 h-4.5" />
                 <span
                   className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-zinc-50 dark:border-zinc-900 ${dotClass}`}
                 />
@@ -1618,42 +1191,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 </span>
               </div>
               <div className="space-y-0.5">
-                {activePulseEntries.map((entry) => {
-                  const isActive = entry.session.id === activeSessionId;
-                  return (
-                    <button
-                      key={entry.session.id}
-                      type="button"
-                      onClick={() => handleSelect(entry.session.id)}
-                      title={entry.session.title}
-                      className={`w-full text-left px-2 py-1.5 rounded-lg border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 ${
-                        isActive
-                          ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70'
-                          : 'border-transparent hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80'
-                      }`}
-                    >
-                      {/* 第 1 行：状态灯 + 容器 · 会话标题 + 状态胶囊 + 未读 */}
-                      <span className="flex items-center gap-1.5 min-w-0">
-                        <AttentionDot level={entry.attention} />
-                        <span
-                          className="shrink-0 text-[10px] text-zinc-400 dark:text-zinc-500 truncate max-w-[80px]"
-                          title={entry.leadBot ? `${entry.leadBot.name}${entry.spaceName ? ` · ${entry.spaceName}` : ''}` : entry.containerLabel}
-                        >
-                          {entry.spaceName || entry.leadBot?.name || '会话'}
-                        </span>
-                        <span className="truncate text-xs font-semibold text-zinc-800 dark:text-zinc-200 flex-1">
-                          {sessionDisplayTitle(entry.session, botsById)}
-                        </span>
-                        <span
-                          className={`shrink-0 px-1.5 py-0.5 rounded-full text-[10px] font-medium ${ATTENTION_VISUALS[entry.attention].pill}`}
-                        >
-                          {ATTENTION_VISUALS[entry.attention].label}
-                        </span>
-                        <UnreadBadge count={entry.unread} />
-                      </span>
-                    </button>
-                  );
-                })}
+                {activePulseEntries.map((entry) => (
+                  <SessionRow
+                    key={entry.session.id}
+                    session={entry.session}
+                    botsById={botsById}
+                    isActive={entry.session.id === activeSessionId}
+                    attention={entry.attention}
+                    unread={entry.unread}
+                    batchMode={false}
+                    selected={false}
+                    contextLabel={entry.containerLabel}
+                    onSelect={() => handleSelect(entry.session.id)}
+                    onToggleSelect={() => handleSelect(entry.session.id)}
+                    onSetArchived={onSetArchived}
+                    onDelete={setDeleteTarget}
+                  />
+                ))}
               </div>
             </section>
           )}
@@ -1843,14 +1397,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   );
                   const isActive =
                     !!entry.currentSession && entry.currentSession.id === activeSessionId;
-                  const defaultSpaceDir = resolveSessionWorkspaceDir(
-                    entry.currentSession ?? ({ leadBotId: bot.id } as SessionRecord),
-                    botsById
-                  );
-                  const preview =
-                    entry.lastMessagePreview ||
-                    (defaultSpaceDir ? getSpaceDisplayName(defaultSpaceDir) : null) ||
-                    (nodeOnline ? '节点在线' : '节点离线');
+                  const preview = entry.lastMessagePreview;
+                  const idleOffline = !running && entry.topAttention === 'idle' && !nodeOnline;
 
                   return (
                     <div
@@ -1876,17 +1424,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           }
                         }
                       }}
-                      className={`group min-h-[54px] w-full text-left px-2 py-2 rounded-xl border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 flex items-center gap-2.5 ${
+                      className={`group min-h-[44px] w-full text-left px-2 py-2 rounded-lg border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 flex items-center gap-2.5 ${
+                        idleOffline ? 'opacity-50 hover:opacity-100' : ''
+                      } ${
                         isActive
                           ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs'
                           : 'border-transparent hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80'
                       }`}
                     >
                       <span className="relative shrink-0">
-                        <BotTile bot={bot} className="w-9 h-9 text-sm" />
+                        <BotTile active={isActive} className="w-6 h-6" />
                         <span
                           title={dotTitle}
-                          className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-zinc-50 dark:border-zinc-900 ${dotClass}`}
+                          className={`absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border-2 border-zinc-50 dark:border-zinc-900 ${dotClass}`}
                         />
                       </span>
                       <div className="flex-1 min-w-0">
@@ -1897,7 +1447,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           {entry.subagentCount > 0 && (
                             <span
                               title={`${entry.subagentCount} 个子代理`}
-                              className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border border-zinc-200/80 dark:border-zinc-800"
+                              className="shrink-0 text-[10px] font-medium text-zinc-400 dark:text-zinc-500"
                             >
                               +{entry.subagentCount}
                             </span>
@@ -1908,17 +1458,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             </span>
                           )}
                         </div>
-                        <div className="flex items-center gap-1.5 mt-1 min-w-0">
-                          <span className="truncate text-[11px] text-zinc-500 dark:text-zinc-400 flex-1">
-                            {preview}
-                          </span>
+                        <div className="flex items-center gap-1.5 mt-0.5 min-w-0">
+                          {preview && (
+                            <span className="truncate text-[11px] text-zinc-500 dark:text-zinc-400 flex-1">
+                              {preview}
+                            </span>
+                          )}
+                          {!preview && entry.directSessions.length > 1 && (
+                            <span className="flex-1" aria-hidden="true" />
+                          )}
                           <UnreadBadge count={entry.unreadCount} />
                           {entry.directSessions.length > 1 && (
                             <span
                               title={`${entry.directSessions.length} 个活跃话题`}
-                              className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border border-zinc-200/80 dark:border-zinc-800"
+                              className="shrink-0 text-[10px] font-medium text-zinc-400 dark:text-zinc-500"
                             >
-                              {entry.directSessions.length} 话题
+                              ×{entry.directSessions.length}
                             </span>
                           )}
                         </div>
@@ -1944,7 +1499,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <ChildSessionRow
                   key={session.id}
                   session={session}
-                  leadBot={botsById.get(session.leadBotId)}
                   isActive={session.id === activeSessionId}
                   attention={attentionOf(session)}
                   unread={unreadCounts[session.id] ?? 0}

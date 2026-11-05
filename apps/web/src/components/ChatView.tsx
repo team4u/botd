@@ -44,13 +44,12 @@ import { BotHistoryDrawer } from './BotHistoryDrawer';
 import { WorkersDrawer } from './WorkersDrawer';
 import { useSuperAgentWorkers, isWorkerActive } from '../hooks/useSuperAgentWorkers';
 import { BotEditorModal } from './BotEditorModal';
-import { BotAvatarBadge } from './MessageItem';
 import {
   resolveContextTabGroup,
   getSessionAttention,
   ATTENTION_VISUALS,
   type ContextTabGroup,
-} from './Sidebar';
+} from '../session-space';
 import { BotdUiRenderer } from './generative-ui/BotdUiRenderer';
 import { api } from '../api';
 import { onGlobalEvent } from '../events';
@@ -846,20 +845,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </button>
             </div>
           ) : (
-            /* 身份徽章 + 标题/副标题：点击标题行内重命名，Bot 徽章打开智能体设置 */
+            /* 标题/副标题：点击标题行内重命名 */
             <div
               className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer group/title"
               onClick={startRename}
               title="点击重命名会话"
             >
-              {directBot && (
-                <BotAvatarBadge
-                  botId={directBot.id}
-                  name={directBot.name}
-                  color={directBot.color}
-                  className="w-6 h-6 text-[11px] shrink-0"
-                />
-              )}
               <div className="flex flex-col min-w-0 leading-tight">
                 <span className="font-semibold text-sm sm:text-base text-zinc-900 dark:text-zinc-100 truncate">
                   {session.title}
@@ -1135,12 +1126,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
           ) : (
             contextGroup.leadBot && (
               <span className="shrink-0 inline-flex items-center gap-1 px-1 py-0.5">
-                <BotAvatarBadge
-                  botId={contextGroup.leadBot.id}
-                  name={contextGroup.leadBot.name}
-                  color={contextGroup.leadBot.color}
-                  className="w-4.5 h-4.5 text-[9px]"
-                />
                 <span className="text-[11px] font-mono font-semibold text-zinc-600 dark:text-zinc-300 max-w-[100px] truncate">
                   {contextGroup.label}
                 </span>

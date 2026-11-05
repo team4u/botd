@@ -6,7 +6,7 @@ import {
   pickCurrentDirectSession,
   getSpaceDisplayName,
   normalizeWorkspaceDir,
-} from '../components/Sidebar';
+} from '../session-space';
 import type { AddToastFn } from './useToasts';
 import type { NavigateFn } from './useHashRoute';
 

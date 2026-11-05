@@ -15,15 +15,12 @@ import {
 } from 'lucide-react';
 import type { BotConfig, MessageRecord, NodeRecord, SessionRecord } from '@botd/protocol';
 import {
-  BotAvatarBadge,
   MemoizedMessageItem,
-  formatChatDayLabel,
-  formatShortModel,
-  isSameCalendarDay,
   SubagentRunsPanel,
   TypingDots,
+  AssistantTurnContent,
 } from './MessageItem';
-import { AssistantTurnContent } from './MessageItem';
+import { formatChatDayLabel, formatShortModel, isSameCalendarDay } from '../message-format';
 import type { StreamingAssistantState } from '../types';
 
 /** 等待首条输出时的思考占位：TypingDots + 实时读秒，缓解长等待焦虑 */
@@ -280,9 +277,8 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
             : 'py-2 sm:py-2.5 animate-in fade-in'
         }
       >
-        {/* 身份行：微徽章 + 名称 + 模型 + 运行中呼吸指示 */}
+        {/* 身份行：名称 + 模型 + 运行中呼吸指示 */}
         <div className="flex items-center gap-1.5 min-w-0 mb-0.5">
-          <BotAvatarBadge botId={state.botId} name={bot?.name} color={bot?.color} />
           <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate">
             {bot?.name || state.botId}
           </span>
@@ -373,7 +369,6 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
                       className="inline-flex items-center gap-1.5 px-2 py-1 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800/80 rounded-full text-[11px] text-zinc-600 dark:text-zinc-400"
                       title={`${b?.name || bid} · @${bid}`}
                     >
-                      <BotAvatarBadge botId={bid} name={b?.name} color={b?.color} className="!w-4 !h-4 !text-[9px]" />
                       <span className="truncate max-w-[120px]">{b?.name || bid}</span>
                     </span>
                   );

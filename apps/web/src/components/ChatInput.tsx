@@ -11,7 +11,7 @@ import {
   FileText,
 } from 'lucide-react';
 import type { BotConfig, NodeRecord, MessageRecord, MessageAttachment } from '@botd/protocol';
-import { formatFileSize } from './MessageItem';
+import { formatFileSize } from '../message-format';
 import {
   canSubmitMessage,
   consumeSubmittedAttachments,

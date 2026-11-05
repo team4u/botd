@@ -8,7 +8,7 @@ import { useSessionMessages } from './hooks/useSessionMessages';
 import { useEventStream } from './hooks/useEventStream';
 import { useSessionActions } from './hooks/useSessionActions';
 import { LoginView } from './components/LoginView';
-import { Sidebar } from './components/Sidebar';
+import { Sidebar, BotTile } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
 import { CreateSessionModal } from './components/CreateSessionModal';
 import { NodesBotsView } from './components/NodesBotsView';
@@ -16,8 +16,8 @@ import { SettingsModal } from './components/SettingsModal';
 import { UsersModal } from './components/UsersModal';
 import { ToastContainer } from './components/Toast';
 import { Loader2, Menu, Bot, Server, ChevronRight, FolderGit2, MessageSquare } from 'lucide-react';
-import { BotAvatarBadge } from './components/MessageItem';
-import { buildSpaceGroups } from './components/Sidebar';
+
+import { buildSpaceGroups } from './session-space';
 
 export const App: React.FC = () => {
   // Auth state
@@ -545,7 +545,7 @@ export const App: React.FC = () => {
                           title={`@${bot.id}`}
                           className="group flex items-center gap-3 p-3 rounded-xl border border-zinc-200/80 dark:border-zinc-800/80 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800/80 hover:border-zinc-300 dark:hover:border-zinc-700 transition-all text-left cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500"
                         >
-                          <BotAvatarBadge botId={bot.id} name={bot.name} color={bot.color} className="!w-9 !h-9 !text-sm" />
+                          <BotTile className="w-9 h-9" iconClassName="w-4.5 h-4.5" />
                           <span className="min-w-0 flex-1">
                             <span className="block truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
                               {bot.name}

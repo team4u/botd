@@ -2,7 +2,7 @@ import React, { useEffect } from 'react';
 import { Terminal, Loader2, RefreshCw, AlertTriangle } from 'lucide-react';
 import type { BotConfig, ChatCommand } from '@botd/protocol';
 
-export function getSourceBadge(source: ChatCommand['source']) {
+function getSourceBadge(source: ChatCommand['source']) {
   switch (source) {
     case 'skill':
       return (

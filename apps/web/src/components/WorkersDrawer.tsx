@@ -18,7 +18,8 @@ import {
   Zap,
 } from 'lucide-react';
 import type { BotConfig, NodeRecord, ToolCallRecord } from '@botd/protocol';
-import { BotAvatarBadge, formatDuration, AssistantTurnContent } from './MessageItem';
+import { AssistantTurnContent } from './MessageItem';
+import { formatDuration } from '../message-format';
 import {
   formatWorkerElapsed,
   isWorkerActive,
@@ -337,12 +338,6 @@ const WorkerDetailView: React.FC<{
           >
             <ChevronLeft className="w-4.5 h-4.5" />
           </button>
-          <BotAvatarBadge
-            botId={worker.botId}
-            name={worker.botName || bot?.name}
-            color={bot?.color}
-            className="!w-7 !h-7 !text-[11px] shrink-0"
-          />
           <div className="min-w-0">
             <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 truncate">
               {worker.title}

@@ -3,13 +3,13 @@ import test from 'node:test';
 import type { BotConfig, SessionRecord } from '../packages/protocol/src/index.js';
 import {
   CheckList,
-  computeCheckListSelection,
 } from '../apps/web/src/components/CheckList.js';
+import { computeCheckListSelection } from '../apps/web/src/check-list-selection.js';
 import {
   createDefaultSessionDraft,
   resolveCreateSessionStep,
   type CreateSessionDraft,
-} from '../apps/web/src/components/CreateSessionModal.js';
+} from '../apps/web/src/create-session-draft.js';
 import {
   orderBotsAsTree,
 } from '../apps/web/src/utils/bots.js';

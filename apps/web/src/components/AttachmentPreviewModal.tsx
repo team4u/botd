@@ -13,7 +13,7 @@ import {
 import type { MessageAttachment } from '@botd/protocol';
 import { Markdown } from './Markdown.js';
 import { copyText } from '../utils/clipboard.js';
-import { formatFileSize } from './MessageItem.js';
+import { formatFileSize } from '../message-format.js';
 
 /** 文本类预览的体积上限（超出仅提供下载，避免拉爆浏览器） */
 const MAX_TEXT_PREVIEW_BYTES = 2 * 1024 * 1024;
