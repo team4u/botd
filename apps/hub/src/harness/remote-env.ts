@@ -450,8 +450,8 @@ export class RemoteExecutionEnv implements ExecutionEnv {
         execId,
         command,
         ...(this.cwd === undefined ? {} : { cwd: this.cwd }),
-        // SecretStash：机密以环境变量注入远端子进程（明文不进命令行/上下文）。
-        env: withSecretEnv(mergedEnv),
+        // SecretStash：机密以环境变量注入远端子进程（明文不进命令行/上下文），按会话隔离。
+        env: withSecretEnv(mergedEnv, undefined, this.#shellEnv?.BOTD_SESSION_ID),
         ...(options?.inheritEnv === undefined ? {} : { inheritEnv: options.inheritEnv }),
         ...(options?.timeout === undefined ? {} : { timeout: options.timeout }),
         ...(options?.spill === undefined ? {} : { spill: options.spill }),

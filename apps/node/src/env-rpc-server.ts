@@ -459,7 +459,15 @@ export function createNodeEnvRpcServer(options: NodeEnvRpcServerOptions): NodeEn
       await git('worktree', 'remove', '--force', worktreePath).catch(() => undefined);
       await git('worktree', 'prune').catch(() => undefined);
       const add = await git('worktree', 'add', '-B', branchName, worktreePath, 'HEAD');
-      if (!add.ok || add.value.exitCode !== 0) return notARepo();
+      // 失败即闭合：真实 git 仓库中 worktree 获取失败时显式报错，绝不静默回落到
+      // repoDir 主工作区（否则隔离 worker 会直接弄脏主分支）。
+      if (!add.ok || add.value.exitCode !== 0) {
+        throw new Error(
+          `Failed to acquire git worktree at ${worktreePath} in git repository ${repoDir}: ${
+            add.ok ? add.value.stderr.trim() || `exit code ${add.value.exitCode}` : add.error.message
+          }`,
+        );
+      }
       return { worktreePath, branchName, isGitRepo: true };
     },
 
@@ -480,13 +488,14 @@ export function createNodeEnvRpcServer(options: NodeEnvRpcServerOptions): NodeEn
 }
 
 /** 服务端内部 git 子进程执行（一次性，与 envExec 的流式通道无关）。 */
-function runGit(cwd: string, args: string[]): Promise<Result<{ exitCode: number; stdout: string }, Error>> {
+function runGit(cwd: string, args: string[]): Promise<Result<{ exitCode: number; stdout: string; stderr: string }, Error>> {
   return new Promise((resolve) => {
     const child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
+    let stderr = '';
     child.stdout?.on('data', (chunk: Buffer) => (stdout += chunk.toString('utf8')));
-    child.stderr?.on('data', () => undefined);
+    child.stderr?.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')));
     child.on('error', (error) => resolve(err(error)));
-    child.on('close', (exitCode) => resolve(ok({ exitCode: exitCode ?? -1, stdout })));
+    child.on('close', (exitCode) => resolve(ok({ exitCode: exitCode ?? -1, stdout, stderr })));
   });
 }

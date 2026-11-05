@@ -286,11 +286,16 @@ export function registerMessageRoutes(
     // 主线切流：显式注入 runtime 或已配置 Provider 凭据时，用户消息直接提交给会话的
     // Router 会话（全双工 whenBusy: "steer"），assistant 回复经镜像回写时间线；
     // 未注入且无凭据（或提交失败）时退回原 GroupRouter 路径。
+    const durableMainlineEligible =
+      ctx.durableInjected || listEffectiveProviderCredentials(db).length > 0;
     const dctx = durableCtx();
-    if (dctx.durableRuntime !== undefined) {
+    const rt = durableMainlineEligible
+      ? (dctx.durableRuntime ?? (dctx.getDurableRuntime ? await dctx.getDurableRuntime() : undefined))
+      : undefined;
+    if (rt !== undefined) {
       try {
         const submitted = await submitSessionMessageToDurable(
-          dctx,
+          { ...dctx, durableRuntime: rt },
           id,
           targetBotId,
           content,

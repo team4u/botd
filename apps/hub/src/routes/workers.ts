@@ -344,7 +344,7 @@ export async function respondToDurableAsk(input: {
     if (prompt === undefined) continue;
     // 机密表单字段只 stash 一次：明文进内存 SecretStash，落库/广播/上下文只留
     // [REDACTED:$BOTD_SECRET_...] 占位符。
-    const { redactedAnswer, stashedEnvKeys } = redactSecretAskAnswer(answer, previewType, previewContent);
+    const { redactedAnswer, stashedEnvKeys } = redactSecretAskAnswer(answer, previewType, previewContent, undefined, sessionId);
     let answered = false;
     try {
       await rt.harness.commit(async (tx) => {
@@ -1041,6 +1041,8 @@ export function createDurableSessionMirror(
     lastMirrored: number;
     /** 上一帧是否处于 running（pi.live.run 存在）：驱动 running/idle 状态机的边沿检测。 */
     wasRunning: boolean;
+    /** 本轮回合中是否有思考流输出：收尾时广播 status: 'done'。 */
+    hadThinking: boolean;
     /** 已广播为 text_delta 的累计正文（live.generation.message 前缀差分）。 */
     streamedText: string;
     /** 已广播为 thinking_stream delta 的累计思考文本。 */
@@ -1207,6 +1209,7 @@ export function createDurableSessionMirror(
       unwatch: async () => undefined,
       lastMirrored: 0,
       wasRunning: false,
+      hadThinking: false,
       streamedText: '',
       streamedThinking: '',
       toolSnapshots: new Map(),
@@ -1231,6 +1234,7 @@ export function createDurableSessionMirror(
         // A. 空闲 -> running：复位流水位并广播运行中状态。
         if (isRunning && !current.wasRunning) {
           current.wasRunning = true;
+          current.hadThinking = false;
           current.streamedText = '';
           current.streamedThinking = '';
           current.toolSnapshots.clear();
@@ -1249,9 +1253,13 @@ export function createDurableSessionMirror(
         if (isRunning) {
           const partial = live?.generation?.message;
           const thinkingFull = liveStreamedText(partial, 'thinking');
+          if (!thinkingFull.startsWith(current.streamedThinking) && thinkingFull.length > 0) {
+            current.streamedThinking = '';
+          }
           if (thinkingFull.startsWith(current.streamedThinking) && thinkingFull.length > current.streamedThinking.length) {
             const delta = thinkingFull.slice(current.streamedThinking.length);
             current.streamedThinking = thinkingFull;
+            current.hadThinking = true;
             sseHub.broadcast(sessionId, {
               type: 'thinking_stream',
               sessionId,
@@ -1261,6 +1269,9 @@ export function createDurableSessionMirror(
             });
           }
           const textFull = liveStreamedText(partial, 'text');
+          if (!textFull.startsWith(current.streamedText) && textFull.length > 0) {
+            current.streamedText = '';
+          }
           if (textFull.startsWith(current.streamedText) && textFull.length > current.streamedText.length) {
             const delta = textFull.slice(current.streamedText.length);
             current.streamedText = textFull;
@@ -1294,12 +1305,16 @@ export function createDurableSessionMirror(
           if (!Number.isInteger(entryId) || entryId <= current.lastMirrored) continue;
           current.lastMirrored = entryId;
           mirror(sessionId, botId, entry);
+          if (entry.kind === 'pi.assistant') {
+            current.streamedText = '';
+            current.streamedThinking = '';
+          }
         }
 
         // D. running -> 空闲：收尾思考流，复位水位，若存在 runFailure 则报 failed，否则会话置 idle 并广播（子会话完成
         // 监听、前端运行指示灯由此解锁）。
         if (!isRunning && current.wasRunning) {
-          if (current.streamedThinking.length > 0) {
+          if (current.hadThinking) {
             sseHub.broadcast(sessionId, {
               type: 'thinking_stream',
               sessionId,
@@ -1308,6 +1323,7 @@ export function createDurableSessionMirror(
             });
           }
           current.wasRunning = false;
+          current.hadThinking = false;
           current.streamedText = '';
           current.streamedThinking = '';
           current.toolSnapshots.clear();

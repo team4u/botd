@@ -255,17 +255,19 @@ export class NodeConnectionManager {
           }
         }
 
-        // 与节点上报对账：Hub SQLite 是 Bot 配置的权威存储，节点上报只做 upsert，
-        // 不再删除 Hub 侧存量 Bot（离线期间创建/编辑的 Bot 不能因节点未同步而被清除）。
+        // Hub SQLite 是 Bot 业务配置（模型、提示词、工作区、扩展等）的唯一权威事实源。
+        // 节点作为无状态执行器（Stateless Worker），上报时严禁反向覆盖 Hub 中已存在的 Bot 配置。
         this.db.inTransaction(() => {
           this.db.updateNodeMetadata(nodeId, info.name, info.platform, info.skills, extensions, pid, startedAt, info.version);
-          for (const bot of info.bots) {
+          for (const bot of info.bots || []) {
             const existingBot = this.db.getBot(bot.id);
-            this.db.saveBot({
-              ...bot,
-              visibility: bot.visibility ?? existingBot?.visibility ?? 'private',
-              enabledExtensions: bot.enabledExtensions ?? [],
-            });
+            if (!existingBot) {
+              this.db.saveBot({
+                ...bot,
+                visibility: bot.visibility ?? 'private',
+                enabledExtensions: bot.enabledExtensions ?? [],
+              });
+            }
           }
         });
 

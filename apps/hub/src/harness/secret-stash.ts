@@ -25,6 +25,7 @@ const DEFAULT_TTL_MS = 5 * 60 * 1000;
 interface StashedSecret {
 	value: string;
 	expiresAt: number;
+	scopeId?: string;
 }
 
 /** Redaction placeholder written into persisted/broadcast answers. */
@@ -33,10 +34,12 @@ export const redactionPlaceholder = (envKey: string): string => `[REDACTED:$${en
 export class SecretStash {
 	#entries = new Map<string, StashedSecret>();
 
-	/** Stash a plaintext value; returns the generated env var name. */
-	stash(value: string, ttlMs: number = DEFAULT_TTL_MS): string {
+	/** Stash a plaintext value; returns the generated env var name. Optional scopeId binds the secret to one session. */
+	stash(value: string, ttlMsOrScopeId?: number | string, scopeId?: string): string {
+		const ttlMs = typeof ttlMsOrScopeId === 'number' ? ttlMsOrScopeId : DEFAULT_TTL_MS;
+		const effectiveScopeId = typeof ttlMsOrScopeId === 'string' ? ttlMsOrScopeId : scopeId;
 		const envKey = `BOTD_SECRET_${randomBytes(4).toString('hex').toUpperCase()}`;
-		this.#entries.set(envKey, { value, expiresAt: Date.now() + ttlMs });
+		this.#entries.set(envKey, { value, expiresAt: Date.now() + ttlMs, ...(effectiveScopeId ? { scopeId: effectiveScopeId } : {}) });
 		return envKey;
 	}
 
@@ -46,20 +49,29 @@ export class SecretStash {
 		}
 	}
 
-	/** Active secrets as an env record ({ BOTD_SECRET_XXXX: plaintext }); prunes expired entries. */
-	getEnvRecord(): Record<string, string> {
+	/**
+	 * Active secrets as an env record ({ BOTD_SECRET_XXXX: plaintext }); prunes expired entries.
+	 * With a scopeId, only unscoped entries and entries bound to that session are returned —
+	 * a secret stashed by session A is never leaked into session B's environment.
+	 */
+	getEnvRecord(scopeId?: string): Record<string, string> {
 		this.#prune(Date.now());
-		return Object.fromEntries([...this.#entries].map(([key, entry]) => [key, entry.value]));
+		return Object.fromEntries(
+			[...this.#entries]
+				.filter(([_, entry]) => scopeId === undefined || entry.scopeId === undefined || entry.scopeId === scopeId)
+				.map(([key, entry]) => [key, entry.value]),
+		);
 	}
 
-	/** Read (keep) a stashed value; undefined when missing or expired. */
-	peek(envKey: string): string | undefined {
+	/** Read (keep) a stashed value; undefined when missing, expired, or scoped to another session. */
+	peek(envKey: string, scopeId?: string): string | undefined {
 		const entry = this.#entries.get(envKey);
 		if (entry === undefined) return undefined;
 		if (entry.expiresAt <= Date.now()) {
 			this.#entries.delete(envKey);
 			return undefined;
 		}
+		if (scopeId !== undefined && entry.scopeId !== undefined && entry.scopeId !== scopeId) return undefined;
 		return entry.value;
 	}
 
@@ -74,12 +86,14 @@ export class SecretStash {
 /** Hub-wide default stash (process-local, TTL-bounded). */
 export const globalSecretStash = new SecretStash();
 
-/** Merge active secret env vars into `options.env`; explicit entries win. */
+/** Merge active secret env vars into `options.env`; explicit entries win. Scope defaults to the session id in env. */
 export const withSecretEnv = (
 	env: Record<string, string> | undefined,
 	stash: SecretStash = globalSecretStash,
+	scopeId?: string,
 ): Record<string, string> | undefined => {
-	const secrets = stash.getEnvRecord();
+	const effectiveScope = scopeId ?? env?.BOTD_SESSION_ID;
+	const secrets = stash.getEnvRecord(effectiveScope);
 	const keys = Object.keys(secrets);
 	if (keys.length === 0) return env;
 	return { ...secrets, ...(env ?? {}) };
@@ -122,6 +136,7 @@ export function redactSecretAskAnswer(
 	previewType?: string,
 	previewContent?: string,
 	stash: SecretStash = globalSecretStash,
+	scopeId?: string,
 ): RedactedAskAnswer {
 	const stashedEnvKeys: Record<string, string> = {};
 	const secretPaths = previewType === 'ui' && previewContent ? extractSecretStatePaths(previewContent) : [];
@@ -148,7 +163,7 @@ export function redactSecretAskAnswer(
 		if (located === undefined) continue;
 		const raw = located.parent[located.key];
 		if (typeof raw !== 'string' || raw.length === 0) continue;
-		const envKey = stash.stash(raw);
+		const envKey = stash.stash(raw, DEFAULT_TTL_MS, scopeId);
 		located.parent[located.key] = redactionPlaceholder(envKey);
 		stashedEnvKeys[path] = envKey;
 	}
