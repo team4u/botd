@@ -8,8 +8,6 @@ import ReconnectingWebSocket from 'partysocket/ws';
 import { WebSocket as WsWebSocket } from 'ws';
 import { createBirpc, type BirpcReturn } from 'birpc';
 import {
-  validateUiSpec,
-  type AskPreviewType,
   type HubRpcFunctions,
   type NodeRpcFunctions,
   type PlatformType,
@@ -100,15 +98,12 @@ async function checkOrCleanSocket(socketPath: string): Promise<void> {
   await fs.unlink(socketPath).catch(() => {});
 }
 
-let restartRequested = false;
-
 /**
  * 本地守护进程控制面（Unix socket / Windows 命名管道上的极简 HTTP）：
  * 只服务 CLI 的进程管理（status/shutdown/reload）与回合计入面
- * （wake/ask/artifact），全部转发给 Hub；无任何本地状态。
+ * （wake/artifact），全部转发给 Hub；无任何本地状态。
  */
 const MAX_BODY_BYTES = 64 * 1024;
-const MAX_ASK_BODY_BYTES = 512 * 1024;
 const MAX_ARTIFACT_BODY_BYTES = 15 * 1024 * 1024;
 const IPC_TOKEN_HEADER = 'x-botd-ipc-token';
 
@@ -271,40 +266,6 @@ export function createDaemonControlServer(deps: ControlDeps): http.Server {
       ...(delaySeconds ? { delaySeconds: Math.floor(delaySeconds) } : {}),
     });
     sendJson(res, 200, { ok: true, ...(wakeRes && typeof wakeRes === 'object' ? wakeRes : {}) });
-  };
-
-  const handleAsk = async (_req: http.IncomingMessage, res: http.ServerResponse, { body }: { body: any }) => {
-    const { sessionId, botId, prompt, options, timeoutSeconds, previewType, previewContent } = body ?? {};
-    if (typeof sessionId !== 'string' || typeof botId !== 'string' || typeof prompt !== 'string' || !sessionId.trim() || !botId.trim() || !prompt.trim()) {
-      sendJson(res, 400, { error: 'Missing or invalid sessionId, botId, or prompt' });
-      return;
-    }
-    assertSafeId(sessionId, 'Session ID');
-    assertSafeId(botId, 'Bot ID');
-    let normalizedPreviewContent = typeof previewContent === 'string' && previewContent ? previewContent : undefined;
-    if (previewType === 'ui') {
-      if (!normalizedPreviewContent || !normalizedPreviewContent.trim()) {
-        sendJson(res, 400, { error: 'Missing or empty previewContent for UI preview' });
-        return;
-      }
-      const validation = validateUiSpec(normalizedPreviewContent);
-      if (!validation.ok) {
-        sendJson(res, 400, { error: `Invalid UI spec: ${validation.errors.join('; ')}` });
-        return;
-      }
-      normalizedPreviewContent = validation.normalizedJson;
-    }
-    const hubRpc = requireHubRpc(deps);
-    const result = await hubRpc.requestHumanInput({
-      sessionId,
-      botId,
-      prompt: String(prompt),
-      ...(Array.isArray(options) ? { options: options.map(String) } : {}),
-      ...(typeof timeoutSeconds === 'number' && timeoutSeconds >= 0 ? { timeoutSeconds } : {}),
-      ...(previewType === 'diff' || previewType === 'markdown' || previewType === 'text' || previewType === 'ui' ? { previewType: previewType as AskPreviewType } : {}),
-      ...(normalizedPreviewContent ? { previewContent: normalizedPreviewContent } : {}),
-    });
-    sendJson(res, 200, { ok: true, answer: result.answer });
   };
 
   const handleArtifactPut = async (_req: http.IncomingMessage, res: http.ServerResponse, { body }: { body: any }) => {
@@ -471,7 +432,6 @@ export function createDaemonControlServer(deps: ControlDeps): http.Server {
     { method: 'GET', match: (u) => u === '/upgrade/check' || u.startsWith('/upgrade/check?'), handler: handleUpgradeCheck },
     { method: 'POST', match: (u) => u === '/upgrade', handler: handleUpgrade },
     { method: 'POST', match: (u) => u === '/wake', handler: handleWake },
-    { method: 'POST', match: (u) => u === '/ask', maxBodyBytes: MAX_ASK_BODY_BYTES, handler: handleAsk },
     { method: 'POST', match: (u) => u === '/artifact/put', maxBodyBytes: MAX_ARTIFACT_BODY_BYTES, handler: handleArtifactPut },
     { method: 'POST', match: (u) => u === '/artifact/pull', handler: handleArtifactPull },
     { method: 'GET', match: (u) => u === '/artifact/list' || u.startsWith('/artifact/list?'), handler: handleArtifactList },
@@ -591,6 +551,8 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
   let isStopping = false;
   let hubRpc: BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null = null;
   let heartbeatTimer: NodeJS.Timeout | null = null;
+  // restartDaemon 防重入标记：闭包内实例级状态，同一进程多个 daemon 实例互不污染。
+  let restartRequested = false;
   // 被动升级（Phase 7A）：Node 不再自轮询 npm registry；升级由 Hub 中心化
   // 下发 upgradeDaemon RPC 或用户经 CLI/Web 显式触发。
   let rpcInstance: BirpcReturn<HubRpcFunctions, NodeRpcFunctions> | null = null;
@@ -832,10 +794,6 @@ export async function startDaemon(dataDirOverride?: string): Promise<DaemonHandl
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
     }
-    hubRpc = null;
-
-    restartRequested = false;
-
     if (rpcInstance) {
       try {
         rpcInstance.$close();

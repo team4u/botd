@@ -22,7 +22,7 @@ async function fileExists(p: string): Promise<boolean> {
 }
 
 /** Legacy WSL launcher (System32/bash.exe) is an empty shell without a distro — skip it. */
-function isLegacyWslBashPath(p: string): boolean {
+export function isLegacyWslBashPath(p: string): boolean {
   const normalized = p.toLowerCase();
   const systemRoot = process.env.SystemRoot;
   if (systemRoot && /^[a-z]:[\\/]/i.test(systemRoot)) {

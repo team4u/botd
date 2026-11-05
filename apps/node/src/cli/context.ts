@@ -31,16 +31,21 @@ export function readGlobals(command: Command): Globals {
 /**
  * Wrap a commander action: guarantees `error: <message>` on stderr (JSON form under --json)
  * and exit code 1, so AI callers get deterministic failure semantics.
+ *
+ * The action receives Commander's trailing arguments verbatim: positional args
+ * first, then `options`, then the `Command` instance — e.g. a command declared
+ * as `<a> [b...]` gets `(a, b, options, command)`. Commands without positional
+ * args therefore get the familiar `(options, command)` shape.
  */
-export function cliAction(action: (options: Record<string, unknown>, command: Command) => Promise<void>) {
-  return async (options: Record<string, unknown>, command: Command): Promise<void> => {
+export function cliAction(action: (...args: any[]) => Promise<void>) {
+  return async (...cliArgs: any[]): Promise<void> => {
     try {
-      await action(options, command);
+      await action(...cliArgs);
     } catch (error) {
       const { message } = describeError(error);
       let json = false;
       try {
-        json = readGlobals(command).json;
+        json = readGlobals(cliArgs[cliArgs.length - 1]).json;
       } catch {
         // fall through to plain error output
       }

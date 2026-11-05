@@ -1,7 +1,7 @@
 import type { Command } from 'commander';
 import { cliAction, readGlobals } from '../context.js';
-import { CliError } from '../errors.js';
 import { HubClient } from '../hub-client.js';
+import { readInput } from '../input.js';
 import { printResult } from '../render.js';
 
 /**
@@ -26,52 +26,35 @@ export function registerEventsCommands(program: Command): void {
     .option('--branch <branch>', 'Branch name the event belongs to')
     .option('--session <sessionId>', 'Target botd session (routes to its Router conversation)')
     .option('--bot <botId>', 'Default bot persona to route the event to')
-    .action(
-      cliAction(async (options, command) => {
-        const g = readGlobals(command);
-        const client = await HubClient.connect(g);
+    .action(cliAction(async (options: Record<string, unknown>, command: Command) => {
+      const g = readGlobals(command);
+      const client = await HubClient.connect(g);
 
-        let content: string | undefined;
-        if (typeof options.content === 'string') {
-          content = options.content;
-        } else if (typeof options.file === 'string' && options.file) {
-          if (options.file === '-') {
-            if (process.stdin.isTTY) {
-              throw new CliError('No input provided. Pass --file <path> or pipe content through stdin.');
-            }
-            const chunks: Buffer[] = [];
-            for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
-            content = Buffer.concat(chunks).toString('utf8');
-          } else {
-            const { readFile } = await import('node:fs/promises');
-            try {
-              content = await readFile(options.file, 'utf8');
-            } catch (err) {
-              throw new CliError(`Cannot read file ${options.file}: ${(err as Error).message}`);
-            }
-          }
-        }
+      const content = typeof options.content === 'string'
+        ? options.content
+        : typeof options.file === 'string' && options.file
+          ? await readInput(options.file)
+          : undefined;
 
-        const parseNumber = (value: unknown): number | undefined => {
-          if (value === undefined) return undefined;
-          const parsed = Number(value);
-          return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
-        };
+      const parseNumber = (value: unknown): number | undefined => {
+        if (value === undefined) return undefined;
+        const parsed = Number(value);
+        return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
+      };
 
-        const result = await client.post<Record<string, unknown>>('/api/events/ingest', {
-          source: String(options.source).trim(),
-          type: String(options.type).trim(),
-          ...(content !== undefined ? { content } : {}),
-          ...(typeof options.title === 'string' && options.title ? { title: options.title } : {}),
-          ...(typeof options.sender === 'string' && options.sender ? { sender: options.sender } : {}),
-          ...(typeof options.repo === 'string' && options.repo ? { repo: options.repo } : {}),
-          ...(typeof options.branch === 'string' && options.branch ? { branch: options.branch } : {}),
-          ...(parseNumber(options.pr) !== undefined ? { prNumber: parseNumber(options.pr) } : {}),
-          ...(parseNumber(options.issue) !== undefined ? { issueNumber: parseNumber(options.issue) } : {}),
-          ...(typeof options.session === 'string' && options.session ? { sessionId: options.session } : {}),
-          ...(typeof options.bot === 'string' && options.bot ? { botId: options.bot } : {}),
-        });
-        printResult(result, g.json);
-      }),
-    );
+      const result = await client.post<Record<string, unknown>>('/api/events/ingest', {
+        source: String(options.source).trim(),
+        type: String(options.type).trim(),
+        ...(content !== undefined ? { content } : {}),
+        ...(typeof options.title === 'string' && options.title ? { title: options.title } : {}),
+        ...(typeof options.sender === 'string' && options.sender ? { sender: options.sender } : {}),
+        ...(typeof options.repo === 'string' && options.repo ? { repo: options.repo } : {}),
+        ...(typeof options.branch === 'string' && options.branch ? { branch: options.branch } : {}),
+        ...(parseNumber(options.pr) !== undefined ? { prNumber: parseNumber(options.pr) } : {}),
+        ...(parseNumber(options.issue) !== undefined ? { issueNumber: parseNumber(options.issue) } : {}),
+        ...(typeof options.session === 'string' && options.session ? { sessionId: options.session } : {}),
+        ...(typeof options.bot === 'string' && options.bot ? { botId: options.bot } : {}),
+      });
+      printResult(result, g.json);
+    }));
 }

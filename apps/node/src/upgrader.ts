@@ -269,22 +269,22 @@ function computeSriHash(filePath: string): string {
 }
 
 /** Downloads the exact tarball via `npm pack <pkg>@<version> --registry <url>`
- *  into stagingDir and verifies its sha512 against the registry's published
- *  dist.integrity. Throws on mismatch; caller cleans up staging.
+ *  into packDir and verifies its sha512 against the registry's published
+ *  dist.integrity. Returns the verified local tarball path; throws on
+ *  mismatch. Caller cleans up staging.
  *
  *  NOTE (known residual): only the top-level botd tarball is verified. The
  *  supply-chain trust of dependency tarballs installed by `npm install`
  *  (resolved by semver ranges) is inherited from the registry/npm policies
  *  and is NOT individually pinned or verified here. */
 async function verifyReleaseTarball(
-  stagingDir: string,
+  packDir: string,
   registryUrl: string,
   pkgName: string,
   targetVersion: string,
   expectedIntegrity: string,
-): Promise<void> {
+): Promise<string> {
   const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  const packDir = path.join(stagingDir, '.integrity-check');
   await fsPromises.mkdir(packDir, { recursive: true });
 
   await new Promise<void>((resolve, reject) => {
@@ -313,12 +313,14 @@ async function verifyReleaseTarball(
     throw new Error(`npm pack did not produce a tarball for ${pkgName}@${targetVersion}`);
   }
 
-  const actualIntegrity = computeSriHash(path.join(packDir, tarball));
+  const tarballPath = path.join(packDir, tarball);
+  const actualIntegrity = computeSriHash(tarballPath);
   if (actualIntegrity !== expectedIntegrity) {
     throw new Error(
       `Integrity mismatch for ${pkgName}@${targetVersion}: expected ${expectedIntegrity}, got ${actualIntegrity}`,
     );
   }
+  return tarballPath;
 }
 
 export async function stageReleaseFromNpm(
@@ -399,6 +401,20 @@ export async function stageReleaseFromNpm(
       const registryUrl = rawRegistry.trim().replace(/\/+$/, '');
       const fetchImpl = options?.fetchFn ?? fetch;
 
+      // Supply-chain integrity + single download: fetch the exact tarball once
+      // via `npm pack`, verify its sha512 against the registry's signed
+      // dist.integrity, then `npm install` straight from the verified local
+      // file — the registry is never hit twice. (Dependencies are not
+      // pinned — known residual.)
+      const expectedIntegrity = await fetchDistIntegrity(registryUrl, pkgName, targetVersion, fetchImpl);
+      const tarballPath = await verifyReleaseTarball(
+        stagingDir,
+        registryUrl,
+        pkgName,
+        targetVersion,
+        expectedIntegrity,
+      );
+
       await fsPromises.writeFile(
         path.join(stagingDir, 'package.json'),
         JSON.stringify({ name: 'botd-release', private: true }),
@@ -408,7 +424,7 @@ export async function stageReleaseFromNpm(
       const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
       const npmArgs = [
         'install',
-        `${pkgName}@${targetVersion}`,
+        tarballPath,
         '--omit=dev',
         '--no-audit',
         '--no-fund',
@@ -428,13 +444,6 @@ export async function stageReleaseFromNpm(
           else reject(new Error(`npm install failed with exit code ${code}`));
         });
       });
-
-      // Supply-chain integrity check: compare the tarball bytes published at
-      // this exact version against the registry's signed dist.integrity. A
-      // mismatch aborts the upgrade and the staging dir is cleaned up by the
-      // catch handler below. (Dependencies are not pinned — known residual.)
-      const expectedIntegrity = await fetchDistIntegrity(registryUrl, pkgName, targetVersion, fetchImpl);
-      await verifyReleaseTarball(stagingDir, registryUrl, pkgName, targetVersion, expectedIntegrity);
 
       const candidate1 = path.join(stagingDir, 'node_modules', pkgName, 'dist', 'cli.js');
       const candidate2 = path.join(stagingDir, 'node_modules', '@botd/node', 'dist', 'cli.js');

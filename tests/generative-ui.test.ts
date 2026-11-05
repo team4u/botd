@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import http from 'node:http';
 import { test } from 'node:test';
 import {
   BOTD_UI_COMPONENT_TYPES,
@@ -8,7 +7,6 @@ import {
   validateUiSpec,
   type BotdUiSpec,
 } from '../packages/protocol/src/index.js';
-import { createDaemonControlServer } from '../apps/node/src/daemon.js';
 import { BUILTIN_SKILL_MD, BUILTIN_SKILL_VERSION } from '../apps/node/src/builtin-skill.js';
 import { GroupRouter } from '../apps/hub/src/group-router.js';
 import { HubDatabase } from '../apps/hub/src/db.js';
@@ -474,163 +472,10 @@ test('validateUiSpec 拦截新组件的非法用法：Table 列数不匹配 / mo
 });
 
 // ---------------------------------------------------------------------------
-// 3. Local IPC /ask: previewType: 'ui' support and validation
+// 3. Hub GroupRouter.requestHumanInput: previewType: 'ui' validation
 // ---------------------------------------------------------------------------
 
-function listenPort0(server: http.Server): Promise<number> {
-  return new Promise((resolve) => {
-    // Port 0 automatically selects an available port, avoiding 3000
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address() as { port: number };
-      resolve(addr.port);
-    });
-  });
-}
-
-function postJson(port: number, url: string, body: unknown): Promise<{ status: number; body: string }> {
-  const data = JSON.stringify(body);
-  return new Promise((resolve, reject) => {
-    const req = http.request(
-      {
-        host: '127.0.0.1',
-        port,
-        path: url,
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) },
-      },
-      (res) => {
-        let out = '';
-        res.setEncoding('utf8');
-        res.on('data', (c) => {
-          out += c;
-        });
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: out }));
-      },
-    );
-    req.on('error', reject);
-    req.write(data);
-    req.end();
-  });
-}
-
-const mockAskCalls: any[] = [];
-
-function makeTestIpcServer() {
-  return createDaemonControlServer({
-    identity: { nodeId: 'node_test', name: 'test', hubUrl: 'http://127.0.0.1:1' },
-    dataDir: '/tmp/botd-test-data',
-    socketPath: '/tmp/botd-test.sock',
-    startedAt: Date.now(),
-    isHubConnected: () => true,
-    getHubRpc: () =>
-      ({
-        requestHumanInput: async (input: any) => {
-          mockAskCalls.push(input);
-          return { answer: '{"decision":"approve"}' };
-        },
-        onSessionStream: { asEvent: () => {} },
-        requestWakeupTurn: async () => {},
-        uploadArtifact: async () => {
-          throw new Error('noop');
-        },
-        downloadArtifact: async () => {
-          throw new Error('noop');
-        },
-        listSessionArtifacts: async () => [],
-        registerNode: async () => {},
-        heartbeat: async () => {},
-      }) as any,
-    ipcToken: null,
-    syncRegistrationWithHub: async () => {},
-    handleShutdown: () => {},
-  } as any);
-}
-
-test('Local IPC /ask 支持 previewType: "ui" 且合法 Spec 正常转发 Hub (200)', { timeout: 60_000 }, async () => {
-  mockAskCalls.length = 0;
-  const server = makeTestIpcServer();
-  const port = await listenPort0(server);
-  try {
-    const validSpec = {
-      root: 'card_root',
-      elements: {
-        card_root: {
-          type: 'Card',
-          props: { title: 'Approval Card' },
-          children: ['btn_approve'],
-        },
-        btn_approve: {
-          type: 'Button',
-          props: { label: 'Approve', variant: 'primary' },
-          on: { press: { action: 'submit', params: { decision: 'approve' } } },
-        },
-      },
-    };
-
-    const res = await postJson(port, '/ask', {
-      sessionId: 'sess_ui_1',
-      botId: 'bot_ui_1',
-      prompt: 'Please review and approve',
-      previewType: 'ui',
-      previewContent: JSON.stringify(validSpec),
-    });
-
-    assert.equal(res.status, 200);
-    assert.equal(mockAskCalls.length, 1);
-    assert.equal(mockAskCalls[0].previewType, 'ui');
-    assert.equal(typeof mockAskCalls[0].previewContent, 'string');
-    assert.match(mockAskCalls[0].previewContent, /Approval Card/);
-  } finally {
-    server.close();
-  }
-});
-
-test('Local IPC /ask 拒绝非法 UI Spec 或缺失 previewContent (400)', { timeout: 60_000 }, async () => {
-  mockAskCalls.length = 0;
-  const server = makeTestIpcServer();
-  const port = await listenPort0(server);
-  try {
-    // 1. Missing previewContent with previewType: 'ui'
-    const res1 = await postJson(port, '/ask', {
-      sessionId: 'sess_ui_1',
-      botId: 'bot_ui_1',
-      prompt: 'Please review',
-      previewType: 'ui',
-    });
-    assert.equal(res1.status, 400);
-    assert.match(res1.body, /Missing or empty previewContent/);
-
-    // 2. Invalid UI Spec (unknown component type)
-    const invalidSpec = {
-      root: 'bad_root',
-      elements: {
-        bad_root: {
-          type: 'UnknownWidget',
-          props: {},
-        },
-      },
-    };
-    const res2 = await postJson(port, '/ask', {
-      sessionId: 'sess_ui_1',
-      botId: 'bot_ui_1',
-      prompt: 'Please review',
-      previewType: 'ui',
-      previewContent: JSON.stringify(invalidSpec),
-    });
-    assert.equal(res2.status, 400);
-    const bodyObj = JSON.parse(res2.body);
-    assert.match(bodyObj.error, /Invalid UI spec/);
-    assert.match(bodyObj.error, /Unknown component type "UnknownWidget"/);
-  } finally {
-    server.close();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// 4. Hub GroupRouter.requestHumanInput: previewType: 'ui' validation
-// ---------------------------------------------------------------------------
-
-test('Hub GroupRouter.requestHumanInput 校验 UI Spec：拒绝非法 Spec，放行合法 Spec', { timeout: 60_000 }, async () => {
+test('Hub GroupRouter.requestHumanInput 校验 UI Spec：拒绝非法 Spec，放行合法 Spec', async () => {
   const db = new HubDatabase({ dbPath: ':memory:' });
   const auth = new AuthManager();
   const sse = new SseHub();

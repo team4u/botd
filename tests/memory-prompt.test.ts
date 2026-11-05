@@ -1,16 +1,10 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import {
-  getBotMemoryDir,
-  listBotMemoryTopics,
-  readNodeMemory,
-  saveBot,
-  writeNodeMemory,
-} from '../apps/node/src/storage.js';
+import { saveBot } from '../apps/node/src/storage.js';
 import {
   buildMemoryPromptSection,
   canBotWriteMemory,
@@ -201,7 +195,7 @@ test('buildMemoryPromptSection: 超过 150 行附加截断提示', () => {
 });
 
 // ==========================================
-// 4. 存储层：memory 目录 / 主题文件 / 节点记忆
+// 4. 存储层：saveBot 创建 memory 目录（主题记忆归档层）
 // ==========================================
 
 test('saveBot 自动创建 bots/<botId>/memory 目录', async () => {
@@ -210,52 +204,6 @@ test('saveBot 自动创建 bots/<botId>/memory 目录', async () => {
     const dataDir = path.join(dir, 'data');
     await saveBot(dataDir, makeBot({ id: 'bot-mem' }));
     assert.equal(existsSync(path.join(dataDir, 'bots', 'bot-mem', 'memory')), true, 'saveBot 应创建 memory 目录');
-    assert.equal(existsSync(getBotMemoryDir(dataDir, 'bot-mem')), true);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('listBotMemoryTopics: 列出 .md 主题文件（字母序），忽略非 md 与子目录', async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'botd-memory-test-'));
-  try {
-    const dataDir = path.join(dir, 'data');
-    const memoryDir = path.join(dataDir, 'bots', 'bot-topics', 'memory');
-    await mkdir(memoryDir, { recursive: true });
-    await writeFile(path.join(memoryDir, 'topology.md'), '# Topology');
-    await writeFile(path.join(memoryDir, 'architecture.md'), '# Architecture');
-    await writeFile(path.join(memoryDir, 'notes.txt'), 'not markdown');
-    await mkdir(path.join(memoryDir, 'subdir.md'), { recursive: true });
-
-    const topics = await listBotMemoryTopics(dataDir, 'bot-topics');
-    assert.deepEqual(topics, ['architecture.md', 'topology.md']);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('listBotMemoryTopics: 目录不存在时返回空数组', async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'botd-memory-test-'));
-  try {
-    const topics = await listBotMemoryTopics(path.join(dir, 'data'), 'no-such-bot');
-    assert.deepEqual(topics, []);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('readNodeMemory / writeNodeMemory: 正确读写节点级 MEMORY.md', async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'botd-memory-test-'));
-  try {
-    const dataDir = path.join(dir, 'data');
-    // 未写入前返回空串
-    assert.equal(await readNodeMemory(dataDir), '');
-    await writeNodeMemory(dataDir, '# 节点共享记忆\n- 机房拓扑: A 栋');
-    assert.equal(await readNodeMemory(dataDir), '# 节点共享记忆\n- 机房拓扑: A 栋');
-    assert.equal(existsSync(path.join(dataDir, 'MEMORY.md')), true);
-    // 覆写
-    await writeNodeMemory(dataDir, 'updated');
-    assert.equal(await readNodeMemory(dataDir), 'updated');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -35,6 +35,7 @@ export function registerWorkersCommands(program: Command): void {
   const workers = program.command('workers').description('Super-agent background workers (list/spawn/steer/stop/recall)');
 
   workers
+<<<<<<< HEAD
     .command('list [sessionId]')
     .description('List background workers (of a session, or globally across all sessions when sessionId is omitted)')
     .action((sessionId: string | undefined, options: Record<string, unknown>, command: Command) =>
@@ -49,6 +50,18 @@ export function registerWorkersCommands(program: Command): void {
         printResult(result.workers, g.json);
       })(options, command),
     );
+=======
+    .command('list <sessionId>')
+    .description('List background workers of a session')
+    .action(cliAction(async (sessionId: string, _options: Record<string, unknown>, command: Command) => {
+      const g = readGlobals(command);
+      const client = await HubClient.connect(g);
+      const result = await client.get<WorkersListResult>(
+        `/api/sessions/${encodeURIComponent(sessionId)}/workers`,
+      );
+      printResult(result.workers, g.json);
+    }));
+>>>>>>> pi-agent-2eef9335-42e4-48c
 
   workers
     .command('spawn <sessionId>')
@@ -58,24 +71,22 @@ export function registerWorkersCommands(program: Command): void {
     .option('--bot <botId>', 'Bot persona the worker runs as (default: session lead bot)')
     .option('--worktree', 'Give the worker an isolated git worktree')
     .option('--thread-key <keys...>', 'Channel thread key(s) the worker feeds')
-    .action((sessionId: string, options: Record<string, unknown>, command: Command) =>
-      cliAction(async (_opts, cmd) => {
-        const g = readGlobals(cmd);
-        const client = await HubClient.connect(g);
-        const threadKeys = (options.threadKey as string[] | undefined) ?? [];
-        const result = await client.post<{ ok: true; worker: WorkerListItem }>(
-          `/api/sessions/${encodeURIComponent(sessionId)}/workers`,
-          {
-            title: String(options.title).trim(),
-            task: String(options.task).trim(),
-            ...(typeof options.bot === 'string' && options.bot ? { botId: options.bot } : {}),
-            worktree: options.worktree === true,
-            ...(threadKeys.length > 0 ? { threadKey: threadKeys[0] } : {}),
-          },
-        );
-        printResult(result.worker, g.json);
-      })(options, command),
-    );
+    .action(cliAction(async (sessionId: string, options: Record<string, unknown>, command: Command) => {
+      const g = readGlobals(command);
+      const client = await HubClient.connect(g);
+      const threadKeys = (options.threadKey as string[] | undefined) ?? [];
+      const result = await client.post<{ ok: true; worker: WorkerListItem }>(
+        `/api/sessions/${encodeURIComponent(sessionId)}/workers`,
+        {
+          title: String(options.title).trim(),
+          task: String(options.task).trim(),
+          ...(typeof options.bot === 'string' && options.bot ? { botId: options.bot } : {}),
+          worktree: options.worktree === true,
+          ...(threadKeys.length > 0 ? { threadKey: threadKeys[0], threadKeys } : {}),
+        },
+      );
+      printResult(result.worker, g.json);
+    }));
 
   workers
     .command('steer <sessionId> <workerId> <message...>')
@@ -85,45 +96,39 @@ export function registerWorkersCommands(program: Command): void {
         .choices(['steer', 'followUp'])
         .default('steer'),
     )
-    .action((sessionId: string, workerId: string, message: string[], options: Record<string, unknown>, command: Command) =>
-      cliAction(async (_opts, cmd) => {
-        const g = readGlobals(cmd);
-        const text = message.join(' ').trim();
-        if (!text) throw new Error('Provide the steer message as trailing arguments');
-        const client = await HubClient.connect(g);
-        const result = await client.post<{ ok: true }>(
-          `/api/sessions/${encodeURIComponent(sessionId)}/workers/${encodeURIComponent(workerId)}/steer`,
-          { message: text, mode: options.mode === 'followUp' ? 'followUp' : 'steer' },
-        );
-        printResult(result, g.json);
-      })(options, command),
-    );
+    .action(cliAction(async (sessionId: string, workerId: string, message: string[], options: Record<string, unknown>, command: Command) => {
+      const g = readGlobals(command);
+      const text = message.join(' ').trim();
+      if (!text) throw new Error('Provide the steer message as trailing arguments');
+      const client = await HubClient.connect(g);
+      const result = await client.post<{ ok: true }>(
+        `/api/sessions/${encodeURIComponent(sessionId)}/workers/${encodeURIComponent(workerId)}/steer`,
+        { message: text, mode: options.mode === 'followUp' ? 'followUp' : 'steer' },
+      );
+      printResult(result, g.json);
+    }));
 
   workers
     .command('stop <sessionId> <workerId>')
     .description('Abort a running worker (other workers and the session are unaffected)')
-    .action((sessionId: string, workerId: string, options: Record<string, unknown>, command: Command) =>
-      cliAction(async (_opts, cmd) => {
-        const g = readGlobals(cmd);
-        const client = await HubClient.connect(g);
-        const result = await client.post<{ ok: true }>(
-          `/api/sessions/${encodeURIComponent(sessionId)}/workers/${encodeURIComponent(workerId)}/stop`,
-        );
-        printResult(result, g.json);
-      })(options, command),
-    );
+    .action(cliAction(async (sessionId: string, workerId: string, _options: Record<string, unknown>, command: Command) => {
+      const g = readGlobals(command);
+      const client = await HubClient.connect(g);
+      const result = await client.post<{ ok: true }>(
+        `/api/sessions/${encodeURIComponent(sessionId)}/workers/${encodeURIComponent(workerId)}/stop`,
+      );
+      printResult(result, g.json);
+    }));
 
   workers
     .command('recall <sessionId> <workerId>')
     .description('Recall a worker: its Chain-of-Recall node and recent transcript')
-    .action((sessionId: string, workerId: string, options: Record<string, unknown>, command: Command) =>
-      cliAction(async (_opts, cmd) => {
-        const g = readGlobals(cmd);
-        const client = await HubClient.connect(g);
-        const result = await client.get<{ node: unknown; transcript: unknown }>(
-          `/api/sessions/${encodeURIComponent(sessionId)}/workers/${encodeURIComponent(workerId)}/recall`,
-        );
-        printResult(result, g.json);
-      })(options, command),
-    );
+    .action(cliAction(async (sessionId: string, workerId: string, _options: Record<string, unknown>, command: Command) => {
+      const g = readGlobals(command);
+      const client = await HubClient.connect(g);
+      const result = await client.get<{ node: unknown; transcript: unknown }>(
+        `/api/sessions/${encodeURIComponent(sessionId)}/workers/${encodeURIComponent(workerId)}/recall`,
+      );
+      printResult(result, g.json);
+    }));
 }
