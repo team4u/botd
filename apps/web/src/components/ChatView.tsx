@@ -48,6 +48,9 @@ import {
   resolveContextTabGroup,
   getSessionAttention,
   ATTENTION_VISUALS,
+  HUB_ROUTER_BOT_ID,
+  buildHubRouterVirtualBot,
+  isHubAssistantSession,
   type ContextTabGroup,
 } from '../session-space';
 import { BotdUiRenderer } from './generative-ui/BotdUiRenderer';
@@ -204,6 +207,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
     },
     [session.leadBotId, botMap]
   );
+
+  // 中枢总管会话（leadBotId 绑定系统内置 hub-router 或遗留标题匹配）：无真实节点分身，
+  // directBot 保持 undefined（不打开破损的节点分身编辑器），副标题展示「系统内置总管」。
+  // leadBotId 为 hub-router 时不在 botMap 中，mentionableBots 自然包含全部用户分身（@ 任意 BOT）。
+  const isHubRouterSession = isHubAssistantSession(session);
+  // 展示用 botMap：注入 hub-router 虚拟分身，让总管消息/交互卡正确渲染发送方名称
+  const viewBotMap = useMemo(() => {
+    if (!isHubRouterSession) return botMap;
+    const augmented = new Map(botMap);
+    augmented.set(HUB_ROUTER_BOT_ID, buildHubRouterVirtualBot(botMap.values()));
+    return augmented;
+  }, [botMap, isHubRouterSession]);
 
   // 输入框 @ 可提及的智能体列表：排除当前单聊对象自己（不能 @ 自己）；
   // 优先展示同门子代理与主 BOT，其次展示其他可用 BOT
@@ -721,14 +736,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const entries: { botId: string; label: string }[] = [];
     if (isRunning) {
       for (const [botId, message] of Object.entries(extensionUiState.workingMessages)) {
-        entries.push({ botId, label: `@${botMap.get(botId)?.name || botId}: ${message}` });
+        entries.push({ botId, label: `@${viewBotMap.get(botId)?.name || botId}: ${message}` });
       }
     }
     for (const { botId, text } of Object.values(extensionUiState.statuses)) {
       entries.push({ botId, label: text });
     }
     return entries;
-  }, [extensionUiState, isRunning, botMap]);
+  }, [extensionUiState, isRunning, viewBotMap]);
   // 运行中禁止编辑用户消息（与后端 409 拦截对齐）
   const canEdit = session.status !== 'running';
 
@@ -858,7 +873,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   {session.title}
                 </span>
                 <span className="font-mono text-[10px] text-zinc-400 dark:text-zinc-500 truncate">
-                  {directBot ? `${directBot.name}${currentSpaceName ? ` · ${currentSpaceName}` : ''}` : currentSpaceName}
+                  {isHubRouterSession
+                    ? '系统内置总管'
+                    : directBot
+                      ? `${directBot.name}${currentSpaceName ? ` · ${currentSpaceName}` : ''}`
+                      : currentSpaceName}
                 </span>
               </div>
               <Pencil className="w-3 h-3 text-zinc-300 dark:text-zinc-600 shrink-0 sm:opacity-0 sm:group-hover/title:opacity-100 transition-opacity" />
@@ -1337,7 +1356,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       <MessageTimeline
         messages={messages}
         streamingStates={streamingStates}
-        botMap={botMap}
+        botMap={viewBotMap}
         nodeMap={nodeMap}
         session={session}
         loadingMessages={loadingMessages}
@@ -1365,7 +1384,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             <AskCard
               key={ask.id}
               ask={ask}
-              bot={ask.botId ? botMap.get(ask.botId) : undefined}
+              bot={ask.botId ? viewBotMap.get(ask.botId) : undefined}
               onRespond={async (askId, answer) => {
                 await onRespondToAsk?.(session.id, askId, answer);
               }}
@@ -1539,7 +1558,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       <WorkersDrawer
         isOpen={workersDrawerOpen}
         workers={superAgent.workers}
-        botMap={botMap}
+        botMap={viewBotMap}
         nodeMap={nodeMap}
         initialWorkerId={workersDrawerInitial ?? undefined}
         onSelectWorker={(workerId) => superAgent.setSelectedWorkerId(workerId)}

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   Send,
   Square,
@@ -25,6 +25,7 @@ import { SlashMenuDropdown } from './ChatInput/SlashMenuDropdown';
 import { MentionMenuDropdown } from './ChatInput/MentionMenuDropdown';
 import { FileMentionDropdown } from './ChatInput/FileMentionDropdown';
 import { ComposerStatusBar } from './ChatInput/ComposerStatusBar';
+import { HUB_ROUTER_BOT_ID, buildHubRouterVirtualBot } from '../session-space';
 
 interface ChatInputProps {
   onSendMessage: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
@@ -87,8 +88,16 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const slash = useSlashMenu({ content, setContent, textareaRef, leadBotId, memberBots, botMap });
   const mention = useMentionMenu({ content, setContent, textareaRef, memberBots, isSubagentSession });
 
-  // 当前主控 BOT：# 文件补全的工作区归属，也是底栏微操舱的秒切目标
-  const currentBot = leadBotId && botMap ? botMap.get(leadBotId) : undefined;
+  // 当前主控 BOT：# 文件补全的工作区归属，也是底栏微操舱的秒切目标；
+  // leadBotId 为系统内置 hub-router 时构造虚拟分身，保证总管会话底栏可秒切模型与思考档位
+  const currentBot = useMemo(
+    () =>
+      leadBotId
+        ? (botMap?.get(leadBotId) ??
+          (leadBotId === HUB_ROUTER_BOT_ID ? buildHubRouterVirtualBot(botMap?.values()) : undefined))
+        : undefined,
+    [leadBotId, botMap]
+  );
   const fileMention = useFileMentionMenu({
     content,
     setContent,

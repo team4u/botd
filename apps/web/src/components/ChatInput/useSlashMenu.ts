@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { BotConfig, ChatCommand } from '@botd/protocol';
 import { api } from '../../api';
+import { HUB_ROUTER_BOT_ID } from '../../session-space';
 import { BUILTIN_SESSION_COMMANDS, parseSlashTrigger, type ParsedSlashTrigger } from './slash';
 
 interface UseSlashMenuParams {
@@ -166,10 +167,14 @@ export function useSlashMenu({ content, setContent, textareaRef, leadBotId, memb
       const hasSpecificBot = slashMatch.targetBotIds.length === 1;
       const targetId = hasSpecificBot ? slashMatch.targetBotIds[0] : (leadBotId || '');
 
+      // 系统内置中枢总管（hub-router）为合法斜杠目标：总管会话中输入 / 直接打开命令浮层
+      const isHubRouterTarget = targetId === HUB_ROUTER_BOT_ID;
+
       // 仅允许限制为 memberBots 或 leadBotId 或有效 bot
       const isMember =
         memberBots.some((b) => b.id === targetId) ||
         targetId === leadBotId ||
+        isHubRouterTarget ||
         Boolean(botMap?.has(targetId));
 
       if (hasSpecificBot && !isMember) {
@@ -190,6 +195,7 @@ export function useSlashMenu({ content, setContent, textareaRef, leadBotId, memb
       const target =
         memberBots.find((b) => b.id === targetId) ||
         botMap?.get(targetId) ||
+        (isHubRouterTarget ? { id: HUB_ROUTER_BOT_ID, name: '中枢总管' } : undefined) ||
         (targetId === leadBotId && botMap && leadBotId ? botMap.get(leadBotId) : undefined) ||
         (targetId ? { id: targetId, name: targetId } : null);
 
@@ -198,10 +204,18 @@ export function useSlashMenu({ content, setContent, textareaRef, leadBotId, memb
       setSlashPosition({ start: slashMatch.slashIndex, end: cursor });
       setShowSlashMenu(true);
 
-      // 仅在菜单开启或切换目标 BOT 时拉取目录，避免重复与永不过期
+      // 仅在菜单开启或切换目标 BOT 时拉取目录，避免重复与永不过期；
+      // hub-router 为前端虚拟身份，无命令目录，仅展示内建会话命令（/new /clear /compact）
       if (!showSlashMenu || activeTargetBotIdRef.current !== targetId) {
-        if (targetId) {
+        if (targetId && targetId !== HUB_ROUTER_BOT_ID) {
           fetchCommands(targetId);
+        } else if (targetId === HUB_ROUTER_BOT_ID) {
+          fetchRequestIdRef.current++;
+          activeTargetBotIdRef.current = HUB_ROUTER_BOT_ID;
+          setCommands([]);
+          setSlashIndex(0);
+          setLoadingCommands(false);
+          setCommandsError(null);
         } else {
           setCommands([]);
           setCommandsError('未找到主导智能体');
