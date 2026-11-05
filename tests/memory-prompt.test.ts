@@ -32,7 +32,7 @@ function makeBot(overrides: Partial<BotConfig> = {}): BotConfig {
 // 1. truncateMemoryIndex
 // ==========================================
 
-test('truncateMemoryIndex: 未超过 150 行时完整保留且不标记截断', () => {
+test('truncateMemoryIndex: 未超过 150 行时完整保留且不标记截断', { timeout: 60_000 }, () => {
   const content = Array.from({ length: 100 }, (_, i) => `line-${i}`).join('\n');
   const result = truncateMemoryIndex(content);
   assert.equal(result.text, content);
@@ -40,14 +40,14 @@ test('truncateMemoryIndex: 未超过 150 行时完整保留且不标记截断', 
   assert.equal(result.totalLines, 100);
 });
 
-test('truncateMemoryIndex: 恰好 150 行（边界）不截断', () => {
+test('truncateMemoryIndex: 恰好 150 行（边界）不截断', { timeout: 60_000 }, () => {
   const content = Array.from({ length: MEMORY_INDEX_MAX_LINES }, (_, i) => `line-${i}`).join('\n');
   const result = truncateMemoryIndex(content);
   assert.equal(result.truncated, false);
   assert.equal(result.totalLines, MEMORY_INDEX_MAX_LINES);
 });
 
-test('truncateMemoryIndex: 超过 150 行时截取前 150 行并标记', () => {
+test('truncateMemoryIndex: 超过 150 行时截取前 150 行并标记', { timeout: 60_000 }, () => {
   const lines = Array.from({ length: 200 }, (_, i) => `line-${i}`);
   const content = lines.join('\n');
   const result = truncateMemoryIndex(content);
@@ -57,7 +57,7 @@ test('truncateMemoryIndex: 超过 150 行时截取前 150 行并标记', () => {
   assert.equal(result.text.endsWith(`line-${MEMORY_INDEX_MAX_LINES - 1}`), true);
 });
 
-test('truncateMemoryIndex: 支持自定义 maxLines', () => {
+test('truncateMemoryIndex: 支持自定义 maxLines', { timeout: 60_000 }, () => {
   const content = 'a\nb\nc\nd';
   const result = truncateMemoryIndex(content, 2);
   assert.equal(result.text, 'a\nb');
@@ -65,7 +65,7 @@ test('truncateMemoryIndex: 支持自定义 maxLines', () => {
   assert.equal(result.totalLines, 4);
 });
 
-test('truncateMemoryIndex: 空内容不截断', () => {
+test('truncateMemoryIndex: 空内容不截断', { timeout: 60_000 }, () => {
   const result = truncateMemoryIndex('');
   assert.equal(result.text, '');
   assert.equal(result.truncated, false);
@@ -76,16 +76,16 @@ test('truncateMemoryIndex: 空内容不截断', () => {
 // 2. canBotWriteMemory
 // ==========================================
 
-test('canBotWriteMemory: all / 未配置 toolScope 时可写', () => {
+test('canBotWriteMemory: all / 未配置 toolScope 时可写', { timeout: 60_000 }, () => {
   assert.equal(canBotWriteMemory({}), true);
   assert.equal(canBotWriteMemory({ toolScope: 'all' }), true);
 });
 
-test('canBotWriteMemory: readonly 不可写', () => {
+test('canBotWriteMemory: readonly 不可写', { timeout: 60_000 }, () => {
   assert.equal(canBotWriteMemory({ toolScope: 'readonly' }), false);
 });
 
-test('canBotWriteMemory: custom 须包含 edit/write/bash 之一', () => {
+test('canBotWriteMemory: custom 须包含 edit/write/bash 之一', { timeout: 60_000 }, () => {
   assert.equal(canBotWriteMemory({ toolScope: 'custom', customTools: ['read', 'grep', 'find', 'ls'] }), false);
   assert.equal(canBotWriteMemory({ toolScope: 'custom', customTools: [] }), false);
   assert.equal(canBotWriteMemory({ toolScope: 'custom' }), false);
@@ -98,7 +98,7 @@ test('canBotWriteMemory: custom 须包含 edit/write/bash 之一', () => {
 // 3. buildMemoryPromptSection
 // ==========================================
 
-test('buildMemoryPromptSection: 只读模式不含 edit/write 写入引导', () => {
+test('buildMemoryPromptSection: 只读模式不含 edit/write 写入引导', { timeout: 60_000 }, () => {
   const section = buildMemoryPromptSection({
     memoryMd: '记忆内容',
     canWrite: false,
@@ -109,7 +109,7 @@ test('buildMemoryPromptSection: 只读模式不含 edit/write 写入引导', () 
   assert.equal(section.includes('可通过 ../MEMORY.md 与 ../memory'), false);
 });
 
-test('buildMemoryPromptSection: 可写模式包含维护规范与标题', () => {
+test('buildMemoryPromptSection: 可写模式包含维护规范与标题', { timeout: 60_000 }, () => {
   const section = buildMemoryPromptSection({
     memoryMd: '记忆内容',
     canWrite: true,
@@ -121,7 +121,7 @@ test('buildMemoryPromptSection: 可写模式包含维护规范与标题', () => 
   assert.match(section, /skills\/<skillId>\/SKILL\.md/, '保留 Skill 学习说明');
 });
 
-test('buildMemoryPromptSection: 包含节点共享记忆段落', () => {
+test('buildMemoryPromptSection: 包含节点共享记忆段落', { timeout: 60_000 }, () => {
   const section = buildMemoryPromptSection({
     memoryMd: 'bot 记忆',
     nodeMemoryMd: '节点级共享内容',
@@ -133,7 +133,7 @@ test('buildMemoryPromptSection: 包含节点共享记忆段落', () => {
   assert.ok(section.indexOf('节点级共享内容') < section.indexOf('bot 记忆'));
 });
 
-test('buildMemoryPromptSection: 节点共享记忆为空时不输出该段落', () => {
+test('buildMemoryPromptSection: 节点共享记忆为空时不输出该段落', { timeout: 60_000 }, () => {
   const section = buildMemoryPromptSection({
     memoryMd: 'bot 记忆',
     nodeMemoryMd: '   ',
@@ -142,7 +142,7 @@ test('buildMemoryPromptSection: 节点共享记忆为空时不输出该段落', 
   assert.equal(section.includes('节点共享记忆'), false);
 });
 
-test('buildMemoryPromptSection: memoryTopics 输出主题文件索引列表', () => {
+test('buildMemoryPromptSection: memoryTopics 输出主题文件索引列表', { timeout: 60_000 }, () => {
   const section = buildMemoryPromptSection({
     memoryMd: '记忆',
     memoryTopics: ['coding-style.md', 'topology.md'],
@@ -153,7 +153,7 @@ test('buildMemoryPromptSection: memoryTopics 输出主题文件索引列表', ()
   assert.match(section, /- \.\.\/memory\/topology\.md/);
 });
 
-test('buildMemoryPromptSection: 子代理回退到主 Bot 的 parentMemoryMd（自身记忆为空）', () => {
+test('buildMemoryPromptSection: 子代理回退到主 Bot 的 parentMemoryMd（自身记忆为空）', { timeout: 60_000 }, () => {
   const section = buildMemoryPromptSection({
     memoryMd: '',
     parentMemoryMd: '主 Bot 的记忆',
@@ -162,7 +162,7 @@ test('buildMemoryPromptSection: 子代理回退到主 Bot 的 parentMemoryMd（�
   assert.match(section, /主 Bot 的记忆/);
 });
 
-test('buildMemoryPromptSection: 子代理合并主 Bot 记忆与自身记忆（主 Bot 在前）', () => {
+test('buildMemoryPromptSection: 子代理合并主 Bot 记忆与自身记忆（主 Bot 在前）', { timeout: 60_000 }, () => {
   const section = buildMemoryPromptSection({
     memoryMd: '子代理专属记忆',
     parentMemoryMd: '主 Bot 的记忆',
@@ -173,7 +173,7 @@ test('buildMemoryPromptSection: 子代理合并主 Bot 记忆与自身记忆（�
   assert.ok(section.indexOf('主 Bot 的记忆') < section.indexOf('子代理专属记忆'), '主 Bot 记忆应在前');
 });
 
-test('buildMemoryPromptSection: parentMemoryMd 与自身相同内容不重复展示', () => {
+test('buildMemoryPromptSection: parentMemoryMd 与自身相同内容不重复展示', { timeout: 60_000 }, () => {
   const section = buildMemoryPromptSection({
     memoryMd: '相同记忆',
     parentMemoryMd: '相同记忆',
@@ -182,7 +182,7 @@ test('buildMemoryPromptSection: parentMemoryMd 与自身相同内容不重复展
   assert.equal(section.split('相同记忆').length - 1, 1, '相同内容只出现一次');
 });
 
-test('buildMemoryPromptSection: 超过 150 行附加截断提示', () => {
+test('buildMemoryPromptSection: 超过 150 行附加截断提示', { timeout: 60_000 }, () => {
   const longMemory = Array.from({ length: 200 }, (_, i) => `mem-${i}`).join('\n');
   const section = buildMemoryPromptSection({
     memoryMd: longMemory,

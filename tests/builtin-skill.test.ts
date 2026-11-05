@@ -49,7 +49,7 @@ test('ensureBuiltinSkill writes all three references/ files beside SKILL.md', as
   assert.equal(await readFile(referenceFile(dir, 'generative-ui.md'), 'utf8'), BUILTIN_SKILL_REFERENCES['generative-ui.md']);
 });
 
-test('builtin skill documents the Super-agent toolset at version 16', () => {
+test('builtin skill documents the Super-agent toolset at version 16', { timeout: 60_000 }, () => {
   assert.equal(BUILTIN_SKILL_VERSION, 16);
   // Super-agent 工具面（Router 内置）
   assert.match(BUILTIN_SKILL_MD, /spawn_worker/);
@@ -63,7 +63,7 @@ test('builtin skill documents the Super-agent toolset at version 16', () => {
   assert.match(BUILTIN_SKILL_MD, /api\.memo/);
 });
 
-test('builtin skill documents the first-class Super-agent CLI surface', () => {
+test('builtin skill documents the first-class Super-agent CLI surface', { timeout: 60_000 }, () => {
   for (const cmd of [
     'botd workers list',
     'botd workers spawn',
@@ -85,7 +85,7 @@ test('builtin skill documents the first-class Super-agent CLI surface', () => {
   }
 });
 
-test('builtin skill no longer teaches removed legacy commands', () => {
+test('builtin skill no longer teaches removed legacy commands', { timeout: 60_000 }, () => {
   // 旧架构（pi-subagents / bg / delegate / ask / install CLI）必须绝迹
   assert.ok(!/botd bg(?!\b)/.test(BUILTIN_SKILL_MD) && !BUILTIN_SKILL_MD.includes('botd bg '), 'must not teach botd bg');
   assert.ok(!/botd ask\b(?!s)/.test(BUILTIN_SKILL_MD), 'must not teach botd ask (asks is fine)');
@@ -95,7 +95,7 @@ test('builtin skill no longer teaches removed legacy commands', () => {
   assert.ok(!BUILTIN_SKILL_MD.includes('stop_subagent'), 'must not teach pi-subagents control');
 });
 
-test('builtin skill main file is lean and points at references (progressive disclosure)', () => {
+test('builtin skill main file is lean and points at references (progressive disclosure)', { timeout: 60_000 }, () => {
   // 主文件控制在 ~100 行以内
   assert.ok(BUILTIN_SKILL_MD.split('\n').length <= 100, `SKILL.md too long: ${BUILTIN_SKILL_MD.split('\n').length} lines`);
   // 正文必须指引按需 read 参考文档
@@ -108,7 +108,7 @@ test('builtin skill main file is lean and points at references (progressive disc
   }
 });
 
-test('extension reference covers full-stack ctx.ui bridging and details.ui', () => {
+test('extension reference covers full-stack ctx.ui bridging and details.ui', { timeout: 60_000 }, () => {
   const dev = BUILTIN_SKILL_REFERENCES['extension-and-skill-dev.md'];
   // ctx.ui 桥接方法（对话框 / 实时流与挂件 / 自定义工具视图三个插槽）
   for (const api of ['ctx.ui.confirm', 'ctx.ui.select', 'ctx.ui.input', 'ctx.ui.editor', 'ctx.ui.custom', 'ctx.ui.notify', 'ctx.ui.setStatus', 'ctx.ui.setWorkingMessage', 'ctx.ui.setWidget', 'ctx.ui.setEditorText', 'ctx.ui.pasteToEditor', 'details.ui']) {
@@ -125,7 +125,7 @@ test('extension reference covers full-stack ctx.ui bridging and details.ui', () 
   assert.match(dev, /pi\.on\('tool_call'/);
 });
 
-test('generative-ui reference documents all 17 botd.v1 components with state binding', () => {
+test('generative-ui reference documents all 17 botd.v1 components with state binding', { timeout: 60_000 }, () => {
   const ui = BUILTIN_SKILL_REFERENCES['generative-ui.md'];
   for (const component of ['Stack', 'Card', 'Tabs', 'Accordion', 'MetricGrid', 'MetricCard', 'BarList', 'KeyValueList', 'Table', 'Callout', 'Steps', 'TextInput', 'Select', 'Switch', 'CheckboxGroup', 'ActionBar', 'Button']) {
     assert.ok(ui.includes(`\`${component}\``), `UI reference missing component: ${component}`);
@@ -134,7 +134,7 @@ test('generative-ui reference documents all 17 botd.v1 components with state bin
   assert.match(ui, /"root": "page"/);
 });
 
-test('worker reference documents spawn_worker lifecycle and the memoized workflow pipeline', () => {
+test('worker reference documents spawn_worker lifecycle and the memoized workflow pipeline', { timeout: 60_000 }, () => {
   const sub = BUILTIN_SKILL_REFERENCES['subagents-and-workflows.md'];
   // Super-agent 工具契约
   assert.match(sub, /spawn_worker/);
@@ -180,7 +180,7 @@ test('cleanupEphemeralAgents tolerates a missing agents dir', async () => {
   await cleanupEphemeralAgents(agentDir); // must not throw
 });
 
-test('parseGitSource understands Pi git: prefixes and @ref suffixes', () => {
+test('parseGitSource understands Pi git: prefixes and @ref suffixes', { timeout: 60_000 }, () => {
   // git: shorthand host + tag
   const a = parseGitSource('git:github.com/owner/repo@v1.0.0');
   assert.equal(a.repoUrl, 'https://github.com/owner/repo.git');
