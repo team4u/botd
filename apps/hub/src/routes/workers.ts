@@ -88,7 +88,7 @@ export async function ensureRouterConversationId(
   runtime: HubDurableRuntime,
   sessionId: string,
   botId: string,
-  options?: { workspaceDir?: string },
+  options?: { workspaceDir?: string; title?: string },
 ): Promise<string> {
   const remembered = await runtime.harness.snapshot(SessionRouterDoc, sessionId, BACKGROUND_CONTEXT);
   // workspaceDir 粘性：首次携带后记住在映射文档里，后续不带 options 的调用
@@ -102,7 +102,7 @@ export async function ensureRouterConversationId(
         doc.workspaceDir = options.workspaceDir!.trim();
       }, BACKGROUND_CONTEXT);
     }
-    await syncRouterTargetDoc(runtime, convId, sessionId, botId, workspaceDir || undefined);
+    await syncRouterTargetDoc(runtime, convId, sessionId, botId, workspaceDir || undefined, options?.title);
     return convId;
   }
   if (runtime.getPersona(botId) === undefined) throw new Error(`unknown persona: ${botId}`);
@@ -113,7 +113,7 @@ export async function ensureRouterConversationId(
     doc.conversationId = newId;
     if (workspaceDir) doc.workspaceDir = workspaceDir;
   }, BACKGROUND_CONTEXT);
-  await syncRouterTargetDoc(runtime, newId, sessionId, botId, workspaceDir || undefined);
+  await syncRouterTargetDoc(runtime, newId, sessionId, botId, workspaceDir || undefined, options?.title);
   return newId;
 }
 
@@ -124,6 +124,7 @@ async function syncRouterTargetDoc(
   sessionId: string,
   botId: string,
   workspaceDir?: string,
+  title?: string,
 ): Promise<void> {
   const persona = runtime.getPersona(botId);
   if (persona === undefined) return;
@@ -137,7 +138,8 @@ async function syncRouterTargetDoc(
     current !== undefined &&
     (current as { sessionId?: string }).sessionId === sessionId &&
     current.botId === botId &&
-    current.cwd === effectiveCwd
+    current.cwd === effectiveCwd &&
+    (title === undefined || current.title === title)
   ) {
     return;
   }
@@ -155,6 +157,9 @@ async function syncRouterTargetDoc(
       await configure(tx, id, { cwd: effectiveCwd });
     }
     target.cwd = effectiveCwd;
+    if (title !== undefined && target.title !== title) {
+      target.title = title;
+    }
   }, BACKGROUND_CONTEXT);
 }
 
@@ -485,6 +490,38 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
   });
 
   // --- Workers 生命周期 -------------------------------------------------
+
+  // 全局 Worker 聚合：跨当前用户全部未归档会话汇总后台 Worker（中枢总管视图），
+  // running 优先、其次按更新时间倒序；无 Durable 运行时时安全返回空列表。
+  app.get('/api/workers', async (c) => {
+    const user = c.get('user');
+    const rt = await runtime();
+    if (rt === undefined) return c.json({ workers: [] });
+
+    const sessions = db.getAllSessions(user.id).filter((s) => !s.archived);
+    const collected: Array<WorkerListItem & { sessionTitle?: string; workspaceDir?: string }> = [];
+    for (const session of sessions) {
+      const routerId = await findRouterConversationId(rt, session.id);
+      if (routerId === undefined) continue;
+      const workers = await rt.getActiveWorkers(routerId);
+      for (const w of workers) {
+        collected.push({
+          ...toListItem(w, session.id),
+          sessionTitle: session.title,
+          ...(session.workspaceDir ? { workspaceDir: session.workspaceDir } : {}),
+        });
+      }
+    }
+    collected.sort((a, b) => {
+      const aActive = a.status === 'running' ? 1 : 0;
+      const bActive = b.status === 'running' ? 1 : 0;
+      if (bActive !== aActive) return bActive - aActive;
+      const ta = Date.parse(a.updatedAt || a.startedAt || '') || 0;
+      const tb = Date.parse(b.updatedAt || b.startedAt || '') || 0;
+      return tb - ta;
+    });
+    return c.json({ workers: collected });
+  });
 
   app.get('/api/sessions/:id/workers', async (c) => {
     const id = c.req.param('id');
@@ -1513,8 +1550,10 @@ export async function submitSessionMessageToDurable(
     activeBotId: botId,
     activeBotIds: [botId],
   });
+  const sessionRecord = ctx.db.getSession(sessionId);
   const routerId = await ensureRouterConversationId(rt, sessionId, botId, {
-    workspaceDir: ctx.db.getSession(sessionId)?.workspaceDir,
+    workspaceDir: sessionRecord?.workspaceDir,
+    title: sessionRecord?.title,
   });
   await mirror?.ensure(sessionId);
 
@@ -1531,6 +1570,17 @@ export async function submitSessionMessageToDurable(
   if (newMatch) {
     const handoff = newMatch[1]?.trim() || undefined;
     await rt.resetConversation(stringToConversationId(routerId), handoff, BACKGROUND_CONTEXT);
+    markDurableSessionIdle(ctx, sessionId);
+    return routerId;
+  }
+
+  // /clear：原地清空上下文 —— 追加 pi.reset 边界 + 清空 SQLite 消息，但保留
+  // SessionRouterDoc 映射与正在运行的后台 Worker（与 /new 语义不同：不换会话）。
+  const clearMatch = /^\/clear(?:\s+([\s\S]*))?$/i.exec(rawCommand);
+  if (clearMatch) {
+    const handoff = clearMatch[1]?.trim() || undefined;
+    await rt.resetConversation(stringToConversationId(routerId), handoff, BACKGROUND_CONTEXT);
+    ctx.db.clearSessionMessages(sessionId);
     markDurableSessionIdle(ctx, sessionId);
     return routerId;
   }
@@ -1705,6 +1755,19 @@ export async function cancelDurableSession(rt: HubDurableRuntime, sessionId: str
   }
   const conv = await rt.conversation(routerId, BACKGROUND_CONTEXT);
   await conv?.abort(BACKGROUND_CONTEXT).catch(() => undefined);
+}
+
+/**
+ * 原地清空会话上下文（/clear 专用）：仅中止 Router 前台自身回合，并调用原生
+ * `conv.reset` 追加上下文重置边界，保留 `SessionRouterDoc` 映射与 `WorkerRegistryDoc`
+ * 中正在运行的后台 Worker 不受影响。
+ */
+export async function clearDurableSessionContext(rt: HubDurableRuntime, sessionId: string): Promise<void> {
+  const routerId = await findRouterConversationId(rt, sessionId);
+  if (routerId === undefined) return;
+  const conv = await rt.conversation(routerId, BACKGROUND_CONTEXT);
+  await conv?.abort(BACKGROUND_CONTEXT).catch(() => undefined);
+  await rt.resetConversation(stringToConversationId(routerId), undefined, BACKGROUND_CONTEXT).catch(() => undefined);
 }
 
 /**
