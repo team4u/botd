@@ -15,6 +15,8 @@ interface WorkerListItem {
   nodeId?: string;
   cwd?: string;
   worktreePath?: string;
+  sessionTitle?: string;
+  workspaceDir?: string;
   threadKeys: string[];
   startedAt: string;
   updatedAt?: string;
@@ -33,15 +35,17 @@ export function registerWorkersCommands(program: Command): void {
   const workers = program.command('workers').description('Super-agent background workers (list/spawn/steer/stop/recall)');
 
   workers
-    .command('list <sessionId>')
-    .description('List background workers of a session')
-    .action((sessionId: string, options: Record<string, unknown>, command: Command) =>
+    .command('list [sessionId]')
+    .description('List background workers (of a session, or globally across all sessions when sessionId is omitted)')
+    .action((sessionId: string | undefined, options: Record<string, unknown>, command: Command) =>
       cliAction(async (_opts, cmd) => {
         const g = readGlobals(cmd);
         const client = await HubClient.connect(g);
-        const result = await client.get<WorkersListResult>(
-          `/api/sessions/${encodeURIComponent(sessionId)}/workers`,
-        );
+        const path =
+          typeof sessionId === 'string' && sessionId.trim()
+            ? `/api/sessions/${encodeURIComponent(sessionId.trim())}/workers`
+            : '/api/workers';
+        const result = await client.get<WorkersListResult>(path);
         printResult(result.workers, g.json);
       })(options, command),
     );

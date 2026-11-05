@@ -42,7 +42,7 @@ export const BUILTIN_SKILL_MD = `${VERSION_MARKER}
 Super-agent 操作（workers / events / watchdog / asks）与 Web UI 完全同权：
 
 \`\`\`bash
-botd workers list <sessionId> --json                    # 会话的后台 Worker（含状态/摘要/threadKeys）
+botd workers list <sessionId> --json                    # 会话的后台 Worker（含状态/摘要/threadKeys）；省略 <sessionId> 则跨会话列出全部 Worker
 botd workers spawn <sessionId> --title "重构" --task "..." [--bot <botId>] [--worktree] [--thread-key <key>]
 botd workers steer <sessionId> <workerId> "改用方案 B" [--mode followUp]
 botd workers stop <sessionId> <workerId>
@@ -58,7 +58,7 @@ botd asks respond <sessionId> <askId> 批准
 
 其余常用命令（全部支持 \`--json\`）：
 
-- \`botd sessions list|create|messages <id>|search <q>|cancel <id>|share <id>\` — 会话与消息。
+- \`botd sessions list|create|messages <id>|search <q>|cancel <id>|share <id>\` — 会话与消息；\`botd sessions clear <id> --keep-workers\` 清空历史并重置记忆但保留运行中的后台 Worker。
 - \`botd chat send <sessionId> "<msg>" --wait 120\` — 向会话发消息并等回复（bot-to-bot）。
 - \`botd bots create <botId> --name <n> --model <provider/modelId> [--workspace <dir>]\` — 新建 BOT 分身（\`--node\` 默认 \`BOTD_NODE_ID\` 或 \`local\`）；\`botd bots env set <botId> KEY=VALUE\` 注入密钥。
 - \`botd artifact put <filePath>\` / \`artifact pull <id>\` / \`artifact list\` — 文件在节点、会话与 BOT 间共享。
@@ -107,7 +107,7 @@ export const BUILTIN_SKILL_REFERENCES: Record<string, string> = {
 ## 2. Worker 生命周期与状态
 
 - Worker 状态：\`running | completed | failed | aborted\`；完成后 registry 带 \`summary\`。
-- \`botd workers list <sessionId> --json\` 随时查状态/摘要/worktree 路径/threadKeys。
+- \`botd workers list <sessionId> --json\` 随时查状态/摘要/worktree 路径/threadKeys；省略 \`<sessionId>\` 则跨会话列出全部 Worker。
 - \`steer_worker\` 的 \`mode\`：\`"steer"\`（运行中插话改向，默认）/ \`"followUp"\`（排在当前 run 之后继续）。
 - \`recall\`（Chain of Recall）：\`recall({ id })\` 返回节点完整内容 + relatedIds 的一行摘要（多跳追溯）。
 

@@ -145,13 +145,15 @@ export function registerSessionsCommands(program: Command): void {
 
   sessions
     .command('clear <sessionId>')
-    .description('Clear message history of a session and reset bot memory')
+    .description('Clear message history of a session and reset bot memory (--keep-workers keeps running background workers alive)')
+    .option('--keep-workers', 'Reset foreground router context and clear messages without stopping running background workers')
     .action((sessionId: string, options: Record<string, unknown>, command: Command) =>
       cliAction(async (_opts, cmd) => {
         const g = readGlobals(cmd);
         const client = await HubClient.connect(g);
+        const query = options.keepWorkers ? '?keepWorkers=1' : '';
         const res = await client.delete<{ ok: boolean }>(
-          `/api/sessions/${encodeURIComponent(sessionId)}/messages`,
+          `/api/sessions/${encodeURIComponent(sessionId)}/messages${query}`,
         );
         printResult(res, g.json);
       })(options, command),
