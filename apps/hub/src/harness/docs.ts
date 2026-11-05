@@ -15,6 +15,23 @@ import type { JsonValue } from "@earendil-works/chord";
 /** The role a conversation plays in the super-agent tree. */
 export type BotdRole = "router" | "worker" | "subagent";
 
+/** Thinking 档位（persona 配置与会话覆盖共用）；`"max"` 应用时收敛为 `"xhigh"`。 */
+export type BotdThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/** 会话级模型覆盖（API 形态）：`thinkingLevel: null` 显式清除，省略表示回退 persona 默认。 */
+export interface ConversationModelOverride {
+	provider: string;
+	modelId: string;
+	thinkingLevel?: BotdThinkingLevel | null;
+}
+
+/** 会话级模型覆盖（存储形态）：thinkingLevel 仅在显式设置时存在，不带 null。 */
+export interface StoredModelOverride {
+	provider: string;
+	modelId: string;
+	thinkingLevel?: BotdThinkingLevel;
+}
+
 /** State stored on a `botd.target` document (conversation-scoped, forked as-of). */
 export interface TargetState {
 	/** Owning Bot persona (`botId`), e.g. `"architect"` or `"finance"`. */
@@ -38,7 +55,7 @@ export interface TargetState {
 	/** Human-readable title (topic sessions, worker tasks). */
 	title?: string;
 	/** Optional conversation-scoped model override (isolated from global BotPersonaConfig). */
-	modelOverride?: { provider: string; modelId: string; thinkingLevel?: string };
+	modelOverride?: StoredModelOverride;
 }
 export type TargetStateJson = TargetState & { [key: string]: JsonValue };
 
