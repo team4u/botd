@@ -476,14 +476,22 @@ export function createWorkflowExtension(
 				const text = await answerText(settled);
 
 				// gate：shell 门禁；非零退出码或执行错误判步失败。本步在独立 worktree
-				// 中时，gate 必须在同一 worktree 目录下运行（先确保挂载，再 cd 进去执行）。
+				// 中时，gate 必须在同一 worktree 目录下运行：挂载不能只依赖 Hub 本机的
+				// node:fs/child_process（远端 ExecutionEnv 上路径不存在），gate 命令自身
+				// 幂等挂载目标环境上的 worktree（本地 ensureWorktree 仅作尽力而为的预挂载）。
 				if (opts?.gate !== undefined) {
 					const env = await apiEnv(api, context);
 					if (env === undefined) throw new Error('workflow gate requires an execution env');
 					let gateCommand = opts.gate;
 					if (stepWorktreePath !== '') {
+						const repoDir = dirname(dirname(stepWorktreePath));
 						await ensureWorktree(stepWorktreePath, stepBranchName);
-						gateCommand = `if [ -d "${stepWorktreePath}" ]; then cd "${stepWorktreePath}"; fi && (${opts.gate})`;
+						gateCommand =
+							`if [ ! -d "${stepWorktreePath}" ] && git -C "${repoDir}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then ` +
+							`git -C "${repoDir}" worktree prune 2>/dev/null; ` +
+							`mkdir -p "${dirname(stepWorktreePath)}" && git -C "${repoDir}" worktree add -B "${stepBranchName}" "${stepWorktreePath}" HEAD >/dev/null 2>&1 || true; ` +
+							`fi && ` +
+							`if [ -d "${stepWorktreePath}" ]; then cd "${stepWorktreePath}"; fi && (${opts.gate})`;
 					}
 					const gateResult = await env.exec(gateCommand, undefined, context);
 					if (!gateResult.ok || gateResult.value?.exitCode !== 0) {
@@ -621,7 +629,9 @@ export function createWorkflowExtension(
 	return defineExtension({ name: 'subagent-workflow', tools: [SubagentWorkflow] });
 }
 
-/** 惰性幂等的本地 worktree 挂载：目录已存在则复用，否则从基准仓库创建；失败静默（gate 回退原目录）。 */
+/** 惰性幂等的本地 worktree 挂载：目录已存在则复用，否则从基准仓库创建；失败静默
+ *  （gate 回退原目录）。目标环境可能是远端 ExecutionEnv：真正的挂载由 gate 命令
+ *  自身在目标环境上幂等完成，此处仅是 Hub 本机的尽力而为预挂载。 */
 async function ensureWorktree(worktreePath: string, branchName: string): Promise<void> {
 	try {
 		if (existsSync(worktreePath)) return;

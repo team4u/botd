@@ -10,6 +10,8 @@ import type { ArtifactService } from './artifact-service.js';
 import type { HubDurableRuntime } from './harness/hub-harness.js';
 import { submitSessionMessageToDurable, type DurableSessionMirror } from './routes/workers.js';
 import { watchSubSessionCompletion } from './subsession.js';
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
+import { ThreadSubscriptionsDoc, threadKeyOf, type IncomingEvent } from './harness/event-router.js';
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -164,6 +166,38 @@ export function matchesEventFilter(
     }
   }
   return true;
+}
+
+/**
+ * 从 webhook 载荷推导 threadKey：GitHub 约定（repository.full_name + pull_request/issue.number
+ * 优先，repo/prNumber/issueNumber 简写次之）或载荷显式 threadKey 字段。无法推导返回 undefined。
+ */
+export function deriveWebhookThreadKey(meta: {
+  source: string;
+  eventType: string;
+  parsedObject?: Record<string, unknown>;
+}): string | undefined {
+  const p = meta.parsedObject;
+  if (p === undefined) return undefined;
+  if (typeof p.threadKey === 'string' && p.threadKey.trim()) return p.threadKey.trim();
+  const repo =
+    (p.repository as { full_name?: string } | undefined)?.full_name ??
+    (typeof p.repo === 'string' ? p.repo : undefined);
+  const prNumber =
+    (p.pull_request as { number?: number } | undefined)?.number ??
+    (typeof p.prNumber === 'number' ? p.prNumber : undefined);
+  const issueNumber =
+    (p.issue as { number?: number } | undefined)?.number ??
+    (typeof p.issueNumber === 'number' ? p.issueNumber : undefined);
+  if (repo === undefined || (prNumber === undefined && issueNumber === undefined)) return undefined;
+  const event: IncomingEvent = {
+    source: meta.source,
+    type: meta.eventType,
+    sender: 'webhook',
+    summary: '',
+    target: { repo, number: (prNumber ?? issueNumber)!, kind: prNumber !== undefined ? 'pr' : 'issue' },
+  };
+  return threadKeyOf(event);
 }
 
 export class TriggerService {
@@ -473,6 +507,55 @@ export class TriggerService {
       this.db.updateAutomationEvent(eventId, { payloadArtifactId });
     }
     const durableWakeup = `[Trigger "${trigger.name}" (@${trigger.botId})]: ${wakeupMsg}`;
+
+    // 线程直通（EventRouter 3.2）：GitHub PR/Issue 等线程化 webhook 命中
+    // ThreadSubscriptionsDoc 的活跃 Worker 订阅时，事件直接投递给订阅 Worker，
+    // 绕过前台 Router LLM（0 Router 轮）；未命中或无订阅则照常唤醒 Router。
+    if (this.durableActive()) {
+      const threadKey = deriveWebhookThreadKey(meta);
+      if (threadKey !== undefined) {
+        try {
+          const rt = await this.getDurableRuntime!();
+          const subs = await rt.harness.snapshot(ThreadSubscriptionsDoc, BACKGROUND_CONTEXT);
+          const workerIds = subs?.subs[threadKey] ?? [];
+          const delivered: string[] = [];
+          for (const workerId of workerIds) {
+            const numeric = Number(workerId);
+            if (!Number.isInteger(numeric)) continue;
+            const workerConv = await rt.harness.conversation(
+              numeric as import('@earendil-works/pi-durable').ConversationId,
+              BACKGROUND_CONTEXT,
+            );
+            if (workerConv === undefined) continue;
+            await rt.submitUserMessage(workerId, durableWakeup, {
+              requestId: `webhook:${eventId}:${workerId}`,
+              whenBusy: 'steer',
+            });
+            delivered.push(workerId);
+          }
+          if (delivered.length > 0) {
+            return {
+              status: 200,
+              body: {
+                ok: true,
+                triggerId: trigger.id,
+                sessionId: trigger.sessionId,
+                passthrough: true,
+                threadKey,
+                deliveredTo: delivered,
+                ...(inserted ? { eventId } : {}),
+              },
+            };
+          }
+        } catch (err) {
+          console.warn(
+            '[triggers] thread passthrough failed, falling back to router wakeup:',
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+    }
+
     if (!(await this.submitToDurable(trigger.sessionId, trigger.botId, durableWakeup))) {
       await this.router.handleWakeup(trigger.sessionId, trigger.botId, wakeupMsg);
     }
