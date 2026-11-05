@@ -283,7 +283,6 @@ const SessionRow: React.FC<{
   batchMode: boolean;
   selected: boolean;
   dimmed?: boolean;
-  treeConnector?: string | null;
   /** 容器归属前缀（雷达行用）：空间名或助理名，如 botd / 随手记 */
   contextLabel?: string | null;
   onSelect: () => void;
@@ -299,7 +298,6 @@ const SessionRow: React.FC<{
   batchMode,
   selected,
   dimmed = false,
-  treeConnector = null,
   contextLabel = null,
   onSelect,
   onToggleSelect,
@@ -308,6 +306,11 @@ const SessionRow: React.FC<{
 }) => {
   const relativeTime = formatRelativeTime(session.lastMessageAt ?? session.updatedAt);
   const title = sessionDisplayTitle(session, botsById);
+  // 雷达行徽标后紧跟同名前缀的标题会结巴（如 [botd] botd #2），去掉重复前缀
+  const displayTitle =
+    contextLabel && title.startsWith(`${contextLabel} `)
+      ? title.slice(contextLabel.length + 1) || title
+      : title;
 
   const handleClick = () => {
     if (batchMode) onToggleSelect();
@@ -327,23 +330,15 @@ const SessionRow: React.FC<{
         }
       }}
       className={`group min-h-[40px] w-full text-left px-2 py-1.5 rounded-lg border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 flex items-center gap-2 ${
-        dimmed ? 'opacity-70 hover:opacity-100' : ''
+        dimmed && !isActive ? 'opacity-65 hover:opacity-100' : ''
       } ${
         batchMode && selected
-          ? 'bg-blue-50/70 dark:bg-blue-950/30 border-blue-200 dark:border-blue-900/70'
+          ? 'bg-blue-50/80 dark:bg-blue-950/40 border-blue-200 dark:border-blue-900/70 text-zinc-900 dark:text-zinc-100'
           : isActive
-            ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs'
-            : 'border-transparent hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80'
-      }`}
-    >
-      {treeConnector && (
-        <span
-          aria-hidden="true"
-          className="shrink-0 w-3.5 font-mono text-[11px] leading-none text-zinc-300 dark:text-zinc-600 select-none"
-        >
-          {treeConnector}
-        </span>
-      )}
+            ? 'relative bg-white dark:bg-zinc-800/95 border-zinc-200/90 dark:border-zinc-700/80 shadow-xs text-zinc-950 dark:text-zinc-50 before:content-[""] before:absolute before:left-0 before:top-2 before:bottom-2 before:w-0.5 before:rounded-full before:bg-zinc-900 dark:before:bg-zinc-100'
+            : 'border-transparent text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/50 dark:hover:bg-zinc-800/60 hover:text-zinc-900 dark:hover:text-zinc-200'
+      }`
+    }>
       {batchMode ? (
         selected ? (
           <CheckSquare className="w-4 h-4 shrink-0 text-blue-600 dark:text-blue-400" />
@@ -357,18 +352,20 @@ const SessionRow: React.FC<{
       <div className="flex-1 min-w-0 flex items-baseline gap-2">
         {contextLabel && (
           <span
-            className="shrink-0 font-mono text-[10px] text-zinc-400 dark:text-zinc-500 truncate max-w-[80px]"
+            className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-zinc-200/70 dark:bg-zinc-700/60 text-zinc-600 dark:text-zinc-300 truncate max-w-[88px] leading-none"
             title={contextLabel}
           >
             {contextLabel}
           </span>
         )}
         <span
-          className={`truncate text-[13px] font-semibold ${
-            isActive ? 'text-zinc-900 dark:text-zinc-100' : 'text-zinc-800 dark:text-zinc-200'
+          className={`truncate text-[13px] ${
+            isActive
+              ? 'font-semibold text-zinc-950 dark:text-zinc-50'
+              : 'font-medium text-zinc-700 dark:text-zinc-300 group-hover:text-zinc-900 dark:group-hover:text-zinc-100'
           }`}
         >
-          {title}
+          {displayTitle}
         </span>
         {attention !== 'idle' && (
           <span
@@ -417,8 +414,8 @@ const ChildSessionRow: React.FC<{
       }}
       className={`group min-h-[44px] w-full text-left px-2 py-1.5 rounded-lg border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 flex items-center gap-2 ${
         isActive
-          ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70'
-          : 'border-transparent hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80'
+          ? 'relative bg-white dark:bg-zinc-800/95 border-zinc-200/90 dark:border-zinc-700/80 shadow-xs text-zinc-950 dark:text-zinc-50 before:content-[""] before:absolute before:left-0 before:top-2 before:bottom-2 before:w-0.5 before:rounded-full before:bg-zinc-900 dark:before:bg-zinc-100'
+          : 'border-transparent hover:bg-zinc-200/50 dark:hover:bg-zinc-800/60'
       }`}
     >
       {attention !== 'idle' ? (
@@ -426,7 +423,11 @@ const ChildSessionRow: React.FC<{
       ) : (
         <span className="w-2 h-2 shrink-0" aria-hidden="true" />
       )}
-      <span className="truncate text-xs text-zinc-700 dark:text-zinc-300 flex-1 min-w-0">
+      <span
+        className={`truncate text-xs flex-1 min-w-0 ${
+          isActive ? 'font-semibold text-zinc-950 dark:text-zinc-50' : 'text-zinc-700 dark:text-zinc-300'
+        }`}
+      >
         {session.title}
       </span>
       {!isActive && <UnreadBadge count={unread} />}
@@ -845,11 +846,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     [nodeMap]
   );
 
-  const renderSessionRow = (
-    session: SessionRecord,
-    dimmed = false,
-    treeConnector: string | null = null
-  ) => (
+  const renderSessionRow = (session: SessionRecord, dimmed = false) => (
     <SessionRow
       key={session.id}
       session={session}
@@ -860,7 +857,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
       batchMode={multiSelectOn}
       selected={selectedIds.has(session.id)}
       dimmed={dimmed}
-      treeConnector={treeConnector}
       onSelect={() => handleSelect(session.id)}
       onToggleSelect={() => toggleSelectOne(session.id)}
       onSetArchived={onSetArchived}
@@ -1256,12 +1252,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       }}
                       className={`group min-h-[54px] w-full text-left px-2 py-2 rounded-xl border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 flex items-center gap-2.5 ${
                         isActive
-                          ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300/70 dark:border-zinc-700/70 shadow-xs'
-                          : 'border-transparent hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80'
+                          ? 'bg-white dark:bg-zinc-800/95 border-zinc-200/90 dark:border-zinc-700/80 shadow-xs'
+                          : 'border-transparent hover:bg-zinc-200/50 dark:hover:bg-zinc-800/60'
                       }`}
                     >
                       <span className="relative shrink-0">
-                        <BotTile className="w-9 h-9 text-sm" />
+                        <BotTile className="w-9 h-9 text-sm" active={isActive} />
                         <span
                           title={dotTitle}
                           className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-zinc-50 dark:border-zinc-900 ${dotClass}`}
@@ -1340,14 +1336,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   // 当前会话属于该 Space 时自动展开（下方 effect 同步清除其收起标记）
                   const activeInSpace = group.sessions.some((s) => s.id === activeSessionId);
                   const isOpen = !!query || !collapsedSpaces.has(group.path);
+                  // 展开时目录头不加背景框（避免与选中子会话卡片「双框叠罗汉」），
+                  // 仅折叠且当前会话藏在内时用轻柔胶囊提醒
                   return (
-                    <div key={group.path}>
+                    <div key={group.path} className="group/space">
                       <div
                         className={`group flex items-center gap-1.5 px-2 py-1.5 rounded-lg border transition-all cursor-pointer ${
-                          activeInSpace
-                            ? 'bg-zinc-100/70 dark:bg-zinc-800/70 border-zinc-200/70 dark:border-zinc-700/70'
+                          activeInSpace && !isOpen
+                            ? 'bg-zinc-200/60 dark:bg-zinc-800/70 border-transparent'
                             : 'border-transparent hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80'
-                        }`}
+                        } ${activeInSpace ? 'text-zinc-900 dark:text-zinc-100' : ''}`}
                       >
                         <button
                           type="button"
@@ -1362,7 +1360,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             }`}
                           />
                         </button>
-                        <FolderGit2 className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400 shrink-0" />
+                        <FolderGit2
+                          className={`w-3.5 h-3.5 shrink-0 ${
+                            activeInSpace ? 'text-zinc-700 dark:text-zinc-300' : 'text-zinc-500 dark:text-zinc-400'
+                          }`}
+                        />
                         <button
                           type="button"
                           onClick={() => {
@@ -1381,50 +1383,46 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           title={group.path}
                           className="flex items-center gap-1.5 min-w-0 flex-1 text-left cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 rounded"
                         >
-                          <span className="truncate text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+                          <span
+                            className={`truncate text-xs font-semibold ${
+                              activeInSpace ? 'text-zinc-900 dark:text-zinc-100' : 'text-zinc-800 dark:text-zinc-200'
+                            }`}
+                          >
                             {group.name}
                           </span>
                           <span className="shrink-0 text-[10px] font-normal text-zinc-400 dark:text-zinc-500">
-                            ({group.sessions.length})
+                            · {group.sessions.length}
                           </span>
                           <AttentionDot level={group.topAttention} />
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const leadBotId =
+                              group.sessions[0]?.leadBotId ||
+                              group.botIds.find((id) => !botsById.get(id)?.parentBotId) ||
+                              group.botIds[0];
+                            if (!leadBotId) {
+                              onOpenCreateModal?.();
+                              return;
+                            }
+                            if (onCreateParallelTopic)
+                              void onCreateParallelTopic({
+                                leadBotId,
+                                workspaceDir: group.path,
+                              });
+                            else onOpenCreateModal?.();
+                          }}
+                          title={`在 ${group.name} 中新建任务`}
+                          aria-label={`在 ${group.name} 中新建任务`}
+                          className="shrink-0 w-5 h-5 flex items-center justify-center rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-700/60 transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-500 opacity-70 lg:opacity-0 lg:group-hover/space:opacity-100 focus-visible:opacity-100"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                        </button>
                       </div>
-                      {isOpen && (
-                        <div className="space-y-0.5 pl-4">
-                          {group.sessions.map((s, idx) =>
-                            renderSessionRow(
-                              s,
-                              false,
-                              idx === group.sessions.length - 1 ? '└─' : '├─'
-                            )
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const leadBotId =
-                                group.sessions[0]?.leadBotId ||
-                                group.botIds.find((id) => !botsById.get(id)?.parentBotId) ||
-                                group.botIds[0];
-                              if (!leadBotId) {
-                                onOpenCreateModal?.();
-                                return;
-                              }
-                              if (onCreateParallelTopic)
-                                void onCreateParallelTopic({
-                                  leadBotId,
-                                  workspaceDir: group.path,
-                                });
-                              else onOpenCreateModal?.();
-                            }}
-                            className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 transition-colors cursor-pointer"
-                          >
-                            <span aria-hidden="true" className="w-3.5 font-mono text-[11px] text-zinc-300 dark:text-zinc-600 select-none">
-                              └─
-                            </span>
-                            <Plus className="w-3 h-3 shrink-0" />
-                            <span className="truncate">在 {group.name} 中新建任务</span>
-                          </button>
+                      {isOpen && group.sessions.length > 0 && (
+                        <div className="mt-0.5 ml-3.5 pl-2.5 border-l border-zinc-200/80 dark:border-zinc-800 space-y-0.5">
+                          {group.sessions.map((s) => renderSessionRow(s, false))}
                         </div>
                       )}
                     </div>

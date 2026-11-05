@@ -173,7 +173,13 @@ test('buildActivePulseEntries: 仅含非 idle 未归档会话，支持 priority 
   const botLife = mkBot({ id: 'bot_life', name: 'Life Bot' });
 
   const failed = mkSession({ id: 's_failed', leadBotId: 'bot_life', status: 'failed' });
-  const working = mkSession({ id: 's_working', leadBotId: 'bot_dev', status: 'running' });
+  const working = mkSession({
+    id: 's_working',
+    leadBotId: 'bot_dev',
+    status: 'running',
+    // 固定更晚的 updatedAt，保证同优先级（working）内 s_working 稳定排在 s_child 前，不受毫秒抖动影响
+    updatedAt: new Date(Date.now() + 5_000).toISOString(),
+  });
   const unseen = mkSession({ id: 's_unseen', leadBotId: 'bot_life' });
   const idle = mkSession({ id: 's_idle', leadBotId: 'bot_dev' });
   const archivedWorking = mkSession({ id: 's_arch', leadBotId: 'bot_dev', status: 'running', archived: true });
@@ -271,7 +277,7 @@ test('resolveContextTabGroup: Space 会话与 Assistant 会话分别聚合平级
 // 三场景正交编排：助理（通讯录）/ 编程（Spaces+雷达）/ 中枢（脉冲+归档治理）
 // ==========================================
 
-test('Sidebar 三场景正交编排：编程模式 Spaces 在雷达上方，中枢模式零 Space/助理且有零活跃空态', async () => {
+test('Sidebar 三场景正交编排：编程模式 Spaces 在雷达上方，中枢模式零 Space/助理且有零活跃空态', { timeout: 60_000 }, async () => {
   const sidebarPath = fileURLToPath(
     new URL('../apps/web/src/components/Sidebar.tsx', import.meta.url)
   );
@@ -332,7 +338,133 @@ test('Sidebar 三场景正交编排：编程模式 Spaces 在雷达上方，中�
   const archivedSection = source.slice(pulseArchived);
   assert.match(archivedSection, /ListChecks/, '已归档区块应提供批量勾选删除入口');
   assert.match(archivedSection, /sidebarMode === 'pulse'/, '已归档区块仅中枢模式渲染');
-}, { timeout: 60_000 });
+});
+
+// ==========================================
+// 方案 A（Linear/Raycast 浮起白卡）：项目空间树重构 + 选中态升级
+// ==========================================
+
+test('Sidebar 项目空间树：移除 ASCII 字符画，改用 CSS 垂直导轨线且新建按钮上移空间头', { timeout: 60_000 }, async () => {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const source = await fs.readFile(
+    path.join(process.cwd(), 'apps/web/src/components/Sidebar.tsx'),
+    'utf-8'
+  );
+
+  // 1. treeConnector 参数与字符画彻底移除
+  assert.doesNotMatch(source, /treeConnector/, '不得再存在 treeConnector 参数');
+  assert.doesNotMatch(source, /└─/, '不得再渲染 └─ 字符画');
+  assert.doesNotMatch(source, /├─/, '不得再渲染 ├─ 字符画');
+
+  // 2. 子会话容器采用 border-l 垂直导轨线
+  assert.match(
+    source,
+    /border-l border-zinc-200\/80 dark:border-zinc-800/,
+    '子会话列表应使用左置 CSS 垂直导轨线（border-l）'
+  );
+  assert.doesNotMatch(
+    source,
+    /\(\{group\.sessions\.length\}\)/,
+    '空间头数量展示应为 · N 而非 (N)'
+  );
+  assert.match(source, /· \{group\.sessions\.length\}/, '空间头数量展示应为 · N');
+
+  // 3. 新建任务按钮位于空间头部（title/aria-label），树底不再有占行按钮
+  assert.match(
+    source,
+    /title=\{`在 \$\{group\.name\} 中新建任务`\}/,
+    '空间头应携带「在空间中新建任务」的紧凑 + 按钮'
+  );
+  assert.match(
+    source,
+    /aria-label=\{`在 \$\{group\.name\} 中新建任务`\}/,
+    '新建按钮应带 aria-label'
+  );
+  // 树底占行按钮已删：新建按钮不再是占满整行的文案按钮，而是紧凑图标按钮（w-5 h-5）
+  const spaceCreateMatches = source.match(
+    /aria-label=\{`在 \$\{group\.name\} 中新建任务`\}[\s\S]{0,600}?className="([^"]+)"/
+  );
+  assert.ok(spaceCreateMatches, '应能定位新建按钮的 className');
+  assert.match(spaceCreateMatches[1], /w-5 h-5/, '新建按钮应为紧凑图标按钮');
+  assert.match(
+    spaceCreateMatches[1],
+    /lg:opacity-0 lg:group-hover\/space:opacity-100/,
+    '新建按钮应 Hover 显现（桌面端默认隐藏）'
+  );
+  assert.doesNotMatch(
+    source,
+    /在 \{group\.name\} 中新建任务<\/span>/,
+    '树底不再有占行的「在空间中新建任务」文案按钮'
+  );
+
+  // 4. 展开态空间头不加背景框（消除父子双框叠罗汉）；仅折叠且活跃时轻柔胶囊
+  assert.match(
+    source,
+    /activeInSpace && !isOpen/,
+    '空间头背景提示应仅在「折叠且当前会话藏在内」时出现'
+  );
+  assert.doesNotMatch(
+    source,
+    /activeInSpace\s*\?\s*'bg-zinc-100\/70/,
+    '展开态空间头不得再套灰框背景'
+  );
+});
+
+test('Sidebar 选中态方案 A：浮起白卡 + 左侧指示条，归档选中不降透明度，雷达徽标胶囊化去重', { timeout: 60_000 }, async () => {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const source = await fs.readFile(
+    path.join(process.cwd(), 'apps/web/src/components/Sidebar.tsx'),
+    'utf-8'
+  );
+
+  // 1. SessionRow 选中态：浮起白卡（bg-white）+ 左侧 2px 高对比指示条
+  const floatingCard =
+    'relative bg-white dark:bg-zinc-800/95 border-zinc-200/90 dark:border-zinc-700/80 shadow-xs';
+  assert.ok(
+    source.includes(floatingCard),
+    'SessionRow/ChildSessionRow 选中态应为浮起白卡样式'
+  );
+  const indicatorBar = source.match(
+    /before:content-\[""\] before:absolute before:left-0 before:top-2 before:bottom-2 before:w-0\.5 before:rounded-full before:bg-zinc-900 dark:before:bg-zinc-100/g
+  );
+  assert.ok(
+    indicatorBar && indicatorBar.length >= 2,
+    'SessionRow 与 ChildSessionRow 选中态均应携带左侧指示条'
+  );
+
+  // 2. 归档行选中时 100% 不透明：dimmed 仅在非选中态生效
+  assert.match(
+    source,
+    /dimmed && !isActive \? 'opacity-65 hover:opacity-100' : ''/,
+    '归档降透明应被 isActive 守卫，选中时清晰锐利'
+  );
+  assert.doesNotMatch(
+    source,
+    /dimmed \? 'opacity-70 hover:opacity-100' : ''/,
+    '不得再无条件对归档行降透明（旧实现）'
+  );
+
+  // 3. 雷达行 contextLabel 胶囊化 + 标题智能去重前缀
+  assert.match(
+    source,
+    /inline-flex items-center px-1\.5 py-0\.5 rounded text-\[10px\] font-medium bg-zinc-200\/70/,
+    'contextLabel 应渲染为圆角目录徽标胶囊而非裸 monospace'
+  );
+  assert.match(
+    source,
+    /title\.startsWith\(`\$\{contextLabel\} `\)/,
+    '标题与容器同名时应去掉重复前缀（如 [botd] botd #2 → [botd] #2）'
+  );
+
+  // 4. 个人助理卡片选中态同步浮起白卡，且图标反转高亮
+  assert.match(
+    source,
+    /<BotTile className="w-9 h-9 text-sm" active=\{isActive\} \/>/,
+    '选中助理时 BotTile 应传入 active 反转高亮'
+  );
+});
 
 // ==========================================
 // 3. 回调通知卡：语义化标题 + 长回执默认折叠
