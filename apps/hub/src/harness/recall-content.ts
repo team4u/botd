@@ -45,6 +45,28 @@ export function assistantEntryText(entry: ScannedEntry | undefined): string {
 		.join("\n");
 }
 
+/**
+ * Live progress line for one entry: the assistant text plus `[tool: name]`
+ * markers for tool-call blocks (bash/edit/read mid-run rounds have no text).
+ */
+export function formatEntryProgress(entry: ScannedEntry | undefined): string {
+	const first = entry?.model?.[0];
+	if (first === undefined || first.role !== "assistant" || !Array.isArray(first.content)) return "";
+	const parts: string[] = [];
+	for (const block of first.content) {
+		if (block === null || typeof block !== "object") continue;
+		if (block.type === "text" && typeof block.text === "string" && block.text !== "") {
+			parts.push(block.text);
+		} else if (
+			(block.type === "toolCall" || block.type === "tool_use") &&
+			typeof block.name === "string" && block.name !== ""
+		) {
+			parts.push(`[tool: ${block.name}]`);
+		}
+	}
+	return parts.filter(Boolean).join("\n");
+}
+
 export interface ResolvedRecallBody {
 	content: string;
 	source: "spill-file" | "conversation" | "preview";
@@ -76,6 +98,17 @@ async function conversationOrPreview(node: RecallNode, scanEntries: EntryScanner
 		if (Number.isInteger(id)) {
 			try {
 				const page = await scanEntries({ conversationId: id as ConversationId, order: "descending" }, 20);
+				// Finished worker (spill written): last assistant text wins — exact
+				// backward-compatible body. Still running or mid-run: join the recent
+				// rounds (text + `[tool: name]` markers) so the caller sees live progress.
+				if (node.spillPath === undefined && page.items.length > 0) {
+					const formatted = page.items.map(formatEntryProgress).filter((line) => line !== "");
+					if (formatted.length === 1) return { content: formatted[0], source: "conversation" };
+					if (formatted.length > 1) {
+						// scan is newest-first: take the 5 most recent, restore chronological order.
+						return { content: formatted.slice(0, 5).reverse().join("\n"), source: "conversation" };
+					}
+				}
 				for (const entry of page.items) {
 					const text = assistantEntryText(entry);
 					if (text !== "") return { content: text, source: "conversation" };

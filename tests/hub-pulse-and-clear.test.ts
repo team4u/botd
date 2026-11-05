@@ -21,7 +21,7 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { createModels, fauxAssistantMessage, fauxProvider } from '@earendil-works/pi-ai';
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai';
 import { MemoryStorage } from '@earendil-works/pi-durable';
 
 import { startHub } from '../apps/hub/src/index.js';
@@ -426,6 +426,148 @@ test('4. 中枢-titled session syncs TargetDoc.title and injects Central Hub Dis
   await f.json(`/api/sessions/${plainSid}/messages`, 'POST', { content: 'just do the work' });
   await waitFor(() => plainPrompts.length, (n) => n >= 1, 'plain router system prompt captured');
   assert.doesNotMatch(plainPrompts.at(-1)!, /中枢总管守则/, 'non-hub sessions must not get dispatcher rules');
+});
+
+test('6. hub-router sees, steers, stops and recalls a worker spawned in another session', { timeout: 60_000 }, async (t) => {
+  const f = await fixture(t);
+
+  // Session A（普通分身 architect）：派生一个 Worker。
+  f.hub.db.createSession({
+    id: 'sess_a',
+    title: 'Session A',
+    leadBotId: 'architect',
+    ownerId: 'user_admin',
+  });
+  // Worker 剧本：第一轮「文本 + 快速 bash」，第二轮长命令 sleep → 回合卡在工具
+  // 执行中，registry 停留 running，会话里留下文本 + 工具调用两类 assistant entry。
+  f.faux.setResponses([
+    fauxAssistantMessage(
+      [fauxToolCall('bash', { command: 'echo step-1' })],
+      { stopReason: 'toolUse' },
+    ),
+    fauxAssistantMessage(
+      [fauxToolCall('bash', { command: 'sleep 8' })],
+      { stopReason: 'toolUse' },
+    ),
+  ]);
+  await f.json('/api/sessions/sess_a/workers', 'POST', {
+    title: 'cross session task',
+    task: 'Do the cross-session work.',
+  });
+  const workersA = await waitFor(
+    async () => await f.json<{ workers: Array<{ workerId: string; status: string }> }>('/api/sessions/sess_a/workers'),
+    (result) => result.workers.some((w) => w.status === 'running'),
+    'session A worker running',
+  );
+  const workerId = workersA.workers.find((w) => w.status === 'running')!.workerId;
+
+  // recall({ id }) 在 Worker 运行中返回会话实时进展（文本 + [tool: bash] 轨迹）。
+  const recalled = (await waitFor(
+    () => f.runtime.recall(workerId) as Promise<{ fullContent?: string } | undefined>,
+    (node) => ((node?.fullContent ?? '').match(/\[tool: bash\]/g) ?? []).length >= 2,
+    'running worker recall to surface live conversation progress',
+  ))!;
+  assert.ok(recalled.fullContent!.includes('[tool: bash]'), 'recall carries recent tool-call progress');
+  assert.ok((recalled.fullContent!.match(/\[tool: bash\]/g) ?? []).length >= 2, 'recall joins the recent tool-call trace');
+
+  // Session B（中枢总管 hub-router）：active_workers 提示词节直接看到 Session A 的 Worker，
+  // 且能跨会话 steer / stop。
+  const sessionB = await f.json<{ id: string; leadBotId: string }>('/api/sessions', 'POST', {
+    title: '⚡ 中枢总管',
+    leadBotId: 'hub-router',
+  });
+  assert.equal(sessionB.leadBotId, 'hub-router');
+  const sidB = sessionB.id;
+
+  const steerResults: string[] = [];
+  type FauxContext = { messages: Array<{ role: string; content?: unknown }> };
+  /** 本回合是否已有工具结果（只看最后一条用户消息之后）。 */
+  const toolResultThisTurn = (messages: FauxContext['messages']): boolean => {
+    const reversed = [...messages].reverse();
+    const lastUser = reversed.findIndex((m) => m.role === 'user');
+    return lastUser >= 0 && reversed.slice(0, lastUser).some((m) => m.role === 'toolResult');
+  };
+  const hubScript = (context: FauxContext) => {
+    const lastUser = [...context.messages].reverse().find((m) => m.role === 'user');
+    const text = typeof lastUser?.content === 'string' ? lastUser.content : '';
+    if (/please steer/.test(text) && !toolResultThisTurn(context.messages)) {
+      return fauxAssistantMessage(
+        [fauxToolCall('steer_worker', { workerId, message: 'Prioritize the API layer.' })],
+        { stopReason: 'toolUse' },
+      );
+    }
+    if (/please stop/.test(text) && !toolResultThisTurn(context.messages)) {
+      return fauxAssistantMessage(
+        [fauxToolCall('stop_worker', { workerId })],
+        { stopReason: 'toolUse' },
+      );
+    }
+    if (toolResultThisTurn(context.messages)) {
+      const last = [...context.messages].reverse().find((m) => m.role === 'toolResult');
+      steerResults.push(JSON.stringify((last as { content?: unknown })?.content ?? ''));
+      return fauxAssistantMessage('coordinated.');
+    }
+    return fauxAssistantMessage('standing by.');
+  };
+
+  // 提示词捕获：active_workers 节必须列出 Session A 的跨会话 Worker。
+  const systemPrompts: string[] = [];
+  const capture = () =>
+    ((context: FauxContext) => {
+      const shown = new Map<string, string>();
+      for (const m of context.messages) {
+        if (m.role !== 'system') continue;
+        const sections = (m as { sections?: Record<string, string | null> }).sections;
+        if (sections === undefined) continue;
+        for (const [k, v] of Object.entries(sections)) {
+          if (v === null) shown.delete(k);
+          else shown.set(k, v);
+        }
+      }
+      systemPrompts.push([...shown.values()].join('\n'));
+      return hubScript(context);
+    }) as never;
+  f.faux.setResponses([capture(), capture(), capture(), capture(), capture(), capture()]);
+
+  await f.json(`/api/sessions/${sidB}/messages`, 'POST', { content: 'show me the hub status' });
+  await waitFor(() => systemPrompts.length, (n) => n >= 1, 'hub-router prompt captured');
+  const prompt = systemPrompts.at(-1)!;
+  const workerLine = prompt.split('\n').find((l) => l.includes(workerId)) ?? '';
+  assert.ok(workerLine, `active_workers section must list the cross-session worker ${workerId}`);
+  assert.match(workerLine, /\[running\]/);
+  assert.match(workerLine, /cross session task/);
+
+  // 跨会话 steer：hub-router 会话里的 steer_worker 命中 Session A 的 registry。
+  await f.json(`/api/sessions/${sidB}/messages`, 'POST', { content: 'please steer the worker' });
+  await waitFor(
+    () => steerResults.length,
+    (n) => n >= 1,
+    'steer_worker tool result to come back',
+  );
+  assert.ok(
+    !/Unknown worker|Error/i.test(steerResults[0]),
+    `steer_worker must resolve the cross-session worker: ${steerResults[0]}`,
+  );
+  assert.match(steerResults[0], /Delivered to/);
+
+  // 跨会话 stop：目标 Worker 在 Session A 的 registry 里被置为 aborted。
+  await f.json(`/api/sessions/${sidB}/messages`, 'POST', { content: 'please stop the worker' });
+  await waitFor(
+    () => steerResults.length,
+    (n) => n >= 2,
+    'stop_worker tool result to come back',
+  );
+  assert.match(steerResults[1], /aborted/);
+  const routerIdA = await ensureRouterConversationId(f.runtime, 'sess_a', 'architect');
+  const statusA = await waitFor(
+    async () => {
+      const list = await f.runtime.getActiveWorkers(routerIdA);
+      return list.find((w) => w.workerId === workerId)?.status;
+    },
+    (status) => status === 'aborted',
+    'worker aborted in the owning session registry',
+  );
+  assert.equal(statusA, 'aborted');
 });
 
 test('5. hub-router built-in persona: session creation, commands, end-to-end messaging and peer visibility', { timeout: 60_000 }, async (t) => {
