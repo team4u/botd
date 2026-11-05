@@ -34,35 +34,9 @@ import type {
   UserRecord,
   UserRole,
 } from '@botd/protocol';
-import { decodePackageFile } from '@botd/protocol';
+import { HubResourceStore, type HubPackageFileInput } from './resource-store.js';
 
-/** Hub 包文件写入载荷：文本直传，二进制/带可执行位的文件走保真形态。 */
-export type HubPackageFileInput =
-  | string
-  | Buffer
-  | { data: Buffer; executable?: boolean }
-  | { content?: string; contentBase64?: string; executable?: boolean };
-
-/** 写入单个包文件：string 按 utf8，Buffer 直写，对象形态解码后按需补可执行位。 */
-function writePackageFile(target: string, relativePath: string, value: HubPackageFileInput): void {
-  if (typeof value === 'string') {
-    fs.writeFileSync(target, value, 'utf8');
-    return;
-  }
-  if (Buffer.isBuffer(value)) {
-    fs.writeFileSync(target, value);
-    return;
-  }
-  if (Buffer.isBuffer((value as { data?: unknown }).data)) {
-    const { data, executable } = value as { data: Buffer; executable?: boolean };
-    fs.writeFileSync(target, data);
-    if (executable === true) fs.chmodSync(target, 0o755);
-    return;
-  }
-  const decoded = decodePackageFile({ path: relativePath, ...value });
-  fs.writeFileSync(target, decoded.data);
-  if (decoded.executable) fs.chmodSync(target, 0o755);
-}
+export type { HubPackageFileInput } from './resource-store.js';
 
 export interface HubDatabaseOptions {
   dbPath?: string;
@@ -362,11 +336,8 @@ const mapAutomationEventRow = (row: AutomationEventRow): AutomationEventRecord =
 export class HubDatabase {
   public db: DatabaseSync;
   public readonly dbPath: string;
-  /** Skill/Extension 文件系统包根目录的父目录。 */
-  private readonly dataDir: string;
-  private readonly skillsRoot: string;
-  private readonly extensionsRoot: string;
-  private readonly skillSearchDirs: string[];
+  /** Skill/Extension 文件系统包存储（目录为唯一事实源）。 */
+  private readonly resources: HubResourceStore;
   /** `:memory:` 库的临时 dataDir，close 时清理。 */
   private readonly tempDataDir: string | undefined;
 
@@ -377,19 +348,16 @@ export class HubDatabase {
     if (dbPath !== ':memory:') {
       fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
     }
-    this.skillSearchDirs = options?.skillSearchDirs ?? [];
-    if (options?.dataDir) {
-      this.dataDir = path.resolve(options.dataDir);
-    } else if (dbPath !== ':memory:') {
-      this.dataDir = path.dirname(path.resolve(dbPath));
-    } else {
-      this.tempDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'botd-hub-mem-'));
-      this.dataDir = this.tempDataDir;
-    }
-    this.skillsRoot = path.join(this.dataDir, 'skills');
-    this.extensionsRoot = path.join(this.dataDir, 'extensions');
-    fs.mkdirSync(this.skillsRoot, { recursive: true });
-    fs.mkdirSync(this.extensionsRoot, { recursive: true });
+    // `:memory:` 库用临时 dataDir（close 时清理），否则取显式 dataDir 或库文件所在目录。
+    this.tempDataDir =
+      options?.dataDir || dbPath !== ':memory:' ? undefined : fs.mkdtempSync(path.join(os.tmpdir(), 'botd-hub-mem-'));
+    const dataDir = options?.dataDir
+      ? path.resolve(options.dataDir)
+      : this.tempDataDir ?? path.dirname(path.resolve(dbPath));
+    this.resources = new HubResourceStore({
+      dataDir,
+      ...(options?.skillSearchDirs ? { skillSearchDirs: options.skillSearchDirs } : {}),
+    });
     this.db = new DatabaseSync(dbPath);
     if (dbPath !== ':memory:' && process.platform !== 'win32') fs.chmodSync(dbPath, 0o600);
     this.initSchema();
@@ -398,7 +366,7 @@ export class HubDatabase {
 
   /** dataDir 只读访问：凭据/模型目录等 legacy 文件的定位基准（`<dataDir>/.agent/...`）。 */
   public getDataDir(): string {
-    return this.dataDir;
+    return this.resources.getDataDir();
   }
 
   public getSchemaVersion(): number {
@@ -429,9 +397,14 @@ export class HubDatabase {
 
     // 会话状态处置（启动时进程内队列已丢失，磁盘是唯一事实）：
     // - 有未过期的 queued_offline 待发任务 → 保持 queued（节点重连后 onNodeOnline 补发）；
-    // - running 且无待发任务 → Hub 在回合运行期间重启，诚实标记 failed 并交代原因；
+    // - running 且无待发任务：
+    //   - 启用 pi-durable 持久恢复（磁盘存在 <dbPath>.durable.sqlite）时保持 running，
+    //     Router 会话与中断回合一并落盘，重启后由 Durable 运行时接管，不得强制 failed；
+    //   - 否则 Hub 在回合运行期间重启（无持久化可恢复），诚实标记 failed 并交代原因；
     // - queued 且无待发任务 → 内存队列已随重启丢失，回到 idle。
     const now = new Date().toISOString();
+    const durableRecovery =
+      this.dbPath !== ':memory:' && fs.existsSync(`${this.dbPath}.durable.sqlite`);
     const staleSessions = this.db.prepare(
       "SELECT id, status FROM sessions WHERE status IN ('running', 'queued') AND archived = 0"
     ).all() as { id: string; status: string }[];
@@ -452,6 +425,11 @@ export class HubDatabase {
         continue;
       }
       if (session.status === 'running') {
+        if (durableRecovery) {
+          // Durable 持久恢复在场：中断回合由 pi-durable 重启接管（scheduler 把
+          // 存活任务重新排队），此时强制 failed + 插入虚假报错消息只会污染时间线。
+          continue;
+        }
         // Hub 在回合运行期间重启：已产生的工作区变更仍在节点上，向用户诚实交代中断
         this.db
           .prepare("UPDATE sessions SET status = 'failed', active_bot_id = NULL, updated_at = ? WHERE id = ?")
@@ -1338,255 +1316,86 @@ export class HubDatabase {
       .run(botId, kind, content, now);
   }
 
-  // --- Hub Skills / Extensions（文件系统包目录为唯一事实源） ---
+  // --- Hub Skills / Extensions（委托 HubResourceStore，文件系统包目录为唯一事实源） ---
 
-  /** 目录下所有文件的 POSIX 相对路径（排除 .git / node_modules），按字典序。 */
-  private listFilesUnder(dir: string): string[] {
-    const out: string[] = [];
-    const walk = (current: string, prefix: string): void => {
-      let entries: fs.Dirent[];
-      try {
-        entries = fs.readdirSync(current, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-      for (const entry of entries) {
-        if (entry.name === '.git' || entry.name === 'node_modules') continue;
-        const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
-        if (entry.isDirectory()) walk(path.join(current, entry.name), rel);
-        else if (entry.isFile()) out.push(rel);
-      }
-    };
-    walk(dir, '');
-    return out;
-  }
-
-  /** 包目录内的安全相对路径：拒绝空/绝对路径、NUL、逃逸包根。 */
-  private safeJoin(pkgDir: string, relativePath: string): string {
-    if (relativePath === '' || relativePath.includes('\0')) {
-      throw new Error(`invalid relative path: ${JSON.stringify(relativePath)}`);
-    }
-    const resolved = path.resolve(pkgDir, relativePath);
-    const rel = path.relative(pkgDir, resolved);
-    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
-      throw new Error(`relative path escapes package directory: ${relativePath}`);
-    }
-    return resolved;
-  }
-
-  /** 目录及其内文件的最大 mtime（ISO 字符串）；目录不存在返回 undefined。 */
-  private latestMtimeUnder(dir: string): string | undefined {
-    let latest = 0;
-    const walk = (current: string): void => {
-      let stat: fs.Stats;
-      try {
-        stat = fs.statSync(current);
-      } catch {
-        return;
-      }
-      latest = Math.max(latest, stat.mtimeMs);
-      if (!stat.isDirectory()) return;
-      let entries: fs.Dirent[];
-      try {
-        entries = fs.readdirSync(current, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      for (const entry of entries) {
-        if (entry.name === '.git' || entry.name === 'node_modules') continue;
-        walk(path.join(current, entry.name));
-      }
-    };
-    walk(dir);
-    return latest > 0 ? new Date(latest).toISOString() : undefined;
-  }
-
-  /** 扫描基目录下的 `.agents/skills` / `.agent/skills`（含 `skills` 兼容）里的技能目录。 */
-  private discoverAgentSkillDirs(baseDirs: readonly string[]): Map<string, string> {
-    const found = new Map<string, string>();
-    const subRoots = [path.join('.agents', 'skills'), path.join('.agent', 'skills'), 'skills'];
-    for (const base of baseDirs) {
-      for (const sub of subRoots) {
-        const root = path.join(base, sub);
-        let entries: fs.Dirent[];
-        try {
-          entries = fs.readdirSync(root, { withFileTypes: true });
-        } catch {
-          continue;
-        }
-        for (const entry of entries) {
-          if (!entry.isDirectory() || found.has(entry.name)) continue;
-          if (fs.existsSync(path.join(root, entry.name, 'SKILL.md'))) found.set(entry.name, path.join(root, entry.name));
-        }
-      }
-    }
-    return found;
-  }
-
-  /** 标准 Agent 技能根（进程 cwd 与用户 home 的 .agents/skills / .agent/skills）。 */
-  private standardAgentSkillRoots(): string[] {
-    return [
-      path.join(process.cwd(), '.agents', 'skills'),
-      path.join(process.cwd(), '.agent', 'skills'),
-      path.join(os.homedir(), '.agents', 'skills'),
-      path.join(os.homedir(), '.agent', 'skills'),
-    ];
-  }
-
-  /**
-   * 解析技能所在目录（优先级从高到低）：Hub dataDir、extraDirs、配置的
-   * skillSearchDirs、标准 Agent 技能根。仅含 `SKILL.md` 的目录才算技能。
-   */
+  /** 解析技能所在目录（Hub dataDir、extraDirs、skillSearchDirs、标准 Agent 技能根）。 */
   resolveSkillDir(id: string, extraDirs?: string[]): string | undefined {
-    const candidates = [path.join(this.skillsRoot, id)];
-    for (const base of [...(extraDirs ?? []), ...this.skillSearchDirs]) {
-      candidates.push(
-        path.join(base, '.agents', 'skills', id),
-        path.join(base, '.agent', 'skills', id),
-        path.join(base, 'skills', id),
-        path.join(base, id),
-      );
-    }
-    for (const root of this.standardAgentSkillRoots()) candidates.push(path.join(root, id));
-    for (const dir of candidates) {
-      if (fs.existsSync(path.join(dir, 'SKILL.md'))) return dir;
-    }
-    return undefined;
+    return this.resources.resolveSkillDir(id, extraDirs);
   }
 
   /** Hub 托管技能目录（写入目标），与解析无关。 */
   getSkillDir(id: string): string {
-    return path.join(this.skillsRoot, id);
-  }
-
-  /** Hub 托管扩展包目录（写入与加载目标）。 */
-  getExtensionDir(id: string): string {
-    return path.join(this.extensionsRoot, id);
+    return this.resources.getSkillDir(id);
   }
 
   /** 读取技能内相对路径的文件内容；技能不存在返回 ''。 */
   getSkillContent(id: string, relativePath = 'SKILL.md', extraDirs?: string[]): string {
-    const dir = this.resolveSkillDir(id, extraDirs);
-    if (dir === undefined) return '';
-    try {
-      return fs.readFileSync(this.safeJoin(dir, relativePath), 'utf8');
-    } catch {
-      return '';
-    }
+    return this.resources.getSkillContent(id, relativePath, extraDirs);
   }
 
   /** 写入 Hub 托管技能的单个文件（默认 `SKILL.md`）。 */
   saveSkillContent(id: string, content: string, relativePath = 'SKILL.md'): void {
-    this.saveSkillFiles(id, { [relativePath]: content });
+    this.resources.saveSkillContent(id, content, relativePath);
   }
 
   /** 写入 Hub 托管技能的全部文件（相对路径 → 内容；支持二进制与可执行位保真）。 */
   saveSkillFiles(id: string, files: Record<string, HubPackageFileInput>): void {
-    const dir = this.getSkillDir(id);
-    for (const [relativePath, value] of Object.entries(files)) {
-      const target = this.safeJoin(dir, relativePath);
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      writePackageFile(target, relativePath, value);
-    }
+    this.resources.saveSkillFiles(id, files);
   }
 
   /** 技能目录内全部文件（排除 .git / node_modules）；不存在返回空数组。 */
   listSkillFiles(id: string, extraDirs?: string[]): string[] {
-    const dir = this.resolveSkillDir(id, extraDirs);
-    return dir === undefined ? [] : this.listFilesUnder(dir);
+    return this.resources.listSkillFiles(id, extraDirs);
   }
 
   /** 全部可见技能：Hub 托管优先，叠加 extraDirs / skillSearchDirs 中发现的 `.agents/skills` 技能。 */
   listSkills(extraDirs?: string[]): Array<{ id: string; updatedAt: string; source: 'hub' | 'agent-dir' }> {
-    const result = new Map<string, { id: string; updatedAt: string; source: 'hub' | 'agent-dir' }>();
-    for (const [id, dir] of this.discoverAgentSkillDirs([this.dataDir, ...(extraDirs ?? []), ...this.skillSearchDirs])) {
-      const updatedAt = this.latestMtimeUnder(dir) ?? new Date(0).toISOString();
-      result.set(id, { id, updatedAt, source: 'agent-dir' });
-    }
-    // dataDir 直接视为 Hub 托管根（skills/<id>），覆盖 source 标记
-    for (const id of this.listPackageIds(this.skillsRoot)) {
-      const updatedAt = this.latestMtimeUnder(this.getSkillDir(id)) ?? new Date(0).toISOString();
-      result.set(id, { id, updatedAt, source: 'hub' });
-    }
-    return [...result.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    return this.resources.listSkills(extraDirs);
   }
 
   /** 删除 Hub 托管技能目录。 */
   deleteSkillContent(id: string): void {
-    fs.rmSync(this.getSkillDir(id), { recursive: true, force: true });
+    this.resources.deleteSkillContent(id);
+  }
+
+  /** Hub 托管扩展包目录（写入与加载目标）。 */
+  getExtensionDir(id: string): string {
+    return this.resources.getExtensionDir(id);
   }
 
   /** 读取 Hub 托管扩展内相对路径的文件内容；不存在返回 ''。 */
   getExtensionContent(id: string, relativePath = 'index.ts'): string {
-    try {
-      return fs.readFileSync(this.safeJoin(this.getExtensionDir(id), relativePath), 'utf8');
-    } catch {
-      return '';
-    }
+    return this.resources.getExtensionContent(id, relativePath);
   }
 
   /** 写入 Hub 托管扩展的单个文件（默认 `index.ts`）。 */
   saveExtensionContent(id: string, content: string, relativePath = 'index.ts'): void {
-    this.saveExtensionFiles(id, { [relativePath]: content });
+    this.resources.saveExtensionContent(id, content, relativePath);
   }
 
   /** 写入 Hub 托管扩展的全部文件（相对路径 → 内容；支持二进制与可执行位保真）。 */
   saveExtensionFiles(id: string, files: Record<string, HubPackageFileInput>): void {
-    const dir = this.getExtensionDir(id);
-    for (const [relativePath, value] of Object.entries(files)) {
-      const target = this.safeJoin(dir, relativePath);
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      writePackageFile(target, relativePath, value);
-    }
+    this.resources.saveExtensionFiles(id, files);
   }
 
   /** 扩展目录内全部文件（排除 node_modules / .git）；不存在返回空数组。 */
   listExtensionFiles(id: string): string[] {
-    return this.listFilesUnder(this.getExtensionDir(id));
+    return this.resources.listExtensionFiles(id);
   }
 
   /** 全部 Hub 托管扩展（目录扫描，mtime 即 updatedAt）。 */
   listExtensions(): Array<{ id: string; updatedAt: string }> {
-    return this.listPackageIds(this.extensionsRoot)
-      .map((id) => ({
-        id,
-        updatedAt: this.latestMtimeUnder(this.getExtensionDir(id)) ?? new Date(0).toISOString(),
-      }))
-      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  }
-
-  /** 目录是否非空（存在即可加载）。 */
-  private dirHasContent(dir: string): boolean {
-    try {
-      return fs.readdirSync(dir).length > 0;
-    } catch {
-      return false;
-    }
+    return this.resources.listExtensions();
   }
 
   /** 扩展目录是否存在且含文件（供运行时加载判断）。 */
   hasExtensionDir(id: string): boolean {
-    return this.dirHasContent(this.getExtensionDir(id));
+    return this.resources.hasExtensionDir(id);
   }
 
   /** 删除 Hub 托管扩展目录。 */
   deleteExtensionContent(id: string): void {
-    fs.rmSync(this.getExtensionDir(id), { recursive: true, force: true });
-  }
-
-  /** 包根下有效包目录 id 列表（仅含普通文件的目录才算包，忽略点开头目录）。 */
-  private listPackageIds(root: string): string[] {
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(root, { withFileTypes: true });
-    } catch {
-      return [];
-    }
-    return entries
-      .filter((e) => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules')
-      .filter((e) => this.listFilesUnder(path.join(root, e.name)).length > 0)
-      .map((e) => e.name);
+    this.resources.deleteExtensionContent(id);
   }
 
   // --- Provider Credentials（Hub 权威存储） ---
@@ -1766,49 +1575,6 @@ export class HubDatabase {
     });
   }
 
-  listSubSessions(parentSessionId: string): SessionRecord[] {
-    const stmt = this.db.prepare(`
-      SELECT s.id, s.title, s.lead_bot_id, s.status, s.active_bot_id, s.archived, s.parent_session_id, s.workspace_dir, s.created_at, s.updated_at,
-        (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
-        (SELECT m.content FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_content,
-        (SELECT m.created_at FROM messages m WHERE m.session_id = s.id ORDER BY m.rowid DESC LIMIT 1) AS last_message_at
-      FROM sessions s
-      WHERE s.parent_session_id = ?
-      ORDER BY s.created_at ASC
-    `);
-    const rows = stmt.all(parentSessionId) as {
-      id: string;
-      title: string;
-      lead_bot_id: string;
-      status: string;
-      active_bot_id: string | null;
-      archived: number;
-      parent_session_id: string | null;
-      workspace_dir: string | null;
-      created_at: string;
-      updated_at: string;
-      message_count: number | bigint;
-      last_message_content: string | null;
-      last_message_at: string | null;
-    }[];
-    return rows.map((row) => {
-      return {
-        id: row.id,
-        title: row.title,
-        leadBotId: row.lead_bot_id,
-        status: row.status as SessionStatus,
-        activeBotId: row.active_bot_id ?? undefined,
-        archived: Boolean(row.archived),
-        parentSessionId: row.parent_session_id ?? undefined,
-        ...(row.workspace_dir ? { workspaceDir: row.workspace_dir } : {}),
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        messageCount: Number(row.message_count),
-        lastMessagePreview: buildPreview(row.last_message_content ?? ''),
-        lastMessageAt: row.last_message_at ?? undefined,
-      };
-    });
-  }
 
   /** 返回会话归属用户 id；会话不存在返回 undefined */
   getSessionOwner(sessionId: string): string | undefined {

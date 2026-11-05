@@ -1,24 +1,9 @@
 import { decodePackageFile, isSafeId } from '@botd/protocol';
-import { requireAdmin, resolveOwnedNode, resolveOwnedNodeRpc } from '../http-helpers.js';
+import { ensureNodeOwned, requireAdmin, resolveOwnedNode, resolveOwnedNodeRpc } from '../http-helpers.js';
 import { installResourceLocally } from '../local-installer.js';
 import type { HubApp, HubContext } from './context.js';
 
 const isText = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
-
-/** 确保 nodeId 存在节点行（虚拟节点按首位声明者归属）；存在但不属于该用户时返回 false */
-function ensureNodeOwned(db: HubContext['db'], nodeId: string, userId: string): boolean {
-  if (db.getNode(nodeId)) {
-    return db.getNodeOwner(nodeId) === userId;
-  }
-  db.createNode({
-    id: nodeId,
-    name: nodeId === 'local' ? 'Local' : nodeId,
-    platform: process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : 'linux',
-    tokenHash: 'virtual:' + '0'.repeat(64),
-    ownerId: userId,
-  });
-  return true;
-}
 
 const isFilesMap = (value: unknown): value is Record<string, string> =>
   typeof value === 'object' &&
