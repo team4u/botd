@@ -29,13 +29,12 @@ import type { SessionSseEvent } from '../packages/protocol/src/index.js';
 
 import { HubDatabase } from '../apps/hub/src/db.js';
 import { SseHub } from '../apps/hub/src/sse.js';
-import { HubDurableRuntime } from '../apps/hub/src/harness/hub-harness.js';
 import {
   createDurableSessionMirror,
   submitSessionMessageToDurable,
   type DurableSessionMirror,
 } from '../apps/hub/src/routes/workers.js';
-import { watchSubSessionCompletion } from '../apps/hub/src/subsession.js';
+import { HubDurableRuntime } from '../apps/hub/src/harness/hub-harness.js';
 
 /** 会话 SSE 事件订阅器：按会话收集事件 + 挂起的 Promise 唤醒。 */
 class EventRecorder {
@@ -252,7 +251,7 @@ test('2. tool round broadcasts tool_status and mirrors the tool-calling turn', {
   assert.match((toolBlock as { outputPreview?: string }).outputPreview ?? '', /tool round payload/);
 });
 
-test('3. watchSubSessionCompletion fires for a durable subsession after the assistant message is mirrored', { timeout: 60_000 }, async (t) => {
+test('3. durable subsession settles idle only after the assistant message is mirrored (subsession completion ordering)', { timeout: 60_000 }, async (t) => {
   const f = await fixture(t);
 
   // 父会话 + 子会话（模拟 trigger-service 的 subsession 分发形态）。
@@ -272,18 +271,16 @@ test('3. watchSubSessionCompletion fires for a durable subsession after the assi
 
   f.faux.setResponses([fauxAssistantMessage('Subtask done: report attached.')]);
 
-  let settled: 'idle' | 'failed' | undefined;
-  const parentRecorder = new EventRecorder(f.sseHub, 'sess_parent');
-  t.after(() => parentRecorder.dispose());
-  const stopWatch = watchSubSessionCompletion({
-    db: f.db,
-    sseHub: f.sseHub,
-    parentSessionId: 'sess_parent',
-    childSession: { id: child.id, title: child.title },
-    botId: PERSONA.botId,
-    onSettled: (status) => {
-      settled = status;
-    },
+  // 监听子会话 idle 广播：捕获 idle 时刻的镜像状态
+  // （旧 watchSubSessionCompletion 已随旧引擎删除，这里直接验证它所依赖的次序不变量）。
+  let idleSeen: 'mirrored' | 'not-mirrored' | undefined;
+  const childRecorder = new EventRecorder(f.sseHub, child.id);
+  t.after(() => childRecorder.dispose());
+  const stopWatch = f.sseHub.subscribe(child.id, (event) => {
+    if (event.type === 'session_status' && event.status === 'idle') {
+      const mirrored = f.db.getMessages(child.id).some((m) => m.role === 'assistant');
+      idleSeen = mirrored ? 'mirrored' : 'not-mirrored';
+    }
   });
   t.after(() => stopWatch());
 
@@ -295,17 +292,15 @@ test('3. watchSubSessionCompletion fires for a durable subsession after the assi
     f.mirror,
   );
 
-  // 子会话 idle 广播先于父会话 callback；完成回调把子会话末条 assistant 摘要带回父会话。
-  await parentRecorder.waitFor((e) => e.type === 'message_created' && e.message.role === 'callback', 'parent callback');
-  assert.equal(settled, 'idle');
+  // 子会话最终回到 idle，且回合收敛为已完成。
+  await childRecorder.waitFor((e) => e.type === 'session_status' && e.status === 'idle', 'child idle');
+  assert.equal(idleSeen, 'mirrored', 'assistant must be mirrored into db before the idle broadcast fires');
+  assert.equal(f.db.getSession(child.id)!.status, 'idle');
 
-  // 关键次序：父会话收到 idle 时，子会话的 assistant 消息必须已经镜像进 db
-  // （watchSubSessionCompletion 回调里读 db.getMessages 找末条 assistant 摘要）。
+  // 子会话末条 assistant 摘要可从 db 时间线读到（父会话回传回调的数据源）。
   const childAssistant = f.db.getMessages(child.id).find((m) => m.role === 'assistant');
   assert.ok(childAssistant, 'child assistant message must be mirrored before idle fires');
-  const callback = f.db.getMessages('sess_parent').find((m) => m.role === 'callback');
-  assert.ok(callback, 'parent callback message must exist');
-  assert.match(callback.content, /Subtask done: report attached\./);
+  assert.match(childAssistant.content, /Subtask done: report attached\./);
 });
 
 test('4. attached files context carries both path: and artifactId: (remote node pull hint)', { timeout: 60_000 }, async (t) => {

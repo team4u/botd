@@ -36,9 +36,6 @@ import { createWorkflowExtension } from '../apps/hub/src/harness/workflow-extens
 import { HubDurableRuntime, type BotPersonaConfig } from '../apps/hub/src/harness/hub-harness.js';
 import { TriggerService, deriveWebhookThreadKey } from '../apps/hub/src/trigger-service.js';
 import { HubDatabase } from '../apps/hub/src/db.js';
-import { GroupRouter } from '../apps/hub/src/group-router.js';
-import { NodeConnectionManager } from '../apps/hub/src/ws-hub.js';
-import { AuthManager } from '../apps/hub/src/auth.js';
 import { SseHub } from '../apps/hub/src/sse.js';
 
 const run = promisify(execFile);
@@ -219,14 +216,21 @@ test('2. SubagentWorkflow worktree gate mounts the worktree on the ExecutionEnv 
 // 3. TriggerService webhook → ThreadSubscriptionsDoc 直通
 // ---------------------------------------------------------------------------
 
-/** 组装最小 Hub 侧组件：HubDatabase（内存）+ GroupRouter + SseHub。 */
+/** 组装最小 Hub 侧组件：HubDatabase（内存）+ SseHub + 路由桩（旧 GroupRouter 已删除，
+ *  TriggerService 仅在 Durable 提交失败时才回退路由，本套件恒走 Durable 主线）。 */
 async function createHubSide() {
 	const db = new HubDatabase({ dbPath: ':memory:' });
-	const auth = new AuthManager();
 	const sseHub = new SseHub();
-	const connections = new NodeConnectionManager(db, auth, sseHub);
-	const router = new GroupRouter(db, connections, sseHub);
-	return { db, auth, sseHub, connections, router };
+	const router = {
+		canRunBot: () => true,
+		handleUserMessage: async () => {
+			throw new Error('GroupRouter fallback must not be reached on the durable mainline');
+		},
+		handleWakeup: async () => {
+			throw new Error('GroupRouter fallback must not be reached on the durable mainline');
+		},
+	} as unknown as import('../apps/hub/src/trigger-service.js').TriggerService['router'];
+	return { db, sseHub, router };
 }
 
 const persona = (botId: string, cwd: string): BotPersonaConfig => ({
@@ -242,11 +246,7 @@ test('3. processWebhook passes a GitHub PR event straight to the Worker subscrib
 	const dir = await mkdtemp(path.join(tmpdir(), 'botd-trigger-pt-'));
 	t.after(async () => await rm(dir, { recursive: true, force: true }).catch(() => undefined));
 
-	const { db, auth, sseHub, connections, router } = await createHubSide();
-	t.after(() => {
-		connections.close();
-		router.close();
-	});
+	const { db, sseHub, router } = await createHubSide();
 
 	const env = createFauxEnv();
 	const runtime = await HubDurableRuntime.open({ storage: new MemoryStorage(), models: env.models, codemode: false });

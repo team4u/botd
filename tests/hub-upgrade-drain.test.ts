@@ -15,12 +15,10 @@ import { getBuiltinModelCatalog } from '../packages/models/src/index.js';
 import type {
   BotConfig,
   HubRpcFunctions,
-  MessageRecord,
   NodeRecord,
   NodeRpcFunctions,
   NodeUpgradeCheckResult,
   NodeUpgradeResult,
-  SessionRecord,
 } from '../packages/protocol/src/index.js';
 
 const PASSWORD = 'upgrade-drain-password';
@@ -33,16 +31,6 @@ const waitFor = async <T>(read: () => Promise<T> | T, predicate: (value: T) => b
     await new Promise((resolve) => setTimeout(resolve, 15));
   }
   throw new Error('Timed out waiting for the expected state');
-};
-
-const deferred = <T>() => {
-  let resolve!: (value: T) => void;
-  let reject!: (err: Error) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
 };
 
 async function createTestFixture(t: TestContext) {
@@ -121,7 +109,6 @@ async function createTestFixture(t: TestContext) {
     version?: string;
     checkUpgrade?: NodeRpcFunctions['checkUpgrade'];
     upgradeDaemon?: NodeRpcFunctions['upgradeDaemon'];
-    runTurn?: NodeRpcFunctions['runTurn'];
     cookieOverride?: string;
   }) => {
     const ids = options?.ids ?? ['bot-1'];
@@ -154,13 +141,7 @@ async function createTestFixture(t: TestContext) {
 
     const rpcFunctions: Partial<NodeRpcFunctions> = {
       getModelCatalog: async () => getBuiltinModelCatalog(),
-      getCommands: async () => [],
       restartDaemon: async () => ({ ok: true as const, pid: 4242 }),
-      runTurn: options?.runTurn ?? (async (input) => ({
-        replyText: `Reply from ${input.botId}`,
-        modelBadge: 'openai/test-model',
-      })),
-      cancelTurn: async () => {},
     };
 
     if (options?.checkUpgrade) {
@@ -423,86 +404,5 @@ test('3. SQLite 旧版本数据库（PRAGMA user_version = 0 或 1）通过 new 
   const statsAfter = fs.statSync(expectedBackup1);
   assert.equal(statsBefore.mtimeMs, statsAfter.mtimeMs, 'Backup file should not be touched when opening an already upgraded database');
   hubDb1Reopened.close();
-});
 
-test('4. Hub drain() 优雅排空：当有一个慢速 runTurn 正在执行时调用 hub.drain(5000)，验证期间 GET /api/health 返回 draining: true, activeTurns: 1，新发 POST /api/sessions/:id/messages 返回 503，而正在执行的 runTurn 能够正常完成并写入助手回复，drain() 最终返回 { drained: true, remaining: 0 }', { timeout: 60_000 }, async (t) => {
-  const f = await createTestFixture(t);
-
-  const turnStarted = deferred<void>();
-  const turnFinish = deferred<void>();
-
-  await f.addNode({
-    ids: ['drain-bot'],
-    runTurn: async (input) => {
-      turnStarted.resolve();
-      await turnFinish.promise;
-      return {
-        replyText: `Slow reply completed for ${input.botId}`,
-        modelBadge: 'openai/test-model',
-      };
-    },
-  });
-
-  // Create session with drain-bot
-  const session = await f.json<SessionRecord>('/api/sessions', 'POST', {
-    title: 'Drain Test Session',
-    leadBotId: 'drain-bot',
-  });
-
-  // Initial health check: not draining, 0 active turns
-  const initialHealth = await f.json<{ ok: boolean; draining: boolean; activeTurns: number }>('/api/health');
-  assert.equal(initialHealth.ok, true);
-  assert.equal(initialHealth.draining, false);
-  assert.equal(initialHealth.activeTurns, 0);
-
-  // Send initial message to start slow runTurn
-  const firstMsgRes = await f.request(`/api/sessions/${session.id}/messages`, 'POST', {
-    content: 'First message requiring slow processing',
-  });
-  assert.equal(firstMsgRes.status, 202, 'First message should be accepted (202)');
-
-  // Wait until runTurn starts executing
-  await turnStarted.promise;
-  assert.equal(f.hub.router.getActiveTurnCount(), 1, 'Active turn count should be 1');
-
-  // Trigger graceful drain
-  const drainPromise = f.hub.drain(5000);
-
-  // Verify during draining:
-  // 4.1 GET /api/health returns draining: true, activeTurns: 1
-  const healthDuringDrain = await f.json<{ ok: boolean; draining: boolean; activeTurns: number }>('/api/health');
-  assert.equal(healthDuringDrain.ok, true);
-  assert.equal(healthDuringDrain.draining, true, 'draining should be true during drain()');
-  assert.equal(healthDuringDrain.activeTurns, 1, 'activeTurns should be 1 during slow turn');
-
-  // 4.2 New message submission returns 503
-  const secondMsgRes = await f.request(`/api/sessions/${session.id}/messages`, 'POST', {
-    content: 'Second message sent while draining',
-  });
-  assert.equal(secondMsgRes.status, 503, 'New message during drain must return 503');
-  const secondMsgBody = (await secondMsgRes.json()) as { error: string };
-  assert.match(secondMsgBody.error, /Hub is draining for upgrade/i);
-
-  // Allow the slow runTurn to complete
-  turnFinish.resolve();
-
-  // 4.3 drain() resolves successfully with { drained: true, remaining: 0 }
-  const drainResult = await drainPromise;
-  assert.deepEqual(drainResult, { drained: true, remaining: 0 });
-
-  // 4.4 Health check after drain
-  const healthAfterDrain = await f.json<{ ok: boolean; draining: boolean; activeTurns: number }>('/api/health');
-  assert.equal(healthAfterDrain.ok, true);
-  assert.equal(healthAfterDrain.draining, true);
-  assert.equal(healthAfterDrain.activeTurns, 0);
-
-  // 4.5 Verify messages in session:
-  // The first user message and its assistant reply are successfully recorded.
-  // The second rejected message is NOT recorded.
-  const messages = await f.json<MessageRecord[]>(`/api/sessions/${session.id}/messages`);
-  assert.equal(messages.length, 2, 'Should contain exactly 2 messages (1 user, 1 assistant)');
-  assert.equal(messages[0].role, 'user');
-  assert.equal(messages[0].content, 'First message requiring slow processing');
-  assert.equal(messages[1].role, 'assistant');
-  assert.equal(messages[1].content, 'Slow reply completed for drain-bot');
 });
