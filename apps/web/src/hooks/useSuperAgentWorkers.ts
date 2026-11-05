@@ -134,6 +134,35 @@ export function transcriptToTurnBlocks(transcript: WorkerTranscriptEntry[]): Tur
   const blocks: TurnBlock[] = [];
   for (const item of transcript) {
     if (!item || typeof item !== 'object') continue;
+    // 工具返回值：回填到最近一个未携带输出的 tool 块（按 pi-ai 调用顺序配对），
+    // 绝不作为独立文本块平铺 —— 否则几千行的工具输出会直接刷屏正文。
+    // 兼容旧数据：transcript 里没有前面的 toolCall 块时，退化为独立 tool 块（原行为）。
+    if (item.kind === 'pi.tool-result') {
+      const preview = item.text || '';
+      let paired = false;
+      for (let i = blocks.length - 1; i >= 0; i--) {
+        const b = blocks[i];
+        if (b.type === 'tool' && b.outputPreview === undefined) {
+          blocks[i] = {
+            ...b,
+            ...(preview ? { outputPreview: preview.slice(0, 8000) } : {}),
+            status: 'done',
+          };
+          paired = true;
+          break;
+        }
+      }
+      if (!paired && preview) {
+        blocks.push({
+          type: 'tool',
+          id: item.id,
+          name: 'tool-result',
+          status: 'done',
+          outputPreview: preview,
+        });
+      }
+      continue;
+    }
     const content = Array.isArray(item.content) ? item.content : null;
     if (content) {
       for (const block of content) {
@@ -158,15 +187,7 @@ export function transcriptToTurnBlocks(transcript: WorkerTranscriptEntry[]): Tur
       continue;
     }
     if (typeof item.text !== 'string' || item.text === '') continue;
-    if (item.kind === 'pi.tool-result') {
-      blocks.push({
-        type: 'tool',
-        id: item.id,
-        name: 'tool-result',
-        status: 'done',
-        outputPreview: item.text,
-      });
-    } else if (item.kind === 'pi.assistant' || item.kind === 'pi.user') {
+    if (item.kind === 'pi.assistant' || item.kind === 'pi.user') {
       blocks.push({ type: 'text', text: item.text });
     }
   }

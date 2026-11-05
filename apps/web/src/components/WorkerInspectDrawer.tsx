@@ -437,7 +437,7 @@ export const WorkerInspectDrawer: React.FC<WorkerInspectDrawerProps> = ({
 
           {/* 执行过程：与主会话共享 AssistantTurnContent（Markdown / 思考 / 工具分组 / 返回值，同一渲染体系） */}
           {timelineBlocks ? (
-            <AssistantTurnContent blocks={timelineBlocks} />
+            <AssistantTurnContent blocks={timelineBlocks} collapseCompletedProcess />
           ) : worker.toolCalls && worker.toolCalls.length > 0 ? (
             <div className="relative">
               <span
