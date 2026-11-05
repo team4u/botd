@@ -24,6 +24,21 @@ export function requireAdmin(c: AuthContext): Response | null {
   return null;
 }
 
+/** 确保 nodeId 存在节点行（虚拟节点按首位声明者归属）；存在但不属于该用户时返回 false。 */
+export function ensureNodeOwned(db: HubDatabase, nodeId: string, userId: string): boolean {
+  if (db.getNode(nodeId)) {
+    return db.getNodeOwner(nodeId) === userId;
+  }
+  db.createNode({
+    id: nodeId,
+    name: nodeId === 'local' ? 'Local' : nodeId,
+    platform: process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : 'linux',
+    tokenHash: 'virtual:' + '0'.repeat(64),
+    ownerId: userId,
+  });
+  return true;
+}
+
 export function resolveOwnedNode(
   c: AuthContext,
   db: HubDatabase,
