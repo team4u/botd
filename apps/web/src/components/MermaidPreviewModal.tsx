@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Copy, Check, Waypoints, ZoomIn, ZoomOut } from 'lucide-react';
-import { copyText } from '../utils/clipboard';
+import { copyText } from '../utils/clipboard.js';
 
 interface MermaidPreviewModalProps {
   /** Mermaid 源码（供复制） */

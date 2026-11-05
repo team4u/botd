@@ -31,10 +31,10 @@ import type {
   SubagentRunRecord,
   TurnBlock,
 } from '@botd/protocol';
-import { Markdown } from './Markdown';
-import { copyText } from '../utils/clipboard';
-import { AttachmentPreviewModal } from './AttachmentPreviewModal';
-import { BotdUiRenderer } from './generative-ui/BotdUiRenderer';
+import { Markdown } from './Markdown.js';
+import { copyText } from '../utils/clipboard.js';
+import { AttachmentPreviewModal } from './AttachmentPreviewModal.js';
+import { BotdUiRenderer } from './generative-ui/BotdUiRenderer.js';
 
 /** 单个工具块类型别名 */
 type ToolBlock = Extract<TurnBlock, { type: 'tool' }>;

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Loader2, TriangleAlert, Maximize2 } from 'lucide-react';
-import { MermaidPreviewModal } from './MermaidPreviewModal';
+import { MermaidPreviewModal } from './MermaidPreviewModal.js';
 
 type Mermaid = (typeof import('mermaid'))['default'];
 

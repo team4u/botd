@@ -5,7 +5,7 @@ import remarkMath from 'remark-math';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
 import { Check, Copy } from 'lucide-react';
-import { MermaidBlock } from './MermaidBlock';
+import { MermaidBlock } from './MermaidBlock.js';
 import { UiSpecBlock } from './generative-ui/BotdUiRenderer.js';
 import 'katex/dist/katex.min.css';
 

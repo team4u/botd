@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Monitor, Sun, Moon } from 'lucide-react';
-import { type ThemeMode, getThemeMode, cycleTheme } from '../utils/theme';
+import { type ThemeMode, getThemeMode, cycleTheme } from '../utils/theme.js';
 
 const THEME_META: Record<ThemeMode, { label: string; Icon: typeof Monitor }> = {
   auto: { label: '主题：跟随系统', Icon: Monitor },
