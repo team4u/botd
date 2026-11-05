@@ -192,8 +192,6 @@ export interface AutomationEventRecord {
   createdAt: string;
 }
 
-export type BgJobStatus = 'running' | 'done' | 'failed' | 'killed';
-
 /** 工作区代码变更文件状态：M 修改 / A 新增 / D 删除 / R 重命名 / U 冲突 */
 export type WorkspaceDiffStatus = 'M' | 'A' | 'D' | 'R' | 'U';
 
@@ -216,22 +214,6 @@ export interface WorkspaceDiffResult {
   totalAdditions: number;
   totalDeletions: number;
   truncated?: boolean;
-}
-
-export interface BgJobRecord {
-  id: string;
-  sessionId: string;
-  botId: string;
-  command: string;
-  cwd: string;
-  pid?: number;
-  status: BgJobStatus;
-  exitCode?: number | null;
-  replyToBotId?: string;
-  noTurnOnComplete?: boolean;
-  logPath: string;
-  startedAt: string;
-  finishedAt?: string;
 }
 
 export interface MessageSearchHit {
@@ -426,21 +408,6 @@ export interface SharedSessionSnapshot {
   bots: SharedBotSummary[];
   messages: MessageRecord[];
   artifacts: ArtifactRecord[];
-}
-
-export interface DelegateSessionInput {
-  botId: string;
-  title?: string;
-  prompt: string;
-  artifactIds?: string[];
-  /** 是否在子会话完成后自动唤醒父会话的主控 Bot（默认 true；同步等待或静默委派时传 false） */
-  autoWakeParent?: boolean;
-}
-
-export interface DelegateSessionResult {
-  parentSessionId: string;
-  childSession: SessionRecord;
-  initialMessage: MessageRecord;
 }
 
 export type NotificationChannelKind = 'webhook' | 'feishu' | 'slack' | 'telegram';
@@ -869,6 +836,27 @@ export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhi
 export const THINKING_LEVELS: readonly ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 export const isThinkingLevel = (value: unknown): value is ThinkingLevel =>
   typeof value === 'string' && (THINKING_LEVELS as readonly string[]).includes(value);
+
+/** 会话级模型覆盖：只作用于单个会话，不改动全局 Bot 配置，兄弟会话不受影响 */
+export interface SessionModelOverride {
+  provider: string;
+  modelId: string;
+  thinkingLevel?: ThinkingLevel;
+}
+
+/** 会话当前生效的模型：存在覆盖时即覆盖值，否则为 Bot 默认配置 */
+export interface SessionModelSelection {
+  provider: string;
+  modelId: string;
+  thinkingLevel?: ThinkingLevel;
+}
+
+/** GET/PUT /api/sessions/:id/model 响应：覆盖、生效配置与是否恢复了失败回合 */
+export interface SessionModelConfig {
+  override: SessionModelOverride | null;
+  effective: SessionModelSelection;
+  resumed?: boolean;
+}
 
 export const SAFE_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
 export const isSafeId = (value: unknown): value is string =>

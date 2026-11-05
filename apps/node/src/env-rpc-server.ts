@@ -21,7 +21,8 @@
  */
 
 import { spawn } from 'node:child_process';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { BACKGROUND_CONTEXT, withCancel, type Context } from './env/index.js';
 import { NodeExecutionEnv } from './env/node.js';
 import {
@@ -450,13 +451,26 @@ export function createNodeEnvRpcServer(options: NodeEnvRpcServerOptions): NodeEn
     async envAcquireWorktree({ repoDir, workerId, branchPrefix }): Promise<EnvAcquireWorktreeResult> {
       const notARepo = (): EnvAcquireWorktreeResult => ({ worktreePath: repoDir, branchName: '', isGitRepo: false });
       const git = (...args: string[]) => runGit(repoDir, args);
-      const probe = await git('rev-parse', '--is-inside-work-tree');
-      if (!probe.ok || probe.value.exitCode !== 0 || probe.value.stdout.trim() !== 'true') return notARepo();
+      const probe = await git('rev-parse', '--git-dir');
+      if (!probe.ok || probe.value.exitCode !== 0 || !probe.value.stdout.trim()) {
+        if (probe.ok && probe.value.exitCode === 128 && /not a git repository/i.test(probe.value.stderr)) return notARepo();
+        throw new Error(`无法探测 ${repoDir} 的 git 仓库状态：${probe.ok ? probe.value.stderr || `exit code ${probe.value.exitCode}` : probe.error.message}`);
+      }
 
       const branchName = `${branchPrefix ?? 'botd'}/${workerId}`;
-      const worktreePath = join(repoDir, '.botd-worktrees', workerId);
-      // 已存在则先清理，保证幂等
-      await git('worktree', 'remove', '--force', worktreePath).catch(() => undefined);
+      const worktreePath = resolve(repoDir, '.botd-worktrees', workerId);
+      if (worktreePath === resolve(repoDir)) throw new Error('隔离 worktree 不能复用主工作区');
+      if (existsSync(worktreePath)) {
+        const listing = await git('worktree', 'list', '--porcelain', '-z');
+        if (!listing.ok || listing.value.exitCode !== 0) {
+          throw new Error(`无法验证 ${worktreePath} 的 worktree 注册状态`);
+        }
+        const registered = listing.value.stdout.split('\0').some((field) =>
+          field.startsWith('worktree ') && resolve(field.slice('worktree '.length)) === worktreePath,
+        );
+        if (registered) return { worktreePath, branchName, isGitRepo: true };
+        throw new Error(`路径 ${worktreePath} 已存在但不是 ${repoDir} 的 git worktree，拒绝复用以避免假隔离`);
+      }
       await git('worktree', 'prune').catch(() => undefined);
       const add = await git('worktree', 'add', '-B', branchName, worktreePath, 'HEAD');
       // 失败即闭合：真实 git 仓库中 worktree 获取失败时显式报错，绝不静默回落到
@@ -490,7 +504,7 @@ export function createNodeEnvRpcServer(options: NodeEnvRpcServerOptions): NodeEn
 /** 服务端内部 git 子进程执行（一次性，与 envExec 的流式通道无关）。 */
 function runGit(cwd: string, args: string[]): Promise<Result<{ exitCode: number; stdout: string; stderr: string }, Error>> {
   return new Promise((resolve) => {
-    const child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('git', args, { cwd, env: { ...process.env, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout?.on('data', (chunk: Buffer) => (stdout += chunk.toString('utf8')));

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Brain, Check, ChevronDown, Loader2, Search, Zap } from 'lucide-react';
-import type { BotConfig, ModelCatalog, ModelCatalogEntry, ThinkingLevel } from '@botd/protocol';
+import { Brain, Check, ChevronDown, Loader2, RotateCcw, Search, Zap } from 'lucide-react';
+import type { BotConfig, ModelCatalog, ModelCatalogEntry, SessionModelConfig, SessionModelOverride, ThinkingLevel } from '@botd/protocol';
 import { api } from '../../api';
 import {
   THINKING_LEVEL_LABELS,
@@ -20,7 +20,9 @@ function shortThinkingLabel(level: Exclude<ThinkingLevel, ''>): string {
 }
 
 interface ComposerStatusBarProps {
-  /** 当前主控 BOT（模型/思考档位的秒切目标） */
+  /** 当前会话：模型覆盖的保存目标与拉取来源 */
+  sessionId: string;
+  /** 当前主控 BOT：目录拉取与「跟随 Bot 默认」的回退显示 */
   currentBot: BotConfig;
 }
 
@@ -32,14 +34,15 @@ interface CatalogModelEntry {
 }
 
 /**
- * 输入框底栏微操舱：模型秒切与思考档位秒切（均为模型感知，切换模型自动收敛档位）。
- * 变更走 api.updateBot 增量保存，本地乐观更新显示，失败时回滚。
+ * 输入框底栏微操舱：会话级模型/思考档位秒切。
+ * 覆盖经 PUT /api/sessions/:id/model 只作用于当前会话，不改动全局 Bot 配置，
+ * 同 Bot 的兄弟会话不受影响；显示以 GET 的有效配置为准，保存乐观更新、失败回滚。
  */
-export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot }) => {
-  // 乐观 UI 状态：null 表示跟随 currentBot 真实值
-  const [modelOverride, setModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
-  const [thinkingOverride, setThinkingOverride] = useState<ThinkingLevel | null>(null);
-  const [savingModel, setSavingModel] = useState(false);
+export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ sessionId, currentBot }) => {
+  // 服务端真值（GET 拉取）；local 为保存期间的乐观覆盖显示，null 表示以服务端为准
+  const [serverConfig, setServerConfig] = useState<SessionModelConfig | null>(null);
+  const [localConfig, setLocalConfig] = useState<SessionModelConfig | null>(null);
+  const [saving, setSaving] = useState(false);
   const [savingError, setSavingError] = useState<string | null>(null);
 
   // 模型选择浮层
@@ -53,11 +56,40 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
   const thinkingMenuRef = useRef<HTMLDivElement>(null);
   const modelSearchInputRef = useRef<HTMLInputElement>(null);
 
-  const modelProvider = modelOverride?.provider ?? currentBot.modelProvider;
-  const modelId = modelOverride?.modelId ?? currentBot.modelId;
-  const thinkingLevel = (thinkingOverride ?? (currentBot.thinkingLevel || 'medium')) as Exclude<ThinkingLevel, ''>;
+  // 始终读取最新会话 ID：异步回调中丢弃已切走会话的迟到响应
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
 
-  // BOT/节点变化即拉取目录（带 fallback）：保证先点「思考」胶囊也有目录可用，不必先开模型菜单
+  // 请求序号：同一会话内较旧的 GET/PUT 响应不得覆盖较新请求的结果
+  const requestSeqRef = useRef(0);
+
+  const display = localConfig ?? serverConfig;
+  const effective = display?.effective;
+  const hasOverride = (display?.override ?? null) !== null;
+
+  const modelProvider = effective?.provider ?? currentBot.modelProvider;
+  const modelId = effective?.modelId ?? currentBot.modelId;
+  const thinkingLevel = effective
+    ? (effective.thinkingLevel ?? 'off')
+    : (currentBot.thinkingLevel ?? 'off');
+
+  // 保存期间延后刷新，防止读取旧配置覆盖刚提交的选择。
+  useEffect(() => {
+    if (saving) return;
+    const seq = ++requestSeqRef.current;
+    api
+      .getSessionModel(sessionId)
+      .then((config) => {
+        if (sessionIdRef.current !== sessionId || requestSeqRef.current !== seq) return;
+        setServerConfig(config);
+      })
+      .catch((error: unknown) => {
+        if (sessionIdRef.current !== sessionId || requestSeqRef.current !== seq) return;
+        setSavingError(error instanceof Error ? error.message : '加载会话模型失败');
+      });
+  }, [sessionId, currentBot.id, currentBot.modelProvider, currentBot.modelId, currentBot.thinkingLevel, saving]);
+
+  // BOT/节点变化即拉取目录（带 fallback）：保证先点「思考」胶囊也有目录可用
   useEffect(() => {
     let active = true;
     setCatalog(null);
@@ -83,15 +115,12 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
     };
   }, [currentBot.id, currentBot.nodeId]);
 
-  // 切换 BOT 时清空乐观覆盖与浮层
+  // 切换 BOT 或会话时收起浮层并清空搜索
   useEffect(() => {
-    setModelOverride(null);
-    setThinkingOverride(null);
-    setSavingError(null);
     setModelMenuOpen(false);
     setThinkingMenuOpen(false);
     setModelSearch('');
-  }, [currentBot.id]);
+  }, [currentBot.id, sessionId]);
 
   // 打开模型浮层时聚焦搜索框
   useEffect(() => {
@@ -115,8 +144,7 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
     };
   }, [modelMenuOpen, thinkingMenuOpen]);
 
-  // 模型扁平列表：严格只从已配置凭据的服务商提取（与设置页「已配置」同口径），
-  // 绝不把未配置的 modelProvider 塞进去，也绝不回退到未配置的内置服务商
+  // 模型扁平列表：严格只从已配置凭据的服务商提取（与设置页「已配置」同口径）
   const catalogModels = useMemo<CatalogModelEntry[]>(() => {
     const providers = catalog?.providers || [];
     const configured = providers.filter((p) => p.configured || p.credentialType);
@@ -125,7 +153,7 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
     );
   }, [catalog]);
 
-  // 当前 BOT 的模型是否可用：provider/model 任一为空，或 provider 未配置凭据，都视为未就绪
+  // 当前会话的模型是否可用：provider/model 任一为空，或 provider 未配置凭据，都视为未就绪
   const currentProviderConfigured = useMemo(
     () => catalog?.providers.some((p) => p.id === modelProvider && (p.configured || p.credentialType)) ?? false,
     [catalog, modelProvider],
@@ -159,29 +187,46 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
     [currentModelMeta],
   );
 
-  /** 保存 BOT：仅提交变更字段（systemMd 未传时后端保留原值），成功保留乐观值，失败回滚 */
-  const persistBot = async (patch: {
-    modelProvider?: string;
-    modelId?: string;
-    thinkingLevel?: ThinkingLevel;
-  }) => {
+  /** 保存会话级覆盖：乐观更新显示，成功以服务端回执为准，失败回滚并提示。
+   *  序号守卫：同会话内旧请求的迟到响应不得覆盖新请求；session 守卫：切走后全部丢弃。 */
+  const persistOverride = async (override: SessionModelOverride | null) => {
+    const seq = ++requestSeqRef.current;
+    const stillCurrent = () => sessionIdRef.current === sessionId && requestSeqRef.current === seq;
     setSavingError(null);
-    const prevOverride = { model: modelOverride, thinking: thinkingOverride };
-    setSavingModel(true);
+    const optimistic: SessionModelConfig = {
+      override,
+      effective: override ?? {
+        provider: currentBot.modelProvider,
+        modelId: currentBot.modelId,
+        ...(currentBot.thinkingLevel ? { thinkingLevel: currentBot.thinkingLevel } : {}),
+      },
+    };
+    setLocalConfig(optimistic);
+    setSaving(true);
     try {
-      await api.updateBot(currentBot.id, patch as any);
+      const config = await api.updateSessionModel(sessionId, override);
+      if (!stillCurrent()) return; // 会话已切走或已有更新请求：丢弃
+      setServerConfig(config);
     } catch (err: any) {
-      // 失败回滚乐观值
-      setModelOverride(prevOverride.model);
-      setThinkingOverride(prevOverride.thinking);
+      if (!stillCurrent()) return;
       setSavingError(err?.message || '保存失败');
+      // 回滚到服务端真值（GET 失败时退回 currentBot 显示）
+      try {
+        const config = await api.getSessionModel(sessionId);
+        if (!stillCurrent()) return;
+        setServerConfig(config);
+      } catch {
+        /* 保持 currentBot 回退显示 */
+      }
     } finally {
-      setSavingModel(false);
+      if (stillCurrent()) {
+        setSaving(false);
+        setLocalConfig(null);
+      }
     }
   };
 
   const selectModel = (providerId: string, selectedModelId: string) => {
-    setModelOverride({ provider: providerId, modelId: selectedModelId });
     setModelMenuOpen(false);
     setModelSearch('');
     // 模型感知：目标模型不支持当前思考档位时，收敛到最近的支持档位并一并保存
@@ -193,26 +238,30 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
       null;
     const nextSupported = deriveModelThinkingLevels(nextMeta);
     const clamped = clampThinkingLevel(thinkingLevel, nextSupported);
-    if (clamped !== null) {
-      setThinkingOverride(clamped);
-      void persistBot({ modelProvider: providerId, modelId: selectedModelId, thinkingLevel: clamped });
-    } else {
-      void persistBot({ modelProvider: providerId, modelId: selectedModelId });
-    }
+    void persistOverride({
+      provider: providerId,
+      modelId: selectedModelId,
+      ...(clamped !== null ? { thinkingLevel: clamped } : {}),
+    });
   };
 
   const selectThinking = (level: Exclude<ThinkingLevel, ''>) => {
-    setThinkingOverride(level);
     setThinkingMenuOpen(false);
-    void persistBot({ thinkingLevel: level });
+    void persistOverride({ provider: modelProvider, modelId, thinkingLevel: level });
+  };
+
+  const followBotDefault = () => {
+    setModelMenuOpen(false);
+    void persistOverride(null);
   };
 
   return (
     <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
-      {/* 模型秒切胶囊：未配置模型时呈现醒目琥珀色警告态，引导用户先选型 */}
+      {/* 模型秒切胶囊：未配置模型时呈现醒目琥珀色警告态；存在会话覆盖时加蓝色标识 */}
       <div className="relative" ref={modelMenuRef}>
         <button
           type="button"
+          disabled={saving}
           onClick={() => {
             setModelMenuOpen((v) => !v);
             setThinkingMenuOpen(false);
@@ -220,23 +269,31 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
           className={`inline-flex items-center gap-1 h-6 px-2 rounded-full border font-mono transition-colors cursor-pointer max-w-[13rem] ${
             modelMissing
               ? 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 hover:border-amber-400 dark:hover:border-amber-600'
-              : 'border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 text-zinc-600 dark:text-zinc-300 hover:border-zinc-300 hover:text-zinc-900 dark:hover:border-zinc-700 dark:hover:text-zinc-100'
+              : hasOverride
+                ? 'border-blue-300 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 hover:border-blue-400 dark:hover:border-blue-600'
+                : 'border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 text-zinc-600 dark:text-zinc-300 hover:border-zinc-300 hover:text-zinc-900 dark:hover:border-zinc-700 dark:hover:text-zinc-100'
           }`}
           title={
             modelMissing
               ? `⚠️ 未配置模型：${modelProvider ? `${modelProvider}/${modelId || '未设置'}` : '未设置'}，点击选择已就绪的模型`
-              : `模型：${modelProvider} / ${modelId}${modelOverride ? '（保存中/已切换）' : '，点击秒切模型'}`
+              : hasOverride
+                ? `模型（会话覆盖）：${modelProvider} / ${modelId}，仅作用于当前会话，点击切换或跟随 Bot 默认`
+                : `模型（Bot 默认）：${modelProvider} / ${modelId}，点击秒切模型`
           }
           aria-haspopup="listbox"
           aria-expanded={modelMenuOpen}
         >
           <Zap
             className={`w-3 h-3 shrink-0 ${
-              modelMissing ? 'text-amber-500 dark:text-amber-400' : 'text-zinc-400 dark:text-zinc-500'
+              modelMissing
+                ? 'text-amber-500 dark:text-amber-400'
+                : hasOverride
+                  ? 'text-blue-500 dark:text-blue-400'
+                  : 'text-zinc-400 dark:text-zinc-500'
             }`}
           />
           <span className="truncate">{modelMissing ? '⚠️ 未配置模型' : shortModelLabel(modelId)}</span>
-          {savingModel ? (
+          {saving ? (
             <Loader2 className="w-3 h-3 animate-spin-fast shrink-0" />
           ) : (
             <ChevronDown className="w-3 h-3 shrink-0 opacity-60" />
@@ -253,7 +310,7 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
                   value={modelSearch}
                   onChange={(e) => setModelSearch(e.target.value)}
                   placeholder="搜索模型..."
-                  className="w-full bg-transparent text-xs text-zinc-700 dark:text-zinc-200 placeholder-zinc-400 focus:outline-none"
+                  className="w-full bg-transparent text-xs text-zinc-700 dark:text-zinc-200 placeholder:text-zinc-400 focus:outline-none"
                 />
               </div>
             </div>
@@ -305,6 +362,20 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
                   );
                 })}
             </div>
+            {/* 清除覆盖：恢复跟随 Bot 默认模型 */}
+            {hasOverride && (
+              <div className="p-1 border-t border-zinc-100 dark:border-zinc-800">
+                <button
+                  type="button"
+                  onClick={followBotDefault}
+                  disabled={saving}
+                  className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] text-zinc-500 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800 hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  跟随 Bot 默认（{shortModelLabel(currentBot.modelId)}）
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -313,12 +384,13 @@ export const ComposerStatusBar: React.FC<ComposerStatusBarProps> = ({ currentBot
       <div className="relative" ref={thinkingMenuRef}>
         <button
           type="button"
+          disabled={saving}
           onClick={() => {
             setThinkingMenuOpen((v) => !v);
             setModelMenuOpen(false);
           }}
           className="inline-flex items-center gap-1 h-6 px-2 rounded-full border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 text-zinc-600 dark:text-zinc-300 hover:border-zinc-300 hover:text-zinc-900 dark:hover:border-zinc-700 dark:hover:text-zinc-100 transition-colors cursor-pointer"
-          title={`推理强度：${shortThinkingLabel(thinkingLevel)}（${thinkingLevel}），点击秒切思考档位`}
+          title={`推理强度：${shortThinkingLabel(thinkingLevel)}（${thinkingLevel}）${hasOverride ? '，会话覆盖中' : ''}，点击秒切思考档位`}
           aria-haspopup="listbox"
           aria-expanded={thinkingMenuOpen}
         >

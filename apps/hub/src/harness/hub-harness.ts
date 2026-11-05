@@ -10,9 +10,11 @@
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Context } from "@earendil-works/chord";
+import type { SessionModelConfig, SessionModelOverride, ThinkingLevel } from "@botd/protocol";
 import { createModels, type ModelThinkingLevel, type Models } from "@earendil-works/pi-ai";
 import {
 	configure,
+	ConversationBusy,
 	createRegistry,
 	Harness,
 	LiveDoc,
@@ -34,11 +36,7 @@ import {
 	type UserInput,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
-import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
-import path from "node:path";
-import { promisify } from "node:util";
+import { acquireLocalWorktree } from "./worktree.js";
 import { withSecretEnv } from "./secret-stash.js";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -72,7 +70,7 @@ export interface BotPersonaConfig {
 	/** Dynamic extension names enabled for this persona (mounted on Router and Worker). */
 	enabledExtensions?: string[];
 	/** Thinking effort for the persona's model requests; `'max'` clamps to pi-durable's `'xhigh'`. */
-	thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+	thinkingLevel?: ThinkingLevel;
 	/** Extra env vars for the persona's shell commands, merged over the Hub process env. */
 	env?: Record<string, string>;
 	nodeId: string;
@@ -125,10 +123,27 @@ function personaInstructions(persona: BotPersonaConfig): string {
 	return parts.join("\n");
 }
 
-/** Persona thinking level as pi-durable's `ModelThinkingLevel`: `'max'` clamps to `'xhigh'`. */
+/** Persona thinking uses the same resolver as session overrides. */
 function thinkingLevelFor(persona: BotPersonaConfig): ModelThinkingLevel | undefined {
-	if (persona.thinkingLevel === undefined) return undefined;
-	return persona.thinkingLevel === "max" ? "xhigh" : persona.thinkingLevel;
+	return effectiveModelConfig(persona).thinkingLevel;
+}
+
+type EffectiveModelConfig = Omit<SessionModelOverride, "thinkingLevel"> & { thinkingLevel?: ModelThinkingLevel };
+
+/** Resolve configuration once so create, update, clear and sync agree. */
+function effectiveModelConfig(persona: BotPersonaConfig, override?: SessionModelOverride): EffectiveModelConfig {
+	const model = override ?? persona.model;
+	const thinking = override?.thinkingLevel ?? persona.thinkingLevel;
+	const thinkingLevel = thinking === "max" ? "xhigh" : thinking;
+	return { provider: model.provider, modelId: model.modelId, ...(thinkingLevel === undefined ? {} : { thinkingLevel }) };
+}
+
+function modelConfigChange(config: EffectiveModelConfig) {
+	return {
+		model: { provider: config.provider, modelId: config.modelId },
+		// Omission preserves an old value; null actually restores the default.
+		thinkingLevel: config.thinkingLevel ?? null,
+	};
 }
 
 /** Session index: one main-session conversation id per bot persona (keyed by botId). */
@@ -159,36 +174,6 @@ export class SecretInjectingEnv extends NodeExecutionEnv {
 		context: Context,
 	): Promise<import("@earendil-works/pi-durable/env").Result<import("@earendil-works/pi-durable/env").ShellExecResult, import("@earendil-works/pi-durable/env").ExecutionError>> {
 		return super.exec(command, { ...options, env: withSecretEnv(options?.env, this.#scopeId) }, context);
-	}
-}
-
-/**
- * 惰性幂等的本地 worktree 挂载：目录已存在则复用；否则 `git worktree add -B
- * <branchName> <worktreePath> HEAD`。非 git 仓库或任何失败回退 baseCwd。
- */
-async function acquireLocalWorktree(
-	baseCwd: string,
-	worktreePath: string,
-	branchName: string,
-): Promise<string> {
-	try {
-		if (existsSync(worktreePath)) return worktreePath;
-		const probe = await promisify(execFile)("git", ["-C", baseCwd, "rev-parse", "--is-inside-work-tree"]);
-		if (probe.stdout.trim() !== "true") return baseCwd;
-		await mkdir(path.dirname(worktreePath), { recursive: true });
-		await promisify(execFile)("git", [
-			"-C",
-			baseCwd,
-			"worktree",
-			"add",
-			"-B",
-			branchName,
-			worktreePath,
-			"HEAD",
-		]);
-		return worktreePath;
-	} catch {
-		return baseCwd;
 	}
 }
 
@@ -342,8 +327,9 @@ export class HubDurableRuntime {
 							if (targetState?.botId) shellEnv.BOTD_BOT_ID = targetState.botId;
 							if (targetState?.sessionId) shellEnv.BOTD_SESSION_ID = targetState.sessionId;
 							// A target with a worktreePath executes in its isolated git worktree:
-							// lazily mounted once per conversation (idempotent), falling back to
-							// the base cwd outside a git repo or on failure.
+							// lazily mounted once per conversation (idempotent reuse on remount).
+							// A non-git cwd falls back to the base cwd; a real git failure throws
+							// (fail-closed) instead of silently running in the main checkout.
 							let cwd = target.cwd ?? process.cwd();
 							if (targetState?.worktreePath) {
 								const cached = acquiredWorktrees.get(String(target.conversationId));
@@ -426,24 +412,12 @@ export class HubDurableRuntime {
 					const effectiveCwd = target.cwd || persona.cwd;
 					// A session-scoped model override survives persona syncs: switching one
 					// conversation's model must never be wiped by a global config update.
-					const override = target.modelOverride;
-					const overrideModel =
-						override !== undefined && override.provider !== "" && override.modelId !== ""
-							? {
-								model: { provider: override.provider, modelId: override.modelId },
-								...(override.thinkingLevel
-									? {
-											thinkingLevel: (
-												override.thinkingLevel === "max" ? "xhigh" : override.thinkingLevel
-											) as ModelThinkingLevel,
-										}
-										: {}),
-							}
-							: undefined;
+					const effective = effectiveModelConfig(persona, target.modelOverride);
+					const modelChange = modelConfigChange(effective);
 					if (target.role === "router") {
-						await configure(tx, record.id, { ...this.routerAgent(persona), cwd: effectiveCwd, ...(overrideModel ?? {}) });
+						await configure(tx, record.id, { ...this.routerAgent(persona), cwd: effectiveCwd, ...modelChange });
 					} else if (target.role === "worker") {
-						await configure(tx, record.id, { ...this.workerAgentFor(persona), cwd: effectiveCwd, ...(overrideModel ?? {}) });
+						await configure(tx, record.id, { ...this.workerAgentFor(persona), cwd: effectiveCwd, ...modelChange });
 					}
 				}
 				if (page.next === undefined) break;
@@ -456,53 +430,76 @@ export class HubDurableRuntime {
 		return [...this.personas.values()];
 	}
 
-	/**
-	 * Set or clear a conversation-scoped model override without mutating the
-	 * global BotPersonaConfig or sibling sessions. If the conversation is
-	 * currently idle with an unresolved `runFailure` (e.g. `model_error`),
-	 * automatically submits `{ type: "continue" }` so the turn resumes
-	 * immediately on the newly selected model.
-	 */
+	/** Save and configure atomically; returning committed values needs no second read. */
 	async setConversationModelOverride(
 		conversationId: string,
-		override: { provider: string; modelId: string; thinkingLevel?: BotPersonaConfig["thinkingLevel"] } | null,
+		override: SessionModelOverride | null,
 		context: Context = BACKGROUND_CONTEXT,
-	): Promise<{ resumed: boolean }> {
+	): Promise<SessionModelConfig> {
 		const id = stringToConversationId(conversationId);
-		await this.harness.commit(async (tx) => {
+		return this.harness.commit(async (tx) => {
 			const target = await tx.doc(TargetDoc, id);
 			const persona = this.personas.get(target.botId);
+			if (persona === undefined) throw new Error(`unknown persona: ${target.botId}`);
 			if (override === null) {
 				delete target.modelOverride;
 			} else {
+				if (!override.provider.trim() || !override.modelId.trim()) throw new Error("provider and modelId are required");
 				target.modelOverride = {
 					provider: override.provider,
 					modelId: override.modelId,
-					...(override.thinkingLevel ? { thinkingLevel: override.thinkingLevel } : {}),
+					...(override.thinkingLevel === undefined ? {} : { thinkingLevel: override.thinkingLevel }),
 				};
 			}
-			const effectiveModel = override ? { provider: override.provider, modelId: override.modelId } : persona?.model;
-			const rawThinking = override ? (override.thinkingLevel ?? persona?.thinkingLevel) : persona?.thinkingLevel;
-			const thinkingLevel =
-				rawThinking === undefined ? undefined : rawThinking === "max" ? ("xhigh" as const) : rawThinking;
-			await configure(tx, id, {
-				...(effectiveModel ? { model: effectiveModel } : {}),
-				...(thinkingLevel ? { thinkingLevel } : {}),
-			});
+			const effective = effectiveModelConfig(persona, target.modelOverride);
+			await configure(tx, id, modelConfigChange(effective));
+			return { override: target.modelOverride === undefined ? null : { ...target.modelOverride }, effective };
 		}, context);
-		const live = await this.harness.snapshot(LiveDoc, id, context);
-		if (
-			live?.run === undefined &&
-			live?.runFailure !== undefined &&
-			(live.runFailure.reason === "model_error" || live.runFailure.reason === "interrupted")
-		) {
-			const conv = await this.harness.conversation(id, context);
-			if (conv !== undefined) {
-				await conv.submit({ type: "continue" }, context);
-				return { resumed: true };
+	}
+
+	async getConversationModelConfig(
+		conversationId: string,
+		context: Context = BACKGROUND_CONTEXT,
+	): Promise<SessionModelConfig> {
+		const id = stringToConversationId(conversationId);
+		const target = await this.harness.snapshot(TargetDoc, id, context);
+		const persona = this.personas.get(target?.botId ?? "");
+		if (persona === undefined) throw new Error(`no model configured for conversation: ${conversationId}`);
+		return {
+			override: target?.modelOverride === undefined ? null : { ...target.modelOverride },
+			effective: effectiveModelConfig(persona, target?.modelOverride),
+		};
+	}
+
+	/**
+	 * Resume an idle conversation whose last run failed with `model_error` or
+	 * `interrupted`: one commit reads the live doc and admits `{ type: "continue" }`
+	 * through that same transaction, so a concurrent resume sees the run this one
+	 * started and returns false instead of double-submitting. Returns false when
+	 * there is nothing to resume (busy, no pending failure, another reason,
+	 * unknown conversation).
+	 */
+	async resumeFailedConversation(conversationId: string, context: Context = BACKGROUND_CONTEXT): Promise<boolean> {
+		const id = stringToConversationId(conversationId);
+		const conversation = await this.harness.conversation(id, context);
+		if (conversation === undefined) return false;
+		return await this.harness.commit(async (tx) => {
+			const live = await tx.doc(LiveDoc, id);
+			if (
+				live?.run !== undefined ||
+				live?.runFailure === undefined ||
+				(live.runFailure.reason !== "model_error" && live.runFailure.reason !== "interrupted")
+			) {
+				return false;
 			}
-		}
-		return { resumed: false };
+			try {
+				await conversation.submit(tx, { type: "continue" });
+				return true;
+			} catch (error) {
+				if (error instanceof ConversationBusy) return false;
+				throw error;
+			}
+		}, context);
 	}
 
 	/** Extensions mounted on a persona's Router and Worker conversations. */
@@ -564,7 +561,7 @@ export class HubDurableRuntime {
 		];
 		return {
 			model: persona.model,
-			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+			thinkingLevel: thinkingLevel ?? null,
 			instructions: personaInstructions(persona),
 			cwd: persona.cwd,
 			extensions,
@@ -729,6 +726,9 @@ export class HubDurableRuntime {
 				threadKeys,
 				title: options.title,
 			});
+			// 新 worker 一律目标 persona 默认配置：fork:asOf 会继承父会话的会话级模型覆盖，
+			// 与上面 configure 的 persona 默认分叉，这里在创建事务内显式清掉。
+			delete target.modelOverride;
 			registry.workers[workerId] = {
 				workerId,
 				conversationId,
@@ -799,7 +799,7 @@ export class HubDurableRuntime {
 		];
 		return {
 			model: persona.model,
-			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+			thinkingLevel: thinkingLevel ?? null,
 			instructions: personaInstructions(persona),
 			cwd: persona.cwd,
 			extensions,
@@ -860,24 +860,24 @@ export class HubDurableRuntime {
 		const source = await this.harness.conversation(sourceConversationId, ctx);
 		if (source === undefined) throw new Error(`unknown conversation: ${sourceConversationId}`);
 		const persona = botId === undefined ? undefined : this.personas.get(botId);
-		return source.fork(
-			atEntryId,
-			{
-				ownership: { kind: "ownerless" },
-				...(persona === undefined
-					? {}
-					: {
-						agent: this.routerAgent(persona),
-						init: async (tx, id) => {
-							const target = await tx.doc(TargetDoc, id);
-							target.botId = persona.botId;
-							target.nodeId = persona.nodeId;
-							target.cwd = persona.cwd;
-						},
-					}),
-			},
-			ctx,
-		);
+		if (botId !== undefined && persona === undefined) throw new Error(`unknown persona: ${botId}`);
+		const id = await this.harness.commit(async (tx) => {
+			const record = await tx.forkConversation(sourceConversationId, atEntryId, { ownership: { kind: "ownerless" } });
+			if (persona !== undefined) {
+				// Read the fork's as-of state, never the source's newer configuration.
+				const target = await tx.doc(TargetDoc, record.id);
+				if (target.botId !== persona.botId) delete target.modelOverride;
+				target.botId = persona.botId;
+				target.nodeId = persona.nodeId;
+				target.cwd = persona.cwd;
+				await configure(tx, record.id, {
+					...this.routerAgent(persona),
+					...modelConfigChange(effectiveModelConfig(persona, target.modelOverride)),
+				});
+			}
+			return record.id;
+		}, ctx);
+		return (await this.harness.conversation(id, ctx))!;
 	}
 
 	/** Reset a conversation's context via pi-durable's native `pi.reset` entry, carrying a handoff summary. */

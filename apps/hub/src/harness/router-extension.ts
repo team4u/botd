@@ -521,6 +521,9 @@ export function createRouterExtension(options: {
 
 				// 3. Target doc: role worker, parent = this router.
 				const workerTarget = await tx.doc(TargetDoc, record.id);
+				// 新 worker 一律目标 persona 默认配置：fork:asOf 继承的会话级模型覆盖
+				//（含跨 persona 分叉残留）在此显式清除，与上面 configure 的 agent 保持一致。
+				delete workerTarget.modelOverride;
 				Object.assign(workerTarget, {
 					botId: runBotId,
 					role: "worker" as const,
@@ -674,6 +677,8 @@ export function createRouterExtension(options: {
 				worktreePath = `${persona.cwd}/.botd-worktrees/${workerId}`;
 
 				const workerTarget = await tx.doc(TargetDoc, record.id);
+				// 委托目标是另一 persona：同样不继承任何会话级模型覆盖。
+				delete workerTarget.modelOverride;
 				Object.assign(workerTarget, {
 					botId: args.targetBotId,
 					role: "worker" as const,

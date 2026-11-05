@@ -272,6 +272,9 @@ const subagentToolFor = (resolveSubagentChange: SubagentChangeResolver | undefin
 				// Mark it as a subagent in its target doc.
 				const workerTarget = await tx.doc(TargetDoc, record.id);
 				const self = await tx.doc(TargetDoc, api.conversationId);
+				// fork:asOf 会继承本会话的模型覆盖；子代理按目标 persona（或本 persona）
+				// 的默认/解析配置运行，继承覆盖在此显式清除，避免状态与配置分叉。
+				delete workerTarget.modelOverride;
 				if (useWorktree) {
 					const baseCwd = self.cwd || process.cwd();
 					const subId = `sub-${record.id}`;

@@ -6,7 +6,6 @@ import type {
   SessionRecord,
   CreateSessionInput,
   MessageRecord,
-  SessionSseEvent,
   GlobalSseEvent,
   PairingResult,
   ModelCatalog,
@@ -23,10 +22,10 @@ import type {
   MessageSearchHit,
   NodeUpgradeCheckResult,
   NodeUpgradeResult,
+  SessionModelConfig,
+  SessionModelOverride,
   SessionShareRecord,
   SharedSessionSnapshot,
-  DelegateSessionInput,
-  DelegateSessionResult,
   NotificationChannelRecord,
   CreateNotificationChannelInput,
   NotificationTellPolicy,
@@ -157,6 +156,21 @@ export const api = {
   async getModelCatalog(nodeId?: string): Promise<ModelCatalog> {
     const query = nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : '';
     return request<ModelCatalog>(`/api/models/catalog${query}`);
+  },
+
+  // Sessions —— 会话级模型覆盖（不影响全局 Bot 配置与兄弟会话）
+  async getSessionModel(sessionId: string): Promise<SessionModelConfig> {
+    return request<SessionModelConfig>(`/api/sessions/${encodeURIComponent(sessionId)}/model`);
+  },
+
+  async updateSessionModel(
+    sessionId: string,
+    override: SessionModelOverride | null,
+  ): Promise<SessionModelConfig> {
+    return request<SessionModelConfig>(`/api/sessions/${encodeURIComponent(sessionId)}/model`, {
+      method: 'PUT',
+      body: JSON.stringify({ override }),
+    });
   },
 
   async startProviderLogin(
@@ -339,13 +353,6 @@ export const api = {
     return request<{ content: string }>(`/api/bots/${encodeURIComponent(botId)}/system`);
   },
 
-  async saveBotSystem(botId: string, content: string): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>(`/api/bots/${encodeURIComponent(botId)}/system`, {
-      method: 'PUT',
-      body: JSON.stringify({ content }),
-    });
-  },
-
   async getBotMemory(botId: string): Promise<{ content: string }> {
     return request<{ content: string }>(`/api/bots/${encodeURIComponent(botId)}/memory`);
   },
@@ -410,14 +417,6 @@ export const api = {
     });
   },
 
-  async delegateSession(sessionId: string, input: DelegateSessionInput): Promise<DelegateSessionResult> {
-    return request<DelegateSessionResult>(`/api/sessions/${encodeURIComponent(sessionId)}/delegate`, {
-      method: 'POST',
-      body: JSON.stringify(input),
-    });
-  },
-
-
   async updateSession(
     sessionId: string,
     input: Partial<CreateSessionInput>
@@ -433,12 +432,6 @@ export const api = {
     return request<SessionRecord>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
       method: 'PATCH',
       body: JSON.stringify({ archived }),
-    });
-  },
-
-  async getSessionMessages(sessionId: string, signal?: AbortSignal): Promise<MessageRecord[]> {
-    return request<MessageRecord[]>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
-      signal,
     });
   },
 
@@ -745,44 +738,6 @@ export const api = {
     return request(`/api/watchdog/health${runPass ? '?runPass=1' : ''}`);
   },
 };
-
-/**
- * Connect to SSE stream for a specific session.
- * Returns an unsubscribe callback to cleanly close the connection.
- */
-export function subscribeSessionEvents(
-  sessionId: string,
-  callbacks: {
-    onEvent: (event: SessionSseEvent) => void;
-    onError?: (error: Event) => void;
-    onOpen?: () => void;
-  }
-): () => void {
-  const url = `/api/sessions/${encodeURIComponent(sessionId)}/events`;
-  const eventSource = new EventSource(url, { withCredentials: true });
-
-  eventSource.onopen = () => {
-    callbacks.onOpen?.();
-  };
-
-  eventSource.onmessage = (event) => {
-    try {
-      if (!event.data) return;
-      const parsed = JSON.parse(event.data) as SessionSseEvent;
-      callbacks.onEvent(parsed);
-    } catch (err) {
-      console.warn('[SSE] Failed to parse message data:', err, event.data);
-    }
-  };
-
-  eventSource.onerror = (err) => {
-    callbacks.onError?.(err);
-  };
-
-  return () => {
-    eventSource.close();
-  };
-}
 
 export async function getSessionShare(sessionId: string): Promise<{ share: SessionShareRecord | null }> {
   return request<{ share: SessionShareRecord | null }>(`/api/sessions/${encodeURIComponent(sessionId)}/share`);

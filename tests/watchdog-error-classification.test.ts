@@ -8,11 +8,11 @@
  *  4. abort 优先调用 options.stopWorker。
  */
 import assert from 'node:assert/strict';
-import test, { type TestContext } from 'node:test';
+import test from 'node:test';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { fauxAssistantMessage, fauxProvider, fauxText } from '@earendil-works/pi-ai/providers/faux';
-import { createRegistry, LiveDoc, MemoryStorage } from '@earendil-works/pi-durable';
+import { ConversationBusy, createRegistry, LiveDoc, MemoryStorage } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { Harness as HarnessType } from '@earendil-works/pi-durable';
 import {
@@ -86,7 +86,7 @@ async function failConversationOn(
 
 test('1. classifyRunFailure: permanent vs transient categories', { timeout: 60_000 }, () => {
 	// auth：401 / 403 / 关键词
-	for (const detail of ['HTTP 401 Unauthorized', 'HTTP 403 forbidden', 'invalid_api_key provided', 'authentication_error from provider']) {
+	for (const detail of ['HTTP 401 Unauthorized', 'HTTP/1.1 401 Unauthorized', 'Status: 403 Forbidden', 'HTTP 403 forbidden', 'invalid_api_key provided', 'authentication_error from provider']) {
 		const c = classifyRunFailure({ reason: 'model_error', detail });
 		assert.equal(c.retryable, false, `"${detail}" must be non-retryable`);
 		assert.equal(c.category, 'auth', `"${detail}" must classify as auth`);
@@ -124,6 +124,15 @@ test('1. classifyRunFailure: permanent vs transient categories', { timeout: 60_0
 	assert.deepEqual(classifyRunFailure(undefined), { retryable: false, category: 'request', summary: 'none' });
 	// 状态码不得误配更长数字（如请求 ID 14042）
 	assert.equal(classifyRunFailure({ reason: 'model_error', detail: 'request id 14042 failed after retry' }).retryable, true);
+	// 429 正文携带配额数字 400（DeepSeek 风格）：第一处 HTTP 状态是 429，正文 400 不是状态码
+	const deepseek = classifyRunFailure({
+		reason: 'model_error',
+		detail: '429 Rate limit reached. Limit 400, Used 400, Requested 5. Please retry after 60s.',
+	});
+	assert.equal(deepseek.retryable, true, '429 with quota numbers 400 in body must stay retryable');
+	assert.equal(deepseek.category, 'transient');
+	// 无 HTTP 状态前缀、仅关键词配额数字的正文不算状态码
+	assert.equal(classifyRunFailure({ reason: 'model_error', detail: 'Limit 400, Used 400 exceeded' }).retryable, true);
 });
 
 test('2. non-retryable 401/400 failure: alert once on pass 1, no actions on pass 2 (no infinite loop)', { timeout: 60_000 }, async (t) => {
@@ -153,22 +162,23 @@ test('2. non-retryable 401/400 failure: alert once on pass 1, no actions on pass
 	);
 });
 
-test('3. persistent retryable 429: continue caps at maxContinueRetries, then alerts once and stops', { timeout: 60_000 }, async (t) => {
+test('3. persistent retryable 429 across passes: continue caps at maxContinueRetries, then alerts once and stops', { timeout: 60_000 }, async (t) => {
 	const env = createFauxEnv();
 	const harness = await openHarness(env.models);
 	t.after(async () => await harness.close(BACKGROUND_CONTEXT).catch(() => undefined));
 
-	const RATE_LIMIT = 'HTTP 429 Too Many Requests: rate limit exceeded, retry later';
-	const workerId = await failConversation(harness, env.faux, RATE_LIMIT);
+	// 每次失败的 detail 都变化（等待秒数递增）：预算按同一批未回答输入累计，不得因 detail 变化重置
+	const rateLimitDetail = (waitSecs: number) => `HTTP 429 Too Many Requests: retry after ${waitSecs}s (req_${waitSecs})`;
+	const workerId = await failConversation(harness, env.faux, rateLimitDetail(60));
 	const options: Partial<WatchdogOptions> = { allowAbort: false, maxContinueRetries: 2 };
 	const counts = (actions: { kind: string; conversationId: number }[]) => ({
 		continue: actions.filter((a) => a.kind === 'continue' && Number(a.conversationId) === workerId).length,
 		alert: actions.filter((a) => a.kind === 'alert' && Number(a.conversationId) === workerId).length,
 	});
 
-	// pass 1 / 2：每次 continue 后都因 429 再次失败 → continue×2 封顶
+	// pass 1 / 2：continue 后同批输入再次失败（等待秒数不同）→ continue×2 封顶
 	for (let i = 1; i <= 2; i++) {
-		env.faux.setResponses([fauxAssistantMessage([], { stopReason: 'error', errorMessage: RATE_LIMIT })]);
+		env.faux.setResponses([fauxAssistantMessage([], { stopReason: 'error', errorMessage: rateLimitDetail(60 + i) })]);
 		const pass = await runWatchdogPass(harness, options, BACKGROUND_CONTEXT);
 		const c = counts(pass.actions);
 		assert.equal(c.continue, 1, `pass ${i} must emit exactly 1 continue (got ${JSON.stringify(pass.actions)})`);
@@ -176,10 +186,10 @@ test('3. persistent retryable 429: continue caps at maxContinueRetries, then ale
 		await waitForIdle(harness);
 	}
 	// pass 3：attempts(2) >= max(2) → 告警一次、不再 continue
-	env.faux.setResponses([fauxAssistantMessage([], { stopReason: 'error', errorMessage: RATE_LIMIT })]);
+	env.faux.setResponses([fauxAssistantMessage([], { stopReason: 'error', errorMessage: rateLimitDetail(120) })]);
 	const pass3 = await runWatchdogPass(harness, options, BACKGROUND_CONTEXT);
 	const c3 = counts(pass3.actions);
-	assert.equal(c3.continue, 0, 'retry limit reached must stop continue');
+	assert.equal(c3.continue, 0, 'retry limit reached must stop continue even though detail changed');
 	assert.equal(c3.alert, 1, `retry limit reached must alert exactly once (got ${JSON.stringify(pass3.actions)})`);
 	assert.ok(pass3.actions.some((a) => a.reason.includes('transient retry limit (2) reached')));
 	// pass 4：已告警 → 零动作
@@ -187,6 +197,93 @@ test('3. persistent retryable 429: continue caps at maxContinueRetries, then ale
 	const pass4 = await runWatchdogPass(harness, options, BACKGROUND_CONTEXT);
 	const c4 = counts(pass4.actions);
 	assert.equal(c4.continue + c4.alert, 0, `post-alert passes must stay silent (got ${JSON.stringify(pass4.actions)})`);
+});
+
+test('3c. busy run keeps the retry budget: budget survives across passes while run is in flight', { timeout: 60_000 }, async (t) => {
+	const env = createFauxEnv();
+	const harness = await openHarness(env.models);
+	t.after(async () => await harness.close(BACKGROUND_CONTEXT).catch(() => undefined));
+
+	const RATE_LIMIT = 'HTTP 429 Too Many Requests: rate limit exceeded, retry later';
+	const workerId = await failConversation(harness, env.faux, RATE_LIMIT);
+	const options: Partial<WatchdogOptions> = { allowAbort: false, maxContinueRetries: 2, now: () => 1_000 };
+
+	// pass 1：429 → continue（attempts 1）
+	env.faux.setResponses([fauxAssistantMessage([], { stopReason: 'error', errorMessage: RATE_LIMIT })]);
+	const pass1 = await runWatchdogPass(harness, options, BACKGROUND_CONTEXT);
+	assert.equal(pass1.actions.filter((a) => a.kind === 'continue').length, 1);
+	await waitForIdle(harness);
+
+	// 人为注入 busy run（模拟 keepFailure 重启 / 长运行）：巡检不得清预算，也不得 continue
+	await harness.commit(async (tx) => {
+		const live = await tx.doc(LiveDoc, workerId as never);
+		live.run = { taskId: 'task_busy' as never, inputs: [] as never, turns: 1 } as never;
+	}, BACKGROUND_CONTEXT);
+	const pass2 = await runWatchdogPass(harness, options, BACKGROUND_CONTEXT);
+	assert.equal(
+		pass2.actions.filter((a) => a.kind === 'continue' && Number(a.conversationId) === workerId).length,
+		0,
+		'busy conversation must not be continued',
+	);
+	// busy run 结束后同批输入仍失败：预算延续（attempts 1），再 continue 一次（attempts 2）后封顶
+	await harness.commit(async (tx) => {
+		const live = await tx.doc(LiveDoc, workerId as never);
+		delete live.run;
+		live.runFailure = { ...live.runFailure!, reason: 'model_error', detail: RATE_LIMIT } as never;
+	}, BACKGROUND_CONTEXT);
+	env.faux.setResponses([fauxAssistantMessage([], { stopReason: 'error', errorMessage: RATE_LIMIT })]);
+	const pass3 = await runWatchdogPass(harness, options, BACKGROUND_CONTEXT);
+	const continues3 = pass3.actions.filter((a) => a.kind === 'continue' && Number(a.conversationId) === workerId);
+	assert.equal(continues3.length, 1, 'budget must survive the busy pass (attempts 1 → 2, not reset to 1)');
+	await waitForIdle(harness);
+	env.faux.setResponses([fauxAssistantMessage([], { stopReason: 'error', errorMessage: RATE_LIMIT })]);
+	const pass4 = await runWatchdogPass(harness, options, BACKGROUND_CONTEXT);
+	const c4 = pass4.actions.filter((a) => Number(a.conversationId) === workerId);
+	assert.equal(c4.filter((a) => a.kind === 'continue').length, 0, 'attempts 2 must cap');
+	assert.equal(c4.filter((a) => a.kind === 'alert').length, 1, 'cap reached must alert');
+});
+
+test('3d. rejected continue does not consume the retry budget or hide storage failures', { timeout: 60_000 }, async (t) => {
+	const env = createFauxEnv();
+	const harness = await openHarness(env.models);
+	t.after(async () => await harness.close(BACKGROUND_CONTEXT).catch(() => undefined));
+
+	const rateLimit = 'HTTP 429 Too Many Requests: retry later';
+	const workerId = await failConversation(harness, env.faux, rateLimit);
+	const options: Partial<WatchdogOptions> = { allowAbort: false, maxContinueRetries: 1 };
+	const originalConversation = harness.conversation;
+	let rejection: 'busy' | 'storage' | undefined = 'busy';
+	harness.conversation = async (id, context) => {
+		const conversation = await originalConversation.call(harness, id, context);
+		if (conversation === undefined || Number(conversation.id) !== workerId) return conversation;
+		return new Proxy(conversation, {
+			get(target, property) {
+				if (property === 'submit') return (...args: unknown[]) => {
+					if (rejection === 'busy') throw new ConversationBusy(target.id);
+					if (rejection === 'storage') throw new Error('admission storage unavailable');
+					return Reflect.apply(target.submit, target, args);
+				};
+				const value = Reflect.get(target, property, target);
+				return typeof value === 'function' ? value.bind(target) : value;
+			},
+		});
+	};
+	try {
+		const busyPass = await runWatchdogPass(harness, options, BACKGROUND_CONTEXT);
+		assert.equal(busyPass.actions.length, 0, 'a rejected admission is not a retry');
+		rejection = 'storage';
+		await assert.rejects(runWatchdogPass(harness, options, BACKGROUND_CONTEXT), /admission storage unavailable/);
+		rejection = undefined;
+		env.faux.setResponses([fauxAssistantMessage([], { stopReason: 'error', errorMessage: rateLimit })]);
+		const admitted = await runWatchdogPass(harness, options, BACKGROUND_CONTEXT);
+		assert.equal(admitted.actions.filter((action) => action.kind === 'continue').length, 1, 'rejections must leave the budget available');
+		await waitForIdle(harness);
+		const exhausted = await runWatchdogPass(harness, options, BACKGROUND_CONTEXT);
+		assert.equal(exhausted.actions.filter((action) => action.kind === 'continue').length, 0);
+		assert.equal(exhausted.actions.filter((action) => action.kind === 'alert').length, 1);
+	} finally {
+		harness.conversation = originalConversation;
+	}
 });
 
 test('3b. recovery clears failure tracking: a fresh transient failure starts the retry budget over', { timeout: 60_000 }, async (t) => {
@@ -223,13 +320,59 @@ test('3b. recovery clears failure tracking: a fresh transient failure starts the
 	);
 });
 
+test('3e. failed alert delivery is retried on the next pass, successful one confirmed once', { timeout: 60_000 }, async (t) => {
+	const env = createFauxEnv();
+	const harness = await openHarness(env.models);
+	t.after(async () => await harness.close(BACKGROUND_CONTEXT).catch(() => undefined));
+
+	// 永久错误触发告警：投递第一次失败 → 未确认；第二次成功 → 确认后不再重投
+	const workerId = await failConversation(harness, env.faux, 'HTTP 401 Unauthorized: invalid_api_key');
+	let deliveries = 0;
+	let failFirst = true;
+	const options: Partial<WatchdogOptions> = {
+		allowAbort: false,
+		alert: async () => {
+			if (failFirst) {
+				failFirst = false;
+				throw new Error('alert sink down');
+			}
+			deliveries += 1;
+		},
+	};
+
+	const pass1 = await runWatchdogPass(harness, options, BACKGROUND_CONTEXT);
+	assert.equal(pass1.actions.filter((a) => a.kind === 'alert').length, 1, 'pass 1 must emit the alert action');
+	await waitForIdle(harness);
+	assert.equal(deliveries, 0, 'failed delivery must not be confirmed');
+
+	const pass2 = await runWatchdogPass(harness, options, BACKGROUND_CONTEXT);
+	assert.equal(
+		pass2.actions.filter((a) => a.kind === 'alert').length,
+		1,
+		'unconfirmed alert must be re-emitted on the next pass',
+	);
+	assert.equal(deliveries, 1, 'second delivery must succeed exactly once');
+	await waitForIdle(harness);
+
+	const pass3 = await runWatchdogPass(harness, options, BACKGROUND_CONTEXT);
+	assert.equal(
+		pass3.actions.filter((a) => a.kind === 'alert' && Number(a.conversationId) === workerId).length,
+		0,
+		'confirmed alert must not be delivered again',
+	);
+});
+
 test('4. abort action calls options.stopWorker when provided', { timeout: 60_000 }, async (t) => {
 	const env = createFauxEnv();
 	const harness = await openHarness(env.models);
 	t.after(async () => await harness.close(BACKGROUND_CONTEXT).catch(() => undefined));
 
 	const stopped: number[] = [];
-	const options: Partial<WatchdogOptions> = { stopWorker: async (id) => (stopped.push(id), true) };
+	const alerts: string[] = [];
+	const options: Partial<WatchdogOptions> = {
+		stopWorker: async (id) => (stopped.push(id), true),
+		alert: async (message) => { alerts.push(message); },
+	};
 	// 直接驱动 applyActions 路径：abort 在 recentToolErrors >= maxToolErrors*2 时触发
 	const worker = await harness.createConversation({ ownership: { kind: 'ownerless' } }, BACKGROUND_CONTEXT);
 	await worker.configure({ model: { provider: 'faux', modelId: 'botd-worker' } }, BACKGROUND_CONTEXT);
@@ -258,4 +401,5 @@ test('4. abort action calls options.stopWorker when provided', { timeout: 60_000
 	const aborts = pass.actions.filter((a) => a.kind === 'abort' && Number(a.conversationId) === workerId);
 	assert.equal(aborts.length, 1, `repeated tool errors must trigger abort (got ${JSON.stringify(pass.actions)})`);
 	assert.deepEqual(stopped, [workerId], 'abort must route through options.stopWorker');
+	assert.deepEqual(alerts, [`aborted runaway worker on conversation ${workerId}`], 'abort alerts must reach the external sink');
 });

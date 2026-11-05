@@ -26,8 +26,6 @@ import { MentionMenuDropdown } from './ChatInput/MentionMenuDropdown';
 import { FileMentionDropdown } from './ChatInput/FileMentionDropdown';
 import { ComposerStatusBar } from './ChatInput/ComposerStatusBar';
 
-export { parseSlashTrigger, type ParsedSlashTrigger } from './ChatInput/slash';
-
 interface ChatInputProps {
   onSendMessage: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
   memberBots: BotConfig[];
@@ -786,10 +784,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           )}
         </div>
 
-        {/* 底栏微操舱：模型/思考档位秒切（编辑态隐藏） */}
-        {!editingMessage && currentBot && (
+        {/* 底栏微操舱：会话级模型/思考档位秒切（编辑态隐藏） */}
+        {!editingMessage && currentBot && sessionId && (
           <div className="mt-1.5 px-1">
-            <ComposerStatusBar currentBot={currentBot} />
+            <ComposerStatusBar key={sessionId} sessionId={sessionId} currentBot={currentBot} />
           </div>
         )}
       </div>

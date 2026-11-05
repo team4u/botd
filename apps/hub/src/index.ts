@@ -1,13 +1,10 @@
 import { randomBytes } from 'node:crypto';
-import { execFile } from 'node:child_process';
 import type { Server } from 'node:http';
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
-import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
+import { BACKGROUND_CONTEXT, type Context } from '@earendil-works/chord/context';
 import { createModels, type Models, type MutableModels } from '@earendil-works/pi-ai';
 import { UserRecord } from '@botd/protocol';
 import { HubDatabase } from './db.js';
@@ -20,7 +17,7 @@ import { ArtifactService } from './artifact-service.js';
 import { HubDurableRuntime, SecretInjectingEnv, type BotPersonaConfig } from './harness/hub-harness.js';
 import { createHubCredentialStore, registerStoredProviders, listEffectiveProviderCredentials } from './credential-store.js';
 import { loadDynamicDurableExtension } from './harness/dynamic-extension-loader.js';
-import { TargetDoc } from './harness/docs.js';
+import { TargetDoc, WorkerRegistryDoc } from './harness/docs.js';
 import { registerProviderRoutes } from './providers.js';
 import { registerArtifactRoutes } from './artifacts.js';
 import { registerShareRoutes } from './share.js';
@@ -35,6 +32,7 @@ import { registerMessageRoutes } from './routes/messages.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerWorkerRoutes, createDurableSessionMirror, submitSessionMessageToDurable, type DurableSessionMirror } from './routes/workers.js';
 import { runWatchdogPass } from './harness/watchdog.js';
+import { acquireLocalWorktree } from './harness/worktree.js';
 import { seedBuiltinSkillInHub } from './builtin-skill-seed.js';
 import type { HubApp, HubContext } from './routes/context.js';
 
@@ -66,6 +64,8 @@ export interface HubInstance {
   durableRuntime?: HubDurableRuntime;
   /** 取（或懒创建）Super-agent 持久运行时；同一 Hub 生命周期内复用同一实例。 */
   ensureDurableRuntime: () => Promise<HubDurableRuntime>;
+  /** watchdog abort 时的宿主 Worker 停止钩子（清宿主 worktree 缓存并释放）。 */
+  stopWorkerHook: (runtime: HubDurableRuntime, conversationId: number, context: Context) => Promise<boolean>;
   drain: (timeoutMs?: number) => Promise<{ drained: boolean; remaining: number }>;
   close: () => Promise<void>;
 }
@@ -250,24 +250,38 @@ export function createHub(options?: HubOptions): HubInstance {
   };
   /** 会话 → 已挂载 worktree 路径缓存：每个 conversation 只幂等获取一次。 */
   const acquiredWorktrees = new Map<string, string>();
-  const runGit = promisify(execFile);
 
   /**
-   * 本地 git worktree 挂载：非 git 仓库降级返回 repoDir；preferredPath 已存在则
-   * 复用；否则 `git worktree add -B botd/<workerId> <path> HEAD`。任何失败回退 repoDir。
+   * 宿主 Worker 停止钩子（watchdog abort 时调用）：经 TargetDoc.parentConversationId
+   * 找到父 Router，再从其 WorkerRegistryDoc 反查 workerId 后走 runtime.stopWorker
+   * （标记 aborted + abort 会话 + 释放 worktree）；非 worker 会话返回 false，由
+   * watchdog 回退普通 conversation.abort。停止成功后同步清宿主缓存，避免已释放
+   * 路径被后续唤醒的 worker 复用。
    */
-  async function acquireLocalWorktree(repoDir: string, workerId: string, preferredPath: string): Promise<string> {
-    try {
-      const probe = await runGit('git', ['-C', repoDir, 'rev-parse', '--is-inside-work-tree']);
-      if (probe.stdout.trim() !== 'true') return repoDir;
-      if (fs.existsSync(preferredPath)) return preferredPath;
-      await fs.promises.mkdir(path.dirname(preferredPath), { recursive: true });
-      await runGit('git', ['-C', repoDir, 'worktree', 'add', '-B', `botd/${workerId}`, preferredPath, 'HEAD']);
-      return preferredPath;
-    } catch {
-      return repoDir;
-    }
-  }
+  const stopWorkerHook = async (
+    runtime: HubDurableRuntime,
+    conversationId: number,
+    context: Context,
+  ): Promise<boolean> => {
+    const target = await runtime.harness.snapshot(
+      TargetDoc,
+      conversationId as import('@earendil-works/pi-durable').ConversationId,
+      context,
+    );
+    const parentId = target?.parentConversationId;
+    if (parentId === undefined || parentId === '') return false;
+    const registry = await runtime.harness.snapshot(
+      WorkerRegistryDoc,
+      Number(parentId) as import('@earendil-works/pi-durable').ConversationId,
+      context,
+    );
+    if (registry === undefined) return false;
+    const entry = Object.values(registry.workers).find((w) => Number(w.conversationId) === conversationId);
+    if (entry === undefined) return false;
+    const stopped = await runtime.stopWorker(parentId, entry.workerId, context);
+    if (stopped) acquiredWorktrees.delete(String(conversationId));
+    return stopped;
+  };
 
   /** 解析 Bot 的自定义环境变量（存储在 Hub SQLite bot_files.env）。 */
   const readBotEnvMap = (botId: string): Record<string, string> | undefined => {
@@ -297,53 +311,60 @@ export function createHub(options?: HubOptions): HubInstance {
     conversationId: string,
     cwd?: string,
   ): Promise<{ nodeId?: string; shellEnv?: Record<string, string>; effectiveCwd?: string }> => {
-    if (durableRuntime !== undefined) {
-      try {
-        const numeric = Number(conversationId);
-        if (Number.isInteger(numeric)) {
-          const target = await durableRuntime.harness.snapshot(
+    const numeric = Number(conversationId);
+    // TargetDoc 读取异常直接传播：此时无法知道会话是否要求隔离/远端执行，
+    // 任何回退都会绕过边界。仅「读成功但文档不存在」才走 Bot cwd 匹配。
+    const target =
+      durableRuntime !== undefined && Number.isInteger(numeric)
+        ? await durableRuntime.harness.snapshot(
             TargetDoc,
             numeric as import('@earendil-works/pi-durable').ConversationId,
             BACKGROUND_CONTEXT,
-          );
-          if (target !== undefined) {
-            const shellEnv: Record<string, string> = {
-              ...(readBotEnvMap(target.botId) ?? {}),
-              ...(target.botId ? { BOTD_BOT_ID: target.botId } : {}),
-              ...(target.sessionId ? { BOTD_SESSION_ID: target.sessionId } : {}),
-              // 分身所在节点：botd-cli 技能的 `botd bots create --node "$BOTD_NODE_ID"`
-              // 依赖此变量；缺失时会落到 'local' 虚拟节点（显示离线且无法对话）。
-              ...(target.nodeId ? { BOTD_NODE_ID: target.nodeId } : {}),
-            };
-            let effectiveCwd = target.cwd || cwd || process.cwd();
-            if (target.worktreePath) {
-              const cached = acquiredWorktrees.get(conversationId);
-              if (cached !== undefined) {
-                effectiveCwd = cached;
-              } else {
-                const workerId = path.basename(target.worktreePath) || `w-${conversationId}`;
-                const isRemoteTarget = Boolean(target.nodeId && target.nodeId !== 'local');
-                // 远端节点：离线时等待重连后由节点侧创建 worktree，绝不在 Hub 本机建。
-                const envRpc = isRemoteTarget
-                  ? (connections.getNodeEnvRpc(target.nodeId!) ??
-                    (await connections.waitForNodeOnline(target.nodeId!, BACKGROUND_CONTEXT).catch(() => undefined)))
-                  : connections.getNodeEnvRpc(target.nodeId ?? '');
-                if (envRpc?.envAcquireWorktree) {
-                  const res = await envRpc.envAcquireWorktree({ repoDir: effectiveCwd, workerId });
-                  effectiveCwd = res.worktreePath || effectiveCwd;
-                } else {
-                  effectiveCwd = await acquireLocalWorktree(effectiveCwd, workerId, target.worktreePath);
-                }
-                acquiredWorktrees.set(conversationId, effectiveCwd);
-              }
+          )
+        : undefined;
+    if (target !== undefined) {
+      const shellEnv: Record<string, string> = {
+        ...(readBotEnvMap(target.botId) ?? {}),
+        ...(target.botId ? { BOTD_BOT_ID: target.botId } : {}),
+        ...(target.sessionId ? { BOTD_SESSION_ID: target.sessionId } : {}),
+        // 分身所在节点：botd-cli 技能的 `botd bots create --node "$BOTD_NODE_ID"`
+        // 依赖此变量；缺失时会落到 'local' 虚拟节点（显示离线且无法对话）。
+        ...(target.nodeId ? { BOTD_NODE_ID: target.nodeId } : {}),
+      };
+      let effectiveCwd = target.cwd || cwd || process.cwd();
+      if (target.worktreePath) {
+        const cached = acquiredWorktrees.get(conversationId);
+        if (cached !== undefined) {
+          effectiveCwd = cached;
+        } else {
+          const workerId = path.basename(target.worktreePath) || `w-${conversationId}`;
+          const isRemoteTarget = Boolean(target.nodeId && target.nodeId !== 'local');
+          if (isRemoteTarget) {
+            // 远端节点：离线时等待重连后由节点侧创建 worktree，绝不在 Hub 本机建。
+            // envAcquireWorktree 失败时错误必须传播（fail-closed），不回退本地。
+            const envRpc =
+              connections.getNodeEnvRpc(target.nodeId!) ??
+              (await connections.waitForNodeOnline(target.nodeId!, BACKGROUND_CONTEXT));
+            if (envRpc?.envAcquireWorktree === undefined) {
+              throw new Error(`节点 ${target.nodeId} 不支持 worktree 隔离`);
             }
-            if (target.nodeId !== '') return { nodeId: target.nodeId, shellEnv, effectiveCwd };
-            return { shellEnv, effectiveCwd };
+            const res = await envRpc.envAcquireWorktree({ repoDir: effectiveCwd, workerId });
+            if (res.isGitRepo && (!res.worktreePath || res.worktreePath === effectiveCwd)) {
+              throw new Error(`节点 ${target.nodeId} 未返回隔离 worktree 路径`);
+            }
+            effectiveCwd = res.isGitRepo === false ? effectiveCwd : res.worktreePath;
+          } else {
+            effectiveCwd = await acquireLocalWorktree(
+              effectiveCwd,
+              target.worktreePath,
+              target.branchName ?? `botd/${workerId}`,
+            );
           }
+          acquiredWorktrees.set(conversationId, effectiveCwd);
         }
-      } catch {
-        // 快照失败退回 Bot 配置匹配
       }
+      if (target.nodeId !== '') return { nodeId: target.nodeId, shellEnv, effectiveCwd };
+      return { shellEnv, effectiveCwd };
     }
     if (cwd === undefined || cwd === '') return {};
     const matched = db.getAllBots().find((bot) => bot.workspaceDir && bot.workspaceDir === cwd);
@@ -583,6 +604,7 @@ export function createHub(options?: HubOptions): HubInstance {
       return durableRuntime;
     },
     ensureDurableRuntime,
+    stopWorkerHook,
     drain,
     close,
   };
@@ -630,10 +652,11 @@ export async function startHub(options?: StartHubOptions): Promise<StartHubResul
     console.warn('[hub] durable runtime init warning:', err);
   });
   // 定时器始终创建（懒打开在启动后任意时刻完成）：回调内动态读取当前实例。
+  // 宿主 Worker 停止钩子由 createHub 提供（闭包可见宿主 acquiredWorktrees 缓存）。
   const watchdogTimer: NodeJS.Timeout = setInterval(() => {
     const runtime = hub.durableRuntime;
     if (runtime === undefined) return;
-    void runWatchdogPass(runtime.harness, undefined, BACKGROUND_CONTEXT).catch((err) => {
+    void runWatchdogPass(runtime.harness, { stopWorker: (conversationId, ctx) => hub.stopWorkerHook(runtime, conversationId, ctx) }, BACKGROUND_CONTEXT).catch((err) => {
       console.warn('[hub] watchdog pass failed:', err instanceof Error ? err.message : err);
     });
   }, options?.watchdogIntervalMs ?? 30_000);

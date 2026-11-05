@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { isSafeId } from '@botd/protocol';
-import type { CreateSessionInput } from '@botd/protocol';
+import { isSafeId, isThinkingLevel } from '@botd/protocol';
+import type { CreateSessionInput, SessionModelConfig, SessionModelOverride } from '@botd/protocol';
 import { resolveOwnedSession } from '../http-helpers.js';
-import { cancelDurableSession, forkDurableSession, resetDurableSession } from './workers.js';
+import { cancelDurableSession, forkDurableSession, ensureRouterConversationId, resetDurableSession } from './workers.js';
+import type { HubDurableRuntime } from '../harness/hub-harness.js';
 import type { HubApp, HubContext } from './context.js';
 
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -246,5 +247,99 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
       activeBotIds: [],
     });
     return c.json({ ok: true });
+  });
+
+  // --- 会话级模型覆盖 -------------------------------------------------------
+  // 单会话秒切模型：覆盖只落在该会话的 Router 会话上，不改动全局 Bot 配置，
+  // 同 Bot 的兄弟会话不受影响；PUT 后显式尝试恢复失败回合（恢复失败不影响保存结果）。
+
+  /** 取运行时并同步 Hub 当前分身配置。 */
+  const modelRuntime = async (): Promise<HubDurableRuntime | undefined> =>
+    ctx.getDurableRuntime ? await ctx.getDurableRuntime() : ctx.durableRuntime;
+
+  /** 解析会话 Router 会话 id；分身缺失等配置错误返回 400，其余内部错误返回 500 */
+  const modelConversation = async (
+    rt: HubDurableRuntime,
+    session: { id: string; leadBotId: string; workspaceDir?: string },
+  ): Promise<{ ok: true; conversationId: string } | { ok: false; error: string; status: 400 | 500 }> => {
+    try {
+      const conversationId = await ensureRouterConversationId(rt, session.id, session.leadBotId, {
+        workspaceDir: session.workspaceDir,
+      });
+      return { ok: true, conversationId };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.startsWith('unknown persona') ? 400 : 500;
+      return { ok: false, error: message, status };
+    }
+  };
+
+  app.get('/api/sessions/:id/model', async (c) => {
+    const id = c.req.param('id');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+
+    const rt = await modelRuntime();
+    if (!rt) return c.json({ error: 'Durable runtime unavailable' }, 503);
+    const conv = await modelConversation(rt, sRes.session);
+    if (!conv.ok) return c.json({ error: conv.error }, conv.status);
+
+    try {
+      const config = await rt.getConversationModelConfig(conv.conversationId);
+      const body: SessionModelConfig = { ...config, resumed: false };
+      return c.json(body);
+    } catch (err) {
+      console.warn('[sessions] get conversation model config failed:', err instanceof Error ? err.message : err);
+      return c.json({ error: 'Failed to load session model config' }, 500);
+    }
+  });
+
+  app.put('/api/sessions/:id/model', async (c) => {
+    const id = c.req.param('id');
+    const sRes = resolveOwnedSession(c, db, id);
+    if (!sRes.ok) return sRes.response;
+    const session = sRes.session;
+
+    const body = await c.req.json<{ override?: SessionModelOverride | null }>().catch(() => null);
+    if (!isObject(body) || !('override' in body)) {
+      return c.json({ error: 'Invalid model override body' }, 400);
+    }
+    let override: SessionModelOverride | null = null;
+    if (body.override !== null && body.override !== undefined) {
+      const raw = body.override;
+      if (!isObject(raw) || !isText(raw.provider) || !isText(raw.modelId)) {
+        return c.json({ error: 'Invalid model override: provider and modelId are required' }, 400);
+      }
+      if (raw.thinkingLevel !== undefined && !isThinkingLevel(raw.thinkingLevel)) {
+        return c.json({ error: 'Invalid thinkingLevel' }, 400);
+      }
+      override = {
+        provider: raw.provider.trim(),
+        modelId: raw.modelId.trim(),
+        ...(raw.thinkingLevel !== undefined ? { thinkingLevel: raw.thinkingLevel } : {}),
+      };
+    }
+
+    const rt = await modelRuntime();
+    if (!rt) return c.json({ error: 'Durable runtime unavailable' }, 503);
+    const conv = await modelConversation(rt, session);
+    if (!conv.ok) return c.json({ error: conv.error }, conv.status);
+
+    // 保存与恢复分开：覆盖落盘成功即成功，setter 返回实际保存的 {override, effective}；
+    // 恢复失败回合失败只降级 resumed=false，绝不影响已保存的配置。
+    let savedConfig: SessionModelConfig;
+    try {
+      savedConfig = await rt.setConversationModelOverride(conv.conversationId, override);
+    } catch (err) {
+      console.warn('[sessions] set conversation model override failed:', err instanceof Error ? err.message : err);
+      return c.json({ error: 'Failed to save session model override' }, 500);
+    }
+    let resumed = false;
+    try {
+      resumed = await rt.resumeFailedConversation(conv.conversationId);
+    } catch (err) {
+      console.warn('[sessions] resume failed conversation skipped:', err instanceof Error ? err.message : err);
+    }
+    return c.json({ ...savedConfig, resumed });
   });
 }

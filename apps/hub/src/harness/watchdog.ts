@@ -13,8 +13,8 @@
  */
 import { BACKGROUND_CONTEXT, type Context } from '@earendil-works/chord/context';
 import type { JsonValue } from '@earendil-works/chord';
-import { LiveDoc, defineDoc, defineTask } from '@earendil-works/pi-durable';
-import type { Cursor, Harness } from '@earendil-works/pi-durable';
+import { ConversationBusy, LiveDoc, defineDoc, defineTask } from '@earendil-works/pi-durable';
+import type { Cursor, Harness, RunFailure, Tx } from '@earendil-works/pi-durable';
 
 // ---------------------------------------------------------------------------
 // 干预记录（session 单例文档）
@@ -45,9 +45,19 @@ export const WatchdogLogDoc = defineDoc({
 export type WatchdogProgressState = {
 	/** conversationId（字符串化） → 上次观测到的进度签名与时间。 */
 	observations: Record<string, { signature: string; lastProgressAt: number }>;
-	/** conversationId（字符串化） → 连续失败追踪（有界自动重试的计数与告警去重）。 */
-	failures?: Record<string, { key: string; attempts: number; alerted?: boolean }>;
+	/** conversationId（字符串化） → 连续失败追踪（以失败锚计数，告警投递成功才置 alerted）。 */
+	failures?: Record<string, { anchor: string; attempts: number; alerted?: boolean }>;
 };
+
+/**
+ * 失败身份锚：同一批未回答输入的失败链共享 run.first（continue 继承原失败的 first），
+ * 新一轮用户输入产生新 first、新预算。first 缺席时退化用 inputs 集合。
+ */
+function failureAnchor(runFailure: RunFailure): string {
+	return runFailure.first !== undefined
+		? `first:${runFailure.first}`
+		: `inputs:${runFailure.inputs.map(String).join(',')}`;
+}
 
 /** 巡检进度观测文档：跨次巡检持久化每个会话的进度签名，用于真实停滞判定。 */
 export const WatchdogProgressDoc = defineDoc({
@@ -112,8 +122,8 @@ const PERMANENT_FAILURE_KEYWORDS: ReadonlyArray<{
 	},
 ];
 
-/** 只认 HTTP 状态位置的 4xx/5xx（"HTTP 400"/"Status: 401"…），正文里的裸数字（配额余量、请求 ID）不算。 */
-const HTTP_STATUS_PATTERN = /(?:^|[^0-9])([45]\d\d)(?![0-9])/;
+/** 只识别状态行或 HTTP/Status 前缀后的首个状态码，忽略正文中的配额数字。 */
+const HTTP_STATUS_PATTERN = /(?:^\s*|\bHTTP(?:\/\d+(?:\.\d+)?)?\s+|\bstatus(?:\s+code)?\s*[:=]?\s*)([45]\d\d)(?![0-9])/i;
 
 /** 永久错误的状态码 → 类别；429 / 5xx 不在表中，即瞬态。 */
 const PERMANENT_STATUS_CATEGORIES: Readonly<Record<string, Exclude<RunFailureClassification['category'], 'transient'>>> = {
@@ -143,8 +153,9 @@ export function classifyRunFailure(runFailure: { reason?: string; detail?: strin
 	}
 	// 解码 \uXXXX 转义：部分网关返回 JSON 转义后的中文（如 \u4f59\u989d\u4e0d\u8db3 = 余额不足）
 	const detail = (runFailure.detail ?? '').replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+	const normalizedDetail = detail.toLowerCase();
 	for (const group of PERMANENT_FAILURE_KEYWORDS) {
-		if (group.patterns.some((pattern) => pattern.test(detail))) {
+		if (group.patterns.some((pattern) => pattern.test(normalizedDetail))) {
 			return { retryable: false, category: group.category, summary: detail || 'model_error' };
 		}
 	}
@@ -202,6 +213,8 @@ export interface WatchdogAction {
 	conversationId: number;
 	kind: 'steer' | 'continue' | 'abort' | 'alert';
 	reason: string;
+	/** 失败告警的记账锚：外部投递成功后据此在同事务确认 alerted。 */
+	alertRecord?: { anchor: string; attempts: number };
 }
 
 export interface WatchdogPassResult {
@@ -260,10 +273,13 @@ export async function runWatchdogPass(
 		if (abortRequestedConversations.has(conversationId)) continue;
 
 		const runFailure = live?.runFailure;
-		// 会话已恢复（无失败或正忙于新一轮）：清空连续失败追踪。
-		if (runFailure === undefined || live?.run !== undefined) {
-			const cid = String(conversationId);
+		const cid = String(conversationId);
+		// 确认成功才复位预算：事务内确认既无未决失败也不 busy 才清空。busy 期间一律不清：
+		// continue 接纳后 startRun 即删 runFailure，若此时清空，run 再失败（同 first）预算就被重置。
+		if (runFailure === undefined) {
 			await harness.commit(async (tx) => {
+				const liveTx = await tx.doc(LiveDoc, conversationId as never);
+				if (liveTx.runFailure !== undefined || liveTx.run !== undefined) return;
 				const progress = await tx.doc(WatchdogProgressDoc);
 				if (progress.failures?.[cid] !== undefined) {
 					const { [cid]: _cleared, ...rest } = progress.failures;
@@ -274,47 +290,53 @@ export async function runWatchdogPass(
 		const failureIsTransient =
 			runFailure !== undefined && (runFailure.reason === 'model_error' || runFailure.reason === 'interrupted');
 
-		// 瞬态失败：空闲 + model_error / interrupted → 按分类做有界自动重试
+		// 瞬态失败：空闲 + model_error / interrupted → 按分类做有界自动重试。
+		// 失败身份锚是 runFailure.first：detail / requestId 变化不重置预算，
+		// 新一轮用户输入才产生新锚、新预算。
 		if (!observation.busy && failureIsTransient) {
-			const cid = String(conversationId);
-			const failureKey = `${runFailure!.reason}:${runFailure!.detail ?? ''}`;
-			const classified = classifyRunFailure(runFailure);
-			await harness.commit(async (tx) => {
-				const progress = await tx.doc(WatchdogProgressDoc);
-				const prev = progress.failures?.[cid];
-				if (!classified.retryable) {
-					// 永久错误（鉴权 / 配额 / 404 / 请求构造）：重试无意义，只告警一次。
-					if (prev?.key !== failureKey || prev.alerted !== true) {
-						progress.failures = { ...progress.failures, [cid]: { key: failureKey, attempts: 0, alerted: true } };
+			const anchor = failureAnchor(runFailure!);
+			const maxRetries = options.maxContinueRetries ?? 3;
+			const conversation = await harness.conversation(conversationId as never, ctx);
+			if (conversation === undefined) continue;
+			await harness
+				.commit(async (tx) => {
+					const liveTx = await tx.doc(LiveDoc, conversationId as never);
+					const currentFailure = liveTx.runFailure;
+					if (
+						liveTx.run !== undefined ||
+						currentFailure === undefined ||
+						(currentFailure.reason !== 'model_error' && currentFailure.reason !== 'interrupted') ||
+						failureAnchor(currentFailure) !== anchor
+					) return;
+					const classified = classifyRunFailure(currentFailure);
+					const progress = await tx.doc(WatchdogProgressDoc);
+					const prev = progress.failures?.[cid];
+					const sameFailure = prev?.anchor === anchor;
+					const attempts = sameFailure ? prev.attempts : 0;
+					if (!classified.retryable || attempts >= maxRetries) {
+						if (sameFailure && prev.alerted === true) return;
+						progress.failures = { ...progress.failures, [cid]: { anchor, attempts, alerted: false } };
 						actions.push({
 							conversationId,
 							kind: 'alert',
-							reason: `non-retryable ${classified.category} error: ${classified.summary}`,
+							reason: classified.retryable
+								? `transient retry limit (${maxRetries}) reached: ${classified.summary}`
+								: `non-retryable ${classified.category} error: ${classified.summary}`,
+							alertRecord: { anchor, attempts },
 						});
+						return;
 					}
-				} else {
-					const maxRetries = options.maxContinueRetries ?? 3;
-					const prevAttempts = prev?.key === failureKey ? prev.attempts : 0;
-					if (prevAttempts >= maxRetries) {
-						// 瞬态错误重试已达上限：停止 continue，只告警一次。
-						if (prev?.alerted !== true) {
-							progress.failures = { ...progress.failures, [cid]: { key: failureKey, attempts: prevAttempts, alerted: true } };
-							actions.push({
-								conversationId,
-								kind: 'alert',
-								reason: `transient retry limit (${maxRetries}) reached: ${classified.summary}`,
-							});
-						}
-					} else {
-						progress.failures = { ...progress.failures, [cid]: { key: failureKey, attempts: prevAttempts + 1, alerted: false } };
-						actions.push({
-							conversationId,
-							kind: 'continue',
-							reason: `transient failure ${runFailure!.reason}: auto-continue`,
-						});
-					}
-				}
-			}, ctx);
+					await conversation.submit(tx, { type: 'continue' });
+					progress.failures = { ...progress.failures, [cid]: { anchor, attempts: attempts + 1 } };
+					actions.push({
+						conversationId,
+						kind: 'continue',
+						reason: `transient failure ${currentFailure.reason}: auto-continue`,
+					});
+				}, ctx)
+				.catch((error: unknown) => {
+					if (!(error instanceof ConversationBusy)) throw error;
+				});
 			continue;
 		}
 
@@ -424,6 +446,11 @@ async function scanFailedConversations(
 	return failed;
 }
 
+/**
+ * 执行巡检动作。continue 已在决策事务内接纳（见 runWatchdogPass），此处只做：
+ * steer / abort 提交、告警外部投递（成功后同事务确认 alerted 并写日志）。
+ * 默认无 alert 钩子时日志投递与确认同一事务，一次写入不可能半途丢失。
+ */
 async function applyActions(
 	harness: Harness,
 	actions: WatchdogAction[],
@@ -432,7 +459,14 @@ async function applyActions(
 ): Promise<void> {
 	if (actions.length === 0) return;
 	const log: WatchdogIntervention[] = [];
+	// 默认日志投递路径的告警确认：与日志写入同事务执行。
+	const pendingLogConfirms: Array<(tx: Tx) => Promise<void>> = [];
 	for (const action of actions) {
+		if (action.kind === 'continue') {
+			// 已在决策事务内接纳执行，只需补记干预日志。
+			log.push({ conversationId: action.conversationId, kind: action.kind, reason: action.reason, at: Date.now() });
+			continue;
+		}
 		const conversation = await harness.conversation(action.conversationId as never, context);
 		if (conversation !== undefined) {
 			try {
@@ -441,8 +475,6 @@ async function applyActions(
 						{ type: 'input', content: options.steerMessage ?? 'Reassess and proceed differently.', whenBusy: 'steer' },
 						context,
 					);
-				} else if (action.kind === 'continue') {
-					await conversation.submit({ type: 'continue' }, context);
 				} else if (action.kind === 'abort') {
 					// 先走宿主的 Worker 停止钩子（关闭进程 / 释放资源）；未提供或返回 false 时回退会话 abort。
 					let stopped = false;
@@ -453,17 +485,39 @@ async function applyActions(
 				// busy / idle 语义冲突（如 continue 遇 busy）巡检不视为失败
 			}
 		}
+		if (action.kind === 'alert' && options.alert !== undefined) {
+			try {
+				await options.alert(action.reason, context);
+			} catch {
+				continue;
+			}
+		}
+		// 失败追踪告警在投递成功后确认；默认日志与确认一起提交。
+		if (action.kind === 'alert' && action.alertRecord !== undefined) {
+			const cid = String(action.conversationId);
+			const record = action.alertRecord;
+			const confirm = async (tx: Tx) => {
+				const progress = await tx.doc(WatchdogProgressDoc);
+				const prev = progress.failures?.[cid];
+				if (prev !== undefined && prev.anchor === record.anchor && prev.attempts === record.attempts) {
+					progress.failures = { ...progress.failures, [cid]: { ...prev, alerted: true } };
+				}
+			};
+			if (options.alert !== undefined) {
+				await harness.commit(confirm, context);
+			} else {
+				pendingLogConfirms.push(confirm);
+			}
+		}
 		log.push({
 			conversationId: action.conversationId,
 			kind: action.kind,
 			reason: action.reason,
 			at: Date.now(),
 		});
-		if (action.kind === 'alert' && options.alert !== undefined) {
-			await options.alert(action.reason, context).catch(() => undefined);
-		}
 	}
 	await harness.commit(async (tx) => {
+		for (const confirm of pendingLogConfirms) await confirm(tx);
 		const doc = await tx.doc(WatchdogLogDoc);
 		doc.events.push(...log);
 		// 干预日志只保留最近 200 条，防止长生命周期会话无限膨胀。

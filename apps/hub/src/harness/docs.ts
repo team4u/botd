@@ -11,6 +11,7 @@
  */
 import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord";
+import type { SessionModelOverride } from "@botd/protocol";
 
 /** The role a conversation plays in the super-agent tree. */
 export type BotdRole = "router" | "worker" | "subagent";
@@ -38,7 +39,7 @@ export interface TargetState {
 	/** Human-readable title (topic sessions, worker tasks). */
 	title?: string;
 	/** Optional conversation-scoped model override (isolated from global BotPersonaConfig). */
-	modelOverride?: { provider: string; modelId: string; thinkingLevel?: string };
+	modelOverride?: SessionModelOverride;
 }
 export type TargetStateJson = TargetState & { [key: string]: JsonValue };
 

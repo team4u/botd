@@ -5,6 +5,7 @@ import { resolveOwnedSession } from '../http-helpers.js';
 import { ArtifactError, type ArtifactActor, type ArtifactService } from '../artifact-service.js';
 import type { HubDatabase } from '../db.js';
 import {
+  ensureRouterConversationId,
   rewindDurableSessionBeforeMessage,
   submitSessionMessageToDurable,
   type DurableSessionMirror,
@@ -256,46 +257,45 @@ export function registerMessageRoutes(
       message: msgResult.message,
     });
 
-    // 前置校验（仅 Durable 主线生效时）：目标 Bot 未配置模型，或其服务商在 Hub 侧
-    // 无任何凭据时，立即显式报错，绝不静默挂起。Hub 无任何凭据时消息本就走
-    // GroupRouter→节点执行路径（节点自带凭据），不在 Hub 侧拦截。
-    const durableMainlineActive =
-      ctx.durableInjected || listEffectiveProviderCredentials(db).length > 0;
-    if (durableMainlineActive && !ctx.durableInjected && targetBotId) {
+    const credentials = listEffectiveProviderCredentials(db);
+    const durableMainlineEligible = ctx.durableInjected || credentials.length > 0;
+    const dctx = durableCtx();
+    const rt = durableMainlineEligible
+      ? (dctx.getDurableRuntime ? await dctx.getDurableRuntime() : dctx.durableRuntime)
+      : undefined;
+
+    // 校验实际会话模型，避免全局 Bot 的空配置挡住有效的会话覆盖。
+    // 节点自行执行的路径仍由节点管理凭据。
+    if (rt !== undefined && !ctx.durableInjected && targetBotId) {
       const bot = db.getBot(targetBotId);
-      if (
-        bot &&
-        (!bot.modelProvider?.trim() ||
-          !bot.modelId?.trim() ||
-          (!listEffectiveProviderCredentials(db).some((c) => c.providerId === bot.modelProvider) &&
-            !loadStoredProviders(db.getDataDir()).some((p) => p.id === bot.modelProvider)))
-      ) {
-        const errorMsg = db.createMessage({
-          id: `msg_${randomUUID()}`,
-          sessionId: id,
-          role: 'system',
-          content: unconfiguredModelMessage(bot.name || targetBotId, bot.modelProvider || '', bot.modelId || ''),
-        });
-        sseHub.broadcast(id, { type: 'message_created', message: errorMsg.message });
-        sseHub.broadcast(id, { type: 'session_status', sessionId: id, status: 'failed' });
-        db.updateSessionStatus(id, 'failed');
-        return c.json(msgResult.message, 202);
+      if (bot) {
+        const conversationId = await ensureRouterConversationId(rt, id, targetBotId, { workspaceDir: session.workspaceDir });
+        const { effective } = await rt.getConversationModelConfig(conversationId);
+        if (
+          !effective.provider.trim() ||
+          !effective.modelId.trim() ||
+          (!credentials.some((credential) => credential.providerId === effective.provider) &&
+            !loadStoredProviders(db.getDataDir()).some((provider) => provider.id === effective.provider))
+        ) {
+          const errorMsg = db.createMessage({
+            id: `msg_${randomUUID()}`,
+            sessionId: id,
+            role: 'system',
+            content: unconfiguredModelMessage(bot.name || targetBotId, effective.provider, effective.modelId),
+          });
+          sseHub.broadcast(id, { type: 'message_created', message: errorMsg.message });
+          sseHub.broadcast(id, { type: 'session_status', sessionId: id, status: 'failed' });
+          db.updateSessionStatus(id, 'failed');
+          return c.json(msgResult.message, 202);
+        }
       }
     }
 
-    // 主线切流：显式注入 runtime 或已配置 Provider 凭据时，用户消息直接提交给会话的
-    // Router 会话（全双工 whenBusy: "steer"），assistant 回复经镜像回写时间线；
-    // 未注入且无凭据（或提交失败）时退回原 GroupRouter 路径。
-    const durableMainlineEligible =
-      ctx.durableInjected || listEffectiveProviderCredentials(db).length > 0;
-    const dctx = durableCtx();
-    const rt = durableMainlineEligible
-      ? (dctx.durableRuntime ?? (dctx.getDurableRuntime ? await dctx.getDurableRuntime() : undefined))
-      : undefined;
+    // 已配置 Durable 主线时提交到会话 Router，否则沿用节点路由。
     if (rt !== undefined) {
       try {
         const submitted = await submitSessionMessageToDurable(
-          { ...dctx, durableRuntime: rt },
+          { db, sseHub, durableRuntime: rt },
           id,
           targetBotId,
           content,
