@@ -100,16 +100,17 @@ test('1. dynamic extensions stay per-persona: no leak onto other personas, no Co
   assert.ok(!names(routerB.extensions).includes('alpha-dyn'), 'routerB must not mount alpha-dyn');
   assert.ok(!names(workerB.extensions).includes('alpha-dyn'), 'workerB must not mount alpha-dyn');
 
-  // Router 不含 CodingTools / codemode / botd-worker（精确选择）
-  for (const forbidden of ['pi.coding-tools', 'codemode', 'botd-worker']) {
+  // Router 挂载 CodingTools（当场干活）但不含 botd-worker 与 codemode（精确选择）
+  for (const forbidden of ['codemode', 'botd-worker']) {
     assert.ok(
       !names(routerA.extensions).some((n) => n.includes(forbidden) || n === forbidden),
       `Router must not mount ${forbidden} (got: ${names(routerA.extensions).join(',')})`,
     );
   }
-  // Router 上 botd-router 与 SubagentWorkflow 必在
+  // Router 上 botd-router、SubagentWorkflow 与 CodingTools 必在
   assert.ok(names(routerA.extensions).some((n) => n.includes('router')));
   assert.ok(names(routerA.extensions).some((n) => n.toLowerCase().includes('workflow') || n.includes('SubagentWorkflow')));
+  assert.ok(names(routerA.extensions).some((n) => n.includes('coding') || n === 'coding-tools'), 'Router must mount CodingTools');
   // Worker 上 CodingTools / worker / workflow 必在
   assert.ok(names(workerB.extensions).some((n) => n.includes('coding') || n === 'pi.tools' || n.toLowerCase().includes('coding')));
   assert.ok(names(workerB.extensions).some((n) => n.includes('worker')));
@@ -136,9 +137,18 @@ test('2. toolScope readonly: write/edit/bash removed from BOTH tools and modelTo
     assert.ok(removedTools.includes(banned), `tools.remove must contain ${banned}`);
     assert.ok(removedModelTools.includes(banned), `modelTools.remove must contain ${banned}`);
   }
-  // Router 层不受 readonly 影响（Router 本来就没有编码工具）
+  // Router 同样受 toolScope: 'readonly' 保护：tools / modelTools 双层移除写工具
   const router = runtime.routerAgent(persona);
-  assert.equal(router.tools, null);
+  const removedRouterTools = removed(router.tools);
+  const removedRouterModelTools = removed(router.modelTools);
+  for (const banned of ['write', 'edit', 'bash']) {
+    assert.ok(removedRouterTools.includes(banned), `router tools.remove must contain ${banned}`);
+    assert.ok(removedRouterModelTools.includes(banned), `router modelTools.remove must contain ${banned}`);
+  }
+  // 无 toolScope 的 Router 拥有全部编码工具（tools/modelTools 均不过滤）
+  const fullRouter = runtime.routerAgent(personaOf({ botId: 'full-bot', name: 'Full' }));
+  assert.equal(fullRouter.tools, null);
+  assert.equal(fullRouter.modelTools, null);
 
   // custom：精确允许列表
   const customPersona = personaOf({ botId: 'cu-bot', name: 'CU', toolScope: 'custom', customTools: ['read', 'write'] });

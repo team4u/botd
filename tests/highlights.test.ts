@@ -464,9 +464,9 @@ test('skills live in Hub storage shared across nodes without any sync endpoint',
 
 // --- 7. Builtin skill creator meta-skill ---
 
-test('builtin skill documents the Super-agent architecture and CLI at v15', () => {
-  // v15：Super-agent 工具面（Brain in Hub, Hands on Node）
-  assert.equal(BUILTIN_SKILL_VERSION, 15, 'version marker bumped to v15');
+test('builtin skill documents the Super-agent architecture and CLI at v16', () => {
+  // v16：Super-agent 工具面（Brain in Hub, Hands on Node）
+  assert.equal(BUILTIN_SKILL_VERSION, 16, 'version marker bumped to v16');
   assert.match(BUILTIN_SKILL_MD, /spawn_worker/);
   assert.match(BUILTIN_SKILL_MD, /delegate_to_bot/);
   assert.match(BUILTIN_SKILL_MD, /steer_worker/);

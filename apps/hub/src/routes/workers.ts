@@ -542,7 +542,7 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
         title: body.title.trim(),
         task: taskText,
         ...(threadKeys[0] ? { threadKey: threadKeys[0] } : {}),
-        forkContext: body.forkContext !== false,
+        ...(body.forkContext === true ? { forkContext: true } : {}),
         ...(worktree ? { worktree: true } : {}),
         ...(threadKeys.length > 0 ? { threadKeys } : {}),
         ...(session.workspaceDir?.trim() ? { cwd: session.workspaceDir.trim() } : {}),

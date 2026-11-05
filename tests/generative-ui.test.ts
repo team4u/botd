@@ -709,8 +709,8 @@ test('Hub GroupRouter.requestHumanInput 校验 UI Spec：拒绝非法 Spec，放
 // 5. BUILTIN_SKILL_MD: Documentation and version bump
 // ---------------------------------------------------------------------------
 
-test('BUILTIN_SKILL_MD: v15 手册包含 Generative UI 与全部组件说明', () => {
-  assert.ok(BUILTIN_SKILL_VERSION >= 15, 'BUILTIN_SKILL_VERSION must be at least 15');
+test('BUILTIN_SKILL_MD: v16 手册包含 Generative UI 与全部组件说明', () => {
+  assert.ok(BUILTIN_SKILL_VERSION >= 16, 'BUILTIN_SKILL_VERSION must be at least 16');
   assert.ok(BUILTIN_SKILL_MD.includes('Generative UI'), 'BUILTIN_SKILL_MD must include Generative UI section');
   assert.ok(BUILTIN_SKILL_MD.includes('```ui'), 'BUILTIN_SKILL_MD must mention the ```ui fence');
 

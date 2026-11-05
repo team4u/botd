@@ -599,7 +599,7 @@ Hub 支持三种身份鉴权方式：
 
 ### POST /api/sessions/:id/workers
 
-派生新后台 Worker 执行长耗时任务。支持 `task`（或别名 `instructions`）、`worktree` / `isolation`、`threadKey` / `threadKeys` 与 `forkContext`。
+派生新后台 Worker 执行长耗时任务。支持 `task`（或别名 `instructions`）、`worktree` / `isolation`、`threadKey` / `threadKeys` 与 `forkContext`（默认 `false`：新建 Worker 是干净独立会话；显式传 `true` 才继承会话上下文）。
 
 请求体：
 

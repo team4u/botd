@@ -97,7 +97,7 @@ sequenceDiagram
 
 ### 3.2 零拷贝上下文继承（forkContext）
 
-当你在前台与 Router 讨论了多轮技术细节后再执行任务时：
+新建 Worker 默认是干净的独立会话，靠自包含的 `task` 传递上下文。当你在前台与 Router 讨论了多轮技术细节后再执行任务、确需继承讨论记录时：
 
 - `spawn_worker` 指定 `forkContext: true` 参数。
 - 系统调用 `conversation.fork()` 复制当前上下文。

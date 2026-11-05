@@ -54,6 +54,10 @@ import type { Cursor } from "@earendil-works/pi-durable";
 export interface BotPersonaConfig {
 	botId: string;
 	name: string;
+	/** Subagents carry their parent primary bot's id here. */
+	parentBotId?: string;
+	/** One-line role description (subagent picker / persona listings). */
+	description?: string;
 	/** Provider/model the persona runs with. */
 	model: { provider: string; modelId: string };
 	/** Persona instructions (SYSTEM.md contents). */
@@ -227,26 +231,48 @@ export class HubDurableRuntime {
 		const models = options.models ?? createModels();
 		const registry = options.registry ?? createRegistry();
 		registry.install(CodingTools);
-		const workerExtension = createWorkerExtension();
+		const personas = new Map<string, BotPersonaConfig>();
+		let runtime: HubDurableRuntime | undefined;
+		/** Resolves a registered persona (or bot) as a real AgentChange: its own model, instructions, extensions and toolScope filter. */
+		const resolveSubagentChange = (agentType: string, cwd?: string): AgentChange | undefined => {
+			const persona = personas.get(agentType.replace(/^@/, ""));
+			if (persona === undefined || runtime === undefined) return undefined;
+			return { ...runtime.workerAgentFor(persona), cwd: cwd ?? persona.cwd };
+		};
+		const workerExtension = createWorkerExtension({ resolveSubagentChange });
 		registry.install(workerExtension);
 		// SubagentWorkflow is a session-wide capability: every Router and Worker
 		// conversation can run deterministic crash-resumable multi-step workflows.
-		const workflowExtension = createWorkflowExtension();
+		// `agent(prompt, { agentType })` hits a registered subagent persona and runs
+		// the step with that persona's real model/instructions/toolScope.
+		const workflowExtension = createWorkflowExtension(undefined, { resolveSubagentChange });
 		registry.install(workflowExtension);
-		const personas = new Map<string, BotPersonaConfig>();
-		let runtime: HubDurableRuntime | undefined;
 		const routerExtension = createRouterExtension({
 			resolvePersona: (botId) => {
 				const persona = personas.get(botId);
 				if (persona === undefined) return undefined;
 				return {
 					botId: persona.botId,
+					...(persona.parentBotId === undefined ? {} : { parentBotId: persona.parentBotId }),
+					...(persona.description === undefined || persona.description === "" ? {} : { description: persona.description }),
 					model: persona.model,
 					instructions: personaInstructions(persona),
 					nodeId: persona.nodeId,
 					cwd: persona.cwd,
+					...(persona.toolScope === undefined ? {} : { toolScope: persona.toolScope }),
 				};
 			},
+			listPersonas: () =>
+				[...personas.values()].map((persona) => ({
+					botId: persona.botId,
+					name: persona.name,
+					...(persona.parentBotId === undefined ? {} : { parentBotId: persona.parentBotId }),
+					...(persona.description === undefined || persona.description === "" ? {} : { description: persona.description }),
+					model: persona.model,
+					...(persona.toolScope === undefined ? {} : { toolScope: persona.toolScope }),
+					nodeId: persona.nodeId,
+					cwd: persona.cwd,
+				})),
 			workerAgent: options.workerAgent ?? (({ botId, cwd }) => {
 				const persona = personas.get(botId);
 				if (persona === undefined || runtime === undefined) throw new Error(`unknown persona: ${botId}`);
@@ -414,19 +440,24 @@ export class HubDurableRuntime {
 
 	/**
 	 * The router agent for a bot: persona model + persona instructions + the
-	 * `botd-router` extension, with the raw coding tools (`read`/`write`/`edit`/
-	 * `bash`) stripped from the model's tool surface — the foreground Router only
-	 * answers, recalls, and dispatches; any hands-on work belongs to a worker.
+	 * `botd-router` extension + CodingTools, so the foreground Router can answer
+	 * quick questions hands-on (read a file, run a light command) instead of
+	 * spawning a worker for every trivium. Multi-step coding, long-running work
+	 * and anything needing isolation still belongs to `spawn_worker` — the
+	 * routing discipline lives in the router prompt. The persona's `toolScope`
+	 * applies to the Router exactly as it does to workers (a `readonly` bot has
+	 * no write/edit/bash anywhere).
 	 *
 	 * `extensions` is an EXACT array (not `{add}`): pi-durable treats an array as
 	 * the whole selection, so no uninstalled-for-this-persona extension (other
-	 * bots' dynamic extensions, CodingTools on the registry) can leak onto the
-	 * Router's tool surface.
+	 * bots' dynamic extensions) can leak onto the Router's tool surface.
 	 */
 	routerAgent(persona: BotPersonaConfig): AgentChange {
 		const thinkingLevel = thinkingLevelFor(persona);
 		const extensions: Extension[] = [
 			this.routerExtension,
+			// CodingTools 回归 Router：快速问答、单步读文件、轻量命令当场完成。
+			CodingTools,
 			// SubagentWorkflow 是会话级能力：Router 也能直接跑确定性多步工作流
 			//（历史上由 host 默认选择隐式携带，精确选择后必须显式列出）。
 			this.workflowExtension,
@@ -439,9 +470,7 @@ export class HubDurableRuntime {
 			instructions: personaInstructions(persona),
 			cwd: persona.cwd,
 			extensions,
-			...(persona.toolScope === "custom"
-				? { ...this.toolFilterFor(persona, extensions) }
-				: { modelTools: { remove: [...(CodingTools.tools ?? [])] }, tools: null }),
+			...this.toolFilterFor(persona, extensions),
 		};
 	}
 
@@ -570,7 +599,7 @@ export class HubDurableRuntime {
 			//（Router 主会话未显式落 sessionId 时，worker 以父会话为上下文根）。
 			const effectiveSessionId = options.sessionId || parentTarget.sessionId || sessionId;
 			const threadKeys = options.threadKeys?.length ? options.threadKeys : (options.threadKey ? [options.threadKey] : []);
-			const fork = options.forkContext !== false;
+			const fork = options.forkContext === true;
 			const latest = await tx.latestEntryId(stringToConversationId(sessionId));
 			const record =
 				fork && latest !== undefined
@@ -826,12 +855,29 @@ export class HubDurableRuntime {
 		if (entry === undefined) return false;
 		const conversation = await this.harness.conversation(stringToConversationId(entry.conversationId), context);
 		if (conversation === undefined) return false;
+		// A message on a finished (completed/failed/aborted) worker wakes it for
+		// another round: reset its status first so the new run's afterRun report is
+		// accepted again and the UI light flips back to running immediately.
+		await this.harness.commit(async (tx) => {
+			const doc = await tx.doc(WorkerRegistryDoc, stringToConversationId(routerConversationId));
+			const record = doc.workers[workerId];
+			if (
+				record !== undefined &&
+				(record.status === "completed" || record.status === "failed" || record.status === "aborted")
+			) {
+				record.status = "running";
+				delete record.finishedAt;
+			}
+		}, context);
 		await conversation.submit(
 			{
 				type: "input",
 				content: message,
 				whenBusy: mode,
 				requestId: `steer:${workerId}:${Date.now()}`,
+				// Tagged like a worker task so the woken run's afterRun names the worker
+				// and reports back exactly like the first round did.
+				entry: { kind: "botd.worker-task", data: { workerId, title: entry.title } },
 			},
 			context,
 		);

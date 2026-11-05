@@ -28,8 +28,12 @@ import {
 
 import { RecallIndexDoc, TargetDoc, WorkerRegistryDoc } from "./docs.js";
 import { askHumanTool } from "./router-extension.js";
+import { configure, type AgentChange } from "@earendil-works/pi-durable";
 
 export const WORKER_EXTENSION_NAME = "botd-worker";
+
+/** Resolves a registered subagent/bot persona into its real agent change (model, instructions, extensions, toolScope). */
+export type SubagentChangeResolver = (agentType: string, cwd?: string) => AgentChange | undefined;
 
 // Branded ConversationId <-> string: documents store plain strings.
 const toId = (value: string): ConversationId => {
@@ -159,101 +163,116 @@ const WorkerReportTask = defineTask<WorkerReportInput, { phase: "report" }, { re
 });
 
 /** Task-owned foreground subagent: the Worker's child conversations. */
-const subagentTool = defineTool({
-	name: "subagent",
-	description:
-		"Delegate a self-contained sub-task to an isolated child agent conversation and get its answer back. " +
-		"The child is owned by this tool call (aborted with it) and is replay-safe across crashes. " +
-		"Pass worktree: true (or isolation: 'worktree') to run it in an isolated git worktree; " +
-		"by default a child inherits the parent's worktree when the parent runs in one.",
-	parameters: obj({
-		task: str({ description: "Complete instructions for the sub-agent" }),
-		worktree: opt(bool({ description: "Give the subagent an isolated git worktree" })),
-		isolation: opt(oneOf(["off", "worktree"])),
-		forkContext: opt(bool({ description: "Fork this conversation's context into the subagent (default false)" })),
-	}),
-	replay: "safe",
-	async execute(args, api, context) {
-		const useWorktree = args.worktree === true || args.isolation === "worktree";
-		let branchName = "";
-		let worktreePath = "";
-		const child = await api.commit(async (tx) => {
-			// The ownership index remembers the child, so a rerun reuses it.
-			const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
-			if (existing !== undefined) {
-				const existingTarget = await tx.doc(TargetDoc, existing.id);
-				branchName = existingTarget.branchName ?? "";
-				worktreePath = existingTarget.worktreePath ?? "";
-				return existing.id;
-			}
-			let record;
-			if (args.forkContext === true) {
-				const latest = await tx.latestEntryId(api.conversationId);
-				record =
-					latest === undefined
-					? await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } })
-					: await tx.forkConversation(api.conversationId, latest, {
-							ownership: { kind: "task", taskId: api.taskId },
-						});
-			} else {
-				record = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
-			}
-			// Mark it as a subagent in its target doc.
-			const workerTarget = await tx.doc(TargetDoc, record.id);
-			const self = await tx.doc(TargetDoc, api.conversationId);
-			if (useWorktree) {
-				const baseCwd = self.cwd || process.cwd();
-				const subId = `sub-${record.id}`;
-				branchName = `botd/${subId}`;
-				worktreePath = `${baseCwd}/.botd-worktrees/${subId}`;
-			} else if (args.isolation !== "off" && self.worktreePath) {
-				// Inherit the parent's worktree: a Worker already isolated in one must
-				// not have its children bounce back to the main checkout.
-				branchName = self.branchName ?? "";
-				worktreePath = self.worktreePath;
-			}
-			Object.assign(workerTarget, {
-				botId: self.botId,
-				role: "subagent" as const,
-				parentConversationId: conversationIdToString(api.conversationId),
-				nodeId: self.nodeId,
-				cwd: self.cwd,
-				...(self.sessionId ? { sessionId: self.sessionId } : {}),
-				...(worktreePath ? { worktreePath, branchName } : {}),
-				threadKeys: [],
-				title: args.task.slice(0, 80),
-			});
-			return record.id;
-		}, context);
+const subagentToolFor = (resolveSubagentChange: SubagentChangeResolver | undefined) =>
+	defineTool({
+		name: "subagent",
+		description:
+			"Delegate a self-contained sub-task to an isolated child agent conversation and get its answer back. " +
+			"The child is owned by this tool call (aborted with it) and is replay-safe across crashes. " +
+			"Pass agentType to run as a registered subagent persona (its model, instructions and toolScope); " +
+			"pass worktree: true (or isolation: 'worktree') to run it in an isolated git worktree; " +
+			"by default a child inherits the parent's worktree when the parent runs in one.",
+		parameters: obj({
+			task: str({ description: "Complete instructions for the sub-agent" }),
+			agentType: opt(str({ description: "Optional subagent persona id to run as" })),
+			worktree: opt(bool({ description: "Give the subagent an isolated git worktree" })),
+			isolation: opt(oneOf(["off", "worktree"])),
+			forkContext: opt(bool({ description: "Fork this conversation's context into the subagent (default false)" })),
+		}),
+		replay: "safe",
+		async execute(args, api, context) {
+			const useWorktree = args.worktree === true || args.isolation === "worktree";
+			let branchName = "";
+			let worktreePath = "";
+			// A registered subagent persona runs with its real identity (model,
+			// SYSTEM.md, toolScope) instead of a blank generic child.
+			const resolvedChange =
+				args.agentType !== undefined ? resolveSubagentChange?.(args.agentType) : undefined;
+			const child = await api.commit(async (tx) => {
+				// The ownership index remembers the child, so a rerun reuses it.
+				const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
+				if (existing !== undefined) {
+					const existingTarget = await tx.doc(TargetDoc, existing.id);
+					branchName = existingTarget.branchName ?? "";
+					worktreePath = existingTarget.worktreePath ?? "";
+					return existing.id;
+				}
+				let record;
+				if (args.forkContext === true) {
+					const latest = await tx.latestEntryId(api.conversationId);
+					record =
+						latest === undefined
+						? await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } })
+						: await tx.forkConversation(api.conversationId, latest, {
+								ownership: { kind: "task", taskId: api.taskId },
+							});
+				} else {
+					record = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
+				}
+				// Apply the resolved subagent persona (model / instructions / extensions /
+				// toolScope) when one matched; otherwise the child keeps the host default.
+				if (resolvedChange !== undefined) {
+					await configure(tx, record.id, resolvedChange);
+				}
+				// Mark it as a subagent in its target doc.
+				const workerTarget = await tx.doc(TargetDoc, record.id);
+				const self = await tx.doc(TargetDoc, api.conversationId);
+				if (useWorktree) {
+					const baseCwd = self.cwd || process.cwd();
+					const subId = `sub-${record.id}`;
+					branchName = `botd/${subId}`;
+					worktreePath = `${baseCwd}/.botd-worktrees/${subId}`;
+				} else if (args.isolation !== "off" && self.worktreePath) {
+					// Inherit the parent's worktree: a Worker already isolated in one must
+					// not have its children bounce back to the main checkout.
+					branchName = self.branchName ?? "";
+					worktreePath = self.worktreePath;
+				}
+				Object.assign(workerTarget, {
+					// Running as a registered subagent persona re-targets the child onto it.
+					botId: args.agentType !== undefined && resolvedChange !== undefined ? args.agentType.replace(/^@/, "") : self.botId,
+					role: "subagent" as const,
+					parentConversationId: conversationIdToString(api.conversationId),
+					nodeId: self.nodeId,
+					cwd: self.cwd,
+					...(self.sessionId ? { sessionId: self.sessionId } : {}),
+					...(worktreePath ? { worktreePath, branchName } : {}),
+					threadKeys: [],
+					title: args.task.slice(0, 80),
+				});
+				return record.id;
+			}, context);
 
-		await api.details({ conversationId: child }, context);
-		const request = {
-			type: "input" as const,
-			content: args.task,
-			requestId: `subagent:${api.taskId}` as const,
-		};
-		const conversation = await api.conversation(child, context);
-		if (conversation === undefined) throw new Error("subagent conversation is gone");
-		const settled = await (await conversation.submit(request, context)).wait(context);
-		let text: string = settled.status;
-		if (settled.status === "done" && settled.type === "input") {
-			// ToolExecutionApi has no entry(); read the answer entry inside a commit.
-			const answerEntry = await api.commit(
-				(tx) => tx.entry(AssistantEntry, settled.answer),
-				context,
-			);
-			text = assistantText(answerEntry) || settled.status;
-		}
-		if (useWorktree) text += `\n[worktree: ${branchName} at ${worktreePath}]`;
-		return { output: [{ type: "text", text }] };
-	},
-});
+			await api.details({ conversationId: child }, context);
+			const request = {
+				type: "input" as const,
+				content: args.task,
+				requestId: `subagent:${api.taskId}` as const,
+			};
+			const conversation = await api.conversation(child, context);
+			if (conversation === undefined) throw new Error("subagent conversation is gone");
+			const settled = await (await conversation.submit(request, context)).wait(context);
+			let text: string = settled.status;
+			if (settled.status === "done" && settled.type === "input") {
+				// ToolExecutionApi has no entry(); read the answer entry inside a commit.
+				const answerEntry = await api.commit(
+					(tx) => tx.entry(AssistantEntry, settled.answer),
+					context,
+				);
+				text = assistantText(answerEntry) || settled.status;
+			}
+			if (useWorktree) text += `\n[worktree: ${branchName} at ${worktreePath}]`;
+			return { output: [{ type: "text", text }] };
+		},
+	});
 
-export function createWorkerExtension(): Extension {
+export function createWorkerExtension(
+	options: { resolveSubagentChange?: SubagentChangeResolver } = {},
+): Extension {
 	return defineExtension({
 		name: WORKER_EXTENSION_NAME,
 		tasks: [WorkerReportTask],
-		tools: [subagentTool, askHumanTool],
+		tools: [subagentToolFor(options.resolveSubagentChange), askHumanTool],
 		sections: [],
 		hooks: [
 			hook(GenerationTask, {

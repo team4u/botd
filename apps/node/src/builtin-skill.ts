@@ -12,7 +12,7 @@ import { readSkill, writeSkill, ensureDir } from './storage.js';
  * authoring) lives in references/*.md that the model reads on demand.
  */
 export const BUILTIN_SKILL_ID = 'botd-cli';
-export const BUILTIN_SKILL_VERSION = 15;
+export const BUILTIN_SKILL_VERSION = 16;
 const VERSION_MARKER = `<!-- botd-skill: ${BUILTIN_SKILL_ID} v${BUILTIN_SKILL_VERSION} -->`;
 
 export const BUILTIN_SKILL_MD = `${VERSION_MARKER}
@@ -28,14 +28,14 @@ export const BUILTIN_SKILL_MD = `${VERSION_MARKER}
 
 ## Super-agent 工具（Router 内置）
 
-你是 Router：前台回答用户，重活派后台 Worker，绝不让用户等。
+你是 Router：前台直接干活 + 重活派后台 Worker，绝不让用户等。
 
-- **快速问答**：直接在会话里回答，绝不为短问题 spawn worker。
-- \`spawn_worker({ title, task, worktree?, threadKey? })\` — 派一个后台 Worker（多步编码/shell/调研），立刻返回 workerId；Worker 跑完自动汇报回来。\`worktree: true\` 给它独立 git worktree（多 Worker 并发改同一仓库时用）。
+- **当场完成（不派 Worker）**：快速问答、看单个/少量文件、跑一行轻量命令、技能查询（记账/查账/状态查看）。你手里就有 \`read\` / \`bash\` 等工具，1 轮能干完的事绝不 spawn_worker。
+- \`spawn_worker({ title, task, subagent?, resume?, forkContext?, worktree?, threadKey? })\` — 派后台 Worker（多步编码/shell/调研），立刻返回 workerId，跑完自动汇报。\`subagent: "<id>"\` 用麾下子代理分身（它的模型/人设/toolScope，共享本工作区）；\`resume: "w-1-2"\` 续跑旧 Worker（保留完整会话与 worktree）；\`worktree: true\` 给独立 git worktree（多 Worker 并发改同一仓库时用）。
 - \`delegate_to_bot({ targetBotId, title, task })\` — 把任务委派给另一个 BOT 分身（它的模型与人设），后台运行。
-- Worker 运行期间继续对话：\`steer_worker({ workerId, message, mode: "steer" | "followUp" })\` 插话改向；\`stop_worker({ workerId })\` 中止；\`recall({ id })\`（Chain of Recall）随时取回任意节点（worker/trigger/artifact/thread）的完整内容与关联摘要。
+- Worker 运行期间继续对话：\`steer_worker({ workerId, message, mode: "steer" | "followUp" })\` 插话改向或唤醒已结束/已停止的 Worker 续跑（保留完整上下文）；\`stop_worker({ workerId })\` 中止；\`recall({ id })\`（Chain of Recall）随时取回任意节点（worker/trigger/artifact/thread）的完整内容与关联摘要。
 - \`ask_human({ prompt, options })\` — 问用户一个问题；再次调用同一 prompt 轮询答案。
-- **\`SubagentWorkflow({ script })\`** — 确定性多步流水线：脚本里用 \`agent()\` / \`pipeline()\` / \`parallel()\` / \`phase()\` / \`log()\`；每步产出写入 crash-safe \`api.memo\` 检查点，进程崩溃重开后已完成步骤 0ms 重放、不再调模型。完整写法（含 schema 校验与 gate 门禁）见 \`read\` 同目录下 \`references/subagents-and-workflows.md\`。
+- **\`SubagentWorkflow({ script })\`** — 确定性多步流水线：脚本里用 \`agent()\` / \`pipeline()\` / \`parallel()\` / \`phase()\` / \`log()\`；每步产出写入 crash-safe \`api.memo\` 检查点，进程崩溃重开后已完成步骤 0ms 重放、不再调模型。\`agent(prompt, { agentType: "<subagentId>" })\` 可让某一步跑在麾下子代理分身上（真实模型/人设/toolScope）。完整写法（含 schema 校验与 gate 门禁）见 \`read\` 同目录下 \`references/subagents-and-workflows.md\`。
 
 ## botd CLI（一等公民）
 
@@ -95,13 +95,14 @@ export const BUILTIN_SKILL_REFERENCES: Record<string, string> = {
 
 ## 1. Router 决策纪律（何时派 Worker）
 
-- 短问题/短答案：直接回答，**绝不** spawn worker。
-- 多步编码、shell、调研、长任务：\`spawn_worker\` 并立刻告知用户 workerId。
+- **当场完成**：短问题/短答案、看单个或少量文件、跑一行轻量命令、技能查询（记账/查账/状态查看）——Router 手里有 \`read\` / \`bash\`，**绝不**为这些 spawn worker。
+- 多步编码、重构、长耗时命令、调研、需要并行或 worktree 隔离的任务：\`spawn_worker\` 并立刻告知用户 workerId。
 - 替别的 BOT 干活：\`delegate_to_bot\`（以目标 BOT 的模型+人设后台运行）。
-- Worker 运行期间保持可聊：\`steer_worker\` 改向、\`stop_worker\` 中止、\`recall({ id })\` 取结果。
+- 麾下子代理分身（同工作区，各自模型/人设/toolScope）：\`spawn_worker({ subagent: "<id>", title, task })\`；或 \`agent(prompt, { agentType: "<id>" })\` 在流水线中调度。
+- Worker 运行期间保持可聊：\`steer_worker\` 改向或唤醒已结束/已停止的 Worker（保留完整上下文）、\`stop_worker\` 中止、\`recall({ id })\` 取结果。
 - Worker 完成会自动汇报；为用户总结其报告即可。
 
-\`spawn_worker\` 参数：\`{ title, task, forkContext? (default true), threadKey?, cwd?, worktree? }\`。\`worktree: true\` 时 Worker 在 \`<cwd>.botd-workers/<conversationId>\` 的独立 git worktree 里改代码（多 Worker 并发改同一仓库时必开）。\`threadKey\` 让 Worker 直接接收该线程上的后续事件（EventRouter 直通）。
+\`spawn_worker\` 参数：\`{ title, task, subagent?, resume?, forkContext? (default false), threadKey?, cwd?, worktree? }\`。新建 Worker 默认是干净的独立会话——靠自包含的 \`task\` 传递上下文，不复制主会话历史；仅当确需继承主会话上下文时才显式 \`forkContext: true\`。\`worktree: true\` 时 Worker 在 \`<cwd>/.botd-worktrees/<workerId>\` 的独立 git worktree 里改代码（多 Worker 并发改同一仓库时必开）。\`resume: "w-1-2"\` 复用旧 Worker 的会话与 worktree 续跑。\`threadKey\` 让 Worker 直接接收该线程上的后续事件（EventRouter 直通）。
 
 ## 2. Worker 生命周期与状态
 

@@ -369,6 +369,8 @@ export function createHub(options?: HubOptions): HubInstance {
       const persona: BotPersonaConfig = {
         botId: bot.id,
         name: bot.name,
+        ...(bot.parentBotId ? { parentBotId: bot.parentBotId } : {}),
+        ...(bot.description ? { description: bot.description } : {}),
         model: effectiveModel,
         ...(bot.thinkingLevel ? { thinkingLevel: bot.thinkingLevel } : {}),
         instructions:
@@ -379,7 +381,8 @@ export function createHub(options?: HubOptions): HubInstance {
         enabledExtensions: bot.enabledExtensions,
         ...(botEnv ? { env: botEnv } : {}),
         nodeId: bot.nodeId,
-        cwd: bot.workspaceDir?.trim() || process.cwd(),
+        // 子代理未显式配置工作目录时继承父 Bot 的 workspaceDir。
+        cwd: bot.workspaceDir?.trim() || parent?.workspaceDir?.trim() || process.cwd(),
         ...(bot.toolScope ? { toolScope: bot.toolScope } : {}),
         ...(bot.customTools ? { customTools: bot.customTools } : {}),
       };

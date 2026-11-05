@@ -138,9 +138,9 @@ Router 会话内置以下协同管理工具：
 
 | 工具名 | 参数 | 功能说明 |
 | :--- | :--- | :--- |
-| `spawn_worker` | `title`, `task`, `forkContext?`, `threadKey?`, `cwd?`, `worktree?`, `isolation?` | 启动当前分身名下的后台 Worker。 |
+| `spawn_worker` | `title`, `task`, `subagent?`, `resume?`, `forkContext?`, `threadKey?`, `cwd?`, `worktree?`, `isolation?` | 启动当前分身名下的后台 Worker；`subagent` 用麾下子代理分身身份运行（共享本工作区），`resume` 续跑旧 Worker（保留会话与 worktree），默认不 fork 主会话上下文。 |
 | `delegate_to_bot` | `targetBotId`, `title`, `task`, `threadKey?`, `worktree?`, `isolation?` | 跨角色委派后台任务给其他分身。 |
-| `steer_worker` | `workerId`, `message`, `mode?` | 向执行中的 Worker 发送插话指令。 |
+| `steer_worker` | `workerId`, `message`, `mode?` | 向执行中的 Worker 发送插话指令；对已结束/已停止的 Worker 会唤醒续跑（保留完整上下文）。 |
 | `stop_worker` | `workerId` | 强制中止正在执行的 Worker。 |
 | `recall` | `id` | 按 ID 查询召回链节点与下一跳关联。 |
 | `ask_human` | `prompt`, `options?` | 向人类发起决策询问并挂起等待回复。 |

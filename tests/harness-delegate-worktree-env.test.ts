@@ -174,7 +174,7 @@ test('1. delegate_to_bot runs the full worker stack and reports back completed',
   }
 });
 
-test('spawn_worker restores coding tools removed from the parent Router', { timeout: 30_000 }, async () => {
+test('Router keeps coding tools; spawn_worker runs the full worker stack and reports back completed', { timeout: 30_000 }, async () => {
   const faux = fauxProvider({ models: [{ id: 'main' }] });
   const models = createModels();
   models.setProvider(faux.provider);
@@ -182,7 +182,9 @@ test('spawn_worker restores coding tools removed from the parent Router', { time
   try {
     runtime.registerPersona(persona('coder', 'Coder', 'Implement coding tasks.', process.cwd()));
     const router = await runtime.ensureBotMainSession('coder');
-    assert.ok(!(await router.agent(BACKGROUND_CONTEXT)).tools.some((tool) => tool.name === 'bash'));
+    // Router 现在自带编码工具（当场干活）；toolScope: 'readonly' 才会剥夺它们。
+    const routerTools = (await router.agent(BACKGROUND_CONTEXT)).tools.map((tool) => tool.name);
+    for (const name of ['read', 'bash']) assert.ok(routerTools.includes(name), `Router must offer ${name}`);
     scriptRouter(faux, (ctx) => {
       const text = lastUserText(ctx.messages);
       if (text === 'Inspect the coding task') return fauxAssistantMessage('Coding task inspected.');
@@ -351,7 +353,7 @@ test('3. startHub seeds builtin skill botd-cli for every persona', { timeout: 60
   // 零节点连接：SQLite 里有完整技能内容
   assert.equal(hub.connections.getNodeRpc('any-node'), undefined);
   const skill = hub.db.getSkillContent('botd-cli');
-  assert.match(skill, /botd-skill: botd-cli v15/, 'SKILL.md must be seeded with the version marker');
+  assert.match(skill, /botd-skill: botd-cli v16/, 'SKILL.md must be seeded with the version marker');
   assert.match(skill, /Multi-Persona Super-agent/);
   const files = hub.db.listSkillFiles('botd-cli');
   assert.ok(files.includes('SKILL.md'));

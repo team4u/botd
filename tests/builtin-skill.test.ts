@@ -49,8 +49,8 @@ test('ensureBuiltinSkill writes all three references/ files beside SKILL.md', as
   assert.equal(await readFile(referenceFile(dir, 'generative-ui.md'), 'utf8'), BUILTIN_SKILL_REFERENCES['generative-ui.md']);
 });
 
-test('builtin skill documents the Super-agent toolset at version 15', () => {
-  assert.equal(BUILTIN_SKILL_VERSION, 15);
+test('builtin skill documents the Super-agent toolset at version 16', () => {
+  assert.equal(BUILTIN_SKILL_VERSION, 16);
   // Super-agent 工具面（Router 内置）
   assert.match(BUILTIN_SKILL_MD, /spawn_worker/);
   assert.match(BUILTIN_SKILL_MD, /delegate_to_bot/);

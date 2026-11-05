@@ -249,10 +249,18 @@ function detailsOf(runId: string, state: WorkflowRunDocState): WorkflowRunDetail
 	};
 }
 
+/** Resolves a registered subagent/bot persona into its real agent change (model, instructions, extensions, toolScope). */
+export type SubagentChangeResolver = (agentType: string, cwd?: string) => AgentChange | undefined;
+
 /**
  * 创建 SubagentWorkflow 工具及承载它的扩展。sandbox 决定脚本执行方式（默认 node:vm 解析器）。
+ * `resolveSubagentChange` 命中已注册子代理/Bot persona 时，`agent(prompt, { agentType })`
+ * 的步骤以该分身真实身份（模型、SYSTEM.md、扩展与 toolScope）运行。
  */
-export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflowSandbox()): Extension {
+export function createWorkflowExtension(
+	sandbox: WorkflowSandbox = createWorkflowSandbox(),
+	options: { resolveSubagentChange?: SubagentChangeResolver } = {},
+): Extension {
 	const SubagentWorkflow = defineTool({
 		name: 'SubagentWorkflow',
 		description:
@@ -378,18 +386,33 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 							if (existingTarget.title === key) return existing.id;
 						}
 						const created = await tx.createConversation({ ownership: { kind: 'task', taskId: api.taskId } });
-						const change: { model?: AgentChange['model']; thinkingLevel?: AgentChange['thinkingLevel']; instructions?: string } = {};
+						const parentTarget = await tx.doc(TargetDoc, api.conversationId);
+						// agentType 优先解析已注册的子代理/Bot persona：命中则整套换用该分身
+						// 真实身份（模型、instructions、精确扩展清单与 toolScope 过滤）；显式
+						// model / effort 覆盖之。未命中（如临时角色名 'reviewer'）退回通用提示词。
+						const personaChange =
+							opts?.agentType !== undefined
+								? options.resolveSubagentChange?.(opts.agentType, parentTarget.cwd)
+								: undefined;
+						const change: { model?: AgentChange['model']; thinkingLevel?: AgentChange['thinkingLevel']; instructions?: string; extensions?: AgentChange['extensions']; tools?: AgentChange['tools']; modelTools?: AgentChange['modelTools']; cwd?: AgentChange['cwd'] } = {};
 						const modelRef = opts?.model !== undefined ? parseModelRef(opts.model) : null;
+						if (personaChange !== undefined) Object.assign(change, personaChange);
 						if (modelRef !== null) change.model = modelRef;
 						if (opts?.effort !== undefined) change.thinkingLevel = opts.effort as AgentChange['thinkingLevel'];
-						if (opts?.agentType !== undefined) change.instructions = `You are a "${opts.agentType}" subagent.`;
-						// 步骤子代理是干活的全能子代理：清空父会话可能携带的模型工具过滤器与
-						// 精确扩展选择（Router 剥掉了编码工具与 botd-worker，子代理必须拿回来：
-						// extensions: null 重置回主机默认选择 = 全部已安装扩展）。
-						await configure(tx, created.id, { ...change, modelTools: null, extensions: null });
+						if (personaChange === undefined && opts?.agentType !== undefined) {
+							change.instructions = `You are a "${opts.agentType}" subagent.`;
+						}
+						if (personaChange !== undefined) {
+							// 已注册分身：子代理拿到真实的扩展清单与工具过滤；childTarget 落该分身 id。
+							await configure(tx, created.id, change);
+						} else {
+							// 步骤子代理是干活的全能子代理：清空父会话可能携带的模型工具过滤器与
+							// 精确扩展选择（未命中 agentType 时子代理必须拿回全部工具：
+							// extensions: null 重置回主机默认选择 = 全部已安装扩展）。
+							await configure(tx, created.id, { ...change, modelTools: null, extensions: null });
+						}
 
 						// 隔离：显式 worktree 建独立分支；否则继承父会话的 worktree（若有）。
-						const parentTarget = await tx.doc(TargetDoc, api.conversationId);
 						const useWorktree = opts?.isolation === 'worktree' || opts?.worktree === true;
 						let worktreePath = '';
 						let branchName = '';
@@ -404,7 +427,11 @@ export function createWorkflowExtension(sandbox: WorkflowSandbox = createWorkflo
 						}
 						const childTarget = await tx.doc(TargetDoc, created.id);
 						Object.assign(childTarget, {
-							botId: parentTarget.botId,
+							// 命中已注册分身时，子代理身份落到该分身；否则保持父会话身份。
+							botId:
+								personaChange !== undefined && opts?.agentType !== undefined
+									? opts.agentType.replace(/^@/, '')
+									: parentTarget.botId,
 							role: 'subagent' as const,
 							parentConversationId: String(api.conversationId),
 							nodeId: parentTarget.nodeId,

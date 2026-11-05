@@ -35,11 +35,28 @@ export const WORKER_EXTENSION = "botd-worker";
 export interface PersonaResolver {
 	(botId: string): {
 		botId: string;
+		/** Present on subagent personas (their parent primary bot's id). */
+		parentBotId?: string;
+		/** One-line role description. */
+		description?: string;
 		model: { provider: string; modelId: string };
 		instructions: string;
 		nodeId: string;
 		cwd: string;
+		toolScope?: "all" | "readonly" | "custom";
 	} | undefined;
+}
+
+/** One persona as listed for the Router prompt (subagents and peer bots). */
+export interface PersonaListing {
+	botId: string;
+	name?: string;
+	description?: string;
+	parentBotId?: string;
+	model: { provider: string; modelId: string };
+	toolScope?: string;
+	nodeId: string;
+	cwd: string;
 }
 
 /** Resolves an agent change for a worker conversation (host hook, default: worker extension + CodingTools). */
@@ -131,6 +148,7 @@ const listWorkers = (registry: { workers: Record<string, WorkerEntry> }): Worker
 function renderPersona(
 	target: { botId: string; role: string; title?: string; threadKeys: string[] },
 	persona: ReturnType<PersonaResolver> | undefined,
+	listPersonas?: () => ReadonlyArray<PersonaListing>,
 ): string {
 	const lines = [
 		`You are the "${target.botId}" bot persona, running as a full-duplex Router.`,
@@ -140,16 +158,55 @@ function renderPersona(
 	if (target.threadKeys.length > 0) lines.push(`Threads: ${target.threadKeys.join(", ")}`);
 	if (persona !== undefined) {
 		lines.push("", "## Persona instructions", persona.instructions || "(none)");
+		if (persona.description !== undefined) lines.push(``, `Description: ${persona.description}`);
 		lines.push("", `Default model: ${persona.model.provider}/${persona.model.modelId}`);
 		lines.push(`Node: ${persona.nodeId} — cwd: ${persona.cwd}`);
 	}
+
+	// Subagents (children of this bot) and peer primary bots, listed from the
+	// registered persona set so the Router can dispatch by real identity.
+	const personas = listPersonas?.() ?? [];
+	const subagents = personas.filter((p) => p.parentBotId === target.botId);
+	const peers = personas.filter((p) => p.parentBotId === undefined && p.botId !== target.botId);
+	if (subagents.length > 0) {
+		lines.push(
+			"",
+			"## Your Subagents (same workspace)",
+			"Dispatch a subagent with `spawn_worker({ subagent: \"<subagentId>\", title, task })` " +
+				"or inside a SubagentWorkflow script via `agent(prompt, { agentType: \"<subagentId>\" })`. " +
+				"A subagent runs with its own model, instructions and toolScope while sharing this workspace cwd.",
+		);
+		for (const sub of subagents) {
+			const bits = [
+				`model ${sub.model.provider}/${sub.model.modelId}`,
+				...(sub.toolScope === undefined ? [] : [`toolScope ${sub.toolScope}`]),
+			];
+			lines.push(`- ${sub.botId}${sub.name === undefined ? "" : ` (${sub.name})`}: ${sub.description ?? "(no description)"} [${bits.join(", ")}]`);
+		}
+	}
+	if (peers.length > 0) {
+		lines.push(
+			"",
+			"## Peer Bots (cross-workspace / cross-node)",
+			"Delegate cross-bot work with `delegate_to_bot({ targetBotId, title, task })` — it runs as that bot (its model, persona and workspace) in the background.",
+		);
+		for (const peer of peers) {
+			const bits = [
+				`model ${peer.model.provider}/${peer.model.modelId}`,
+				`node ${peer.nodeId}`,
+				...(peer.toolScope === undefined ? [] : [`toolScope ${peer.toolScope}`]),
+			];
+			lines.push(`- ${peer.botId}${peer.name === undefined ? "" : ` (${peer.name})`}: ${peer.description ?? "(no description)"} [${bits.join(", ")}] cwd ${peer.cwd}`);
+		}
+	}
+
 	lines.push(
 		"",
 		"## How to route work",
-		"- Quick questions and short answers: answer directly in this conversation; never spawn a worker for them.",
-		"- Multi-step coding, shell, research, or long-running work: call `spawn_worker` and answer the user at once with the worker id.",
+		"- Quick Q&A, single-file or few-file reads, light one-off commands, and skill-driven lookups (accounts/status checks, CLI queries): do them right here with your own tools — never spawn a worker for them.",
+		"- Multi-step coding or refactors, long-running commands, research, or work that needs parallelism / worktree isolation: call `spawn_worker` and answer the user at once with the worker id.",
 		"- Work for another persona: call `delegate_to_bot`; it runs as that bot in the background.",
-		"- While a worker runs, keep chatting: `steer_worker` redirects it, `stop_worker` cancels it, `recall({ id })` loads its results.",
+		"- While a worker runs, keep chatting: `steer_worker` redirects or resumes it, `stop_worker` cancels it, `recall({ id })` loads its results.",
 		"- When a worker finishes it reports back here automatically; summarize its report for the user.",
 	);
 	return lines.join("\n");
@@ -170,6 +227,8 @@ function renderWorkers(registry: { workers: Record<string, WorkerEntry> }): stri
 
 export function createRouterExtension(options: {
 	resolvePersona: PersonaResolver;
+	/** All registered personas, so the Router prompt can list its subagents and peer bots. */
+	listPersonas?: () => ReadonlyArray<PersonaListing>;
 	workerAgent?: WorkerAgentFactory;
 }): Extension {
 	const workerAgent = options.workerAgent ?? fallbackWorkerAgent;
@@ -179,11 +238,15 @@ export function createRouterExtension(options: {
 		description:
 			"Spawn a background worker conversation for multi-step work and return immediately. " +
 			"The worker runs the task with full coding tools and reports back when done; " +
-			"the foreground conversation stays free for the user.",
+			"the foreground conversation stays free for the user. Pass `subagent` to run one of " +
+			"your registered subagent personas (its model/instructions/toolScope, this workspace) " +
+			"or `resume` to continue an existing worker with its conversation history.",
 		parameters: obj({
 			title: str({ description: "Short task title shown in the worker list" }),
 			task: str({ description: "Full task instructions for the worker" }),
-			forkContext: opt(bool({ description: "Fork this conversation's context into the worker (default true)" })),
+			subagent: opt(str({ description: "Optional subagent persona id (under this bot) to run the worker with its specialized model, instructions, and toolScope while sharing this workspace cwd" })),
+			resume: opt(str({ description: "Optional existing workerId (e.g. 'w-1-2') to resume instead of creating a new worker, preserving its conversation history and worktree" })),
+			forkContext: opt(bool({ description: "Fork this conversation's context into the worker (default false)" })),
 			threadKey: opt(str({ description: "Channel thread key the worker feeds" })),
 			cwd: opt(str({ description: "Working directory for the worker" })),
 			worktree: opt(bool({ description: "Give the worker an isolated git worktree" })),
@@ -191,13 +254,22 @@ export function createRouterExtension(options: {
 		}),
 		replay: "safe",
 		async execute(args, api, context) {
-			const forkContext = args.forkContext !== false;
+			const forkContext = args.forkContext === true;
 			const useWorktree = args.worktree === true || args.isolation === "worktree";
 			let workerId = "";
 			let conversationId = "";
 			let title = args.title;
 			let worktreePath = "";
 			let branchName = "";
+			let resumed = false;
+
+			// A subagent persona must exist before anything is created.
+			if (args.subagent !== undefined && options.resolvePersona(args.subagent) === undefined) {
+				return {
+					isError: true,
+					output: [{ type: "text", text: `Unknown subagent persona: ${args.subagent}` }],
+				};
+			}
 
 			const spawnedBy = String(api.taskId);
 			await api.commit(async (tx) => {
@@ -216,15 +288,45 @@ export function createRouterExtension(options: {
 				}
 
 				const target = await tx.doc(TargetDoc, api.conversationId);
+
+				// Resume path: reuse the existing worker's conversation, status and (new)
+				// title; the task is submitted below as a follow-up on that conversation.
+				if (args.resume !== undefined) {
+					const entry = registryBefore.workers[args.resume];
+					if (entry !== undefined) {
+						workerId = entry.workerId;
+						conversationId = entry.conversationId;
+						if (args.title !== undefined && args.title !== "") entry.title = args.title;
+						title = entry.title;
+						if (entry.status !== "running") {
+							entry.status = "running";
+							delete entry.finishedAt;
+						}
+						resumed = true;
+						return;
+					}
+				}
+
+				// Subagent workers keep the workspace cwd (target.cwd / args.cwd) but run
+				// with the subagent persona's identity (model, SYSTEM.md, toolScope).
+				const runBotId = args.subagent ?? target.botId;
 				const cwd = args.cwd ?? target.cwd;
 				// Compute seq up front so the workerTarget, registry entry, and recall
 				// node below all agree on the same worktreePath / branchName.
 				const seq = Object.keys(registryBefore.workers).length + 1;
 				const agent = workerAgent({
-					botId: target.botId,
+					botId: runBotId,
 					cwd: cwd === "" ? undefined : cwd,
 					threadKey: args.threadKey,
 				});
+				// A non-forked worker is a brand-new conversation: it inherits nothing.
+				// A factory that leaves the model unset (custom hosts) falls back to the
+				// persona's, so a clean worker never runs into `no_model`.
+				const runPersona = options.resolvePersona(runBotId);
+				const agentWithModel: AgentChange =
+					agent.model === undefined && runPersona !== undefined
+						? { ...agent, model: runPersona.model }
+						: agent;
 
 				// 1. Create the worker conversation. With context forking, fork at the
 				//    latest entry; otherwise create a fresh conversation owned by this
@@ -253,14 +355,14 @@ export function createRouterExtension(options: {
 				//    `extensions` selection resets to the host default (all installed),
 				//    so the worker keeps the coding tools and the report-back hook.
 				await configure(tx, record.id, {
-					...agent,
-					...(agent.extensions === undefined ? { extensions: null } : {}),
+					...agentWithModel,
+					...(agentWithModel.extensions === undefined ? { extensions: null } : {}),
 				});
 
 				// 3. Target doc: role worker, parent = this router.
 				const workerTarget = await tx.doc(TargetDoc, record.id);
 				Object.assign(workerTarget, {
-					botId: target.botId,
+					botId: runBotId,
 					role: "worker" as const,
 					parentConversationId: conversationIdToString(api.conversationId),
 					nodeId: target.nodeId,
@@ -275,7 +377,7 @@ export function createRouterExtension(options: {
 				registryBefore.workers[workerId] = {
 					workerId,
 					conversationId,
-					botId: target.botId,
+					botId: runBotId,
 					title: args.title,
 					status: "running",
 					threadKeys: args.threadKey === undefined ? [] : [args.threadKey],
@@ -304,14 +406,17 @@ export function createRouterExtension(options: {
 
 			}, context);
 
-			// 6. Submit the task without waiting for the worker to finish.
+			// 6. Submit the task without waiting for the worker to finish. A resumed
+			//    worker may already be mid-run, so the task queues as a follow-up; the
+			//    requestId carries a nonce so every resumed round is a distinct input.
 			const worker = await api.conversation(stringToConversationId(conversationId), context);
 			if (worker !== undefined) {
 				await worker.submit(
 					{
 						type: "input",
 						content: args.task,
-						requestId: `worker-task:${workerId}`,
+						...(resumed ? { whenBusy: "followUp" as const } : {}),
+						requestId: `worker-task:${workerId}${resumed ? `:r${api.now()}` : ""}`,
 						entry: { kind: "botd.worker-task", data: { workerId, title } },
 					},
 					context,
@@ -319,12 +424,13 @@ export function createRouterExtension(options: {
 			}
 
 			const worktreeNote = useWorktree ? `\n[worktree: ${branchName} at ${worktreePath}]` : "";
+			const head = resumed ? `Worker resumed: ${workerId} (${title})` : `Worker started: ${workerId} (${title})`;
 			return {
 				output: [
 					{
 						type: "text",
 						text:
-							`Worker started: ${workerId} (${title}). It runs in the background and will report back here when finished. Keep chatting with me meanwhile.${worktreeNote}`,
+							`${head}. It runs in the background and will report back here when finished. Keep chatting with me meanwhile.${worktreeNote}`,
 					},
 				],
 			};
@@ -466,7 +572,9 @@ export function createRouterExtension(options: {
 
 	const steerWorker = defineTool({
 		name: "steer_worker",
-		description: "Send a message to a running worker: steer it mid-run, or queue a follow-up.",
+		description:
+			"Send a message to a worker: steer a running worker mid-run, queue a followUp, " +
+			"or resume a completed/failed/aborted worker with new instructions while preserving its full conversation context.",
 		parameters: obj({
 			workerId: str(),
 			message: str(),
@@ -482,12 +590,15 @@ export function createRouterExtension(options: {
 			if (worker === undefined) {
 				return { isError: true, output: [{ type: "text", text: `Worker conversation missing: ${args.workerId}` }] };
 			}
-			// A steer on a finished worker wakes it for another round: reset its
-			// registry status so the second round's report-back is accepted again.
+			// A steer on a finished (or stopped) worker wakes it for another round:
+			// reset its registry status so the second round's report-back is accepted again.
 			await api.commit(async (tx) => {
 				const doc = await tx.doc(WorkerRegistryDoc, api.conversationId);
 				const record = doc.workers[args.workerId];
-				if (record !== undefined && (record.status === "completed" || record.status === "failed")) {
+				if (
+					record !== undefined &&
+					(record.status === "completed" || record.status === "failed" || record.status === "aborted")
+				) {
 					record.status = "running";
 					delete record.finishedAt;
 				}
@@ -498,6 +609,9 @@ export function createRouterExtension(options: {
 					content: args.message,
 					whenBusy: args.mode ?? "steer",
 					requestId: `steer:${args.workerId}:${api.now()}`,
+					// Tagged like a worker task so the run's afterRun names the worker and
+					// the second round reports back exactly like the first one did.
+					entry: { kind: "botd.worker-task", data: { workerId: args.workerId, title: entry.title } },
 				},
 				context,
 			);
@@ -586,7 +700,7 @@ export function createRouterExtension(options: {
 			section("persona", async (input) => {
 				const target = await input.read.snapshot(TargetDoc, input.conversationId, BACKGROUND_CONTEXT);
 				if (target === undefined) return undefined;
-				return renderPersona(target, options.resolvePersona(target.botId));
+				return renderPersona(target, options.resolvePersona(target.botId), options.listPersonas);
 			}),
 			section("active_workers", async (input) => {
 				const registry = await input.read.snapshot(WorkerRegistryDoc, input.conversationId, BACKGROUND_CONTEXT);

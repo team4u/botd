@@ -425,6 +425,299 @@ test("5. crash & resume: interrupted worker finishes and reports exactly once", 
 	}
 });
 
+// ---------------------------------------------------------------------------
+// 6. spawn_worker defaults to a clean (non-forked) worker context
+// ---------------------------------------------------------------------------
+
+test("6. spawn_worker defaults to forkContext: false; explicit true forks the router context", { timeout: 30_000 }, async () => {
+	const { runtime, faux } = await openRuntime();
+	try {
+		const router = await runtime.ensureBotMainSession("architect");
+
+		scriptRouter(faux, (context) => {
+			const text = lastUserText(context.messages);
+			if (/Clean worker task/.test(text)) {
+				// The worker run: with the whole router transcript present, this is a fork.
+				const forked = context.messages.some(
+					(m) => m.role === "user" && typeof m.content === "string" && m.content.includes("remember this secret marker"),
+				);
+				return fauxAssistantMessage(forked ? "CONTEXT FORKED" : "CONTEXT CLEAN");
+			}
+			const toolResultSeen = context.messages.some((m) => m.role === "toolResult");
+			if (/spawn both workers/.test(text) && !toolResultSeen) {
+				return fauxAssistantMessage(
+					[
+						fauxToolCall("spawn_worker", { title: "clean worker", task: "Clean worker task." }),
+						fauxToolCall("spawn_worker", { title: "forked worker", task: "Clean worker task.", forkContext: true }),
+					],
+					{ stopReason: "toolUse" },
+				);
+			}
+			return fauxAssistantMessage("Workers dispatched.");
+		});
+
+		// Prime a distinctive marker into the router transcript first.
+		await (await runtime.submitUserMessage(String(router.id), "remember this secret marker for the fork test")).wait(BACKGROUND_CONTEXT);
+		await (await runtime.submitUserMessage(String(router.id), "spawn both workers")).wait(BACKGROUND_CONTEXT);
+
+		const workers = await runtime.getActiveWorkers(String(router.id));
+		assert.equal(workers.length, 2);
+		const byTitle = new Map(workers.map((w) => [w.title, w]));
+
+		const answerOf = async (title: string): Promise<string> => {
+			const conversation = await runtime.conversation(byTitle.get(title)!.conversationId);
+			assert.ok(conversation);
+			const page = await conversation.entries({ order: "descending" }, 50, undefined, BACKGROUND_CONTEXT);
+			const assistant = page.items.map((e) => e.model?.[0]).find((m) => m !== undefined && m.role === "assistant");
+			const content = (assistant as { content?: unknown } | undefined)?.content;
+			return Array.isArray(content) ? String((content[0] as { text?: string }).text ?? "") : "";
+		};
+
+		// Default (no forkContext): the worker transcript has no router history.
+		assert.match(await answerOf("clean worker"), /CONTEXT CLEAN/, "default worker must not inherit the router context");
+		// Explicit forkContext: true: the worker sees the router marker.
+		assert.match(await answerOf("forked worker"), /CONTEXT FORKED/, "forkContext: true must copy the router context");
+	} finally {
+		await runtime.close();
+	}
+});
+
+// ---------------------------------------------------------------------------
+// 7. stop → steer_worker / spawn_worker({ resume }) wakes an aborted worker
+// ---------------------------------------------------------------------------
+
+test("7. aborted worker resumes via steer_worker and spawn_worker({ resume }) and reports back completed", { timeout: 60_000 }, async () => {
+	const { runtime, faux } = await openRuntime();
+	try {
+		const router = await runtime.ensureBotMainSession("architect");
+		let workerId = "";
+
+		scriptRouter(faux, (context) => {
+			const text = lastUserText(context.messages);
+			if (/Long research/.test(text)) return fauxAssistantMessage("Research round done: findings packed.");
+			if (/\[Worker Completed:/.test(text)) return fauxAssistantMessage("Noted the resumed report.");
+			const ranTools = toolResultThisTurn(context.messages);
+			if (/resume via steer/.test(text) && !ranTools) {
+				return fauxAssistantMessage(
+					[fauxToolCall("steer_worker", { workerId, message: "Long research round two.", mode: "followUp" })],
+					{ stopReason: "toolUse" },
+				);
+			}
+			if (/run long research/.test(text) && !ranTools) {
+				return fauxAssistantMessage([fauxToolCall("spawn_worker", { title: "long research", task: "Long research round one." })], { stopReason: "toolUse" });
+			}
+			return fauxAssistantMessage("Ok.");
+		});
+
+		// Round 1: spawn then stop (via runtime.stopWorker, the same path the Web UI takes).
+		await (await runtime.submitUserMessage(String(router.id), "run long research")).wait(BACKGROUND_CONTEXT);
+		const running = await waitFor(
+			async () => (await runtime.getActiveWorkers(String(router.id)))[0],
+			(w) => w !== undefined,
+			"worker registered",
+		);
+		workerId = running.workerId;
+		await runtime.stopWorker(String(router.id), workerId);
+		const aborted = await waitFor(
+			async () => (await runtime.getActiveWorkers(String(router.id)))[0],
+			(w) => w?.status === "aborted",
+			"worker aborted",
+		);
+		assert.equal(aborted.status, "aborted");
+		assert.ok(aborted.finishedAt !== undefined);
+
+		// Round 2: steer_worker on the aborted worker — status must flip back to
+		// running and the follow-up run must report back and complete.
+		await (await runtime.submitUserMessage(String(router.id), "resume via steer")).wait(BACKGROUND_CONTEXT);
+		const rewoken = await waitFor(
+			async () => (await runtime.getActiveWorkers(String(router.id)))[0],
+			(w) => w?.status === "running" || w?.status === "completed",
+			"aborted worker rewoken to running",
+		);
+		assert.notEqual(rewoken.status, "aborted", "steer_worker must reset the aborted status");
+		const completedOnce = await waitFor(
+			async () => (await runtime.getActiveWorkers(String(router.id)))[0],
+			(w) => w?.status === "completed",
+			"steered worker completion",
+		);
+		assert.match(completedOnce.summary ?? "", /findings/);
+
+		// Round 3: spawn_worker({ resume }) on the completed worker — same
+		// conversation, status flips to running, the final report completes again.
+		const beforeConversationId = completedOnce.conversationId;
+		scriptRouter(faux, (context) => {
+			const text = lastUserText(context.messages);
+			if (/Long research round three/.test(text)) return fauxAssistantMessage("Research round three done: final findings.");
+			if (/\[Worker Completed:/.test(text)) return fauxAssistantMessage("Noted the final report.");
+			const ranTools = toolResultThisTurn(context.messages);
+			if (/resume the same worker/.test(text) && !ranTools) {
+				return fauxAssistantMessage(
+					[fauxToolCall("spawn_worker", {
+						title: "long research",
+						task: "Long research round three.",
+						resume: workerId,
+					})],
+					{ stopReason: "toolUse" },
+				);
+			}
+			return fauxAssistantMessage("Ok.");
+		});
+		const resumed = await (await runtime.submitUserMessage(String(router.id), "resume the same worker")).wait(BACKGROUND_CONTEXT);
+		assert.equal(resumed.status, "done");
+		const afterEntry = await waitFor(
+			async () => (await runtime.getActiveWorkers(String(router.id))).find((w) => w.workerId === workerId),
+			(w) => w?.status === "completed",
+			"resumed worker completion",
+		);
+		assert.ok(afterEntry, "resumed worker must be registered");
+		assert.equal(afterEntry.conversationId, beforeConversationId, "resume must reuse the existing worker conversation");
+		assert.match(afterEntry.summary ?? "", /final findings/);
+	} finally {
+		await runtime.close();
+	}
+});
+
+// ---------------------------------------------------------------------------
+// 8. Subagent personas: prompt listing, spawn_worker({ subagent }), workflow agentType
+// ---------------------------------------------------------------------------
+
+test("8. subagent persona: listed in the router prompt, real identity in spawn_worker and workflow agentType", { timeout: 60_000 }, async () => {
+	const faux = fauxProvider({ models: [{ id: "main" }, { id: "reviewer-model" }] });
+	const models = createModels();
+	models.setProvider(faux.provider);
+	// No workerAgent override: the runtime's default factory gives the subagent its real stack.
+	const runtime = await HubDurableRuntime.open({ storage: new MemoryStorage(), models });
+	try {
+		runtime.registerPersona(persona("lead", "Lead", "You orchestrate work.", "main"));
+		const leadCwd = process.cwd();
+		runtime.registerPersona({
+			...persona("reviewer", "Reviewer", "You review code carefully.", "reviewer-model"),
+			parentBotId: "lead",
+			description: "Careful code reviewer",
+			toolScope: "readonly",
+			cwd: leadCwd,
+		});
+		// A peer primary bot: listed under Peer Bots, never under Subagents.
+		runtime.registerPersona(persona("finance", "Finance", "You manage money.", "main"));
+
+		const router = await runtime.ensureBotMainSession("lead");
+
+		// The router prompt lists the subagent and the peer bot.
+		const systemPrompts: string[] = [];
+		const capture = () =>
+			((context: { messages: Array<{ role: string; content?: unknown }> }) => {
+				const shown = new Map<string, string>();
+				for (const m of context.messages) {
+					if (m.role !== "system") continue;
+					const sections = (m as { sections?: Record<string, string | null> }).sections;
+					if (sections === undefined) continue;
+					for (const [k, v] of Object.entries(sections)) {
+						if (v === null) shown.delete(k);
+						else shown.set(k, v);
+					}
+				}
+				systemPrompts.push([...shown.values()].join("\n"));
+				return fauxAssistantMessage("prompt captured");
+			}) as never;
+		faux.setResponses([capture(), capture(), capture()]);
+		await (await runtime.submitUserMessage(String(router.id), "who works under you?")).wait(BACKGROUND_CONTEXT);
+		assert.ok(systemPrompts.length >= 1);
+		const prompt = systemPrompts.at(-1)!;
+		assert.match(prompt, /Your Subagents \(same workspace\)/, "router prompt must list subagents");
+		assert.match(prompt, /- reviewer \(Reviewer\): Careful code reviewer/, "router prompt must describe the reviewer subagent");
+		assert.match(prompt, /faux\/reviewer-model/, "router prompt must carry the subagent model");
+		assert.match(prompt, /toolScope readonly/, "router prompt must carry the subagent toolScope");
+		assert.match(prompt, /Peer Bots \(cross-workspace \/ cross-node\)/, "router prompt must list peer bots");
+		assert.match(prompt, /- finance/, "router prompt must list the finance peer");
+
+		// spawn_worker({ subagent: "reviewer" }): the worker runs as the reviewer
+		// persona (its model + readonly toolScope) in the lead workspace cwd.
+		const WORKFLOW_SCRIPT = `
+export const meta = { name: "subagent-probe", description: "run a step as the reviewer persona", phases: ["Review"] }
+const out = await agent("Review the diff carefully.", { agentType: "reviewer", label: "as-reviewer" })
+const generic = await agent("Act as a generic reviewer.", { agentType: "generic-reviewer", label: "as-generic" })
+return { out, generic }
+`;
+		scriptRouter(faux, (context) => {
+			const text = lastUserText(context.messages);
+			if (/Review the diff carefully|Act as a generic reviewer/.test(text)) {
+				return fauxAssistantMessage("Reviewed.");
+			}
+			if (/\[Worker Completed:/.test(text)) return fauxAssistantMessage("Noted the review.");
+			const ranTools = toolResultThisTurn(context.messages);
+			if (/dispatch the reviewer/.test(text) && !ranTools) {
+				return fauxAssistantMessage(
+					[fauxToolCall("spawn_worker", {
+						title: "diff review",
+						task: "Review the diff.",
+						subagent: "reviewer",
+					})],
+					{ stopReason: "toolUse" },
+				);
+			}
+			if (/spawn the workflow/.test(text) && !ranTools) {
+				return fauxAssistantMessage([fauxToolCall("SubagentWorkflow", { script: WORKFLOW_SCRIPT })], { stopReason: "toolUse" });
+			}
+			return fauxAssistantMessage("Ok.");
+		});
+
+		// spawn_worker({ subagent })
+		await (await runtime.submitUserMessage(String(router.id), "dispatch the reviewer")).wait(BACKGROUND_CONTEXT);
+		const workers = await runtime.getActiveWorkers(String(router.id));
+		const reviewWorker = workers.find((w) => w.title === "diff review");
+		assert.ok(reviewWorker, "subagent worker must be registered");
+		assert.equal(reviewWorker.botId, "reviewer", "subagent worker must run as the reviewer persona");
+		const reviewConversation = await runtime.conversation(reviewWorker.conversationId);
+		assert.ok(reviewConversation);
+		const reviewAgent = await reviewConversation.agent(BACKGROUND_CONTEXT);
+		assert.deepEqual(reviewAgent.model, { provider: "faux", modelId: "reviewer-model" }, "subagent worker must use the subagent model");
+		const reviewTools = reviewAgent.tools.map((t) => t.name);
+		assert.ok(reviewTools.includes("read"), "readonly subagent keeps read");
+		for (const banned of ["write", "edit", "bash"]) {
+			assert.ok(!reviewTools.includes(banned), `readonly subagent must lose ${banned}`);
+		}
+		const reviewTarget = await runtime.harness.snapshot(TargetDoc, reviewConversation.id, BACKGROUND_CONTEXT);
+		assert.equal(reviewTarget?.botId, "reviewer");
+		assert.equal(reviewTarget?.cwd, leadCwd, "subagent worker keeps the lead workspace cwd");
+		await waitFor(
+			async () => (await runtime.getActiveWorkers(String(router.id))).find((w) => w.workerId === reviewWorker.workerId),
+			(w) => w?.status === "completed",
+			"subagent worker completion",
+		);
+
+		// SubagentWorkflow agentType: the registered persona runs with its real
+		// identity; the unregistered name falls back to the generic instructions.
+		await (await runtime.submitUserMessage(String(router.id), "spawn the workflow")).wait(BACKGROUND_CONTEXT);
+		let asReviewer: { id: number; botId: string; title: string } | undefined;
+		let asGeneric: { id: number; botId: string; instructions?: string } | undefined;
+		for (let id = 1; id <= Number(router.id) + 80 && (asReviewer === undefined || asGeneric === undefined); id++) {
+			const target = await runtime.harness.snapshot(TargetDoc, id as never, BACKGROUND_CONTEXT);
+			if (target?.role !== "subagent" || target.parentConversationId !== String(router.id)) continue;
+			if (target.title?.endsWith(":as-reviewer")) asReviewer = { id, botId: target.botId, title: target.title };
+			if (target.title?.endsWith(":as-generic")) {
+				const conv = await runtime.conversation(String(id));
+				const agent = conv !== undefined ? await conv.agent(BACKGROUND_CONTEXT) : undefined;
+				asGeneric = { id, botId: target.botId, instructions: agent?.instructions };
+			}
+		}
+		assert.ok(asReviewer, "workflow as-reviewer step conversation must exist");
+		assert.equal(asReviewer!.botId, "reviewer", "registered agentType must run as the reviewer persona");
+		const reviewerConv = await runtime.conversation(String(asReviewer!.id));
+		assert.ok(reviewerConv);
+		const reviewerStepAgent = await reviewerConv.agent(BACKGROUND_CONTEXT);
+		assert.deepEqual(reviewerStepAgent.model, { provider: "faux", modelId: "reviewer-model" }, "workflow step must use the reviewer model");
+		assert.ok(
+			!reviewerStepAgent.tools.some((t) => t.name === "bash"),
+			"workflow step must inherit the reviewer readonly toolScope",
+		);
+		assert.ok(asGeneric, "workflow as-generic step conversation must exist");
+		assert.equal(asGeneric!.botId, "lead", "unregistered agentType keeps the parent bot identity");
+		assert.match(asGeneric!.instructions ?? "", /"generic-reviewer" subagent/, "unregistered agentType falls back to generic instructions");
+	} finally {
+		await runtime.close();
+	}
+});
+
 /** Pull `w-...` out of a scripted prompt like "please stop w-1-17". */
 function extractWorkerId(text: string): string {
 	const match = text.match(/w-\d+-\d+/);
