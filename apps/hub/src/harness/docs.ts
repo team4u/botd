@@ -37,6 +37,8 @@ export interface TargetState {
 	threadKeys: string[];
 	/** Human-readable title (topic sessions, worker tasks). */
 	title?: string;
+	/** Optional conversation-scoped model override (isolated from global BotPersonaConfig). */
+	modelOverride?: { provider: string; modelId: string; thinkingLevel?: string };
 }
 export type TargetStateJson = TargetState & { [key: string]: JsonValue };
 

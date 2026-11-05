@@ -344,7 +344,7 @@ export async function respondToDurableAsk(input: {
     if (prompt === undefined) continue;
     // 机密表单字段只 stash 一次：明文进内存 SecretStash，落库/广播/上下文只留
     // [REDACTED:$BOTD_SECRET_...] 占位符。
-    const { redactedAnswer, stashedEnvKeys } = redactSecretAskAnswer(answer, previewType, previewContent);
+    const { redactedAnswer, stashedEnvKeys } = redactSecretAskAnswer(answer, previewType, previewContent, undefined, sessionId);
     let answered = false;
     try {
       await rt.harness.commit(async (tx) => {

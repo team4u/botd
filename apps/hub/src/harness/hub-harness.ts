@@ -15,6 +15,7 @@ import {
 	configure,
 	createRegistry,
 	Harness,
+	LiveDoc,
 	MemoryStorage,
 	type AgentChange,
 	type CompactionResult,
@@ -140,12 +141,19 @@ const SessionIndex = SessionIndexDoc;
  * context. Explicit per-call env entries win over the injected secrets.
  */
 export class SecretInjectingEnv extends NodeExecutionEnv {
+	readonly #scopeId?: string;
+
+	constructor(options: ConstructorParameters<typeof NodeExecutionEnv>[0]) {
+		super(options);
+		this.#scopeId = options.shellEnv?.BOTD_SESSION_ID;
+	}
+
 	async exec(
 		command: string | readonly string[],
 		options: import("@earendil-works/pi-durable/env").ShellExecOptions | undefined,
 		context: Context,
 	): Promise<import("@earendil-works/pi-durable/env").Result<import("@earendil-works/pi-durable/env").ShellExecResult, import("@earendil-works/pi-durable/env").ExecutionError>> {
-		return super.exec(command, { ...options, env: withSecretEnv(options?.env) }, context);
+		return super.exec(command, { ...options, env: withSecretEnv(options?.env, undefined, this.#scopeId) }, context);
 	}
 }
 
@@ -411,10 +419,26 @@ export class HubDurableRuntime {
 					const persona = target.botId === undefined ? undefined : this.personas.get(target.botId);
 					if (persona === undefined) continue;
 					const effectiveCwd = target.cwd || persona.cwd;
+					// A session-scoped model override survives persona syncs: switching one
+					// conversation's model must never be wiped by a global config update.
+					const override = target.modelOverride;
+					const overrideModel =
+						override !== undefined && override.provider !== "" && override.modelId !== ""
+							? {
+								model: { provider: override.provider, modelId: override.modelId },
+								...(override.thinkingLevel
+									? {
+											thinkingLevel: (
+												override.thinkingLevel === "max" ? "xhigh" : override.thinkingLevel
+											) as ModelThinkingLevel,
+										}
+										: {}),
+							}
+							: undefined;
 					if (target.role === "router") {
-						await configure(tx, record.id, { ...this.routerAgent(persona), cwd: effectiveCwd });
+						await configure(tx, record.id, { ...this.routerAgent(persona), cwd: effectiveCwd, ...(overrideModel ?? {}) });
 					} else if (target.role === "worker") {
-						await configure(tx, record.id, { ...this.workerAgentFor(persona), cwd: effectiveCwd });
+						await configure(tx, record.id, { ...this.workerAgentFor(persona), cwd: effectiveCwd, ...(overrideModel ?? {}) });
 					}
 				}
 				if (page.next === undefined) break;
@@ -425,6 +449,55 @@ export class HubDurableRuntime {
 
 	listPersonas(): BotPersonaConfig[] {
 		return [...this.personas.values()];
+	}
+
+	/**
+	 * Set or clear a conversation-scoped model override without mutating the
+	 * global BotPersonaConfig or sibling sessions. If the conversation is
+	 * currently idle with an unresolved `runFailure` (e.g. `model_error`),
+	 * automatically submits `{ type: "continue" }` so the turn resumes
+	 * immediately on the newly selected model.
+	 */
+	async setConversationModelOverride(
+		conversationId: string,
+		override: { provider: string; modelId: string; thinkingLevel?: BotPersonaConfig["thinkingLevel"] } | null,
+		context: Context = BACKGROUND_CONTEXT,
+	): Promise<{ resumed: boolean }> {
+		const id = stringToConversationId(conversationId);
+		await this.harness.commit(async (tx) => {
+			const target = await tx.doc(TargetDoc, id);
+			const persona = this.personas.get(target.botId);
+			if (override === null) {
+				delete target.modelOverride;
+			} else {
+				target.modelOverride = {
+					provider: override.provider,
+					modelId: override.modelId,
+					...(override.thinkingLevel ? { thinkingLevel: override.thinkingLevel } : {}),
+				};
+			}
+			const effectiveModel = override ? { provider: override.provider, modelId: override.modelId } : persona?.model;
+			const rawThinking = override ? (override.thinkingLevel ?? persona?.thinkingLevel) : persona?.thinkingLevel;
+			const thinkingLevel =
+				rawThinking === undefined ? undefined : rawThinking === "max" ? ("xhigh" as const) : rawThinking;
+			await configure(tx, id, {
+				...(effectiveModel ? { model: effectiveModel } : {}),
+				...(thinkingLevel ? { thinkingLevel } : {}),
+			});
+		}, context);
+		const live = await this.harness.snapshot(LiveDoc, id, context);
+		if (
+			live?.run === undefined &&
+			live?.runFailure !== undefined &&
+			(live.runFailure.reason === "model_error" || live.runFailure.reason === "interrupted")
+		) {
+			const conv = await this.harness.conversation(id, context);
+			if (conv !== undefined) {
+				await conv.submit({ type: "continue" }, context);
+				return { resumed: true };
+			}
+		}
+		return { resumed: false };
 	}
 
 	/** Extensions mounted on a persona's Router and Worker conversations. */

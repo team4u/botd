@@ -45,6 +45,8 @@ export const WatchdogLogDoc = defineDoc({
 export type WatchdogProgressState = {
 	/** conversationId（字符串化） → 上次观测到的进度签名与时间。 */
 	observations: Record<string, { signature: string; lastProgressAt: number }>;
+	/** conversationId（字符串化） → 连续失败追踪（有界自动重试的计数与告警去重）。 */
+	failures?: Record<string, { key: string; attempts: number; alerted?: boolean }>;
 };
 
 /** 巡检进度观测文档：跨次巡检持久化每个会话的进度签名，用于真实停滞判定。 */
@@ -55,6 +57,86 @@ export const WatchdogProgressDoc = defineDoc({
 	initial: (): WatchdogProgressState => ({ observations: {} as Record<string, { signature: string; lastProgressAt: number }> }),
 	checkpointWhen: () => false,
 });
+
+// ---------------------------------------------------------------------------
+// 错误分类（纯函数）
+// ---------------------------------------------------------------------------
+
+/** runFailure 的窄化分类结果。 */
+export interface RunFailureClassification {
+	retryable: boolean;
+	category: 'auth' | 'request' | 'quota' | 'not_found' | 'transient';
+	summary: string;
+}
+
+/** 永久（非重试）错误类别：任意命中即判非重试。 */
+const PERMANENT_FAILURE_PATTERNS: ReadonlyArray<{ category: Exclude<RunFailureClassification['category'], 'transient'>; patterns: RegExp[] }> = [
+	{
+		category: 'auth',
+		patterns: [
+			/(?<![0-9])40[13](?![0-9])/,
+			/invalid_api_key/,
+			/authentication_error/,
+			/unauthorized/,
+			/permission_error/,
+			/invalid token/,
+			/revoked/,
+			/access denied/,
+		],
+	},
+	{
+		category: 'quota',
+		patterns: [
+			/(?<![0-9])402(?![0-9])/,
+			/insufficient_quota/,
+			/out of credit/,
+			/余额不足/,
+			/quota exceeded/,
+			/billing/,
+			/plan limit/,
+			/monthly limit/,
+		],
+	},
+	{
+		category: 'not_found',
+		patterns: [/(?<![0-9])404(?![0-9])/, /model_not_found/, /does not exist/],
+	},
+	{
+		category: 'request',
+		patterns: [
+			/(?<![0-9])4(00|13|22)(?![0-9])/,
+			/context_length_exceeded/,
+			/maximum context length/,
+			/prompt is too long/,
+			/invalid_request_error/,
+			/unsupported parameter/,
+			/invalid signature/,
+		],
+	},
+];
+
+/**
+ * 纯分类器：判定一个 runFailure 是否值得自动 continue。
+ * 鉴权 / 配额 / 404 / 请求构造错误是永久错误，重试无意义；
+ * 429、5xx、网络中断等瞬态错误值得有界重试。
+ */
+export function classifyRunFailure(runFailure: { reason?: string; detail?: string } | undefined): RunFailureClassification {
+	if (runFailure === undefined) return { retryable: false, category: 'request', summary: 'none' };
+	if (runFailure.reason !== 'model_error' && runFailure.reason !== 'interrupted') {
+		return { retryable: false, category: 'request', summary: runFailure.reason ?? 'none' };
+	}
+	if (runFailure.reason === 'interrupted') {
+		return { retryable: true, category: 'transient', summary: 'interrupted' };
+	}
+	// 解码 \uXXXX 转义：部分网关返回 JSON 转义后的中文（如 \u4f59\u989d\u4e0d\u8db3 = 余额不足）
+	const detail = (runFailure.detail ?? '').replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+	for (const group of PERMANENT_FAILURE_PATTERNS) {
+		if (group.patterns.some((pattern) => pattern.test(detail))) {
+			return { retryable: false, category: group.category, summary: detail || 'model_error' };
+		}
+	}
+	return { retryable: true, category: 'transient', summary: detail || 'model_error' };
+}
 
 // ---------------------------------------------------------------------------
 // 每次巡检
@@ -70,6 +152,10 @@ export interface WatchdogOptions {
 	steerMessage?: string;
 	/** 是否允许 abort 失控任务。 */
 	allowAbort: boolean;
+	/** 瞬态失败自动 continue 的重试上限（达到后改为告警）。 */
+	maxContinueRetries?: number;
+	/** abort 时停止 Worker 的钩子（返回 false 则回退 conversation.abort）。 */
+	stopWorker?: (conversationId: number, context: Context) => Promise<boolean>;
 	/** 告警投递（默认写 WatchdogLogDoc；测试可注入）。 */
 	alert?: (message: string, context: Context) => Promise<void>;
 	/** 时钟（默认 Date.now）。 */
@@ -157,16 +243,61 @@ export async function runWatchdogPass(
 		if (abortRequestedConversations.has(conversationId)) continue;
 
 		const runFailure = live?.runFailure;
+		// 会话已恢复（无失败或正忙于新一轮）：清空连续失败追踪。
+		if (runFailure === undefined || live?.run !== undefined) {
+			const cid = String(conversationId);
+			await harness.commit(async (tx) => {
+				const progress = await tx.doc(WatchdogProgressDoc);
+				if (progress.failures?.[cid] !== undefined) {
+					const { [cid]: _cleared, ...rest } = progress.failures;
+					progress.failures = rest;
+				}
+			}, ctx);
+		}
 		const failureIsTransient =
 			runFailure !== undefined && (runFailure.reason === 'model_error' || runFailure.reason === 'interrupted');
 
-		// 瞬态失败：空闲 + model_error / interrupted → continue 自动恢复
+		// 瞬态失败：空闲 + model_error / interrupted → 按分类做有界自动重试
 		if (!observation.busy && failureIsTransient) {
-			actions.push({
-				conversationId,
-				kind: 'continue',
-				reason: `transient failure ${runFailure.reason}: auto-continue`,
-			});
+			const cid = String(conversationId);
+			const failureKey = `${runFailure!.reason}:${runFailure!.detail ?? ''}`;
+			const classified = classifyRunFailure(runFailure);
+			await harness.commit(async (tx) => {
+				const progress = await tx.doc(WatchdogProgressDoc);
+				const prev = progress.failures?.[cid];
+				if (!classified.retryable) {
+					// 永久错误（鉴权 / 配额 / 404 / 请求构造）：重试无意义，只告警一次。
+					if (prev?.key !== failureKey || prev.alerted !== true) {
+						progress.failures = { ...progress.failures, [cid]: { key: failureKey, attempts: 0, alerted: true } };
+						actions.push({
+							conversationId,
+							kind: 'alert',
+							reason: `non-retryable ${classified.category} error: ${classified.summary}`,
+						});
+					}
+				} else {
+					const maxRetries = options.maxContinueRetries ?? 3;
+					const prevAttempts = prev?.key === failureKey ? prev.attempts : 0;
+					if (prevAttempts >= maxRetries) {
+						// 瞬态错误重试已达上限：停止 continue，只告警一次。
+						if (prev?.alerted !== true) {
+							progress.failures = { ...progress.failures, [cid]: { key: failureKey, attempts: prevAttempts, alerted: true } };
+							actions.push({
+								conversationId,
+								kind: 'alert',
+								reason: `transient retry limit (${maxRetries}) reached: ${classified.summary}`,
+							});
+						}
+					} else {
+						progress.failures = { ...progress.failures, [cid]: { key: failureKey, attempts: prevAttempts + 1, alerted: false } };
+						actions.push({
+							conversationId,
+							kind: 'continue',
+							reason: `transient failure ${runFailure!.reason}: auto-continue`,
+						});
+					}
+				}
+			}, ctx);
 			continue;
 		}
 
@@ -232,7 +363,7 @@ export async function runWatchdogPass(
 	return { actions, observed };
 }
 
-/** 扫描会话的 LiveDoc，收集带 runFailure 的会话（瞬态失败的恢复对象）。 */
+/** 扫描会话的 LiveDoc，收集带 runFailure 的会话（瞬态失败的恢复对象）与仍在失败追踪中的会话。 */
 async function scanFailedConversations(
 	harness: Harness,
 	into: Set<number>,
@@ -242,18 +373,33 @@ async function scanFailedConversations(
 	// 分页扫描全部会话（不再硬编码 ID 上限，高 ID 会话同样能被扫到）：
 	// LiveDoc 只在会话有活动后才存在，缺席即跳过。扫描只能走事务接口。
 	const allConversationIds: number[] = [];
+	const known = new Set<number>();
+	const trackedIds: number[] = [];
 	await harness.commit(async (tx) => {
 		let cursor: Cursor | undefined;
 		for (;;) {
 			const page = await tx.scanConversations({}, 256, cursor);
-			for (const record of page.items) allConversationIds.push(Number(record.id));
+			for (const record of page.items) {
+				const id = Number(record.id);
+				allConversationIds.push(id);
+				known.add(id);
+			}
 			if (page.next === undefined) break;
 			cursor = page.next;
 		}
+		// 仍在失败追踪中的会话也要被巡检：恢复后才能清空计数。
+		const progress = await tx.doc(WatchdogProgressDoc);
+		for (const key of Object.keys(progress.failures ?? {})) trackedIds.push(Number(key));
 	}, context);
 	for (const id of allConversationIds) {
 		const live = await harness.snapshot(LiveDoc, id as never, context).catch(() => undefined);
 		if (live?.runFailure !== undefined) {
+			failed.push(id);
+			into.add(id);
+		}
+	}
+	for (const id of trackedIds) {
+		if (known.has(id) && !into.has(id)) {
 			failed.push(id);
 			into.add(id);
 		}
@@ -281,7 +427,10 @@ async function applyActions(
 				} else if (action.kind === 'continue') {
 					await conversation.submit({ type: 'continue' }, context);
 				} else if (action.kind === 'abort') {
-					await conversation.abort(context);
+					// 先走宿主的 Worker 停止钩子（关闭进程 / 释放资源）；未提供或返回 false 时回退会话 abort。
+					let stopped = false;
+					if (options.stopWorker !== undefined) stopped = await options.stopWorker(action.conversationId, context);
+					if (!stopped) await conversation.abort(context);
 				}
 			} catch {
 				// busy / idle 语义冲突（如 continue 遇 busy）巡检不视为失败
@@ -300,6 +449,8 @@ async function applyActions(
 	await harness.commit(async (tx) => {
 		const doc = await tx.doc(WatchdogLogDoc);
 		doc.events.push(...log);
+		// 干预日志只保留最近 200 条，防止长生命周期会话无限膨胀。
+		if (doc.events.length > 200) doc.events.splice(0, doc.events.length - 200);
 	}, context);
 }
 
