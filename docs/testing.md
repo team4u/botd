@@ -10,12 +10,17 @@ botd 使用 Node 24 原生测试运行器搭配 `tsx`。
 
 ```
 tests/
-├── remote-env-worktree.test.ts      # 远程环境、Worktree 隔离与离线恢复
-├── durable-superagent-core.test.ts  # 多角色调度、崩溃恢复与召回链
-├── workflow-event-watchdog.test.ts  # 工作流编排、事件过滤与 Watchdog 自愈
-├── hub.test.ts                      # Hub 路由、认证与调度测试
-├── node.test.ts                     # 节点注册与 CLI 命令测试
-└── ...                              # 其他专项回归套件
+├── remote-env-worktree.test.ts                  # 远程环境、Worktree 隔离与离线恢复
+├── durable-superagent-core.test.ts              # 多角色调度、崩溃恢复与召回链
+├── workflow-event-watchdog.test.ts              # 工作流编排、事件过滤与 Watchdog 自愈
+├── durable-attachments.test.ts                  # 磁盘化多模态图片与任意文件附件回归
+├── routes-mention-worktree-skill.test.ts        # @分身路由、/skill 斜杠引导与全链路 Worktree
+├── hub-magpie-catalog.test.ts                   # .agent 自定义模型目录与双源凭据合并
+├── resource-package-binary-regressions.test.ts  # 技能与扩展二进制资产及执行位保真
+├── node20-distribution.test.ts                  # @botd/node 与 @botd/protocol Node 20 兼容审计
+├── hub.test.ts                                  # Hub 路由、认证与调度测试
+├── node.test.ts                                 # 节点注册与 CLI 命令测试
+└── ...                                          # 其他专项回归套件
 ```
 
 ## 测试命令
@@ -31,12 +36,16 @@ pnpm test
 
 # 运行单个测试文件
 pnpm exec tsx --test tests/remote-env-worktree.test.ts
+
+# 运行 Node 20 独立打包与 CLI 冒烟测试
+bash scripts/node20-smoke.sh
 ```
 
 ### 命令行为说明
 
 - `pnpm typecheck`：先检查各个子包的类型。命令随后检查 `tests/` 目录的类型定义。
 - `pnpm test`：运行 `tests/*.test.ts` 匹配的全部测试文件。
+- `bash scripts/node20-smoke.sh`：自动查找或下载 Node 20（支持 `BOTD_NODE20_BIN`、`BOTD_NODE20_VERSION`、`BOTD_NODE20_DIR`），验证打包安装与 `botd` 启动。
 
 ## 测试隔离原则
 

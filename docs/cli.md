@@ -10,7 +10,7 @@ botd CLI 提供命令行管理入口。用户可通过 CLI 管理本机 Node 守
 | [登录与鉴权](#登录与鉴权) | `botd login / logout / health` | 登录 Hub、注销与连接健康检查。 |
 | [节点守护进程](#节点守护进程管理) | `botd start / stop / status / join` | 启动守护进程、配对与状态检视。 |
 | [产物管理](#产物管理artifacts) | `botd artifacts` | 上传、下载与清理任务产物文件。 |
-| [Hub 节点管理](#hub-节点管理) | `botd nodes` | 列出集群节点、创建配对码与删除节点。 |
+| [Hub 节点管理](#hub-节点管理) | `botd nodes` | 列出集群节点、创建配对码、安装资产与远程升级。 |
 | [Bot 管理](#bot-管理) | `botd bots` | 创建 Bot、修改人设、绑定模型与技能。 |
 | [会话管理](#会话管理sessions) | `botd sessions` | 会话列表、详情、历史与 Fork/Reset 原语。 |
 | [后台 Worker](#后台-worker-管理super-agent) | `botd workers` | 查看后台 Worker、插话与终止任务。 |
@@ -34,6 +34,8 @@ botd CLI 提供命令行管理入口。用户可通过 CLI 管理本机 Node 守
 | `botd` | 官方标准 CLI 命令。全局安装或通过 `npm link` 接入系统 PATH。 |
 | `pnpm botd` | 源码仓库开发命令。映射至 `pnpm --filter @botd/node cli`。 |
 | `node apps/node/dist/cli.js` | 编译产物入口。输出内容纯净，适合脚本调用。 |
+
+独立发布的 `@botd/node` 与 `dist/cli.js` 支持 Node.js ≥ 20.0.0。源码仓库执行 `pnpm botd` 要求 Node.js ≥ 24.12.0。
 
 查看全局帮助信息：
 
@@ -340,18 +342,21 @@ botd nodes pair
 
 ### nodes install
 
-向指定在线节点安装 Skill 或 Extension 资产。
+向指定节点或 Hub 全局目录安装 Skill 与 Extension 资产。
 
 ```bash
 botd nodes install node_1 github:user/repo --kind skill --id my-skill
+botd nodes install local npm:@scope/botd-ext --kind extension
 ```
 
 | 参数或选项 | 说明 |
 | --- | --- |
-| `<nodeId>` | 目标节点 ID。 |
-| `<source>` | 资产来源路径或 Git 仓库地址。 |
+| `<nodeId>` | 目标节点 ID，传入 `local` 安装至 Hub 全局目录（需 `admin`）。 |
+| `<source>` | 支持本地路径、`file://`、`npm:<spec>`、Git `@ref`、子目录 tree URL 与 `owner/repo@skillName`。 |
 | `--kind <kind>` | 资产类型：`auto`、`skill`、`extension`。 |
 | `--id <customId>` | 自定义安装标识 ID。 |
+
+安装流程保留包内二进制文件（Base64 传输）与可执行权限位（`0o755`）。
 
 ### nodes upgrade
 
@@ -587,7 +592,7 @@ botd workers recall <sessionId> <workerId>
 botd workers list sess_1
 ```
 
-输出字段包含 `workerId`、`title`、`status`（`running`、`completed`、`failed`、`aborted`）、`worktreePath` 与 `threadKeys`。
+输出字段包含 `workerId`、`conversationId`、`botId`、`title`、`status`、`worktreePath`、`branchName`、`threadKeys` 与 `summary`。
 
 ### workers spawn
 
@@ -609,7 +614,7 @@ botd workers spawn sess_1 \
 | `--task <prompt>` | 必填，Worker 任务完整指令。 |
 | `--bot <botId>` | 指定身份 Bot。默认使用会话主导 Bot。 |
 | `--worktree` | 在项目仓库中分配独立的 Git Worktree 隔离目录。 |
-| `--thread-key <keys...>` | 订阅的事件线程键。匹配事件直通该 Worker。 |
+| `--thread-key <key>` | 绑定的事件线程键。匹配事件直通该 Worker。 |
 
 ### workers steer
 
@@ -702,6 +707,8 @@ cat payload.json | botd events ingest --source ci --type build.failed --file -
 | `--session <sessionId>` | 显式投递的目标会话 ID。 |
 | `--bot <botId>` | 目标 Bot 标识 ID。 |
 
+非管理员仅可向本人会话或 `team` 可见分身投递事件，越权调用返回 `403`。
+
 ## 系统健康诊断（Watchdog）
 
 查看耐久运行时（Durable Runtime）系统健康诊断报告。
@@ -710,11 +717,11 @@ cat payload.json | botd events ingest --source ci --type build.failed --file -
 # 查看当前健康报告
 botd watchdog health
 
-# 先触发一轮主动巡检，再输出诊断
+# 先触发一轮主动巡检，再输出诊断（仅限 admin）
 botd watchdog health --run-pass
 ```
 
-输出包含系统健康状态布尔值、摘要说明、错误发现列表与干预记录。
+输出包含系统健康状态布尔值、摘要说明、错误发现列表与干预记录。`--run-pass` 仅限 `admin` 角色调用，普通成员调用返回 `403`。
 
 ## 触发器管理（Triggers）
 
@@ -819,7 +826,7 @@ botd chat watch sess_1 --duration 60
 
 ## 全局与节点 Skills 直管
 
-CLI 支持免指定 `nodeId` 直接管理 Hub 全局托管的 Skills。节点无需在线。CLI 也支持指定 `nodeId` 操作特定节点上的专属 Skills。
+CLI 支持免指定 `nodeId` 直接管理 Hub 全局托管的 Skills。节点无需在线。CLI 也支持指定 `nodeId` 操作特定节点上的专属 Skills。全局模式 `put` 与 `delete` 仅限 `admin` 角色调用。节点模式检查当前用户对目标节点的管理权限。
 
 ```text
 # 全局模式（单参数）
@@ -856,7 +863,7 @@ botd skills put node_1 local-tool --file ./LOCAL_SKILL.md
 
 ## 全局与节点 Extensions 直管
 
-CLI 支持免指定 `nodeId` 直接管理 Hub 全局托管的 Extensions 代码。CLI 也支持指定 `nodeId` 操作特定节点上的专属 Extensions。
+CLI 支持免指定 `nodeId` 直接管理 Hub 全局托管的 Extensions 代码。CLI 也支持指定 `nodeId` 操作特定节点上的专属 Extensions。全局模式 `put` 与 `delete` 仅限 `admin` 角色调用。节点模式检查目标节点归属权限。
 
 ```text
 # 全局模式（单参数）
@@ -893,8 +900,8 @@ botd extensions put node_1 custom-ext --file ./index.ts
 CLI 支持免指定 `nodeId` 直接管理 Hub 全局模型供应商登录认证与凭据。CLI 也支持指定 `nodeId` 管理特定节点上的供应商凭据。
 
 ```text
-# 全局模式（单参数）
-botd providers login <providerId> --method <api_key|oauth> [--wait [seconds]]
+# 全局模式（单参数，Hub 直管登录支持 api_key）
+botd providers login <providerId> --method api_key [--wait [seconds]]
 botd providers status <loginId>
 botd providers respond <loginId> --prompt <promptId> [--value <value>]
 botd providers cancel <loginId>
@@ -908,6 +915,8 @@ botd providers cancel <nodeId> <loginId>
 botd providers logout <nodeId> <providerId>
 ```
 
+全局直管登录支持 `api_key`（传入 `oauth` 返回 `501`）。执行 `logout` 时同步清理 SQLite 与 `<dataDir>/.agent/auth.json` 双源凭据。
+
 ```bash
 # 发起 Anthropic API Key 登录流程
 botd providers login anthropic --method api_key
@@ -915,8 +924,8 @@ botd providers login anthropic --method api_key
 # 回答 API Key 输入提示
 botd providers respond login_100 --prompt api_key --value "sk-ant-api03-xxx"
 
-# 发起 GitHub Copilot OAuth 登录并等待交互
-botd providers login github --method oauth --wait 120
+# 在指定节点发起 OAuth 登录并等待交互
+botd providers login node_1 github-copilot --method oauth --wait 120
 
 # 查看指定登录流程状态
 botd providers status login_100
@@ -944,7 +953,7 @@ botd models catalog
 botd models catalog --node node_1
 ```
 
-输出包含供应商名称、认证方式支持列表（`api_key` / `oauth`）、是否已配置凭据，以及每个模型支持的思考级别。
+输出包含供应商名称、认证方式支持列表（`api_key` / `oauth`）、是否已配置凭据，以及每个模型支持的思考级别。Hub 目录自动合并内置模型、`<dataDir>/.agent/models-store.json` 与 `models.json` 自定义配置。
 
 ## 自动化脚本示例
 

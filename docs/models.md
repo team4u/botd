@@ -34,6 +34,15 @@ Hub 集中托管模型目录与调用凭据。
 | `minimax` | MiniMax | `api_key` | `MiniMax-Text-01` |
 | `openrouter` | OpenRouter | `api_key` | 聚合各大开源与商业模型 |
 
+Hub 同时合并数据目录下的自定义供应商与模型配置：
+
+- `<dataDir>/.agent/models-store.json`（如 `magpie` 等自定义网关目录）。
+- `<dataDir>/.agent/models.json` 与 `<dataDir>/models.json`。
+
+合并流程保留 `thinkingLevelMap`，供 `getSupportedThinkingLevels` 读取。
+
+分身热同步（`syncBotPersonas`）时，Hub 自动向模型注册表动态注册新目录。
+
 ### 模型元数据与能力
 
 模型目录向前端投递标准化元数据：
@@ -54,13 +63,20 @@ Hub 集中托管模型目录与调用凭据。
 
 Router 前台调度与 Worker 后台执行均按角色独立下发思考档位。
 
-### 多模态输入支持（Multimodal）
+Web 输入框底栏（`ComposerStatusBar`）提供模型与思考档位胶囊：
 
-系统统一支持文本与图片混合输入：
+- 页面挂载后立即可用，分身未配置模型时自动回退至目录可用模型。
+- 切换模型后若原档位不受支持，前端自动收敛至新模型支持的档位。
+- 编辑分身时保留已存储的服务商，单固定档位模型直接提示无需手选。
 
-- 前端在消息输入框中粘贴或上传图片。
-- 载荷携带 `images` 数组（包含 `mimeType` 与 Base64 编码数据）。
-- 系统将文本与图片组织为标准消息块，投递给支持视觉的大语言模型。
+### 多模态与通用文件附件（Multimodal & Attachments）
+
+系统通过磁盘落盘的 `attachments` 链路统一处理图片与任意文件：
+
+- 客户端上传文件或提交内联 `dataUrl` 时，Hub 统一落盘至 `<dataDir>/artifacts`。
+- 数据库消息与 Durable 状态仅存储轻量附件指针，避免大二进制撑爆 SQLite。
+- 推理前按需从磁盘读取图片字节，组装为标准 `ImageContent` 视觉消息块。
+- 所有附件（含 PDF、CSV、压缩包等）同时在提示词末尾追加 `[Attached Files]` 路径清单。
 
 ## BYOM 机制
 
@@ -68,7 +84,7 @@ BYOM 即 Bring Your Own Model。
 
 系统支持用户输入自有 API Key。
 
-用户接入自建兼接口或第三方网关。
+用户接入自建兼容接口或第三方网关。
 
 ### 角色分身独立模型配置
 
@@ -104,7 +120,7 @@ BYOM 即 Bring Your Own Model。
 
 新架构采用集中式凭据管理。
 
-所有凭据统一存储在 Hub SQLite 的 `provider_credentials` 表中。
+所有凭据统一存储在 Hub SQLite 的 `provider_credentials` 表中，并自动合并读取 `<dataDir>/.agent/auth.json` 存量凭据（含 `env` 回退字段）。
 
 ```sql
 CREATE TABLE IF NOT EXISTS provider_credentials (
@@ -116,9 +132,11 @@ CREATE TABLE IF NOT EXISTS provider_credentials (
 );
 ```
 
-### 集中凭据的安全机制
+### 集中凭据的安全与门控机制
 
 - 凭据仅由 Hub 统一持久化。Node 端不持有密钥明文。
+- Hub 通过 `listEffectiveProviderCredentials` 汇总双源凭据，作为 Durable 运行时就绪门控。
+- 调用 `DELETE /api/providers/:providerId/auth` 注销时，Hub 同步清除 SQLite 记录与 `.agent/auth.json` 条目。
 - API 接口向前端返回目录时，只指示 `configured: true`。
 - Hub 绝不向前端回显 API Key 原始内容。
 
@@ -128,7 +146,7 @@ CREATE TABLE IF NOT EXISTS provider_credentials (
 
 ### Web 界面配置
 
-1. 打开 Web 管理界面左下角「模型与服务商配置」。
+1. 点击左侧边栏右上角齿轮图标打开全局配置面板。
 2. 浏览支持的供应商列表。
 3. 选择目标供应商并点击「配置凭据」。
 4. 输入该供应商的有效 API Key。
@@ -136,7 +154,7 @@ CREATE TABLE IF NOT EXISTS provider_credentials (
 
 ### HTTP API 交互协议
 
-凭据配置通过 `apps/hub/src/providers.ts` 路由处理：
+凭据配置通过 `apps/hub/src/providers.ts` 路由处理（Hub 直管 HTTP 登录支持 `api_key`，传入 `oauth` 返回 `501`）：
 
 1. 客户端发起登录请求：
    ```bash

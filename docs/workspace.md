@@ -40,9 +40,11 @@ Hub 在 `apps/hub/src/harness/remote-env.ts` 中实现 `RemoteExecutionEnv`。
 
 该类实现 `ExecutionEnv` 接口。
 
-每次工具调用时，Harness 从会话的 `TargetDoc` 读取 `nodeId` 与 `cwd`。
+每次工具调用时，Harness 从会话的 `TargetDoc` 读取 `nodeId`、`worktreePath` 与 `cwd`。
 
-Harness 据此构造 `RemoteExecutionEnv` 实例。
+若会话单独绑定了 `workspaceDir`，`SessionRouterDoc` 会粘性覆盖分身的默认工作目录。
+
+执行环境自动向 Shell 注入 `BOTD_SESSION_ID` 与 `BOTD_BOT_ID` 变量。
 
 实例标识固定为 `remote:<nodeId>`。
 
@@ -50,11 +52,11 @@ Harness 据此构造 `RemoteExecutionEnv` 实例。
 
 ### 节点离线等待与恢复
 
-BYOM 模式支持节点临时离线。
+BYOM 模式支持节点临时离线，并严格隔离宿主机边界。
 
-当目标节点离线时，`RemoteExecutionEnv` 调用 `waitForNodeOnline`。
+绑定远端节点（`nodeId !== "local"`）的会话在节点离线时绝不回退到 Hub 本地目录。
 
-调用挂起并等待节点重新创建连接。
+无论是文件读写、Shell 命令还是首次工作树挂载，`RemoteExecutionEnv` 均调用 `waitForNodeOnline` 挂起等待。
 
 等待过程监听 Chord 的 `Context` 取消信号。
 
@@ -88,7 +90,8 @@ Node 收到请求后执行命令：
 2. Node 使用 `withCancel` 派生独立的取消上下文。
 3. Node 子进程将输出分块推入 `onEnvExecOutput` 回调。
 4. Hub 侧 `ExecOutputHub` 按 `execId` 分发输出，实时推送到 Web 界面。
-5. 进程超时或用户终止任务时，Hub 调用 `envAbortExec` 销毁进程树。
+5. 进程超时或用户取消任务时，Hub 监听取消信号并立即调用 `envAbortExec` 销毁远端进程树。
+6. 会话清理阶段剥离已触发的取消信号，保证远端临时文件清理动作完整执行。
 
 Node 启动环境将 `~/.botd/bin` 放入 `PATH` 首位。
 
@@ -105,83 +108,61 @@ Worker 在脚本中可直接调用 `botd` 命令行工具。
 ```mermaid
 sequenceDiagram
     participant R as Router 会话
-    participant W as 后台 Worker
-    participant H as Hub RemoteEnv
+    participant W as 后台 Worker / 子代理
+    participant H as Hub 环境解析器
     participant N as Node Git 隔离器
 
-    R->>W: spawn_worker(worktree: true)
-    W->>H: 初始化执行环境
+    R->>W: spawn_worker / delegate_to_bot(worktree: true)
+    W->>H: 预计算路径写入 TargetDoc，首次调用工具触发挂载
     H->>N: envAcquireWorktree(repoDir, workerId)
-    N->>N: git worktree add -B botd/worker-1 .botd-worktrees/worker-1
+    N->>N: git worktree add -B botd/<id> .botd-worktrees/<id>
     N-->>H: 返回 worktreePath 与分支名
-    H-->>W: 挂载独立工作树目录
+    H-->>W: 缓存并挂载独立工作树目录
     W->>N: 执行代码修改与测试
-    W->>R: afterRun 汇报执行完成
-    R->>H: 任务结束触发清理
-    H->>N: envReleaseWorktree(worktreePath)
-    N->>N: git worktree remove --force && git worktree prune
-    N-->>H: 清理完成确认
+    W->>R: afterRun 汇报结论（附带分支与工作树路径）
 ```
 
-### 并发安全机制
+### 全工具并发隔离矩阵
 
-当 Router 派发后台任务时，传入 `worktree: true` 参数。
+系统在四个层级的工具中统一支持 `worktree: true` 与 `isolation: "worktree"`：
 
-Hub 向 Node 发送 `envAcquireWorktree` 请求：
+- `spawn_worker` 与 `delegate_to_bot`：路径为 `<cwd>/.botd-worktrees/w-<seq>-<convId>`，分支为 `botd/w-<seq>-<convId>`。
+- `subagent`：显式隔离时路径为 `<cwd>/.botd-worktrees/sub-<convId>`，分支为 `botd/sub-<convId>`。
+- `SubagentWorkflow` 的 `agent()` 步骤：显式隔离时路径为 `<cwd>/.botd-worktrees/wf-<convId>`，分支为 `botd/wf-<convId>`。步骤配置的 `gate` 门禁命令自动进入该工作树目录执行。
 
-- Node 检查目标目录是否为 Git 仓库。
-- 若目标目录非 Git 仓库，Node 返回原目录并标记 `isGitRepo: false`。
-- 若目标目录为 Git 仓库，Node 创建独立工作树。
+未显式指定 `isolation: "off"` 时，`subagent` 与工作流子步骤默认继承父会话的工作树路径。
 
-工作树路径规则：`<repoDir>/.botd-worktrees/<workerId>`。
+若目标目录非 Git 仓库，节点自动回退原目录并标记 `isGitRepo: false`。
 
-对应分支规则：`botd/<workerId>`。
+多个任务同时修改同名文件时，各自在独立工作树中读写，全程无需互斥锁等待。
 
-两个 Worker 同时修改同名文件时，各自在独立的工作树中读写。
+## 工作树挂载与保留生命周期
 
-Worker 之间的修改互不覆盖，不需要互斥等待。
+### 惰性幂等挂载与重放恢复
 
-## 临时工作树生命周期管理
+工具在事务中预先计算确定性的工作树路径与分支名，并写入 `TargetDoc`。
 
-### 创建阶段
+首次解析该会话的 `ExecutionEnv` 时，Hub 向节点发送 `envAcquireWorktree` 请求：
 
-Node 接收 `envAcquireWorktree` 请求。
+1. 若工作树目录已存在，直接幂等复用该目录。
+2. 若目录不存在，节点执行清理与创建命令：
 
-Node 先执行清理动作，保障幂等性：
+```bash
+git worktree add -B botd/<id> <worktreePath> HEAD
+```
+
+进程崩溃重启并触发重放时，工具从持久文档恢复原有的工作树路径与分支信息。
+
+### 默认保留与按需释放
+
+Worker 执行完成或收到 `stop_worker` 中止指令后，系统默认保留工作树目录与对应分支。
+
+该策略防止未合并的代码提交与测试现场意外丢失。
+
+代码合并或确认废弃后，可通过 `envReleaseWorktree` 接口或以下命令显式清理：
 
 ```bash
 git worktree remove --force <worktreePath>
 git worktree prune
+git branch -D botd/<id>
 ```
-
-接着 Node 执行工作树创建命令：
-
-```bash
-git worktree add -B botd/<workerId> <worktreePath> HEAD
-```
-
-Hub 将创建的 `worktreePath` 存储到 Worker 的 `TargetDoc`。
-
-Worker 后续所有文件读写和 Shell 命令均在该目录下执行。
-
-### 释放与清理阶段
-
-Worker 结束执行后，生命周期钩子触发释放流程：
-
-1. Hub 发送 `envReleaseWorktree` RPC 请求。
-2. Node 强制删除临时工作树目录：
-   ```bash
-   git worktree remove --force <worktreePath>
-   ```
-3. Node 修剪过期的工作树索引记录：
-   ```bash
-   git worktree prune
-   ```
-4. 若指定 `deleteBranch: true`，Node 同时删除临时分支：
-   ```bash
-   git branch -D botd/<workerId>
-   ```
-
-Node 进程重启或收到清理信号时，调用 `envCleanup`。
-
-Node 扫描并清理所有残留的临时工作树。

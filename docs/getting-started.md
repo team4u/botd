@@ -4,12 +4,14 @@
 
 ## 前置环境要求
 
-系统需要以下环境：
+源码构建与 Hub 服务需要以下环境：
 
 - Node.js ≥ 24.12.0。
 - pnpm 10.34.9。
 - Git。
 - 可用的模型账户或 API Key。
+
+独立分发的远程 `@botd/node` 守护进程与 `botd` CLI 支持 Node.js ≥ 20.0.0。
 
 执行以下命令检查环境版本：
 
@@ -62,6 +64,8 @@ BOTD_PORT=3002 BOTD_ADMIN_PASSWORD='my-strong-password' pnpm dev
 
 打开浏览器访问 `http://localhost:3001`。使用用户名 `admin` 与刚才配置的密码登录。
 
+指定 `BOTD_ADMIN_PASSWORD` 会在空库创建 `admin`，也会在非空库重启时覆盖 `admin` 密码。未指定该变量时，仅空库首次启动打印一次性随机密码，后续重启保持原密码。
+
 `pnpm dev` 启动管理控制台与 Hub 服务端。Hub 作为系统大脑，执行持久化运行时与模型推理。
 
 ## 3. 配置模型凭据
@@ -70,19 +74,22 @@ Hub 集中管理全部模型供应商凭据。详细说明请参考[模型供应
 
 ### 方式一：Web 界面配置
 
-1. 打开 Web 控制台左下角「模型与服务商配置」。
+1. 点击左侧边栏右上角齿轮图标打开全局配置面板。
 2. 选择模型供应商（如 Anthropic、OpenAI、DeepSeek 或 Gemini）。
-3. 填入 API Key 并保存。凭据安全保存在 Hub 的 `provider_credentials` 表中。
+3. 填入 API Key 并保存。凭据保存在 Hub 的 `provider_credentials` 表中。
+
+Hub 同时自动合并读取 `<dataDir>/.agent/auth.json` 与 `models-store.json` 存量配置。
 
 ### 方式二：CLI 命令行配置
 
-开启新终端执行登录命令：
+开启新终端执行登录与应答命令：
 
 ```bash
-botd providers login anthropic
+botd providers login anthropic --method api_key
+botd providers respond <loginId> --prompt api_key --value "sk-ant-xxx"
 ```
 
-按终端提示输入 API Key。凭据随即写入 Hub 数据库。
+提交 API Key 后，凭据随即写入 Hub 数据库。
 
 ## 4. 节点配对与启动
 
@@ -90,7 +97,7 @@ Node 守护进程作为无状态远端执行环境。守护进程负责文件系
 
 在网页端创建配对凭据：
 
-1. 点击左下角「节点与智能体」。
+1. 点击左侧边栏右上角「节点与分身管理」图标。
 2. 点击右上角「配对节点」按钮。
 3. 查看弹窗中的 6 位数字配对码。配对码有效期为 10 分钟。
 
@@ -118,7 +125,7 @@ botd status
 
 ## 5. 首次对话体验
 
-在 Web 控制台左侧列表点击「默认助手」，进入会话界面。
+在欢迎页点击主打角色卡片，或在左侧边栏快速选择默认助手进入会话。
 
 向 Bot 发送第一条测试指令：
 
@@ -145,7 +152,7 @@ botd 支持通过派生后台 Worker 执行多步长耗时任务。Worker 享有
 
 > 请派生一个后台 Worker，在独立分支上重构项目 README 文档。
 
-前台 Router 调用 `spawn_worker` 工具，在后台启动新 Worker。顶部 `ActiveWorkersBar` 即刻显示任务胶囊。
+前台 Router 调用 `spawn_worker` 在后台启动新 Worker。顶部 `ActiveWorkersBar` 自动从隐藏状态展开并显示任务胶囊。
 
 ### 方式二：通过 CLI 显式派生 Worker
 

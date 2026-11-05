@@ -9,7 +9,7 @@ botd Hub 提供 HTTP REST 接口、SSE 实时事件流，以及 WebSocket Birpc 
 | [架构与通信协议](#架构与通信协议) | `/api/*`, `/ws/node` | 系统通信平面与端口规范。 |
 | [鉴权与安全](#鉴权与安全) | 全局 | Cookie、Node 令牌与限流规则。 |
 | [认证与用户管理](#认证与用户管理路由) | `/api/auth/*` | 登录、登出与用户信息。 |
-| [节点管理](#节点管理路由) | `/api/nodes/*` | 节点配对、状态与模型目录。 |
+| [节点管理](#节点管理路由) | `/api/nodes/*`, `/api/install` | 节点配对、状态、资产安装与远程升级。 |
 | [Bot 管理](#bot-管理路由) | `/api/bots/*` | Bot 增删改查、指令与扩展绑定。 |
 | [会话管理](#会话管理路由) | `/api/sessions/*` | 会话列表、详情与原语操作。 |
 | [消息管理](#消息管理路由) | `/api/sessions/:id/messages` | 消息投递、撤回与多模态输入。 |
@@ -40,7 +40,7 @@ botd Hub 提供 HTTP REST 接口、SSE 实时事件流，以及 WebSocket Birpc 
 Hub 支持三种身份鉴权方式：
 
 1. Cookie 会话：浏览器或 CLI 登录 `POST /api/auth/login` 成功后，Hub 写入 `botd_token` Cookie（HttpOnly，有效期 7 天）。
-2. Node 令牌：Node 守护进程在请求头中携带 `x-botd-node-id` 与 `x-botd-node-token`。
+2. Node 令牌：守护进程携带 `x-botd-node-id` 与 `x-botd-node-token` 请求头。禁止访问 `/api/users*` 与 `/api/nodes/pairing*`（返回 `403`），会话与产物路由仅限已调度至本节点的会话访问。
 3. 签名令牌：用于外部 Webhook 与通知交互回调（HMAC-SHA256）。
 
 ### 免登录公开路由
@@ -58,7 +58,7 @@ Hub 支持三种身份鉴权方式：
 
 中间件强制执行请求体大小限制：
 
-- 产物上传路由（`/api/sessions/:id/artifacts`）：上限 `100MB`。
+- 产物与消息附件路由（`/api/sessions/:id/artifacts` 与 `/api/sessions/:id/messages`）：单产物原始上限 `15MB`（超限返回 `413`），HTTP 请求体封包上限约 `21MB`。
 - Webhook 路由（`/api/webhooks/*`）：上限 `64KB`。
 - 其余 API 路由（`/api/*`）：上限 `1MB`。
 
@@ -152,7 +152,7 @@ Hub 支持三种身份鉴权方式：
 }
 ```
 
-响应（201 Created）：
+响应（200 OK）：
 
 ```json
 {
@@ -165,11 +165,11 @@ Hub 支持三种身份鉴权方式：
 
 ### DELETE /api/users/:id
 
-删除指定用户（禁止删除内置自举管理员 `user_admin`）。
+删除指定用户（仅限 `admin` 角色）。禁止删除当前登录账号自身（`400`），用户名下仍拥有节点时拒绝删除（`409`）。
 
 ### PUT /api/users/:id/password
 
-修改指定用户密码。Hub 自动递增该用户的 token epoch，迫使其旧 Cookie 失效。
+修改指定用户密码（仅限 `admin` 角色）。Hub 自动递增该用户的 token epoch，使旧 Cookie 立即失效。
 
 请求体：
 
@@ -194,7 +194,7 @@ Hub 支持三种身份鉴权方式：
 
 ### POST /api/nodes/pairing/exchange
 
-节点凭配对码完成密钥交换，获取节点身份与访问令牌。
+节点凭配对码完成密钥交换，获取节点身份与访问令牌（按来源 IP 限流，超限返回 `429`）。
 
 请求体：
 
@@ -211,7 +211,9 @@ Hub 支持三种身份鉴权方式：
 ```json
 {
   "nodeId": "node_9f8e7d",
-  "token": "tok_sec_1a2b3c4d5e"
+  "token": "tok_sec_1a2b3c4d5e",
+  "name": "developer-laptop",
+  "hubUrl": "http://localhost:3002"
 }
 ```
 
@@ -223,7 +225,9 @@ Hub 支持三种身份鉴权方式：
 
 ```json
 {
-  "ok": true
+  "ok": true,
+  "draining": false,
+  "activeTurns": 0
 }
 ```
 
@@ -259,17 +263,31 @@ Hub 支持三种身份鉴权方式：
 
 ### DELETE /api/nodes/:nodeId
 
-删除已离线的节点元数据。节点在线时拒绝删除并返回 `409 Conflict`。
+删除指定节点并主动断开连接。若节点仍承载分身且未传 `?force=1`，接口拒绝删除并返回 `409 Conflict`。
 
-### POST /api/nodes/:nodeId/install
+### POST /api/install
 
-向指定节点安装 Skill 或 Extension 资产。
+向 Hub 全局托管目录多源安装 Skill 或 Extension 资产（仅限 `admin` 角色）。支持本地路径、`file://`、`npm:<spec>`、Git `@ref`、子目录 tree URL 与 `owner/repo@skillName`。
 
 请求体：
 
 ```json
 {
-  "source": "github:user/skill-repo",
+  "source": "npm:@scope/botd-ext",
+  "kind": "auto",
+  "customId": "my-ext"
+}
+```
+
+### POST /api/nodes/:nodeId/install
+
+向指定节点安装 Skill 或 Extension 资产（`:nodeId` 传入 `local` 等效于全局安装）。节点在线时经 `readResourcePackage` RPC 完整保留二进制文件与 `0o755` 可执行位，节点离线时回退写入 Hub 资产目录。
+
+请求体：
+
+```json
+{
+  "source": "github:user/skill-repo@v1.2.0",
   "kind": "skill",
   "customId": "my-skill"
 }
@@ -310,6 +328,10 @@ Hub 支持三种身份鉴权方式：
   "modelProvider": "anthropic",
   "modelId": "claude-sonnet-4-5",
   "thinkingLevel": "medium",
+  "toolScope": "readonly",
+  "isolation": "worktree",
+  "inheritSkills": true,
+  "visibility": "team",
   "enabledSkills": ["git-review"],
   "enabledExtensions": [],
   "systemMd": "你是一个严格的代码评审助手。",
@@ -317,17 +339,19 @@ Hub 支持三种身份鉴权方式：
 }
 ```
 
+可选权限字段：`toolScope` 支持 `all`、`readonly` 与 `custom`（搭配 `customTools` 白名单数组）。
+
 ### PUT /api/bots/:botId
 
-修改指定 Bot 的配置属性。
+修改指定 Bot 的配置属性，Hub 随即热同步存量会话配置。
 
 ### DELETE /api/bots/:botId
 
 删除指定 Bot。
 
-### GET /api/bots/:botId/files/:kind
+### GET /api/bots/:botId/system 与 GET /api/bots/:botId/memory
 
-读取指定 Bot 的系统提示词（`system`）或长期记忆（`memory`）。
+读取指定 Bot 的系统提示词（`SYSTEM.md`）或长期记忆（`MEMORY.md`）。兼容节点路由别名 `GET /api/nodes/:nodeId/bots/:botId/files/:kind`。
 
 响应（200 OK）：
 
@@ -337,9 +361,9 @@ Hub 支持三种身份鉴权方式：
 }
 ```
 
-### PUT /api/bots/:botId/files/:kind
+### PUT /api/bots/:botId/system 与 PUT /api/bots/:botId/memory
 
-写入指定 Bot 的 `system` 或 `memory` 文件内容。
+写入指定 Bot 的 `SYSTEM.md` 或 `MEMORY.md` 正文。兼容节点路由别名 `PUT /api/nodes/:nodeId/bots/:botId/files/:kind`。
 
 请求体：
 
@@ -411,19 +435,22 @@ Hub 支持三种身份鉴权方式：
 {
   "title": "项目重构讨论",
   "leadBotId": "reviewer",
-  "workspaceDir": "/home/user/project"
+  "workspaceDir": "/home/user/project",
+  "parentSessionId": "sess_root"
 }
 ```
 
 ### PATCH /api/sessions/:id
 
-修改会话标题、主导 Bot 或归档状态。
+修改会话标题、主导 Bot、工作区目录或归档状态。会话处于 `running` 状态时，除切换 `archived` 外返回 `409 Conflict`。
 
 请求体：
 
 ```json
 {
-  "title": "已更新的会话标题",
+  "title": "已修改的会话标题",
+  "leadBotId": "reviewer",
+  "workspaceDir": "/home/user/project",
   "archived": true
 }
 ```
@@ -490,28 +517,33 @@ Hub 支持三种身份鉴权方式：
 
 ### GET /api/sessions/:id/messages
 
-获取会话的完整历史消息列表。
+获取会话历史消息列表。支持分页查询参数：`limit`（条数上限）、`before`（向前翻页游标消息 ID）与 `around`（围绕锚点消息 ID 加载上下文）。
 
 ### POST /api/sessions/:id/messages
 
-向会话发送用户消息，触发后台推理回合。支持纯文本、斜杠指令与多模态图片附件。
+向会话发送用户消息并触发推理回合。支持 `@<botId>` 提及热切分身、`/compact` 压缩、`/new` 重置、`/` 技能引导，以及图片与任意文件附件。
 
-请求体：
+客户端可引用当前会话已上传的产物 `id`（跨会话引用返回 `403`），也可提交内联 `dataUrl` 由 Hub 自动落盘至 `artifacts/`：
 
 ```json
 {
-  "content": "请结合架构图分析代码结构",
+  "content": "@reviewer 请结合架构图与需求文档评审",
   "attachments": [
     {
-      "type": "image",
-      "mimeType": "image/png",
-      "data": "iVBORw0KGgoAAAANSUhEUgAA..."
+      "id": "art_123",
+      "filename": "arch.png",
+      "mimeType": "image/png"
+    },
+    {
+      "dataUrl": "data:application/pdf;base64,JVBERi0xLjQK...",
+      "filename": "spec.pdf",
+      "mimeType": "application/pdf"
     }
   ]
 }
 ```
 
-响应（202 Accepted）：返回新创建的用户消息记录。
+响应（202 Accepted）：返回新创建的用户消息记录（数据库仅持久化轻量附件指针）。
 
 ### PUT /api/sessions/:id/messages/:messageId
 
@@ -555,8 +587,10 @@ Hub 支持三种身份鉴权方式：
       "title": "模块解耦",
       "kind": "worker",
       "status": "running",
-      "worktreePath": "/repo/.botd-worktrees/wrk_123",
+      "worktreePath": "/repo/.botd-worktrees/w-1",
+      "branchName": "botd/w-1",
       "threadKeys": ["ci-check"],
+      "summary": "正在拆分登录模块",
       "startedAt": "2026-11-04T12:00:00.000Z"
     }
   ]
@@ -565,7 +599,7 @@ Hub 支持三种身份鉴权方式：
 
 ### POST /api/sessions/:id/workers
 
-派生新后台 Worker 执行长耗时任务。
+派生新后台 Worker 执行长耗时任务。支持 `task`（或别名 `instructions`）、`worktree` / `isolation`、`threadKey` / `threadKeys` 与 `forkContext`。
 
 请求体：
 
@@ -574,8 +608,8 @@ Hub 支持三种身份鉴权方式：
   "title": "重构认证模块",
   "task": "拆分登录逻辑并补齐单元测试",
   "botId": "reviewer",
-  "worktree": true,
-  "threadKey": "ci-check"
+  "isolation": "worktree",
+  "threadKeys": ["ci-check"]
 }
 ```
 
@@ -619,7 +653,7 @@ Hub 支持三种身份鉴权方式：
 
 ### GET /api/sessions/:id/workers/:workerId/recall
 
-提取 Worker 的回忆链（Chain-of-Recall）节点及最近 Transcript 记录。
+提取 Worker 的回忆链（Chain-of-Recall）节点及最近 Transcript 记录。目标 Worker 不属于当前会话 `:id` 时返回 `404`。
 
 响应（200 OK）：
 
@@ -680,7 +714,7 @@ Hub 支持三种身份鉴权方式：
 
 ### POST /api/events/ingest
 
-将外部事件摄入 EventRouter 管线。
+将外部事件摄入 EventRouter 管线。非管理员仅可向本人会话或 `team` 可见分身投递事件，越权返回 `403`。
 
 请求体：
 
@@ -691,7 +725,10 @@ Hub 支持三种身份鉴权方式：
   "title": "PR #42 opened",
   "content": "用户提交了新功能代码",
   "repo": "team4u/botd",
-  "prNumber": 42
+  "prNumber": 42,
+  "branch": "feat/auth",
+  "sessionId": "sess_1",
+  "botId": "reviewer"
 }
 ```
 
@@ -700,7 +737,7 @@ Hub 支持三种身份鉴权方式：
 获取 Durable Runtime 系统健康诊断报告。
 
 查询参数：
-- `runPass=1`：先触发一轮主动巡检，再输出报告。
+- `runPass=1`：先触发一轮主动巡检再输出报告（仅限 `admin` 角色，非管理员返回 `403`）。
 
 响应（200 OK）：
 
@@ -723,11 +760,11 @@ Hub 支持三种身份鉴权方式：
 | --- | --- | --- |
 | GET | `/api/skills` | 列出 Hub 全局托管的 Skills 列表。 |
 | GET | `/api/skills/:skillId` | 获取全局 Skill 内容。支持 `?path=` 查询包内相对文件。 |
-| PUT | `/api/skills/:skillId` | 写入全局 Skill 内容。支持单文件或多文件对象字典。 |
-| DELETE | `/api/skills/:skillId` | 删除全局 Skill。 |
+| PUT | `/api/skills/:skillId` | 写入全局 Skill 内容（仅限 `admin`，否则返回 `403`）。 |
+| DELETE | `/api/skills/:skillId` | 删除全局 Skill（仅限 `admin`，否则返回 `403`）。 |
 | GET | `/api/nodes/:nodeId/skills/:skillId` | 获取指定节点专属 Skill 内容。 |
-| PUT | `/api/nodes/:nodeId/skills/:skillId` | 写入指定节点专属 Skill 内容。 |
-| DELETE | `/api/nodes/:nodeId/skills/:skillId` | 删除指定节点专属 Skill。 |
+| PUT | `/api/nodes/:nodeId/skills/:skillId` | 写入指定节点专属 Skill 内容（检查节点权限）。 |
+| DELETE | `/api/nodes/:nodeId/skills/:skillId` | 删除指定节点专属 Skill（检查节点权限）。 |
 
 GET 响应示例：
 
@@ -738,7 +775,7 @@ GET 响应示例：
 }
 ```
 
-PUT 请求体格式（单文件或多文件包）：
+PUT 请求体支持单文件格式（`{"content": "...", "path": "SKILL.md"}`）或多文件包字典：
 
 ```json
 {
@@ -755,11 +792,11 @@ PUT 请求体格式（单文件或多文件包）：
 | --- | --- | --- |
 | GET | `/api/extensions` | 列出 Hub 全局托管的 Extensions 列表。 |
 | GET | `/api/extensions/:extId` | 获取全局 Extension 代码。支持 `?path=` 查询包内相对文件。 |
-| PUT | `/api/extensions/:extId` | 写入全局 Extension 代码。支持单文件或多文件对象字典。 |
-| DELETE | `/api/extensions/:extId` | 删除全局 Extension。 |
+| PUT | `/api/extensions/:extId` | 写入全局 Extension 代码（仅限 `admin`，否则返回 `403`）。 |
+| DELETE | `/api/extensions/:extId` | 删除全局 Extension（仅限 `admin`，否则返回 `403`）。 |
 | GET | `/api/nodes/:nodeId/extensions/:extId` | 获取指定节点专属 Extension 内容。 |
-| PUT | `/api/nodes/:nodeId/extensions/:extId` | 写入指定节点专属 Extension 内容。 |
-| DELETE | `/api/nodes/:nodeId/extensions/:extId` | 删除指定节点专属 Extension。 |
+| PUT | `/api/nodes/:nodeId/extensions/:extId` | 写入指定节点专属 Extension 内容（检查节点权限）。 |
+| DELETE | `/api/nodes/:nodeId/extensions/:extId` | 删除指定节点专属 Extension（检查节点权限）。 |
 
 ---
 
@@ -767,20 +804,20 @@ PUT 请求体格式（单文件或多文件包）：
 
 ### GET /api/models/catalog
 
-查询可用模型供应商及其支持的模型目录。
+查询可用模型供应商及其支持的模型目录。Hub 自动合并内置模型目录、`<dataDir>/.agent/models-store.json` 与 `models.json` 自定义目录。
 
 ### 全局凭据管理路由（免指定 nodeId）
 
-- `POST /api/providers/:providerId/login`：发起供应商登录流程（请求体 `{"method": "api_key" | "oauth"}`）。
+- `POST /api/providers/:providerId/login`：发起供应商登录流程（Hub 直管支持 `{"method": "api_key"}`，请求 `oauth` 返回 `501`）。
 - `GET /api/provider-logins/:loginId`：查询登录流程状态。
 - `POST /api/provider-logins/:loginId/respond`：提交认证交互输入（请求体 `{"promptId": "...", "value": "..."}`）。
 - `DELETE /api/provider-logins/:loginId`：取消进行中的登录流程。
-- `DELETE /api/providers/:providerId/auth`：删除供应商认证凭据。
-- `GET /api/providers/:providerId/credentials`：查询供应商认证类型。
+- `DELETE /api/providers/:providerId/auth`：同步删除 SQLite 与 `<dataDir>/.agent/auth.json` 中的供应商凭据。
+- `GET /api/providers/:providerId/credentials`：查询合并后的有效认证类型。
 
 ### 节点专属凭据路由
 
-路由前缀为 `/api/nodes/:nodeId/providers/:providerId/*` 与 `/api/nodes/:nodeId/provider-logins/:loginId/*`，参数格式与全局路由保持完全一致。
+路由前缀为 `/api/nodes/:nodeId/providers/:providerId/*` 与 `/api/nodes/:nodeId/provider-logins/:loginId/*`，参数格式与全局路由保持一致。
 
 ---
 
@@ -788,7 +825,9 @@ PUT 请求体格式（单文件或多文件包）：
 
 ### 产物管理
 
-- `POST /api/sessions/:id/artifacts`：上传产物文件（Multipart 包含 `file`，可选 `botId` 与 `message`）。
+- `POST /api/sessions/:id/artifacts`：上传会话产物（单文件上限 `15MB`，成功返回 `201 Created`）。支持两种格式：
+  - 二进制流（`Content-Type: application/octet-stream`）：通过请求头 `x-artifact-filename`、`x-artifact-mime-type`、`x-artifact-bot-id`、`x-artifact-message`（或同名查询参数）传递元数据。
+  - JSON Base64（`Content-Type: application/json`）：提交 `{"filename": "...", "contentBase64": "...", "mimeType": "...", "botId": "...", "message": "..."}`。
 - `GET /api/sessions/:id/artifacts`：列出会话关联的产物记录列表。
 - `GET /api/artifacts/:artifactId/content`：下载产物文件二进制数据。
 
@@ -904,6 +943,8 @@ export interface NodeEnvRpcFunctions {
   envReleaseWorktree(input: EnvReleaseWorktreeInput): Promise<EnvReleaseWorktreeResult>;
 }
 ```
+
+此外，`NodeSessionRpcFunctions` 提供 `readResourcePackage(kind, id)` 接口，用于在 Hub 与 Node 之间按文件树同步 Skill 与 Extension 包（`ResourcePackageFile` 支持 UTF-8 `content`、二进制 `contentBase64` 与 `executable` 可执行位标记）。
 
 ### Hub 侧提供：HubEnvStreamFunctions
 

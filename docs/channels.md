@@ -242,6 +242,15 @@ X-Botd-Signature: sha256=<hex_digest>
 }
 ```
 
+## Web 界面配置
+
+用户可在会话界面可视化管理通知通道：
+
+1. 点击会话顶栏右侧的 `⋯`（更多操作）按钮。
+2. 选择「定时与触发器」，切换至「通知通道」标签页。
+3. 添加飞书、钉钉、Discord、Slack、Telegram 或通用 Webhook 通道。
+4. 切换打扰策略（`needed`、`always`、`never`），发送测试通知或查看底部 Outbox 投递日志。
+
 ## HTTP 管理接口
 
 ### 创建通道

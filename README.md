@@ -39,7 +39,7 @@ botd 采用脑手分离架构。Hub 负责状态持久化与调度，Node 负责
 ```mermaid
 flowchart TB
     subgraph Client["客户端"]
-        Web["Web 界面<br/>全双工对话 / ActiveWorkersBar / 检视抽屉"]
+        Web["Web 界面<br/>统一收件箱 / 全双工对话 / ActiveWorkersBar / 检视抽屉"]
     end
 
     subgraph Hub["Hub（中心大脑 · Pi Durable Harness over SQLite）"]
@@ -107,7 +107,9 @@ Watchdog 定时巡检任务状态。Watchdog 自动纠偏卡死任务并恢复�
 
 ## 快速开始
 
-开发环境要求 **Node.js ≥ 24.12.0** 与 **pnpm 10.34.9**。
+源码开发与 Hub 服务要求 **Node.js ≥ 24.12.0** 与 **pnpm 10.34.9**。
+
+独立分发的 `@botd/node` 守护进程与 `botd` CLI 支持 **Node.js ≥ 20.0.0**。
 
 ### 1. 启动 Web 与 Hub
 
@@ -127,7 +129,7 @@ pnpm build
 BOTD_PORT=3002 pnpm dev
 ```
 
-浏览器打开 `http://localhost:3001`。使用默认管理员账号登录。
+浏览器打开 `http://localhost:3001`。空库首次启动会在终端打印 `admin` 的一次性随机密码。指定 `BOTD_ADMIN_PASSWORD` 可初始化或覆盖 `admin` 密码。
 
 > [!IMPORTANT]
 > 本机开发必须指定 `BOTD_PORT=3002`。开发服务使用 3001 与 3002 端口，不占用 3000 端口。
@@ -146,10 +148,10 @@ Web 界面会显示节点在线状态。
 
 ### 3. 体验全双工协同
 
-1. 在 Web 界面选择默认助手。
+1. 在欢迎页点击主打角色卡片直聊，或在侧栏快速发起新对话。
 2. 发送耗时指令：`分析当前项目目录并运行测试`。
 3. Router 会调用 `spawn_worker` 派发后台任务。
-4. 顶部 `ActiveWorkersBar` 显示实时任务胶囊。
+4. 顶部 `ActiveWorkersBar` 零任务时隐藏，任务启动后展开单行胶囊栏。
 5. 你可以继续在前台输入其他消息，对话立即得到响应。
 6. 点击顶部胶囊打开 `WorkerInspectDrawer`，实时查看执行过程或发送插话指令。
 
@@ -157,7 +159,7 @@ Web 界面会显示节点在线状态。
 
 - [apps/hub](apps/hub)：Hub 服务端核心，包含 Pi Durable Harness、Router、Worker 与状态文档。
 - [apps/node](apps/node)：Node 守护进程，包含远程执行 RPC 服务与 Git Worktree 管理。
-- [apps/web](apps/web)：前端交互界面，提供全双工对话视图、ActiveWorkersBar 与 WorkerInspectDrawer。
+- [apps/web](apps/web)：前端交互界面，提供统一收件箱、全双工对话、模型胶囊与检视抽屉。
 - [packages/protocol](packages/protocol)：共享协议契约，包含 `env-rpc.ts` 与模型类型定义。
 
 ## 文档索引

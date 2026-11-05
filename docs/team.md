@@ -9,9 +9,10 @@ botd 支持多用户团队共享、多角色分身协同与全局知识召回。
 
 botd 采用双层全双工架构：
 
-1. **前台 Router 会话**：系统为每个分身维护前台会话。Router 物理剥夺耗时工具，仅保留秒级路由工具。Router 负责实时响应用户闲聊与指令分发。前台对话永不阻塞。
-2. **后台 Worker 会话**：Router 调用 `spawn_worker` 或 `delegate_to_bot` 启动后台 Worker。Worker 拥有完整代码执行与环境操作工具。Worker 执行复杂任务并在完成后自动向 Router 汇报。
-3. **协同插话**：Worker 执行期间，用户可随时向 Router 提问。用户调用 `steer_worker` 调整 Worker 方向，或调用 `stop_worker` 中止任务。
+1. **前台 Router 会话**：系统为每个分身维护前台会话。Router 移除编码工具，仅保留路由与工作流编排工具。前台对话永不阻塞。
+2. **群聊 `@分身` 热切换**：用户在同一会话输入 `@分身名`（或 `@分身名 /技能名`）时，Hub 动态热切换本轮应答分身的人设、模型与执行节点。
+3. **后台 Worker 会话**：Router 调用 `spawn_worker` 或 `delegate_to_bot` 启动后台 Worker。Worker 拥有完整编码工具并在完成后自动向 Router 汇报。
+4. **协同插话**：Worker 执行期间，用户可随时向 Router 提问，也可调用 `steer_worker` 调整方向或调用 `stop_worker` 中止任务。
 
 ```mermaid
 flowchart TD
@@ -40,20 +41,20 @@ flowchart TD
 
 ### 分身独立配置与持久状态
 
-每个分身具备完全独立的状态上下文：
+每个分身具备完全独立的状态上下文与边界：
 
-- `SYSTEM.md`：定义分身的角色定位、专业能力与行为准则。
-- `MEMORY.md`：记录分身的长期记忆与业务背景知识。
-- **专属模型配置**：每个分身可配置不同的提供商与模型规格。例如架构师使用推理模型，测试员使用高速模型。
-- **默认节点与目录**：每个分身绑定默认 Node 执行节点与工作区路径。
+- `SYSTEM.md` 与 `MEMORY.md`：定义分身角色行为准则与长期业务记忆。
+- **专属模型配置**：每个分身可独立配置提供商、模型规格与思考档位。
+- **默认节点与工作区**：每个分身绑定默认 Node 节点与 `workspaceDir`。会话也可单独绑定目录覆盖默认值，自动归入对应项目 Space。
+- **工具范围与热同步**：支持配置 `toolScope`（`all`、`readonly`、`custom`）与 `inheritSkills` 技能继承。修改配置后存量会话自动热同步生效。
 
 ### 团队共享与权限
 
 Hub 内置多用户协作支持：
 
 1. **用户角色**：
-   - `admin`：系统管理员。管理用户账户并创建团队成员。
-   - `member`：团队普通成员。创建私有会话并使用授权的 Bot。
+   - `admin`：系统管理员。管理用户账户、修改全局技能与扩展包，以及触发主动 Watchdog 巡检。
+   - `member`：团队普通成员。创建私有会话并使用自有或团队授权的 Bot。
 2. **节点归属**：
    - 节点所有者在本地执行 `botd nodes pair` 创建 6 位配对码。
    - 目标主机执行 `botd join` 连接 Hub。节点归属配对者私有。
@@ -72,10 +73,12 @@ Router 通过 `delegate_to_bot` 工具发起委派：
 
 ```typescript
 export interface DelegateToBotArgs {
-  targetBotId: string; // 目标角色分身 ID (例如 "tester")
-  title: string;       // 任务标题
-  task: string;        // 完整任务说明
-  threadKey?: string;  // 关联的渠道线程标识
+  targetBotId: string;              // 目标角色分身 ID (例如 "tester")
+  title: string;                    // 任务标题
+  task: string;                     // 完整任务说明
+  threadKey?: string;               // 关联的渠道线程标识
+  worktree?: boolean;               // 是否创建独立 Git Worktree
+  isolation?: 'off' | 'worktree';   // 工作区隔离模式
 }
 ```
 
@@ -98,14 +101,15 @@ export interface DelegateToBotArgs {
 
 ```typescript
 export interface RecallNode {
-  id: string;               // 节点唯一标识 (如 workerId 或 spillId)
-  kind: RecallKind;         // 节点类型: worker | trigger | entry | artifact | thread
-  title: string;            // 节点标题
-  summary: string;          // 1 到 3 行紧凑摘要 (内联展示层)
-  contentPreview: string;   // 正文内容预览 (截断上限 240 字符)
-  conversationId?: string;  // 保存完整 Transcript 的会话 ID
-  relatedIds: string[];     // 关联的下一跳节点 ID 列表
-  createdAt: number;        // 创建时间戳
+  id: string;                      // 节点唯一标识 (如 workerId 或 spillId)
+  kind: RecallKind;                // 节点类型: worker | trigger | entry | artifact | thread
+  title: string;                   // 节点标题
+  summary: string;                 // 1 到 3 行紧凑摘要 (内联展示层)
+  contentPreview: string;          // 正文内容预览 (初始 240 字符，完成汇报最高 480 字符)
+  conversationId?: string;         // 保存完整 Transcript 的会话 ID
+  relatedIds: string[];            // 关联的下一跳节点 ID 列表
+  data?: Record<string, unknown>;  // 附加元数据 (如工作树路径与分支名)
+  createdAt: number;               // 创建时间戳
 }
 ```
 
@@ -134,9 +138,10 @@ Router 会话内置以下协同管理工具：
 
 | 工具名 | 参数 | 功能说明 |
 | :--- | :--- | :--- |
-| `spawn_worker` | `title`, `task`, `cwd?`, `worktree?` | 启动当前分身名下的后台 Worker。 |
-| `delegate_to_bot` | `targetBotId`, `title`, `task` | 跨角色委派后台任务给其他分身。 |
+| `spawn_worker` | `title`, `task`, `forkContext?`, `threadKey?`, `cwd?`, `worktree?`, `isolation?` | 启动当前分身名下的后台 Worker。 |
+| `delegate_to_bot` | `targetBotId`, `title`, `task`, `threadKey?`, `worktree?`, `isolation?` | 跨角色委派后台任务给其他分身。 |
 | `steer_worker` | `workerId`, `message`, `mode?` | 向执行中的 Worker 发送插话指令。 |
 | `stop_worker` | `workerId` | 强制中止正在执行的 Worker。 |
 | `recall` | `id` | 按 ID 查询召回链节点与下一跳关联。 |
 | `ask_human` | `prompt`, `options?` | 向人类发起决策询问并挂起等待回复。 |
+| `SubagentWorkflow` | `script`, `args?`, `name?` | 执行带检查点缓存的多步骤持久工作流脚本。 |

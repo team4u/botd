@@ -9,7 +9,7 @@
 可以从这些工作开始：
 
 - 报告一个能重复出现的问题。
-- 改正无法按步骤执行的文档。
+- 改正无法按步骤运行的文档。
 - 改善一个常用界面的交互。
 - 为已知缺陷补充回归测试。
 
@@ -40,9 +40,9 @@ BOTD_PORT=3002 pnpm dev
 | 想改进的部分 | 入口 |
 | --- | --- |
 | 网页交互和消息展示 | `apps/web/src/` |
-| HTTP 接口和资源权限 | `apps/hub/src/index.ts`、`http-helpers.ts` |
-| 会话路由和多 Bot 协作 | `apps/hub/src/group-router.ts` |
-| 节点运行与工具调用 | `apps/node/src/daemon.ts`、`runtime.ts` |
+| HTTP 接口和资源权限 | `apps/hub/src/routes.ts`、`http-helpers.ts` |
+| 会话调度与多角色协同 | `apps/hub/src/harness/`（`runtime.ts`、`router-extension.ts`） |
+| 节点守护进程与远程环境 | `apps/node/src/daemon.ts`、`env-rpc-server.ts` |
 | CLI 命令 | `apps/node/src/cli/` |
 | 跨端类型和事件 | `packages/protocol/src/` |
 | 模型元数据 | `packages/models/src/` |
@@ -51,11 +51,11 @@ BOTD_PORT=3002 pnpm dev
 
 保持改动聚焦。协议、权限、调度或持久化行为变化时，检查其他端的调用方式。
 
-界面改动遵循 [AGENTS.md](AGENTS.md) 的控件规范。常规表单控件使用 `h-8 px-2.5 text-xs rounded-lg`。
+遵循 [AGENTS.md](AGENTS.md) 的设计原则与端口规范。
 
 修复行为缺陷时，优先增加能复现问题的测试。文档或低风险样式修改不需要为实现细节补测试。
 
-代码修改完成后，在根目录执行：
+代码修改完成后，在根目录运行：
 
 ```bash
 pnpm typecheck
@@ -63,7 +63,7 @@ pnpm build
 pnpm test
 ```
 
-[GitHub Actions](.github/workflows/ci.yml) 在 push 和 Pull Request 时执行这些检查。测试范围与人工验收方法见[测试指南](docs/testing.md)。
+[GitHub Actions](.github/workflows/ci.yml) 在 push 和 Pull Request 时运行这些检查。测试范围与人工验收方法见[测试指南](docs/testing.md)。
 
 ## 提交 Pull Request
 

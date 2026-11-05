@@ -18,11 +18,13 @@ Watchdog 周期巡检活跃任务，自动纠正卡死并恢复瞬态错误。
 
 ## SubagentWorkflow 持久工作流
 
-SubagentWorkflow 作为标准工具暴露给 Worker。
+`SubagentWorkflow` 作为标准工具同时暴露给前台 Router 与后台 Worker。
+
+工具入参包含 `script`、`args`（可选，透传至脚本）与 `name`（可选）。
 
 工具配置 `replay: "safe"` 属性。
 
-执行过程通过 `WorkflowRunDoc` 文档持久记录状态。
+执行过程通过 `WorkflowRunDoc` 文档持久记录状态，子步骤自动恢复完整编码工具集。
 
 Web 界面通过 `api.details` 实时显示进度。
 
@@ -48,9 +50,12 @@ log("开始准备环境");
 
 - `label`：步骤标签，参与生成唯一的步骤键。
 - `phase`：所属执行阶段。
-- `model`：指定特定模型（例如 `deepseek/deepseek-chat`）。
+- `model` 与 `effort`：覆盖步骤模型（如 `deepseek/deepseek-chat`）与思考预算档位。
+- `agentType`：声明子代理专职角色名称，自动注入对应角色指令。
+- `worktree` 与 `isolation`：设为 `worktree: true` 或 `isolation: "worktree"` 时分配独立工作树 `wf-<convId>`。未设 `isolation: "off"` 时默认继承父会话工作树。
+- `resume`：传入前序步骤的 `label`，复用同一持久子会话与工作树继续对话。即使进程崩溃重启，系统也会扫描恢复原持久子会话与工作树路径。
 - `schema`：结构化 JSON 约束。系统自动提取并检查返回值。
-- `gate`：门禁命令。系统在执行环境中执行该 Shell 命令。非零退出码判定步骤失败。
+- `gate`：门禁命令。步骤绑定工作树时自动进入该工作树执行命令，非零退出码判定步骤失败。
 
 #### 2. pipeline(items, ...stages)
 
@@ -179,29 +184,31 @@ Watchdog 承担系统的外部监控控制循环职责。
 
 实现位于 `apps/hub/src/harness/watchdog.ts`。
 
-WatchdogTask 作为常驻任务定期唤醒（默认间隔 60 秒）。
+Hub 启动后默认每隔 30 秒自动执行一轮 `runWatchdogPass`。
 
-系统也支持调用 `runWatchdogPass` 执行即时巡检。
+管理员也可通过接口或 CLI 触发即时巡检。
 
 ### 巡检指标与处置策略
 
-Watchdog 扫描所有 Worker 会话的 `LiveDoc` 状态：
+Watchdog 比对 `WatchdogProgressDoc` 进展签名并分页扫描全库会话：
 
 | 检测场景 | 判定条件 | 处置动作 |
 | :--- | :--- | :--- |
-| 超时卡死 | 会话处于繁忙状态且超过 5 分钟无进展 | 向 Worker 发送 `steer` 纠偏提示 |
-| 循环错误 | 连续 3 次发生工具执行错误 | 注入指令要求 Worker 修改策略 |
-| 瞬态错误 | `runFailure` 报告网络或模型瞬态失败 | 自动提交 `{ type: "continue" }` 恢复 |
-| 失控任务 | 多次纠偏后依旧处于超时无响应状态 | 调用 `abort` 强制终止并向父 Router 告警 |
+| 超时卡死 | 进展签名跨轮未变且持续超过 `maxStallMs`（默认 5 分钟） | 向任务发送 `steer` 纠偏提示并重置进展时间 |
+| 循环错误 | 近期工具调用错误达到阈值（默认 3 次） | 注入指令要求任务修改执行策略 |
+| 瞬态错误 | 事务分页扫描发现网络或模型瞬态中断 | 自动提交 `{ type: "continue" }` 恢复 |
+| 失控任务 | 近期工具调用错误达到阈值两倍（默认 6 次） | 调用 `abort` 强制终止并向父 Router 告警 |
+
+新任务首次观测仅记录进展基线，配置 24 小时预算也不会误触发纠偏。
 
 每次干预均记录到全局单例 `WatchdogLogDoc` 文档中。
 
 ### 系统健康诊断接口
 
-维护者或分身助手可调用 `diagnoseSystemHealth(harness)`。
+维护者或分身助手可调用 `diagnoseSystemHealth(harness)` 或访问 `GET /api/watchdog/health`（传入 `?runPass=1` 主动巡检仅限管理员）。
 
-该函数输出纯文本健康摘要：
+该接口输出结构化健康摘要：
 
 - 汇报当前受阻（blocked）的任务数量与详情。
-- 汇报正在超时的活跃 Worker 会话列表。
+- 汇报正在超时的活跃会话列表。
 - 汇报最近执行的干预动作与原因说明。

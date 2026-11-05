@@ -6,9 +6,9 @@
 
 ## 环境要求
 
-- Node.js `>=24.12.0`
-- pnpm `10.34.9`
-- Git
+- Monorepo 开发与 `@botd/hub`：Node.js `>=24.12.0`、pnpm `10.34.9` 与 Git。
+- 独立分发的 `@botd/node` 与 `@botd/protocol`：声明 `"engines": { "node": ">=20.0.0" }`。
+- 分发包兼容性约束：禁止引入高于 Node 20 的运行时依赖，也禁止使用 `import ... with { type: 'json' }` 语法。
 
 开发者在仓库根目录运行全部命令。
 
@@ -122,6 +122,9 @@ pnpm typecheck
 
 # 运行测试套件
 pnpm test
+
+# 运行 Node 20 分发兼容冒烟检查
+bash scripts/node20-smoke.sh
 ```
 
 ## 版本发布与不可变 CI 分发规范
@@ -131,7 +134,7 @@ botd 采用规范化的发版工作流。
 ### 核心设计原则
 
 - **GitHub Release 为唯一触发源**：本地不手动打 Git 标签。开发者禁止直接调用 `npm publish`。
-- **发布清单隔离**：仅发布 `@botd/protocol`、`@botd/models` 与 `@botd/node`。hub 与 web 保持私有，绝不发布到 npm。
+- **发布清单隔离**：仅按依赖拓扑顺序发布 `@botd/protocol` 与 `@botd/node`。`hub`、`web` 与 `models` 保持私有，绝不发布到 npm。
 - **全仓版本强一致**：发版脚本自动同步根目录与全部子包的版本号。
 - **分发标签隔离**：正式版本使用 `latest` 标签。预发布版本自动使用 `beta` 或 `alpha` 独立标签。
 - **不可变发布检查**：CI 逐包对比 npm 远端文件的 shasum 哈希值。哈希一致则跳过发布，哈希不一致则终止发布。

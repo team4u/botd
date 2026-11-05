@@ -11,9 +11,9 @@
 | 文档 | 说明 |
 | :--- | :--- |
 | [快速入门指南](getting-started.md) | 安装依赖、启动服务与配对第一个节点。 |
-| [用户协同指南](user-guide.md) | 使用全双工会话、派发后台任务、实时插话与查看执行进度。 |
+| [用户协同指南](user-guide.md) | 使用统一收件箱、分身直达卡片、模型思考胶囊、后台任务与实时插话。 |
 | [工作区指南](workspace.md) | Git Worktree 隔离机制与远端执行环境。 |
-| [模型与供应商](models.md) | 配置模型服务商与 API 密钥。 |
+| [模型与供应商](models.md) | 配置模型服务商凭据、动态模型目录与思考档位切换。 |
 
 ### 系统管理员与运维
 
@@ -31,7 +31,7 @@
 | :--- | :--- |
 | [自动化工作流](automation.md) | 编写 SubagentWorkflow 脚本与 Watchdog 自愈巡检。 |
 | [触发器与网关](triggers.md) | 配置 Webhook、定时 Cron 与一次性计划任务。 |
-| [外部渠道集成](channels.md) | 接入飞书、钉钉、Slack、Telegram 与企业微信。 |
+| [外部渠道集成](channels.md) | 接入飞书、钉钉、Discord、Slack、Telegram 与通用 Webhook。 |
 
 ### 核心开发者与扩展
 

@@ -116,6 +116,9 @@ export interface EventFilterPolicy {
 Worker 如果无法处理后续事件，可调用 `handbackToRouter`。
 系统退订该 Worker，并将事件重投给慢路径 Router。
 
+除智能体调用工具传入 `threadKey` 外，用户也可在聊天区 `ActiveWorkersBar` 点击「派发任务」，在表单中手动填写直通线程键。
+已订阅的线程键显示在任务胶囊（多键自动折叠为 `+N`）与 `WorkerInspectDrawer` 元信息栏中。
+
 ### 步骤 3：上下文内联与外溢
 
 系统使用 `formatEventInlineAndSpill` 控制注入上下文的体积。
@@ -200,6 +203,15 @@ botd 使用标准 5 段式空格分隔语法：
 
 1. `runAt`：标准 ISO 8601 时间戳（如 `2026-11-04T12:00:00Z`）。
 2. `delaySeconds`：相对当前时间的延时秒数（如 `3600`）。
+
+## Web 界面配置
+
+用户可在会话界面可视化管理触发器：
+
+1. 点击会话顶栏右侧的 `⋯`（更多操作）按钮。
+2. 选择「定时与触发器」，打开自动化配置弹窗的「触发器」标签页。
+3. 创建或编辑 `webhook`、`cron`、`once` 触发器，复制专属 Webhook 地址。
+4. 切换启用开关、手动触发一次测试或查阅入站事件收件箱记录。
 
 ## HTTP API 接口
 

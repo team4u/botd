@@ -32,11 +32,11 @@ flowchart TB
     subgraph Hub["Hub（中心大脑 · Pi Durable Harness over SQLite）"]
         ER["EventRouter<br/>1.快路径过滤 2.ThreadKey直通<br/>3.Inline&Spill 4.推测执行"]
         subgraph Harness["Pi Durable Harness (tablePrefix: pi_)"]
-            R["Router 前台会话<br/>常驻主会话 / 专项话题会话<br/>工具: spawn_worker / delegate_to_bot / recall / ask_human"]
+            R["Router 前台会话<br/>工具: spawn_worker / delegate_to_bot / recall / ask_human / SubagentWorkflow"]
             W1["Worker 后台会话 1<br/>fork 继承上下文<br/>工具: CodingTools + subagent + SubagentWorkflow"]
             W2["Worker 后台会话 2<br/>跨角色委派 / 订阅 PR 线程<br/>工具: CodingTools + subagent + SubagentWorkflow"]
             WD["WatchdogTask<br/>周期巡检 LiveDoc / 纠偏与自愈"]
-            Docs[("Transactional Docs<br/>TargetDoc / WorkerRegistryDoc<br/>RecallIndexDoc / AskDoc")]
+            Docs[("Transactional Docs<br/>TargetDoc / WorkerRegistryDoc / SessionRouterDoc<br/>RecallIndexDoc / AskDoc / WatchdogProgressDoc")]
         end
         REnv["RemoteExecutionEnv<br/>按 TargetDoc(nodeId, worktreePath) 路由"]
     end
@@ -125,22 +125,22 @@ sequenceDiagram
 
 ### 3.1 角色分身（Bot Personas）
 
-每个角色分身拥有独立的配置：
+每个角色分身拥有独立的配置与精确隔离边界：
 
-- 独立系统指令：读取分身目录下的 `SYSTEM.md`。
-- 独立记忆文件：读取分身目录下的 `MEMORY.md`。
-- 专属模型配置：指定默认模型服务商与模型名称。
-- 默认绑定节点与工作目录：定义任务的默认执行位置。
-- 会话结构：每个分身拥有一个常驻主会话与多个专项话题会话。
+- 独立系统指令与记忆：读取分身专属的 `SYSTEM.md` 与 `MEMORY.md`。
+- 专属模型与目录配置：指定默认模型服务商、模型名称、绑定节点与工作目录。
+- 精确扩展数组隔离：Router 与 Worker 均按分身 `enabledExtensions` 组装精确扩展数组，杜绝跨分身扩展污染。
+- 双层工具权限过滤（`toolScope`）：同时过滤 `modelTools` 与底层 `tools`（含 QuickJS `codemode` 桥接层）。支持 `all`（默认）、`readonly`（禁用 `write`、`edit`、`bash`）与 `custom`（仅开放 `customTools` 白名单）。
+- 存量会话热同步（`syncPersonas`）：修改分身配置、指令或凭据时，Hub 自动重配存量会话，下一轮生效。
 
 ### 3.2 Router 前台层
 
 Router 前台层负责即时沟通、意图识别与任务分发：
 
 - 核心实现位于 [router-extension.ts](../apps/hub/src/harness/router-extension.ts)。
-- 会话仅挂载 `botd-router` 扩展。
-- 系统物理移除 `CodingTools`（`read`、`write`、`edit`、`bash`）。
-- Router 遇到耗时编码任务必须调用 `spawn_worker`。
+- 会话挂载 `botd-router`、`SubagentWorkflow` 与分身启用的动态扩展。
+- 系统从前台 `modelTools` 移除 `CodingTools`（`read`、`write`、`edit`、`bash`）。
+- Router 遇到耗时编码任务必须调用 `spawn_worker` 或 `SubagentWorkflow`。
 - 前台会话在百毫秒内完成回复，不会阻塞后续消息。
 
 Router 专有工具列表：
@@ -150,7 +150,7 @@ Router 专有工具列表：
 | `spawn_worker` | 派发后台 Worker 会话 | 异步启动后台任务，立即返回任务标识。 |
 | `delegate_to_bot` | 跨角色分身委派任务 | 加载目标分身配置并启动后台 Worker。 |
 | `steer_worker` | 干预正在执行的 Worker | 向后台 Worker 注入指导指令。 |
-| `stop_worker` | 中止后台 Worker 任务 | 中止会话并释放关联的 Git Worktree。 |
+| `stop_worker` | 中止后台 Worker 任务 | 中止后台会话并将状态标记为 `aborted`。 |
 | `recall` | 检索历史或外溢上下文 | 按 ID 查询摘要、正文预览与关联节点。 |
 | `ask_human` | 发起人机确认请求 | 登记待确认事项，等待人工决策。 |
 
@@ -159,8 +159,8 @@ Router 专有工具列表：
 Worker 后台层负责执行复杂代码修改与长耗时任务：
 
 - 核心实现位于 [worker-extension.ts](../apps/hub/src/harness/worker-extension.ts)。
-- Worker 会话挂载 `botd-worker`、`CodingTools` 与 `SubagentWorkflow`。
-- 支持通过 `conversation.fork()` 零拷贝继承父会话的历史上下文。
+- Worker 会话挂载 `botd-worker`、`CodingTools`、`codemode` 与 `SubagentWorkflow`。
+- 支持通过 `conversation.fork()` 零拷贝继承上下文，并重置宿主扩展集以恢复编码工具。
 - Worker 拥有独立的 `ConversationId`，可以在后台并发执行。
 
 ### 3.4 完成自动汇报机制
@@ -169,9 +169,9 @@ Worker 执行结束时，`afterRun` 钩子自动处理汇报：
 
 1. 提取 Worker 最终回复文本。
 2. 创建 200 字以内的任务摘要。
-3. 将摘要与关联 ID 写入 `RecallIndexDoc`。
+3. 将摘要、前 480 字符正文预览与关联 ID 写入 `RecallIndexDoc`。
 4. 将父会话 `WorkerRegistryDoc` 中的状态更新为 `completed`。
-5. 向父 Router 会话提交格式化汇报：
+5. 向父 Router 会话提交格式化汇报（挂载工作树时附带分支与路径）：
    `[Worker Completed: <workerId> | <title>]`
 6. 汇报使用确定性 `requestId`，防止重启后重复通知。
 7. 父 Router 唤醒后向用户总结任务产出。
@@ -211,11 +211,16 @@ classDiagram
 
 | 文档名称 | 作用域 | Fork 策略 | 存储内容 |
 | :--- | :--- | :--- | :--- |
-| `TargetDoc` | `conversation` | `asOf` | 记录会话的角色分身、节点标识、工作目录与分支。 |
+| `TargetDoc` | `conversation` | `asOf` | 记录角色分身、节点标识、工作目录、工作树路径、分支名与订阅键。 |
 | `WorkerRegistryDoc` | `conversation` | `initial` | 记录 Router 派生的所有后台 Worker 状态表。 |
 | `AskDoc` | `conversation` | `initial` | 记录会话内待确认与已确认的人机交互请求。 |
+| `SessionRouterDoc` | `session` | 不适用 | 映射 Web 会话到 Router 会话，粘性存储会话级 `workspaceDir`。 |
 | `RecallIndexDoc` | `session` | 不适用 | 维护全局上下文召回索引，支持按跳检索。 |
 | `ThreadSubscriptionsDoc` | `session` | 不适用 | 维护外部事件线程到活跃 Worker 的多对多映射。 |
+| `SpillStoreDoc` | `session` | 不适用 | 按标识分片存储超长外部事件的原始载荷。 |
+| `WorkflowRunDoc` | `session` | 不适用 | 按执行标识记录 `SubagentWorkflow` 的阶段、日志与步骤账本。 |
+| `WatchdogProgressDoc` | `session` | 不适用 | 记录活跃任务的进展签名与最近进展时间戳。 |
+| `WatchdogLogDoc` | `session` | 不适用 | 记录 Watchdog 历次巡检干预动作与原因。 |
 
 ### 4.2 原子提交机制
 
@@ -227,12 +232,13 @@ classDiagram
 
 ### 4.3 会话原生原语与上下文控制
 
-运行时接入 `pi-durable` 原生会话操作原语：
+运行时接入 `pi-durable` 原生会话操作原语与主线路由策略：
 
-- **零拷贝 Fork（`forkConversation`）**：调用 `conv.fork(at)` 继承上下文并重定向 `TargetDoc`，派生独立会话。
-- **消息回滚（`rewindDurableSessionBeforeMessage`）**：编辑历史消息时，回滚上下文至指定锚点并重新计算。
-- **上下文重置与压缩（`resetConversation` / `compactConversation`）**：注入 `pi.reset` 标记重启上下文，支持手动触发压缩任务。
-- **机密注入执行环境（`SecretInjectingEnv`）**：执行命令时动态注入 `SecretStash` 中的活跃环境变量，实现零泄漏执行。
+- **合并凭据切流门槛**：Hub 合并 SQLite `provider_credentials` 与 `<dataDir>/.agent/auth.json` 凭据。存在任意有效凭据时，消息与触发器统一进入 Durable 运行时。
+- **群聊点名与斜杠引导**：消息携带 `@分身` 时动态热切换 `TargetDoc` 目标角色与节点。输入 `/<skillId>` 时自动改写提示词，引导模型调用 `load_skill`。
+- **磁盘多模态附件注入**：入站附件统一落盘为会话产物，数据库仅存轻量指针。图片构造多模态 `ImageContent` 块，全部附件追加 `[Attached Files]` 磁盘路径清单。
+- **零拷贝 Fork 与消息回滚**：`conv.fork(at)` 零拷贝派生新会话，`rewindDurableSessionBeforeMessage` 支持编辑历史消息并回滚重跑。
+- **上下文重置、压缩与机密注入**：支持 `/new` 重置与 `/compact` 异步压缩，`SecretInjectingEnv` 在命令执行时注入 `SecretStash` 临时机密变量。
 
 ## 5. 脑手分离协议与远程执行环境
 
@@ -263,32 +269,33 @@ classDiagram
 
 `RemoteExecutionEnv` 实现 `pi-durable` 的 `ExecutionEnv` 接口：
 
-- 标识符格式固定为 `node:<nodeId>`。
+- 标识符格式固定为 `remote:<nodeId>`。
 - 内置工具根据目标节点与路径执行写入串行化。
-- 工作目录自动指向 `target.worktreePath` 或 `target.cwd`。
+- 工作目录自动指向 `target.worktreePath` 或 `target.cwd`，并注入 `BOTD_SESSION_ID` 与 `BOTD_BOT_ID`。
+- `exec` 订阅取消信号。任务取消时立即调用 `envAbortExec` 终止远端进程树，并脱离取消信号执行清理动作。
 
 ### 5.3 节点离线韧性（BYOM）
 
-系统支持自带设备（BYOM）的离线恢复：
+系统支持自带设备（BYOM）的离线恢复与严格边界隔离：
 
-- 节点离线时，文件与命令操作不会立即抛错。
-- 系统进入挂起等待状态，等待节点重连。
+- 绑定远端节点（`nodeId !== "local"`）的会话在节点离线时绝不回退到 Hub 本地目录。
+- 文件读写、命令执行与首次工作树挂载均进入挂起等待状态，等待节点重连。
 - 系统监听 Chord 取消信号。用户取消时立即中止等待。
 - 节点重连后，挂起的执行流程自动恢复。
 
 ## 6. Git Worktree 并发隔离机制
 
-多个 Worker 同时修改同一代码仓库时，传统单目录锁会导致严重的排队问题。
+多个任务同时修改同一代码仓库时，传统单目录锁会导致严重的排队问题。
 
-botd 采用 Git Worktree 隔离方案解决并发写入冲突。
+botd 在全工具链路支持 Git Worktree 隔离方案，解决并发写入冲突。
 
 ```mermaid
 flowchart TD
     Repo["主代码仓库目录<br/>/projects/my-repo (main 分支)"]
     W1["Worker 1 (修复用户认证)"]
     W2["Worker 2 (编写系统测试)"]
-    WT1[".botd-worktrees/w-1<br/>分支: botd-w-1"]
-    WT2[".botd-worktrees/w-2<br/>分支: botd-w-2"]
+    WT1[".botd-worktrees/w-1-10<br/>分支: botd/w-1-10"]
+    WT2[".botd-worktrees/w-2-11<br/>分支: botd/w-2-11"]
 
     W1 -->|"envAcquireWorktree"| WT1
     W2 -->|"envAcquireWorktree"| WT2
@@ -296,22 +303,18 @@ flowchart TD
     WT2 -.->|"独立工作目录与索引"| Repo
 ```
 
-### 6.1 隔离流程
+### 6.1 全工具隔离矩阵与惰性挂载
 
-1. Router 调用 `spawn_worker` 并指定 `worktree: true`。
-2. Hub 向目标节点发送 `envAcquireWorktree` 请求。
-3. Node 执行 `git worktree add -B <branch> <path> HEAD`。
-4. 隔离目录路径格式为 `<repoDir>/.botd-worktrees/<workerId>`。
-5. Node 将新路径写入 Worker 的 `TargetDoc.worktreePath`。
-6. Worker 在独立工作树中执行文件读写与测试命令。
+1. `spawn_worker`、`delegate_to_bot`、`subagent` 与 `SubagentWorkflow` 的 `agent()` 步骤均支持 `worktree: true` 或 `isolation: "worktree"`。
+2. 工具在事务中预计算工作树路径 `<repoDir>/.botd-worktrees/<id>` 与分支 `botd/<id>`，写入 `TargetDoc` 与注册表文档。
+3. 未显式声明 `isolation: "off"` 时，`subagent` 与工作流子步骤默认继承父会话的工作树路径，防止子任务跳回主检出目录。
+4. 首次解析会话 `ExecutionEnv` 时，Hub 惰性且幂等地调用 `envAcquireWorktree` 创建工作树并缓存结果。
+5. 进程崩溃重放时，工具直接从持久文档恢复工作树路径与分支元数据。
 
-### 6.2 资源释放
+### 6.2 工作树保留与显式清理
 
-1. 用户中止 Worker 任务或任务执行完毕。
-2. Hub 调用 `envReleaseWorktree` 接口。
-3. Node 执行 `git worktree remove --force <path>`。
-4. Node 执行 `git worktree prune` 移除工作树记录。
-5. Node 移除对应的临时开发分支。
+1. 任务完成或调用 `stop_worker` 中止后，系统默认保留工作树目录与分支，保护未合并的代码改动。
+2. 审查或合并完成后，可通过节点 `envReleaseWorktree` 接口或 Git 命令移除工作树与临时分支。
 
 ## 7. 外部事件驱动流水线（EventRouter）
 
@@ -350,13 +353,13 @@ flowchart LR
 
 ### 7.3 内联与外溢（Inline & Spill）
 
-系统控制注入模型的上下文长度：
+系统控制注入模型的上下文长度并保障事件幂等投递：
 
+- 携带事件 ID 时按 `id:<eventId>` 去重，匿名事件分配单调递增序号避免同长摘要碰撞。
 - 默认仅内联事件 ID、标题与前 120 字符摘要。
-- 超长载荷自动写入 `SpillStoreDoc`。
-- 系统在消息末尾附带召回标识：
-  `[Spilled: <spillId> | Call recall({ id: "<spillId>" })]`。
-- 模型通过 `recall` 工具按需拉取完整载荷。
+- 超长载荷先持久化写入 `SpillStoreDoc`，再在消息末尾附带召回标识：
+  `[Spilled: <spillId> | Call recall({ "id": "<spillId>" }) to read full content]`。
+- 无线程订阅的常规事件异步提交至目标 Router 会话，模型可按需调用 `recall` 拉取完整载荷。
 
 ### 7.4 推测执行（Speculative Execution）
 
@@ -373,30 +376,31 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Timer["WatchdogTask 定时唤醒<br/>(默认每 60 秒巡检一次)"] --> Scan["扫描活跃 Worker 与 LiveDoc"]
-    Scan --> C1{"无进展时长 > maxStallMs?"}
-    C1 -->|"是"| S1["提交 steer 指令纠偏<br/>多次超时则强制中止并告警"]
+    Timer["Watchdog 周期唤醒<br/>(Hub 默认每 30 秒巡检一次)"] --> Scan["比对 WatchdogProgressDoc 签名与分页扫描"]
+    Scan --> C1{"签名未变且超 maxStallMs?"}
+    C1 -->|"是"| S1["提交 steer 指令纠偏并重置进展时间"]
     C1 -->|"否"| C2{"检测到瞬态模型报错?"}
-    C2 -->|"是"| S2["提交 continue 指令自动恢复"]
-    C2 -->|"否"| C3{"连续工具调用错误?"}
-    C3 -->|"是"| S3["提交 steer 指令调整执行策略"]
-    C3 -->|"否"| Log["记录健康状态至 WatchdogLogDoc"]
+    C2 -->|"是"| S2["分页扫描命中并提交 continue 自动恢复"]
+    C2 -->|"否"| C3{"近期工具错误连续超限?"}
+    C3 -->|"达阈值 2 倍 (默认 6 次)"| S3["强制 abort 并向父 Router 发送告警"]
+    C3 -->|"达阈值 (默认 3 次)"| S4["提交 steer 指令调整执行策略"]
+    C3 -->|"正常"| Log["记录状态至 WatchdogLogDoc"]
 ```
 
 ### 8.1 巡检机制
 
-`WatchdogTask` 作为常驻任务执行：
+Watchdog 作为后台控制循环持续执行：
 
-- 使用 `runtime.sleepUntil` 维持固定巡检周期（默认 60 秒）。
-- 支持通过 `runWatchdogPass` 执行按需体检。
-- 检查所有活跃 Worker 的 `LiveDoc` 状态。
+- Hub 启动后默认每隔 30 秒自动执行一轮 `runWatchdogPass`。
+- 管理员也可通过接口主动触发即时体检。
+- `WatchdogProgressDoc` 记录回合数、工具状态与输出长度签名。新任务首次观测仅创建基线，避免误判。
 
 ### 8.2 错误处置策略
 
-- **卡死检测**：Worker 处于执行状态超过 `maxStallMs` 且无进展时，系统自动发送纠偏指令。
-- **连续纠偏失败**：纠偏无效后，Watchdog 强制中止任务并向父 Router 发送告警。
-- **瞬态错误恢复**：检测到网络抖动或临时模型错误时，自动提交 `continue` 恢复执行。
-- **健康诊断接口**：提供 `diagnoseSystemHealth` 接口，支持用自然语言查询系统执行状态。
+- **卡死检测**：进展签名跨轮未变且超过 `maxStallMs`（默认 5 分钟）时，系统自动发送 `steer` 指令。已请求中止的任务自动跳过。
+- **失控任务中止**：近期工具调用错误达阈值两倍（默认 6 次）时，Watchdog 强制中止任务并告警。
+- **瞬态错误分页恢复**：事务游标分页扫描全库会话。检测到瞬态模型错误时，系统自动提交 `continue` 恢复执行。
+- **健康诊断接口**：提供 `diagnoseSystemHealth` 接口，汇总受阻任务与近期干预记录。
 
 ## 9. 核心源码索引
 

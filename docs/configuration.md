@@ -49,7 +49,7 @@
 | `BOTD_HUB_DATA_DIR` | `~/.botd` | Hub 数据主目录。 |
 | `BOTD_DB_PATH` | `<数据目录>/hub.sqlite` | SQLite 数据库文件保存路径。 |
 | `BOTD_WEB_DIR` | `apps/web/dist` | 前端静态页面编译产物路径。 |
-| `BOTD_ADMIN_PASSWORD` | 无 | 首次启动数据库自举管理员密码。 |
+| `BOTD_ADMIN_PASSWORD` | 无 | 初始化或覆盖 `admin` 管理员密码。 |
 | `BOTD_PUBLIC_URL` | 无 | 出站通知中公开访问链接前缀。 |
 | `BOTD_BASE_URL` | 无 | 替代 `BOTD_PUBLIC_URL` 的备用地址前缀。 |
 | `BOTD_ASK_SECRET` | 无 | 人工确认公开回调的 HMAC 签名密钥。 |
@@ -63,7 +63,7 @@
 
 1. 数据库路径：优先级为编程参数 > `BOTD_DB_PATH` > `<BOTD_HUB_DATA_DIR>/hub.sqlite`。`:memory:` 表示测试内存库。
 2. 产物目录：产物固定保存在 `<BOTD_HUB_DATA_DIR>/artifacts/` 目录。
-3. 自举密码：`BOTD_ADMIN_PASSWORD` 仅在 `users` 表为空时生效。未指定时 Hub 在控制台打印一次性随机密码。
+3. 管理员密码：指定 `BOTD_ADMIN_PASSWORD` 会在空库创建 `admin`，也会在非空库重启时覆盖 `admin` 密码。未指定时，仅在 `users` 表为空时创建并打印一次性随机密码。
 4. 公开回调前缀解析顺序：`BOTD_PUBLIC_URL` > `BOTD_BASE_URL` > `http://localhost:<PORT>`。
 5. 出站通知退避算法：每次失败后等待毫秒数为 `BOTD_OUTBOX_RETRY_MS × 2^(n-1)`，上限 300000 毫秒。超过最大尝试次数后记录标记为 `dead`。
 
@@ -116,15 +116,21 @@ Hub 与 Node 默认共享或独立使用 `~/.botd` 目录。
 ```text
 ~/.botd/
 ├── hub.sqlite                 # Hub SQLite 核心数据库文件
-├── skills/                    # Hub 托管技能包目录（多文件，文件系统为唯一事实源）
+├── hub.sqlite.durable.sqlite  # Pi Durable 引擎持久化状态库（随 dbPath 派生）
+├── models.json                # Hub 可选自定义模型目录配置
+├── .agent/                    # 兼容的本地智能体凭据与模型目录（0600）
+│   ├── auth.json              # 模型供应商凭据合并回退源
+│   ├── models-store.json      # 自定义网关与模型目录（保留 thinkingLevelMap）
+│   └── models.json            # 补充自定义模型定义
+├── skills/                    # 托管或节点本地技能包目录（多文件，文件系统为事实源）
 │   └── <skillId>/
 │       ├── SKILL.md
 │       └── references/*.md
-├── extensions/                # Hub 托管扩展包目录（多文件 TypeScript）
+├── extensions/                # 托管或节点本地扩展包目录（多文件 TypeScript）
 │   └── <extId>/
 │       ├── index.ts
 │       └── helper.ts
-├── artifacts/                 # Hub 统一产物文件保存目录
+├── artifacts/                 # Hub 统一产物与消息附件二进制保存目录
 │   └── <artifactId>           # 原始产物二进制载荷
 ├── agent.sock                 # Node 守护进程 IPC 本地 Socket（Windows 下为命名管道）
 ├── ipc-token                  # Node 本地 IPC 通信鉴权令牌（0600）
@@ -132,20 +138,14 @@ Hub 与 Node 默认共享或独立使用 `~/.botd` 目录。
 ├── daemon.log                 # Node 守护进程后台执行日志文件
 ├── MEMORY.md                  # Node 节点级共享记忆文件
 ├── cli.json                   # CLI 保存的 Hub 登录态会话凭据（0600）
-├── bots/                      # 本地承载的 Bot 资产目录
-│   └── <botId>/
-│       ├── bot.json           # Bot 基础元数据配置
-│       ├── SYSTEM.md          # Bot 独立系统提示词
-│       ├── MEMORY.md          # Bot 长期记忆文件
-│       ├── memory/            # Bot 分层渐进披露的主题记忆归档目录
-│       │   └── <topic>.md
-│       └── workspace/         # Bot 默认私有工作区目录
-├── skills/                    # 本地 Node 专属 Skills 资产目录
-│   └── <skillId>/
-│       └── SKILL.md
-└── extensions/                # 本地 Node 专属 Extensions 资产目录
-    └── <extId>/
-        └── index.ts
+└── bots/                      # 本地承载的 Bot 资产目录
+    └── <botId>/
+        ├── bot.json           # Bot 基础元数据配置
+        ├── SYSTEM.md          # Bot 独立系统提示词
+        ├── MEMORY.md          # Bot 长期记忆文件
+        ├── memory/            # Bot 分层渐进披露的主题记忆归档目录
+        │   └── <topic>.md
+        └── workspace/         # Bot 默认私有工作区目录
 ```
 
 ---
@@ -196,8 +196,9 @@ botd 采用 Hub 集中凭据管理机制：
 
 ### 集中凭据保存
 
-- 保存位置：`hub.sqlite` 中的 `provider_credentials` 表。
+- 保存位置：`hub.sqlite` 的 `provider_credentials` 表，并自动合并读取 `<dataDir>/.agent/auth.json` 存量凭据。
 - 架构定位：Hub 作为系统大脑统一执行模型推理。Node 执行端不保存密钥明文。
-- 认证类型：支持 API Key 与 OAuth 认证。
-- 直管接口：CLI `botd providers login <providerId>` 或 Web 控制台配置。
-- 别名路由：支持通过 `botd providers login <nodeId> <providerId>` 绑定节点别名。凭据统一保存至 Hub 数据库。
+- 就绪门控：Hub 通过 `listEffectiveProviderCredentials` 汇总双源凭据，判定 Durable 运行时是否就绪。
+- 双源清理：注销供应商凭据时同步清除 SQLite 表记录与 `.agent/auth.json` 条目。
+- 直管接口：CLI `botd providers login <providerId> --method api_key` 或 Web 全局配置面板。
+- 别名路由：支持通过 `botd providers login <nodeId> <providerId> --method <api_key|oauth>` 绑定节点别名。

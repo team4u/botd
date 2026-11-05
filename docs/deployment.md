@@ -48,7 +48,7 @@ curl -fLO https://raw.githubusercontent.com/team4u/botd/main/deploy/docker-compo
 echo 'BOTD_ADMIN_PASSWORD=your-secure-password' > .env
 ```
 
-`BOTD_ADMIN_PASSWORD` 必须提供。管理员密码留空时，Hub 会创建随机密码并打印到日志。
+指定 `BOTD_ADMIN_PASSWORD` 会初始化或覆盖 `admin` 密码。留空时仅空库首次启动创建随机密码并打印到日志，后续重启保持原密码。
 
 使用稳定版本标签启动 Hub：
 
@@ -141,7 +141,7 @@ volumes:
 
 | 数据卷 | 挂载路径 | 保存内容 |
 | --- | --- | --- |
-| `botd-hub-data` | `/data` | Hub SQLite 数据库、产物文件与加密凭据 |
+| `botd-hub-data` | `/data` | `hub.sqlite`、`hub.sqlite.durable.sqlite`、`artifacts/`、全局 `skills/` 与 `extensions/` 包及 `.agent/` 配置（`0600`） |
 | `botd-node-data` | `/data/node` | Node 节点身份配置、工作区与日志 |
 
 ### 在线备份 SQLite 数据库
@@ -245,7 +245,7 @@ botd.example.com {
 
 ## Systemd 服务托管
 
-源码部署模式下，管理员使用 systemd 托管服务。
+源码部署模式下，管理员使用 systemd 托管服务。Hub 原生运行要求宿主机安装 Node.js ≥ 24.12.0。独立分发的 `@botd/node` 守护进程支持 Node.js ≥ 20.0.0。
 
 ### 托管 Hub 服务
 
