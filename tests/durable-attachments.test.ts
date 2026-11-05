@@ -282,7 +282,9 @@ test('2. non-image attachment (csv bill) is visible to the durable model with it
   const entries = await routerEntries(f);
   const text = lastUserEntryContent(entries) as string;
   const sizeBytes = Buffer.byteLength(CSV_CONTENT, 'utf8');
-  assert.match(text, new RegExp(`^\\[Attached Files\\]:\\n- statement\\.csv \\(text/csv, ${sizeBytes} bytes\\) -> path: (\\S+)$`));
+  // 行尾在 storagePath 之后还拼接了 artifactId 拉取指引（远端 Node 提示），
+  // path 捕获组在空白处自然截断。
+  assert.match(text, new RegExp(`^\\[Attached Files\\]:\\n- statement\\.csv \\(text/csv, ${sizeBytes} bytes\\) -> path: (\\S+)`));
   const pathMatch = /-> path: (\S+)/.exec(text);
   assert.ok(pathMatch, 'disk path must be present');
 

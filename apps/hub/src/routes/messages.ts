@@ -256,16 +256,19 @@ export function registerMessageRoutes(
       message: msgResult.message,
     });
 
-    // 前置校验：目标 Bot 未配置模型，或其服务商无任何凭据时，立即显式报错，
-    // 绝不静默挂起（测试注入 runtime 的场景不拦截，交由注入方自行验证）。
-    if (!ctx.durableInjected && targetBotId) {
+    // 前置校验（仅 Durable 主线生效时）：目标 Bot 未配置模型，或其服务商在 Hub 侧
+    // 无任何凭据时，立即显式报错，绝不静默挂起。Hub 无任何凭据时消息本就走
+    // GroupRouter→节点执行路径（节点自带凭据），不在 Hub 侧拦截。
+    const durableMainlineActive =
+      ctx.durableInjected || listEffectiveProviderCredentials(db).length > 0;
+    if (durableMainlineActive && !ctx.durableInjected && targetBotId) {
       const bot = db.getBot(targetBotId);
       if (
         bot &&
         (!bot.modelProvider?.trim() ||
           !bot.modelId?.trim() ||
-          !listEffectiveProviderCredentials(db).some((c) => c.providerId === bot.modelProvider) &&
-            !loadStoredProviders(db.getDataDir()).some((p) => p.id === bot.modelProvider))
+          (!listEffectiveProviderCredentials(db).some((c) => c.providerId === bot.modelProvider) &&
+            !loadStoredProviders(db.getDataDir()).some((p) => p.id === bot.modelProvider)))
       ) {
         const errorMsg = db.createMessage({
           id: `msg_${randomUUID()}`,
