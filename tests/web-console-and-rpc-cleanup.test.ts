@@ -22,8 +22,7 @@ const req = createRequire(import.meta.resolve('../apps/web/package.json'));
 const React = req('react');
 const ReactDOMServer = req('react-dom/server');
 
-const { ActiveWorkersBar } = await import('../apps/web/src/components/ActiveWorkersBar.js' as any);
-const { WorkerInspectDrawer } = await import('../apps/web/src/components/WorkerInspectDrawer.js' as any);
+const { WorkersDrawer } = await import('../apps/web/src/components/WorkersDrawer.js' as any);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,7 +30,7 @@ const repoRoot = path.resolve(__dirname, '..');
 const webSrc = path.resolve(repoRoot, 'apps/web/src');
 
 // ============================================================
-// 1. ActiveWorkersBar SSR：派发任务 + Watchdog 巡检入口
+// 1. WorkersDrawer SSR（列表视图）：worker 行 + 派发 / Watchdog 巡检入口
 // ============================================================
 
 function makeWorker(overrides: Record<string, unknown> = {}) {
@@ -49,11 +48,14 @@ function makeWorker(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderWorkersBar(extraProps: Record<string, unknown> = {}): string {
+function renderWorkersDrawer(extraProps: Record<string, unknown> = {}): string {
   const noop = () => {};
   return ReactDOMServer.renderToStaticMarkup(
-    React.createElement(ActiveWorkersBar as React.FC<Record<string, unknown>>, {
+    React.createElement(WorkersDrawer as React.FC<Record<string, unknown>>, {
+      isOpen: true,
       workers: [makeWorker()],
+      botMap: new Map(),
+      nodeMap: new Map(),
       onSelectWorker: noop,
       onStopWorker: noop,
       onSpawnWorker: async () => true,
@@ -63,34 +65,34 @@ function renderWorkersBar(extraProps: Record<string, unknown> = {}): string {
   );
 }
 
-test('ActiveWorkersBar SSR: 有 Worker 时整行只给胶囊，巡检/派发不再常驻（收进顶栏 ··· 菜单）', () => {
-  const html = renderWorkersBar();
+test('WorkersDrawer SSR（列表）: 有 Worker 时渲染任务行与巡检/派发按钮', () => {
+  const html = renderWorkersDrawer();
 
-  // Worker 胶囊本尊
-  assert.match(html, /修复鉴权模块/, 'worker 胶囊标题应渲染');
+  // worker 行本尊
+  assert.match(html, /修复鉴权模块/, 'worker 行标题应渲染');
+  assert.match(html, /后台子任务/, '抽屉标题应渲染');
 
-  // 巡检/派发按钮不再随胶囊常驻（手机端顶栏不再被挤压；零 Worker 展开态与 ··· 菜单仍可入口）
-  assert.doesNotMatch(html, /title="运行 Watchdog 巡检"/, '有任务时不应常驻巡检按钮');
-  assert.doesNotMatch(html, /aria-label="派发后台 Worker"/, '有任务时不应常驻派发按钮');
+  // 列表顶栏常驻巡检与派发入口（横栏时代的挤压问题不复存在，抽屉里可以常驻）
+  assert.match(html, /title="运行 Watchdog 巡检"/, '列表顶栏应有巡检按钮');
+  assert.match(html, /aria-label="派发后台 Worker"/, '列表顶栏应有派发按钮');
 });
 
-test('ActiveWorkersBar SSR: 零 Worker 时仍可派发首个任务与巡检', () => {
-  const html = renderWorkersBar({ workers: [] });
+test('WorkersDrawer SSR（列表）: 零 Worker 时仍可派发首个任务与巡检', () => {
+  const html = renderWorkersDrawer({ workers: [] });
   assert.match(html, /aria-label="派发后台 Worker"/);
   assert.match(html, /title="运行 Watchdog 巡检"/);
-  assert.doesNotMatch(html, /0 个后台任务已完成/);
-  assert.equal(renderWorkersBar({ workers: [], onSpawnWorker: undefined, onRunWatchdog: undefined }), '');
+  assert.match(html, /暂无后台任务/, '空态应提示暂无后台任务');
 });
 
-test('ActiveWorkersBar SSR: 未传入回调时不渲染动作入口（保持既有外观）', () => {
-  const html = renderWorkersBar({ onSpawnWorker: undefined, onRunWatchdog: undefined });
+test('WorkersDrawer SSR（列表）: 未传入回调时不渲染动作入口', () => {
+  const html = renderWorkersDrawer({ onSpawnWorker: undefined, onRunWatchdog: undefined });
   assert.doesNotMatch(html, /派发后台 Worker/, '未提供 onSpawnWorker 时不应渲染派发按钮');
   assert.doesNotMatch(html, /运行 Watchdog 巡检/, '未提供 onRunWatchdog 时不应渲染巡检按钮');
 });
 
-test('ActiveWorkersBar SSR: 派发表单打开时渲染标题/指令/worktree/threadKey/立即派发', () => {
-  // SSR 无法点击；直接验证源码结构（打开 showSpawnForm 后渲染的表单字段与提交行为）
-  const source = readFileSync(path.join(webSrc, 'components/ActiveWorkersBar.tsx'), 'utf-8');
+test('WorkersDrawer 源码: 派发表单含标题/指令/worktree/threadKey/立即派发', () => {
+  // SSR 无法点击；直接验证源码结构（展开派发表单后渲染的字段与提交行为）
+  const source = readFileSync(path.join(webSrc, 'components/WorkersDrawer.tsx'), 'utf-8');
 
   assert.match(source, /任务标题（如：修复鉴权模块）/, '标题输入框 placeholder 应存在');
   assert.match(source, /后台任务指令\.\.\./, '任务指令 placeholder 应存在');
@@ -104,30 +106,71 @@ test('ActiveWorkersBar SSR: 派发表单打开时渲染标题/指令/worktree/th
   );
 });
 
+test('WorkersDrawer SSR（列表）: 失败置顶，终态折叠为分组头', () => {
+  const html = renderWorkersDrawer({
+    workers: [
+      makeWorker({ workerId: 'w-done', title: '已完成的任务', status: 'completed' }),
+      makeWorker({ workerId: 'w-bad', title: '失败的任务', status: 'failed' }),
+    ],
+  });
+
+  // 终态默认折叠为分组头「已完成 · N」，不直接铺开
+  assert.match(html, /已完成 · 1/, '终态应折叠为分组头');
+  assert.doesNotMatch(html, /已完成的任务/, '终态行默认不渲染（折叠）');
+
+  // 失败任务置顶直出（含详情入口）
+  const failedIdx = html.indexOf('失败的任务');
+  const doneGroupIdx = html.indexOf('已完成 · 1');
+  assert.ok(failedIdx >= 0, '失败任务应渲染');
+  assert.ok(doneGroupIdx > failedIdx, '失败任务应排在终态分组之前');
+});
+
 // ============================================================
-// 2. WorkerInspectDrawer SSR：Watchdog 巡检动作
+// 2. WorkersDrawer SSR（详情视图）：Watchdog 巡检动作 + 遥测徽标
 // ============================================================
 
-test('WorkerInspectDrawer SSR: 提供回调时渲染 Watchdog 巡检动作', () => {
+test('WorkersDrawer SSR（详情）: initialWorkerId 直达详情并渲染 Watchdog 巡检动作', () => {
   const noop = () => {};
   const html = ReactDOMServer.renderToStaticMarkup(
-    React.createElement(WorkerInspectDrawer as React.FC<Record<string, unknown>>, {
+    React.createElement(WorkersDrawer as React.FC<Record<string, unknown>>, {
       isOpen: true,
-      worker: makeWorker({ toolUses: 3, tokens: 1234 }),
-      onClose: noop,
-      onSteer: async () => true,
-      onStop: noop,
+      workers: [makeWorker({ toolUses: 3, tokens: 1234 })],
+      botMap: new Map(),
+      nodeMap: new Map(),
+      initialWorkerId: 'w-1',
+      onSelectWorker: noop,
+      onStopWorker: noop,
+      onSpawnWorker: async () => true,
       onRunWatchdog: async () => ({ healthy: true, summary: 'System healthy.' }),
+      onClose: noop,
     })
   );
 
-  // Watchdog 巡检动作（抽屉头部按钮）
-  assert.match(html, /Watchdog 巡检/, '抽屉头部应渲染「Watchdog 巡检」动作');
+  // 详情视图：返回按钮 + 标题 + Watchdog 巡检动作
+  assert.match(html, /aria-label="返回任务列表"/, '详情视图应有返回列表按钮');
+  assert.match(html, /修复鉴权模块/, '详情视图应渲染 worker 标题');
+  assert.match(html, /Watchdog 巡检/, '详情顶栏应渲染「Watchdog 巡检」动作');
   assert.match(html, /title="运行 Watchdog 巡检"/, '巡检按钮应带 title 提示');
 
   // 遥测徽标仍正常渲染
   assert.match(html, /3 次工具调用/, '工具调用次数徽标应渲染');
   assert.match(html, /Tokens 1,234/, 'Token 徽标应渲染');
+});
+
+test('WorkersDrawer SSR: isOpen=false 时不渲染', () => {
+  const noop = () => {};
+  const html = ReactDOMServer.renderToStaticMarkup(
+    React.createElement(WorkersDrawer as React.FC<Record<string, unknown>>, {
+      isOpen: false,
+      workers: [makeWorker()],
+      botMap: new Map(),
+      nodeMap: new Map(),
+      onSelectWorker: noop,
+      onStopWorker: noop,
+      onClose: noop,
+    })
+  );
+  assert.equal(html, '');
 });
 
 // ============================================================
@@ -150,10 +193,32 @@ test('daemon.ts: Node 侧废弃 RPC 死桩已全部移除', () => {
   }
 });
 
-test('ChatView.tsx: 派发与巡检回调已接线到胶囊条与检视抽屉', () => {
+test('ChatView.tsx: 派发与巡检回调已接线到后台子任务抽屉', () => {
   const source = readFileSync(path.join(webSrc, 'components/ChatView.tsx'), 'utf-8');
-  assert.match(source, /onSpawnWorker=\{spawnBackgroundWorker\}/, 'ActiveWorkersBar 应接线 onSpawnWorker');
+  assert.match(source, /onSpawnWorker=\{spawnBackgroundWorker\}/, 'WorkersDrawer 应接线 onSpawnWorker');
   assert.match(source, /const \{ spawnBackgroundWorker \} = superAgent;/, '应从 useSuperAgentWorkers 解构 spawnBackgroundWorker');
   assert.match(source, /api\.getWatchdogHealth\(true\)/, '巡检回调应调用 api.getWatchdogHealth(true)（runPass）');
-  assert.match(source, /onRunWatchdog=\{runWatchdog\}/, '胶囊条与检视抽屉均应接线 onRunWatchdog');
+  assert.match(source, /onRunWatchdog=\{runWatchdog\}/, 'WorkersDrawer 应接线 onRunWatchdog');
+  assert.match(source, /<WorkersDrawer/, 'ChatView 应挂载 WorkersDrawer');
+  assert.doesNotMatch(source, /ActiveWorkersBar/, 'ActiveWorkersBar 横栏应彻底移除');
+  assert.doesNotMatch(source, /showWorkerToolsBar/, 'showWorkerToolsBar 状态应彻底清理');
+});
+
+test('ChatView.tsx: 顶栏 ⚡ 子任务角标与回执卡查看详情均已接线', () => {
+  const source = readFileSync(path.join(webSrc, 'components/ChatView.tsx'), 'utf-8');
+  // 顶栏 Zap 角标：零任务完全隐藏
+  assert.match(source, /superAgent\.workers\.length > 0 && \(/, '零 worker 时 Zap 按钮应完全隐藏');
+  assert.match(source, /aria-label=\{workersTitle\}/, 'Zap 按钮应带动态 aria-label');
+  // 单 worker 直达详情水合
+  assert.match(source, /superAgent\.setSelectedWorkerId\(workerId\);/, '单 worker 点击应水合 recall');
+  // 回执卡「查看详情」→ 打开抽屉并定位 worker
+  assert.match(source, /onOpenWorker=\{\(workerId\) => \{/, 'MessageTimeline 应接线 onOpenWorker');
+});
+
+test('MessageItem.tsx: Worker 完成回执卡支持 onOpenWorker 直达详情', () => {
+  const source = readFileSync(path.join(webSrc, 'components/MessageItem.tsx'), 'utf-8');
+  assert.match(source, /onOpenWorker\?: \(workerId: string\) => void;/, 'MessageItem 应声明 onOpenWorker prop');
+  assert.match(source, /title === '后台任务完成' && onOpenWorker/, '仅 Worker 完成回执且提供回调时走 onOpenWorker');
+  assert.match(source, /查看详情 →/, 'Worker 回执应渲染「查看详情 →」链接');
+  assert.match(source, /workerReceiptId === null/, 'Worker 回执场景应省略截断摘要折叠区');
 });

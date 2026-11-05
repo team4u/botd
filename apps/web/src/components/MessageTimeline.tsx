@@ -52,6 +52,8 @@ export interface MessageTimelineProps {
   onStartEdit?: (message: MessageRecord) => void;
   onForkMessage?: (messageId: string) => void | Promise<void>;
   onInspectSubagentRun?: (run: import('@botd/protocol').SubagentRunRecord) => void;
+  /** Worker 完成回执「查看详情」：定位到对应后台子任务抽屉详情页（透传 MessageItem） */
+  onOpenWorker?: (workerId: string) => void;
   /** 编辑态目标消息（Slack 式编辑由使用方的输入框承载，此处只做标记与失效防御） */
   editingMessage?: MessageRecord | null;
   /** 运行中的会话禁止编辑（与后端 409 拦截对齐）；抽屉检视场景不传（合成消息不可编辑） */
@@ -81,6 +83,7 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
   onStartEdit,
   onForkMessage,
   onInspectSubagentRun,
+  onOpenWorker,
   editingMessage,
   canEdit = false,
   hasEarlierMessages = false,
@@ -417,6 +420,7 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
                       onStartEdit={onStartEdit}
                       onForkMessage={onForkMessage}
                       onInspectSubagentRun={onInspectSubagentRun}
+                      onOpenWorker={onOpenWorker}
                     />
                   </div>
                 </React.Fragment>

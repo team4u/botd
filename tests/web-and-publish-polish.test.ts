@@ -163,22 +163,26 @@ test('useSuperAgentWorkers: telemetryOf 提取 recall 节点遥测并过滤非�
 });
 
 // ============================================================
-// 4. WorkerInspectDrawer：遥测徽章 SSR（回合 / Tokens / worktree 分支 / 全部 threadKeys）
+// 4. WorkersDrawer（详情视图）：遥测徽章 SSR（回合 / Tokens / worktree 分支 / 全部 threadKeys）
 // ============================================================
 
-const { WorkerInspectDrawer } = (await import('../apps/web/src/components/WorkerInspectDrawer.js' as any)) as {
-  WorkerInspectDrawer: React.FC<Record<string, unknown>>;
+const { WorkersDrawer } = (await import('../apps/web/src/components/WorkersDrawer.js' as any)) as {
+  WorkersDrawer: React.FC<Record<string, unknown>>;
 };
 
 function renderDrawer(worker: Record<string, unknown>): string {
   const noop = () => {};
   return ReactDOMServer.renderToStaticMarkup(
-    React.createElement(WorkerInspectDrawer, {
+    React.createElement(WorkersDrawer, {
       isOpen: true,
-      worker,
+      workers: [worker],
+      botMap: new Map(),
+      nodeMap: new Map(),
+      initialWorkerId: String(worker.workerId),
+      onSelectWorker: noop,
+      onStopWorker: noop,
+      onSpawnWorker: async () => true,
       onClose: noop,
-      onSteer: async () => true,
-      onStop: noop,
     })
   );
 }
@@ -194,13 +198,13 @@ const baseWorker = {
   startedAt: new Date().toISOString(),
 };
 
-test('WorkerInspectDrawer SSR: 渲染回合数与 Token 消耗徽章', () => {
+test('WorkersDrawer SSR（详情）: 渲染回合数与 Token 消耗徽章', () => {
   const html = renderDrawer({ ...baseWorker, turns: 7, tokens: 98765 });
   assert.match(html, /回合 7/, '回合徽章应渲染为「回合 7」');
   assert.match(html, /Tokens 98,765/, 'Token 徽章应渲染千分位格式');
 });
 
-test('WorkerInspectDrawer SSR: turns/tokens 为 0 或缺失时不渲染徽章', () => {
+test('WorkersDrawer SSR（详情）: turns/tokens 为 0 或缺失时不渲染徽章', () => {
   const html = renderDrawer({ ...baseWorker, turns: 0, tokens: 0 });
   assert.doesNotMatch(html, /回合/, 'turns=0 不应渲染回合徽章');
   assert.doesNotMatch(html, /Tokens/, 'tokens=0 不应渲染 Token 徽章');
@@ -210,7 +214,7 @@ test('WorkerInspectDrawer SSR: turns/tokens 为 0 或缺失时不渲染徽章', 
   assert.doesNotMatch(htmlNoData, /Tokens /, '缺失遥测不应渲染 Token 徽章');
 });
 
-test('WorkerInspectDrawer SSR: worktree 徽章附带分支名', () => {
+test('WorkersDrawer SSR（详情）: worktree 徽章附带分支名', () => {
   const html = renderDrawer({
     ...baseWorker,
     worktreePath: '/repo/.botd-worktrees/w-9',
@@ -220,13 +224,13 @@ test('WorkerInspectDrawer SSR: worktree 徽章附带分支名', () => {
   assert.match(html, /\/repo\/\.botd-worktrees\/w-9/, '完整 worktree 路径应保留在 title 提示中');
 });
 
-test('WorkerInspectDrawer SSR: 无 branchName 时 worktree 徽章回落为裸 worktree', () => {
+test('WorkersDrawer SSR（详情）: 无 branchName 时 worktree 徽章回落为裸 worktree', () => {
   const html = renderDrawer({ ...baseWorker, worktreePath: '/repo/.botd-worktrees/w-9' });
   assert.doesNotMatch(html, /worktree · /, '无分支名不应出现「worktree · 」前缀');
   assert.match(html, /worktree/, '仍应渲染 worktree 徽章');
 });
 
-test('WorkerInspectDrawer SSR: 渲染全部 Pass-through threadKeys 而非仅首个', () => {
+test('WorkersDrawer SSR（详情）: 渲染全部 Pass-through threadKeys 而非仅首个', () => {
   const html = renderDrawer({
     ...baseWorker,
     threadKeys: ['github:pr#42', 'slack:chan#ops', 'webhook:alerts'],
@@ -237,27 +241,27 @@ test('WorkerInspectDrawer SSR: 渲染全部 Pass-through threadKeys 而非仅首
 });
 
 // ============================================================
-// 5. ActiveWorkersBar：胶囊条折叠展示全部 threadKeys（首个 + +N 计数）
+// 5. WorkersDrawer（列表视图）：threadKeys 徽标随列表行内展示在详情，列表行保持紧凑
 // ============================================================
 
-const { ActiveWorkersBar } = (await import('../apps/web/src/components/ActiveWorkersBar.js' as any)) as {
-  ActiveWorkersBar: React.FC<Record<string, unknown>>;
-};
-
-test('ActiveWorkersBar SSR: 首个 threadKey 直接展示，其余折叠为 +N', () => {
-  const html = ReactDOMServer.renderToStaticMarkup(
-    React.createElement(ActiveWorkersBar, {
+test('WorkersDrawer SSR（列表）: 活跃 worker 行内直出标题与工具徽标，详情页展示全部 threadKeys', () => {
+  const noop = () => {};
+  const listHtml = ReactDOMServer.renderToStaticMarkup(
+    React.createElement(WorkersDrawer, {
+      isOpen: true,
       workers: [
         {
           ...baseWorker,
           threadKeys: ['github:pr#42', 'slack:chan#ops', 'webhook:alerts'],
         },
       ],
-      onSelectWorker: () => {},
-      onStopWorker: () => {},
+      botMap: new Map(),
+      nodeMap: new Map(),
+      onSelectWorker: noop,
+      onStopWorker: noop,
+      onClose: noop,
     })
   );
-  assert.match(html, /github:pr#42/, '首个线程键应直接展示');
-  assert.match(html, /\+2/, '其余 2 个线程键应折叠为 +2');
-  assert.match(html, /slack:chan#ops、webhook:alerts/, '其余线程键应完整出现在 title 提示中');
+  assert.match(listHtml, /重构认证模块/, '列表行标题应渲染');
+  assert.match(listHtml, /后台子任务/, '列表顶栏标题应渲染');
 });

@@ -30,7 +30,7 @@ export const BOTD_UI_FENCE = "ui";
 /**
  * Format a `botd.v1` Generative UI spec as a fenced ```ui block, optionally
  * preceded by a one-line text summary. Any tool returning this string renders
- * the spec natively in the Web UI timeline and WorkerInspectDrawer.
+ * the spec natively in the Web UI timeline and WorkersDrawer.
  */
 export function formatUiSpecBlock(spec: Record<string, unknown>, summary?: string): string {
 	const json = JSON.stringify(spec, null, 2);

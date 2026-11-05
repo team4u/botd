@@ -41,9 +41,8 @@ import { TriggersModal } from './TriggersModal';
 import { ArtifactsDrawer } from './ArtifactsDrawer';
 import { ShareSessionModal } from './ShareSessionModal';
 import { BotHistoryDrawer } from './BotHistoryDrawer';
-import { ActiveWorkersBar } from './ActiveWorkersBar';
-import { WorkerInspectDrawer } from './WorkerInspectDrawer';
-import { useSuperAgentWorkers } from '../hooks/useSuperAgentWorkers';
+import { WorkersDrawer } from './WorkersDrawer';
+import { useSuperAgentWorkers, isWorkerActive } from '../hooks/useSuperAgentWorkers';
 import { BotEditorModal } from './BotEditorModal';
 import { BotAvatarBadge } from './MessageItem';
 import {
@@ -159,11 +158,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const keyboardInset = useKeyboardInset();
 
   // Super-agent 全双工后台工作单元（Worker / Workflow / Speculative）：
-  // 胶囊条常驻展示 + 检视抽屉干预（steer / followUp / stop），不打断前台对话
+  // 顶栏 ⚡ 角标入口 + 子任务抽屉（列表⇄详情）干预（steer / followUp / stop），不打断前台对话
   const superAgent = useSuperAgentWorkers(session.id);
   const { spawnBackgroundWorker } = superAgent;
 
-  // Watchdog 健康巡检：胶囊条与检视抽屉共用（runPass=1 先跑一轮巡检再出报告）
+  // 后台子任务抽屉：initialWorkerId 非空时直接定位到该 worker 详情
+  const [workersDrawerOpen, setWorkersDrawerOpen] = useState(false);
+  const [workersDrawerInitial, setWorkersDrawerInitial] = useState<string | null>(null);
+  const openWorkersDrawer = useCallback((initialWorkerId: string | null) => {
+    setWorkersDrawerInitial(initialWorkerId);
+    setWorkersDrawerOpen(true);
+  }, []);
+  const closeWorkersDrawer = useCallback(() => {
+    setWorkersDrawerOpen(false);
+    superAgent.setSelectedWorkerId(null);
+  }, [superAgent]);
+
+  // Watchdog 健康巡检：列表与详情视图共用（runPass=1 先跑一轮巡检再出报告）
   const runWatchdog = async (): Promise<{ healthy: boolean; summary: string } | null> => {
     try {
       const res = await api.getWatchdogHealth(true);
@@ -242,11 +253,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
   // 智能体/子代理专属设置弹窗开关
   const [botEditorOpen, setBotEditorOpen] = useState(false);
-  // 按需展开后台任务控制台：零 Worker 正常聊天时胶囊条完全不占像素
-  const [showWorkerToolsBar, setShowWorkerToolsBar] = useState(false);
-  useEffect(() => {
-    setShowWorkerToolsBar(false);
-  }, [session.id]);
 
   // 单聊对应的目标智能体（主 BOT 或子代理）
   const directBot = useMemo<BotConfig | undefined>(() => {
@@ -467,6 +473,33 @@ export const ChatView: React.FC<ChatViewProps> = ({
   }, [session.id]);
 
   const artifactCount = artifactItems.length;
+
+  // ===== 后台子任务角标（顶栏 ⚡ 按钮）=====
+  // 徽章分层：活跃（蓝，呼吸图标）> 失败（玫瑰红）> 全部完成（安静灰）
+  const workersActiveCount = superAgent.workers.filter((w) => isWorkerActive(w.status)).length;
+  const workersFailedCount = superAgent.workers.filter((w) => w.status === 'failed').length;
+  const workersBadge =
+    workersActiveCount > 0
+      ? { count: workersActiveCount, className: 'bg-blue-600' }
+      : workersFailedCount > 0
+        ? { count: workersFailedCount, className: 'bg-rose-600' }
+        : { count: superAgent.workers.length, className: 'bg-zinc-400 dark:bg-zinc-600' };
+  const workersTitle =
+    workersActiveCount > 0
+      ? `后台子任务：${workersActiveCount} 运行 · ${superAgent.workers.length - workersActiveCount} 完成`
+      : workersFailedCount > 0
+        ? `后台子任务：${workersFailedCount} 失败`
+        : '后台子任务';
+  const openWorkersFromBadge = () => {
+    if (superAgent.workers.length === 1) {
+      const workerId = superAgent.workers[0].workerId;
+      superAgent.setSelectedWorkerId(workerId);
+      setWorkersDrawerInitial(workerId);
+    } else {
+      setWorkersDrawerInitial(null);
+    }
+    setWorkersDrawerOpen(true);
+  };
 
   // ===== 顶栏 Space（项目工作目录）徽标与快速绑定 =====
   // 目录可能挂在 session 或 BOT 上；绑定通过 PATCH /api/sessions/:id 即时生效
@@ -830,6 +863,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
             <MessageSquarePlus className="w-4 h-4" />
           </button>
 
+          {/* 后台子任务：有任务才占位（桌面端零任务也完全隐藏），徽章展示活跃/失败/总数 */}
+          {superAgent.workers.length > 0 && (
+            <button
+              onClick={openWorkersFromBadge}
+              className="relative w-9 h-9 inline-flex items-center justify-center rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+              title={workersTitle}
+              aria-label={workersTitle}
+            >
+              <Zap
+                className={`w-4 h-4 ${
+                  workersActiveCount > 0 ? 'text-blue-500 dark:text-blue-400 animate-pulse' : ''
+                }`}
+              />
+              <span
+                className={`absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full ${workersBadge.className} text-white text-[9px] font-semibold flex items-center justify-center pointer-events-none`}
+              >
+                {workersBadge.count > 99 ? '99+' : workersBadge.count}
+              </span>
+            </button>
+          )}
+
           {/* 会话产物：桌面端常驻，移动端有产物或未读红点时才占位，徽标展示数量 */}
           <button
             onClick={openArtifacts}
@@ -913,7 +967,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   role="menuitem"
                   onClick={() => {
                     setMenuOpen(false);
-                    setShowWorkerToolsBar(true);
+                    openWorkersDrawer(null);
                   }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
                 >
@@ -1202,22 +1256,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       )}
 
-      {/* 会话后台任务控制台：仅当存在 Worker 或用户按需展开时挂载，
-          零 Worker 正常聊天时零像素占用 */}
-      {(superAgent.workers.length > 0 || showWorkerToolsBar) && (
-        <ActiveWorkersBar
-          key={session.id}
-          workers={superAgent.workers}
-          onSelectWorker={(workerId) => superAgent.setSelectedWorkerId(workerId)}
-          onStopWorker={(workerId) => {
-            void superAgent.stopWorker(workerId);
-          }}
-          onSpawnWorker={spawnBackgroundWorker}
-          onRunWatchdog={runWatchdog}
-          onClose={() => setShowWorkerToolsBar(false)}
-        />
-      )}
-
       {/* 子会话模式返回父会话横幅 */}
       {session.parentSessionId && (
         <div className="mx-3 sm:mx-4 mt-2.5 px-3 py-1.5 bg-blue-50/80 dark:bg-blue-950/40 border border-blue-200/80 dark:border-blue-900/60 rounded-lg flex items-center justify-between gap-2 text-xs text-blue-800 dark:text-blue-300 shrink-0">
@@ -1277,7 +1315,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
         highlightMessageId={highlightMessageId}
         onStartEdit={startEdit}
         onForkMessage={handleForkMessage}
-        onInspectSubagentRun={(run) => superAgent.setSelectedWorkerId(run ? run.id : null)}
+        onInspectSubagentRun={(run) => {
+          if (run) openWorkersDrawer(run.id);
+        }}
+        onOpenWorker={(workerId) => {
+          superAgent.setSelectedWorkerId(workerId);
+          openWorkersDrawer(workerId);
+        }}
         editingMessage={editingMessage}
         canEdit={canEdit}
         hasEarlierMessages={hasEarlierMessages}
@@ -1464,16 +1508,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
         />
       )}
 
-      {/* Super-agent 后台 Worker 检视抽屉：实时执行时间线 + Steer / Follow-up / Abort 全双工干预台 */}
-      <WorkerInspectDrawer
-        isOpen={Boolean(superAgent.selectedWorker)}
-        worker={superAgent.selectedWorker}
+      {/* Super-agent 后台子任务抽屉：列表⇄详情一体（派发/巡检/中止/Steer/Follow-up 全双工干预） */}
+      <WorkersDrawer
+        isOpen={workersDrawerOpen}
+        workers={superAgent.workers}
         botMap={botMap}
         nodeMap={nodeMap}
-        onClose={() => superAgent.setSelectedWorkerId(null)}
-        onSteer={superAgent.steerWorker}
-        onStop={superAgent.stopWorker}
+        initialWorkerId={workersDrawerInitial ?? undefined}
+        onSelectWorker={(workerId) => superAgent.setSelectedWorkerId(workerId)}
+        onStopWorker={(workerId) => {
+          void superAgent.stopWorker(workerId);
+        }}
+        onSpawnWorker={spawnBackgroundWorker}
         onRunWatchdog={runWatchdog}
+        onSteer={superAgent.steerWorker}
+        onClose={closeWorkersDrawer}
       />
     </div>
   );
