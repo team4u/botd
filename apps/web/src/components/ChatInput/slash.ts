@@ -40,6 +40,11 @@ export const BUILTIN_SESSION_COMMANDS: ChatCommand[] = [
     source: 'builtin',
   },
   {
+    name: 'clear',
+    description: '清空当前会话消息与上下文（保留当前会话与后台任务）',
+    source: 'builtin',
+  },
+  {
     name: 'compact',
     description: '压缩当前会话上下文以降低 Token 水位',
     source: 'builtin',

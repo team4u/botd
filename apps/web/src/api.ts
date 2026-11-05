@@ -501,10 +501,17 @@ export const api = {
     });
   },
 
-  async clearSessionMessages(sessionId: string): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
-      method: 'DELETE',
-    });
+  async clearSessionMessages(
+    sessionId: string,
+    options?: { keepWorkers?: boolean }
+  ): Promise<{ ok: boolean }> {
+    const query = options?.keepWorkers ? '?keepWorkers=1' : '';
+    return request<{ ok: boolean }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/messages${query}`,
+      {
+        method: 'DELETE',
+      }
+    );
   },
 
   // Share links
@@ -731,6 +738,31 @@ export const api = {
       { method: 'POST', body: JSON.stringify(data) }
     );
     return { worker: (res as { worker: ActiveWorkerSummary }).worker ?? res };
+  },
+
+  // 全局活跃 Worker 列表（跨会话检视，如侧边栏中枢）
+  async getGlobalWorkers(): Promise<{
+    workers: Array<{
+      workerId: string;
+      conversationId: string;
+      parentSessionId: string;
+      botId: string;
+      title: string;
+      kind: 'worker' | 'workflow' | 'speculative';
+      status: 'pending' | 'running' | 'waiting' | 'completed' | 'failed' | 'aborted';
+      nodeId?: string;
+      cwd?: string;
+      worktreePath?: string;
+      branchName?: string;
+      threadKeys?: string[];
+      startedAt: string;
+      updatedAt?: string;
+      summary?: string;
+      sessionTitle?: string;
+      workspaceDir?: string;
+    }>;
+  }> {
+    return request('/api/workers');
   },
 
   // Watchdog 健康诊断：runPass=true 时先跑一轮看门狗巡检再返回报告
