@@ -124,6 +124,8 @@ async function fixture(t: TestContext): Promise<Fixture> {
     modelId: 'main',
     thinkingLevel: 'medium',
     enabledSkills: [],
+    // 显式工作目录：Peer Bots 提示词的 cwd 断言不依赖 process.cwd()，避免环境相关性。
+    workspaceDir: '/tmp/arch-space',
     updatedAt: now,
   });
   db.setBotFile('architect', 'system', 'You are the architect bot.');
@@ -476,7 +478,7 @@ test('5. hub-router built-in persona: session creation, commands, end-to-end mes
   assert.match(prompt, /## Peer Bots \(cross-workspace \/ cross-node\)/);
   const peerLine = prompt.split('\n').find((l) => l.includes('- architect')) ?? '';
   assert.ok(peerLine, 'peer bots section must list the user-created architect bot');
-  assert.match(peerLine, /cwd \/tmp/);
+  assert.match(peerLine, /cwd \/tmp\/arch-space/);
   assert.match(peerLine, /node node-1/);
   assert.match(peerLine, /You design systems\./);
 
