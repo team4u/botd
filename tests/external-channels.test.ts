@@ -160,7 +160,7 @@ function startMockHttpServer(): Promise<{
   });
 }
 
-test('外部消息通道桥接：通道 CRUD、测试推送、事件自动推送与 botd ask 免登录一键回调确认', async (t) => {
+test('外部消息通道桥接：通道 CRUD、测试推送、事件自动推送与 botd ask 免登录一键回调确认', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-channels-test-'));
   const dbPath = path.join(dir, 'hub.sqlite');
   const adminPassword = 'admin-password-test';
@@ -642,7 +642,7 @@ function uiInteractionRequest(ask: Record<string, unknown>) {
   } as any;
 }
 
-test('跨端 UI 降级：纯按钮风险审批卡（previewType=ui）生成摘要与免登录一键确认链接', () => {
+test('跨端 UI 降级：纯按钮风险审批卡（previewType=ui）生成摘要与免登录一键确认链接', { timeout: 60_000 }, () => {
   const approvalSpec = buildApprovalCardSpec({
     prompt: '是否将本次变更发布到生产环境？',
     reason: '生产数据库 schema 迁移，失败需回滚',
@@ -703,7 +703,7 @@ test('跨端 UI 降级：纯按钮风险审批卡（previewType=ui）生成摘�
   assert.ok(approveUrl.searchParams.get('token'));
 });
 
-test('跨端 UI 降级：含 TextInput 表单的扩展 ctx.ui.input 卡片附网页填写入口，不生成链接选项', () => {
+test('跨端 UI 降级：含 TextInput 表单的扩展 ctx.ui.input 卡片附网页填写入口，不生成链接选项', { timeout: 60_000 }, () => {
   // 与 web-command-ui.ts buildInputSpec 同构：TextInput + 提交/取消按钮
   const inputSpec = {
     root: 'root',

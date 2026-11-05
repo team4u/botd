@@ -20,7 +20,7 @@ import { SseHub } from '../apps/hub/src/sse.js';
 // 1. validateUiSpec: Valid Spec with all 15 components, $state, submit action
 // ---------------------------------------------------------------------------
 
-test('validateUiSpec: 合法 Spec（包含 15 种组件、$state 绑定与 submit action）通过校验', () => {
+test('validateUiSpec: 合法 Spec（包含 15 种组件、$state 绑定与 submit action）通过校验', { timeout: 60_000 }, () => {
   const validFullSpec: BotdUiSpec = {
     root: 'stack_root',
     elements: {
@@ -195,7 +195,7 @@ test('validateUiSpec: 合法 Spec（包含 15 种组件、$state 绑定与 submi
 // 2. validateUiSpec: Rejection of invalid cases
 // ---------------------------------------------------------------------------
 
-test('validateUiSpec 拦截非法情况：未知组件类型（验证报错信息包含 Allowed types）', () => {
+test('validateUiSpec 拦截非法情况：未知组件类型（验证报错信息包含 Allowed types）', { timeout: 60_000 }, () => {
   const invalidSpec = {
     root: 'unsupported',
     elements: {
@@ -218,7 +218,7 @@ test('validateUiSpec 拦截非法情况：未知组件类型（验证报错信�
   }
 });
 
-test('validateUiSpec 拦截非法情况：树存在环（Cycle）', () => {
+test('validateUiSpec 拦截非法情况：树存在环（Cycle）', { timeout: 60_000 }, () => {
   const cyclicSpec = {
     root: 'node_a',
     elements: {
@@ -243,7 +243,7 @@ test('validateUiSpec 拦截非法情况：树存在环（Cycle）', () => {
   }
 });
 
-test('validateUiSpec 拦截非法情况：超过最大深度', () => {
+test('validateUiSpec 拦截非法情况：超过最大深度', { timeout: 60_000 }, () => {
   // Build a linear chain deeper than MAX_UI_TREE_DEPTH (depth 7)
   const elements: Record<string, any> = {};
   for (let i = 1; i <= MAX_UI_TREE_DEPTH + 1; i++) {
@@ -267,7 +267,7 @@ test('validateUiSpec 拦截非法情况：超过最大深度', () => {
   }
 });
 
-test('validateUiSpec 拦截非法情况：缺少 root 或孤儿 children 引用', () => {
+test('validateUiSpec 拦截非法情况：缺少 root 或孤儿 children 引用', { timeout: 60_000 }, () => {
   // Missing root in elements
   const missingRootSpec = {
     root: 'missing_root',
@@ -301,7 +301,7 @@ test('validateUiSpec 拦截非法情况：缺少 root 或孤儿 children 引用'
   }
 });
 
-test('validateUiSpec 拦截非法情况：非法 action 名称', () => {
+test('validateUiSpec 拦截非法情况：非法 action 名称', { timeout: 60_000 }, () => {
   const illegalActionSpec = {
     root: 'btn_1',
     elements: {
@@ -320,7 +320,7 @@ test('validateUiSpec 拦截非法情况：非法 action 名称', () => {
   }
 });
 
-test('validateUiSpec 拦截非法情况：超长字节限制', () => {
+test('validateUiSpec 拦截非法情况：超长字节限制', { timeout: 60_000 }, () => {
   // Spec larger than MAX_UI_SPEC_BYTES (64KB)
   const hugePayload = 'A'.repeat(MAX_UI_SPEC_BYTES + 500);
   const oversizedSpec = {
@@ -344,7 +344,7 @@ test('validateUiSpec 拦截非法情况：超长字节限制', () => {
 // 2b. botd.v1 扩展能力：CheckboxGroup / Table / multiline / mono / Accordion 槽位
 // ---------------------------------------------------------------------------
 
-test('validateUiSpec 接受新组件与属性：CheckboxGroup(string[] 绑定)、Table、TextInput.multiline、Callout/Accordion mono、Accordion 槽位', () => {
+test('validateUiSpec 接受新组件与属性：CheckboxGroup(string[] 绑定)、Table、TextInput.multiline、Callout/Accordion mono、Accordion 槽位', { timeout: 60_000 }, () => {
   const spec = {
     root: 'form_card',
     elements: {
@@ -416,7 +416,7 @@ test('validateUiSpec 接受新组件与属性：CheckboxGroup(string[] 绑定)�
   }
 });
 
-test('validateUiSpec 拦截新组件的非法用法：Table 列数不匹配 / monoColumns 越界 / CheckboxGroup 非 string[] / rows 越界', () => {
+test('validateUiSpec 拦截新组件的非法用法：Table 列数不匹配 / monoColumns 越界 / CheckboxGroup 非 string[] / rows 越界', { timeout: 60_000 }, () => {
   // Table row length mismatch
   const badTable = validateUiSpec({
     root: 't',
@@ -546,7 +546,7 @@ function makeTestIpcServer() {
   } as any);
 }
 
-test('Local IPC /ask 支持 previewType: "ui" 且合法 Spec 正常转发 Hub (200)', async () => {
+test('Local IPC /ask 支持 previewType: "ui" 且合法 Spec 正常转发 Hub (200)', { timeout: 60_000 }, async () => {
   mockAskCalls.length = 0;
   const server = makeTestIpcServer();
   const port = await listenPort0(server);
@@ -585,7 +585,7 @@ test('Local IPC /ask 支持 previewType: "ui" 且合法 Spec 正常转发 Hub (2
   }
 });
 
-test('Local IPC /ask 拒绝非法 UI Spec 或缺失 previewContent (400)', async () => {
+test('Local IPC /ask 拒绝非法 UI Spec 或缺失 previewContent (400)', { timeout: 60_000 }, async () => {
   mockAskCalls.length = 0;
   const server = makeTestIpcServer();
   const port = await listenPort0(server);
@@ -630,7 +630,7 @@ test('Local IPC /ask 拒绝非法 UI Spec 或缺失 previewContent (400)', async
 // 4. Hub GroupRouter.requestHumanInput: previewType: 'ui' validation
 // ---------------------------------------------------------------------------
 
-test('Hub GroupRouter.requestHumanInput 校验 UI Spec：拒绝非法 Spec，放行合法 Spec', async () => {
+test('Hub GroupRouter.requestHumanInput 校验 UI Spec：拒绝非法 Spec，放行合法 Spec', { timeout: 60_000 }, async () => {
   const db = new HubDatabase({ dbPath: ':memory:' });
   const auth = new AuthManager();
   const sse = new SseHub();
@@ -709,7 +709,7 @@ test('Hub GroupRouter.requestHumanInput 校验 UI Spec：拒绝非法 Spec，放
 // 5. BUILTIN_SKILL_MD: Documentation and version bump
 // ---------------------------------------------------------------------------
 
-test('BUILTIN_SKILL_MD: v16 手册包含 Generative UI 与全部组件说明', () => {
+test('BUILTIN_SKILL_MD: v16 手册包含 Generative UI 与全部组件说明', { timeout: 60_000 }, () => {
   assert.ok(BUILTIN_SKILL_VERSION >= 16, 'BUILTIN_SKILL_VERSION must be at least 16');
   assert.ok(BUILTIN_SKILL_MD.includes('Generative UI'), 'BUILTIN_SKILL_MD must include Generative UI section');
   assert.ok(BUILTIN_SKILL_MD.includes('```ui'), 'BUILTIN_SKILL_MD must mention the ```ui fence');

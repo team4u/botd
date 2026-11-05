@@ -23,7 +23,7 @@ const __dirname = path.dirname(__filename);
 // 1. api.ts: checkNodeUpgrade and upgradeNode Regression Tests
 // ============================================================
 
-test('api.checkNodeUpgrade: issues GET request to /api/nodes/:nodeId/upgrade/check with proper encoding', async () => {
+test('api.checkNodeUpgrade: issues GET request to /api/nodes/:nodeId/upgrade/check with proper encoding', { timeout: 60_000 }, async () => {
   const originalFetch = globalThis.fetch;
   let requestedUrl = '';
   let requestedOptions: RequestInit | undefined;
@@ -57,7 +57,7 @@ test('api.checkNodeUpgrade: issues GET request to /api/nodes/:nodeId/upgrade/che
   }
 });
 
-test('api.checkNodeUpgrade: throws ApiError on non-200 responses', async () => {
+test('api.checkNodeUpgrade: throws ApiError on non-200 responses', { timeout: 60_000 }, async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => {
     return new Response(JSON.stringify({ error: 'Node is unreachable' }), {
@@ -83,7 +83,7 @@ test('api.checkNodeUpgrade: throws ApiError on non-200 responses', async () => {
   }
 });
 
-test('api.upgradeNode: issues POST request without targetVersion sends empty body', async () => {
+test('api.upgradeNode: issues POST request without targetVersion sends empty body', { timeout: 60_000 }, async () => {
   const originalFetch = globalThis.fetch;
   let requestedUrl = '';
   let requestedOptions: RequestInit | undefined;
@@ -118,7 +118,7 @@ test('api.upgradeNode: issues POST request without targetVersion sends empty bod
   }
 });
 
-test('api.upgradeNode: issues POST request with targetVersion included in body', async () => {
+test('api.upgradeNode: issues POST request with targetVersion included in body', { timeout: 60_000 }, async () => {
   const originalFetch = globalThis.fetch;
   let requestedUrl = '';
   let requestedOptions: RequestInit | undefined;
@@ -150,7 +150,7 @@ test('api.upgradeNode: issues POST request with targetVersion included in body',
   }
 });
 
-test('api.upgradeNode: throws ApiError on failure (e.g. Canary rollback failure)', async () => {
+test('api.upgradeNode: throws ApiError on failure (e.g. Canary rollback failure)', { timeout: 60_000 }, async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => {
     return new Response(
@@ -183,7 +183,7 @@ test('api.upgradeNode: throws ApiError on failure (e.g. Canary rollback failure)
 // 2. NodesBotsView.tsx: Version Badge and Upgrade Button UI Rendering
 // ============================================================
 
-test('NodesBotsView: renders node version badge when node.version is present', () => {
+test('NodesBotsView: renders node version badge when node.version is present', { timeout: 60_000 }, () => {
   const nodeWithVersion: NodeWithBots = {
     id: 'node-alpha',
     name: 'Alpha Node',
@@ -213,7 +213,7 @@ test('NodesBotsView: renders node version badge when node.version is present', (
   assert(html.includes('linux'), 'Platform badge is also rendered');
 });
 
-test('NodesBotsView: omits version badge when node.version is undefined', () => {
+test('NodesBotsView: omits version badge when node.version is undefined', { timeout: 60_000 }, () => {
   const nodeWithoutVersion: NodeWithBots = {
     id: 'node-beta',
     name: 'Beta Node',
@@ -241,7 +241,7 @@ test('NodesBotsView: omits version badge when node.version is undefined', () => 
   assert(html.includes('darwin'), 'Platform badge is still rendered');
 });
 
-test('NodesBotsView: renders upgrade button with correct action labels and disabled state when offline', () => {
+test('NodesBotsView: renders upgrade button with correct action labels and disabled state when offline', { timeout: 60_000 }, () => {
   const onlineNode: NodeWithBots = {
     id: 'node-online',
     name: 'Online Node',
@@ -303,7 +303,7 @@ test('NodesBotsView: renders upgrade button with correct action labels and disab
 // 3. NodesBotsView.tsx: Source Code & Interaction Logic Validation
 // ============================================================
 
-test('NodesBotsView: source contains required imports, states, modal, and polling integration', () => {
+test('NodesBotsView: source contains required imports, states, modal, and polling integration', { timeout: 60_000 }, () => {
   const componentPath = path.resolve(__dirname, '../apps/web/src/components/NodesBotsView.tsx');
   const source = readFileSync(componentPath, 'utf8');
 
@@ -406,7 +406,7 @@ test('NodesBotsView: source contains required imports, states, modal, and pollin
 // 4. Modal Dialog Visual States & Content Rendering
 // ============================================================
 
-test('Upgrade Confirmation Dialog: renders all information states correctly', () => {
+test('Upgrade Confirmation Dialog: renders all information states correctly', { timeout: 60_000 }, () => {
   // Case 1: Checking in progress
   const checkingMessage = React.createElement(
     'div',

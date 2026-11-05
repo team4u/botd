@@ -57,7 +57,7 @@ async function createTestContext(t: TestContext): Promise<TestEnv> {
   return { hub, dir, cookie, mockRpcs, jsonRequest };
 }
 
-test('Multiple primary bots per node: POST /api/bots allows multiple primary bots and subagents', async (t) => {
+test('Multiple primary bots per node: POST /api/bots allows multiple primary bots and subagents', { timeout: 60_000 }, async (t) => {
   const ctx = await createTestContext(t);
 
   // 1. Register a node with 1 primary bot
@@ -151,7 +151,7 @@ test('Multiple primary bots per node: POST /api/bots allows multiple primary bot
   assert.equal(promoteSubagent.json.parentBotId, undefined);
 });
 
-test('Session validation: validates lead bot', async (t) => {
+test('Session validation: validates lead bot', { timeout: 60_000 }, async (t) => {
   const ctx = await createTestContext(t);
 
   ctx.hub.db.createNode({

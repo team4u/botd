@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AuthManager } from '../apps/hub/src/auth.js';
 
-test('配对失败后 IP 退避生效，期满后记录被清理', () => {
+test('配对失败后 IP 退避生效，期满后记录被清理', { timeout: 60_000 }, () => {
   const auth = new AuthManager();
   const { code } = auth.createPairingCode('user-1');
   const ip = '203.0.113.7';

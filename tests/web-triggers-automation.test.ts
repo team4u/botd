@@ -28,7 +28,7 @@ const __dirname = path.dirname(__filename);
 // 1. api.ts: 新增自动化事件收件箱与通知投递队列 API 回归测试
 // ============================================================
 
-test('api.listAutomationEvents: issues GET to /api/sessions/:id/automation-events with default limit 50', async () => {
+test('api.listAutomationEvents: issues GET to /api/sessions/:id/automation-events with default limit 50', { timeout: 60_000 }, async () => {
   const originalFetch = globalThis.fetch;
   let requestedUrl = '';
   let requestedOptions: RequestInit | undefined;
@@ -69,7 +69,7 @@ test('api.listAutomationEvents: issues GET to /api/sessions/:id/automation-event
   }
 });
 
-test('api.listAutomationEvents: throws ApiError on non-200 responses', async () => {
+test('api.listAutomationEvents: throws ApiError on non-200 responses', { timeout: 60_000 }, async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => {
     return new Response(JSON.stringify({ error: 'Forbidden' }), {
@@ -95,7 +95,7 @@ test('api.listAutomationEvents: throws ApiError on non-200 responses', async () 
   }
 });
 
-test('api.listNotificationOutbox: issues GET to /api/sessions/:id/outbox', async () => {
+test('api.listNotificationOutbox: issues GET to /api/sessions/:id/outbox', { timeout: 60_000 }, async () => {
   const originalFetch = globalThis.fetch;
   let requestedUrl = '';
   let requestedOptions: RequestInit | undefined;
@@ -141,7 +141,7 @@ test('api.listNotificationOutbox: issues GET to /api/sessions/:id/outbox', async
 //    新参数（dispatchMode / skillId / eventFilter / tellPolicy）透传测试
 // ============================================================
 
-test('api.createSessionTrigger: passes dispatchMode, skillId and eventFilter in POST body', async () => {
+test('api.createSessionTrigger: passes dispatchMode, skillId and eventFilter in POST body', { timeout: 60_000 }, async () => {
   const originalFetch = globalThis.fetch;
   let requestedUrl = '';
   let requestedMethod = '';
@@ -197,7 +197,7 @@ test('api.createSessionTrigger: passes dispatchMode, skillId and eventFilter in 
   }
 });
 
-test('api.updateTrigger: passes dispatchMode, skillId and eventFilter in PATCH body', async () => {
+test('api.updateTrigger: passes dispatchMode, skillId and eventFilter in PATCH body', { timeout: 60_000 }, async () => {
   const originalFetch = globalThis.fetch;
   let requestedUrl = '';
   let requestedMethod = '';
@@ -229,7 +229,7 @@ test('api.updateTrigger: passes dispatchMode, skillId and eventFilter in PATCH b
   }
 });
 
-test('api.createSessionChannel: passes tellPolicy in POST body', async () => {
+test('api.createSessionChannel: passes tellPolicy in POST body', { timeout: 60_000 }, async () => {
   const originalFetch = globalThis.fetch;
   let requestedBody: any;
 
@@ -269,7 +269,7 @@ test('api.createSessionChannel: passes tellPolicy in POST body', async () => {
   }
 });
 
-test('api.updateChannel: passes tellPolicy in PATCH body', async () => {
+test('api.updateChannel: passes tellPolicy in PATCH body', { timeout: 60_000 }, async () => {
   const originalFetch = globalThis.fetch;
   let requestedMethod = '';
   let requestedBody: any;
@@ -309,7 +309,7 @@ const modalSource = [
   .map((f) => readFileSync(path.join(componentDir, f), 'utf8'))
   .join('\n');
 
-test('TriggersModal source: imports new protocol types and renders dispatchMode selector', () => {
+test('TriggersModal source: imports new protocol types and renders dispatchMode selector', { timeout: 60_000 }, () => {
   const source = modalSource;
 
   // 类型引入
@@ -365,7 +365,7 @@ test('TriggersModal source: imports new protocol types and renders dispatchMode 
   );
 });
 
-test('TriggersModal source: tell policy options, badge and outbox section', () => {
+test('TriggersModal source: tell policy options, badge and outbox section', { timeout: 60_000 }, () => {
   const source = modalSource;
 
   // 通知打扰策略文案
@@ -414,7 +414,7 @@ const mockBots: any[] = [
 
 const noop = () => {};
 
-test('TriggersModal: renders inbound tab skeleton without crash', () => {
+test('TriggersModal: renders inbound tab skeleton without crash', { timeout: 60_000 }, () => {
   const html = ReactDOMServer.renderToStaticMarkup(
     React.createElement(TriggersModal, {
       isOpen: true,
@@ -429,7 +429,7 @@ test('TriggersModal: renders inbound tab skeleton without crash', () => {
   assert(html.includes('事件收件箱 (Event Inbox)'), 'event inbox section is present');
 });
 
-test('TriggersModal: renders outbound tab skeleton without crash', () => {
+test('TriggersModal: renders outbound tab skeleton without crash', { timeout: 60_000 }, () => {
   // 组件默认渲染 inbound；outbound 通过源码断言覆盖（tab 切换依赖交互）。
   // 这里验证 outbound 相关的渲染源码与状态机已挂载即可。
   const html = ReactDOMServer.renderToStaticMarkup(

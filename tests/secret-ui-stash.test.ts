@@ -103,7 +103,7 @@ const secretUiSpec = {
 // 1. Protocol: TextInput secret validation + extractSecretStatePaths
 // ---------------------------------------------------------------------------
 
-test('validateUiSpec 接受 TextInput secret:true，并拒绝非布尔 secret', () => {
+test('validateUiSpec 接受 TextInput secret:true，并拒绝非布尔 secret', { timeout: 60_000 }, () => {
   const ok = validateUiSpec(JSON.stringify(secretUiSpec));
   assert.equal(ok.ok, true, ok.ok ? '' : ok.errors.join('; '));
 
@@ -119,7 +119,7 @@ test('validateUiSpec 接受 TextInput secret:true，并拒绝非布尔 secret', 
   assert.match((bad as { errors: string[] }).errors.join('; '), /props\.secret must be a boolean/);
 });
 
-test('extractSecretStatePaths 提取 secret TextInput 的 $bindState/$state 路径（JSON 字符串或对象）', () => {
+test('extractSecretStatePaths 提取 secret TextInput 的 $bindState/$state 路径（JSON 字符串或对象）', { timeout: 60_000 }, () => {
   const paths = extractSecretStatePaths(JSON.stringify(secretUiSpec));
   assert.deepEqual([...paths].sort(), ['/config/token', '/credentials/password']);
   assert.deepEqual(
@@ -139,7 +139,7 @@ test('extractSecretStatePaths 提取 secret TextInput 的 $bindState/$state 路�
 // 2. SecretStash unit behavior
 // ---------------------------------------------------------------------------
 
-test('SecretStash：stash 生成 BOTD_SECRET_* 键，getEnvRecord 按会话注入，peek/consume 与 TTL 过期', async () => {
+test('SecretStash：stash 生成 BOTD_SECRET_* 键，getEnvRecord 按会话注入，peek/consume 与 TTL 过期', { timeout: 60_000 }, async () => {
   const stash = new SecretStash();
   const key = stash.stash('hunter2', 'sess_1');
   assert.match(key, /^BOTD_SECRET_[0-9A-F]{8}$/);
@@ -156,7 +156,7 @@ test('SecretStash：stash 生成 BOTD_SECRET_* 键，getEnvRecord 按会话注�
   assert.deepEqual(stash.getEnvRecord('sess_1'), {}, 'expired entries disappear from env record');
 });
 
-test('withSecretEnv：机密按可信作用域并入 env，显式 env 优先；无作用域/无机密时原样返回', () => {
+test('withSecretEnv：机密按可信作用域并入 env，显式 env 优先；无作用域/无机密时原样返回', { timeout: 60_000 }, () => {
   const stash = new SecretStash();
   const key = stash.stash('s3cret', 'sess_1');
   assert.deepEqual(withSecretEnv(undefined, 'sess_1', stash), { [key]: 's3cret' });
@@ -177,7 +177,7 @@ test('withSecretEnv：机密按可信作用域并入 env，显式 env 优先；�
 // 3. redactSecretAskAnswer
 // ---------------------------------------------------------------------------
 
-test('redactSecretAskAnswer：UI 机密字段替换为 REDACTED 占位符，明文进 stash', () => {
+test('redactSecretAskAnswer：UI 机密字段替换为 REDACTED 占位符，明文进 stash', { timeout: 60_000 }, () => {
   const stash = new SecretStash();
   const specJson = JSON.stringify(secretUiSpec);
   const answer = JSON.stringify({
@@ -198,7 +198,7 @@ test('redactSecretAskAnswer：UI 机密字段替换为 REDACTED 占位符，明�
   assert.equal(stash.peek(passKey, 'sess_2'), undefined, 'another session cannot peek the stashed secret');
 });
 
-test('redactSecretAskAnswer：非 UI / 无机密路径 / 非 JSON / 空 state 原样透传', () => {
+test('redactSecretAskAnswer：非 UI / 无机密路径 / 非 JSON / 空 state 原样透传', { timeout: 60_000 }, () => {
   const stash = new SecretStash();
   assert.deepEqual(
     redactSecretAskAnswer('{"state":{"a":"b"}}', 'sess_1', 'text', 'plain', stash),
@@ -232,7 +232,7 @@ test('redactSecretAskAnswer：非 UI / 无机密路径 / 非 JSON / 空 state �
 // 4. SecretInjectingEnv：注入的 BOTD_SECRET_* 可被子进程读取（跨平台 node -e）
 // ---------------------------------------------------------------------------
 
-test('SecretInjectingEnv：shell 子进程经 process.env 读到机密，命令行不含明文', { timeout: 30_000 }, async () => {
+test('SecretInjectingEnv：shell 子进程经 process.env 读到机密，命令行不含明文', { timeout: 60_000 }, async () => {
   // SecretInjectingEnv 默认从 globalSecretStash 注入（hub 生产路径同源），
   // 作用域来自构造时信任的会话 shellEnv。
   const { globalSecretStash } = await import('../apps/hub/src/harness/secret-stash.js');

@@ -195,7 +195,7 @@ async function createTestFixture(t: TestContext) {
   return { hub, base, dir, request, json, loginAs, forUser, addNode, cookie: () => cookie };
 }
 
-test('1. 节点 registerNode 上报 version: "0.2.1" 后，GET /api/nodes 能正确返回 node.version === "0.2.1"', async (t) => {
+test('1. 节点 registerNode 上报 version: "0.2.1" 后，GET /api/nodes 能正确返回 node.version === "0.2.1"', { timeout: 60_000 }, async (t) => {
   const f = await createTestFixture(t);
 
   const nodeWithVersion = await f.addNode({ ids: ['v-bot-1'], version: '0.2.1' });
@@ -213,7 +213,7 @@ test('1. 节点 registerNode 上报 version: "0.2.1" 后，GET /api/nodes 能正
   assert.equal(matchedNoVer.version, undefined, 'Node without version should not have version defined');
 });
 
-test('2. GET /api/nodes/:nodeId/upgrade/check 与 POST /api/nodes/:nodeId/upgrade 能正确转发给节点 RPC 并返回结果，离线节点返回 503，非 owner 返回 403', async (t) => {
+test('2. GET /api/nodes/:nodeId/upgrade/check 与 POST /api/nodes/:nodeId/upgrade 能正确转发给节点 RPC 并返回结果，离线节点返回 503，非 owner 返回 403', { timeout: 60_000 }, async (t) => {
   const f = await createTestFixture(t);
 
   let checkCalledWith: { registryUrl?: string } | undefined;
@@ -324,7 +324,7 @@ test('2. GET /api/nodes/:nodeId/upgrade/check 与 POST /api/nodes/:nodeId/upgrad
   assert.equal(noUpgradeRes.status, 501, 'Unsupported upgradeDaemon should return 501');
 });
 
-test('3. SQLite 旧版本数据库（PRAGMA user_version = 0 或 1）通过 new HubDatabase({ dbPath }) 打开时，自动生成 ${dbPath}.bak-v0 快照备份文件，且备份文件是合法的 SQLite 数据库，新库 user_version 升为 HUB_SCHEMA_VERSION', async (t) => {
+test('3. SQLite 旧版本数据库（PRAGMA user_version = 0 或 1）通过 new HubDatabase({ dbPath }) 打开时，自动生成 ${dbPath}.bak-v0 快照备份文件，且备份文件是合法的 SQLite 数据库，新库 user_version 升为 HUB_SCHEMA_VERSION', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-db-migration-test-'));
   t.after(async () => {
     await rm(dir, { recursive: true, force: true });
@@ -425,7 +425,7 @@ test('3. SQLite 旧版本数据库（PRAGMA user_version = 0 或 1）通过 new 
   hubDb1Reopened.close();
 });
 
-test('4. Hub drain() 优雅排空：当有一个慢速 runTurn 正在执行时调用 hub.drain(5000)，验证期间 GET /api/health 返回 draining: true, activeTurns: 1，新发 POST /api/sessions/:id/messages 返回 503，而正在执行的 runTurn 能够正常完成并写入助手回复，drain() 最终返回 { drained: true, remaining: 0 }', async (t) => {
+test('4. Hub drain() 优雅排空：当有一个慢速 runTurn 正在执行时调用 hub.drain(5000)，验证期间 GET /api/health 返回 draining: true, activeTurns: 1，新发 POST /api/sessions/:id/messages 返回 503，而正在执行的 runTurn 能够正常完成并写入助手回复，drain() 最终返回 { drained: true, remaining: 0 }', { timeout: 60_000 }, async (t) => {
   const f = await createTestFixture(t);
 
   const turnStarted = deferred<void>();

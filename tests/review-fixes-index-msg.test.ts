@@ -139,7 +139,7 @@ async function createTestContext(t: TestContext): Promise<TestEnv> {
   };
 }
 
-test('Fix 1 — D2: dead routes POST /api/nodes/:nodeId/bots and PUT /api/nodes/:nodeId/bots/:botId return 404', async (t) => {
+test('Fix 1 — D2: dead routes POST /api/nodes/:nodeId/bots and PUT /api/nodes/:nodeId/bots/:botId return 404', { timeout: 60_000 }, async (t) => {
   const ctx = await createTestContext(t);
 
   const postRes = await ctx.jsonRequest('/api/nodes/node_1/bots', 'POST', {
@@ -157,7 +157,7 @@ test('Fix 1 — D2: dead routes POST /api/nodes/:nodeId/bots and PUT /api/nodes/
   assert.equal(putRes.status, 404, 'PUT /api/nodes/:nodeId/bots/:botId must return 404');
 });
 
-test('Fix 2 & 4 — D3: message stores clean content and structured senderUserId/senderUsername; smoke tests mock runTurn', async (t) => {
+test('Fix 2 & 4 — D3: message stores clean content and structured senderUserId/senderUsername; smoke tests mock runTurn', { timeout: 60_000 }, async (t) => {
   const ctx = await createTestContext(t);
   const userA = ctx.adminUser;
 
@@ -228,7 +228,7 @@ test('Fix 2 & 4 — D3: message stores clean content and structured senderUserId
   assert.match(assistantMsg.content, /Acknowledged! Happy to collaborate\./);
 });
 
-test('Fix 2 — D3: single-user message also stores senderUserId/senderUsername and clean content', async (t) => {
+test('Fix 2 — D3: single-user message also stores senderUserId/senderUsername and clean content', { timeout: 60_000 }, async (t) => {
   const ctx = await createTestContext(t);
   const userA = ctx.adminUser;
 
@@ -266,7 +266,7 @@ test('Fix 2 — D3: single-user message also stores senderUserId/senderUsername 
   assert.equal(userMsg.senderUsername, userA.username);
 });
 
-test('Fix 3 — GET /api/bots returns accessible bots for user', async (t) => {
+test('Fix 3 — GET /api/bots returns accessible bots for user', { timeout: 60_000 }, async (t) => {
   const ctx = await createTestContext(t);
   const admin = ctx.adminUser;
   const { user: bob, cookie: bobCookie } = await ctx.createUser('bob_user', 'bob-pass');

@@ -186,7 +186,7 @@ async function waitForOutboxRow(
   throw new Error(`Timed out waiting for outbox row matching predicate after ${timeoutMs}ms`);
 }
 
-test('tellPolicy=needed：仅放行 ask_request 与失败回调，静默普通成功消息', async (t) => {
+test('tellPolicy=needed：仅放行 ask_request 与失败回调，静默普通成功消息', { timeout: 60_000 }, async (t) => {
   const { hub, jsonRequest } = await createTestHub(t);
   const mock = await startFlakyMockServer();
   t.after(async () => {
@@ -278,7 +278,7 @@ test('tellPolicy=needed：仅放行 ask_request 与失败回调，静默普通�
   assert.equal(outboxRes.json[0].status, 'sent');
 });
 
-test('tellPolicy=never：完全静默不推送', async (t) => {
+test('tellPolicy=never：完全静默不推送', { timeout: 60_000 }, async (t) => {
   const { hub, jsonRequest } = await createTestHub(t);
   const mock = await startFlakyMockServer();
   t.after(async () => {
@@ -319,7 +319,7 @@ test('tellPolicy=never：完全静默不推送', async (t) => {
   await askPromise;
 });
 
-test('子会话事件向上继承：命中父会话配置的通知通道', async (t) => {
+test('子会话事件向上继承：命中父会话配置的通知通道', { timeout: 60_000 }, async (t) => {
   const { hub, jsonRequest } = await createTestHub(t);
   const mock = await startFlakyMockServer();
   t.after(async () => {
@@ -441,7 +441,7 @@ test('子会话事件向上继承：命中父会话配置的通知通道', async
   assert.ok(outboxRes.json.every((o: any) => o.status === 'sent' || o.status === 'pending'));
 });
 
-test('Outbox 重试闭环：首投 500 落 pending，退避重试后转 sent', async (t) => {
+test('Outbox 重试闭环：首投 500 落 pending，退避重试后转 sent', { timeout: 60_000 }, async (t) => {
   const { hub, jsonRequest } = await createTestHub(t);
   const mock = await startFlakyMockServer();
   t.after(async () => {
@@ -506,7 +506,7 @@ test('Outbox 重试闭环：首投 500 落 pending，退避重试后转 sent', a
   assert.equal(mock.getCallCount(), 3, '远端恰好收到 3 次请求');
 });
 
-test('PATCH 通道支持更新 tellPolicy 且校验非法值', async (t) => {
+test('PATCH 通道支持更新 tellPolicy 且校验非法值', { timeout: 60_000 }, async (t) => {
   const { hub, jsonRequest } = await createTestHub(t);
 
   const sessionRes = await jsonRequest('/api/sessions', 'POST', {

@@ -65,7 +65,7 @@ const prEvent = (summary: string, payload?: string): IncomingEvent => ({
 // 1. Spill 登记 RecallIndexDoc
 // ---------------------------------------------------------------------------
 
-test('1. formatEventInlineAndSpill registers the spilled event in RecallIndexDoc next to SpillStoreDoc', { timeout: 30_000 }, async (t) => {
+test('1. formatEventInlineAndSpill registers the spilled event in RecallIndexDoc next to SpillStoreDoc', { timeout: 60_000 }, async (t) => {
 	const env = createFauxEnv();
 	const registry = createRegistry();
 	const harness = await HarnessType.open(
@@ -146,7 +146,7 @@ async function rootEntriesText(root: Awaited<ReturnType<HarnessType['root']>>): 
 		.join('\n');
 }
 
-test('2. SubagentWorkflow worktree gate mounts the worktree on the ExecutionEnv when the host never pre-created it', { timeout: 90_000 }, async (t) => {
+test('2. SubagentWorkflow worktree gate mounts the worktree on the ExecutionEnv when the host never pre-created it', { timeout: 60_000 }, async (t) => {
 	// 本地 git 仓库（含初始提交），供 worktree 挂载
 	const repoDir = await mkdtemp(path.join(tmpdir(), 'botd-wf-gate-'));
 	t.after(async () => await rm(repoDir, { recursive: true, force: true }).catch(() => undefined));
@@ -238,7 +238,7 @@ const persona = (botId: string, cwd: string): BotPersonaConfig => ({
 	cwd,
 });
 
-test('3. processWebhook passes a GitHub PR event straight to the Worker subscribed to its threadKey (0 Router turns)', { timeout: 90_000 }, async (t) => {
+test('3. processWebhook passes a GitHub PR event straight to the Worker subscribed to its threadKey (0 Router turns)', { timeout: 60_000 }, async (t) => {
 	const dir = await mkdtemp(path.join(tmpdir(), 'botd-trigger-pt-'));
 	t.after(async () => await rm(dir, { recursive: true, force: true }).catch(() => undefined));
 
@@ -341,7 +341,7 @@ test('3. processWebhook passes a GitHub PR event straight to the Worker subscrib
 	assert.equal(result2.body.passthrough, undefined, 'unsubscribed threads keep the legacy wakeup response');
 });
 
-test('4. deriveWebhookThreadKey: GitHub conventions, shorthand fields and explicit threadKey', () => {
+test('4. deriveWebhookThreadKey: GitHub conventions, shorthand fields and explicit threadKey', { timeout: 60_000 }, () => {
 	// GitHub 原生约定：repository.full_name + pull_request.number
 	assert.equal(
 		deriveWebhookThreadKey({

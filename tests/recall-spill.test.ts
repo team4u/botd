@@ -108,7 +108,7 @@ function extractWorkerId(text: string): string {
 // 1. 短报告内联：完整正文进通知，索引保持目录卡片
 // ---------------------------------------------------------------------------
 
-test("1. short worker report rides inline in full; recall index stays a catalog card", { timeout: 30_000 }, async () => {
+test("1. short worker report rides inline in full; recall index stays a catalog card", { timeout: 60_000 }, async () => {
 	const dir = await mkdtemp(path.join(tmpdir(), "botd-recall-inline-"));
 	const { runtime, faux } = await openRuntime(dir);
 	try {
@@ -166,7 +166,7 @@ test("1. short worker report rides inline in full; recall index stays a catalog 
 // 2. 长报告落盘：完整正文进文件，通知带指针，索引带 spillPath
 // ---------------------------------------------------------------------------
 
-test("2. long worker report spills to <cwd>/.botd/recall/<workerId>.md", { timeout: 30_000 }, async () => {
+test("2. long worker report spills to <cwd>/.botd/recall/<workerId>.md", { timeout: 60_000 }, async () => {
 	const dir = await mkdtemp(path.join(tmpdir(), "botd-recall-spill-"));
 	const { runtime, faux } = await openRuntime(dir);
 	try {
@@ -228,7 +228,7 @@ test("2. long worker report spills to <cwd>/.botd/recall/<workerId>.md", { timeo
 // 3. recall 顺指针取真正文：spill 文件 → worker 会话 → 目录卡片
 // ---------------------------------------------------------------------------
 
-test("3. recall follows the pointer: spill file, then worker transcript fallback", { timeout: 30_000 }, async () => {
+test("3. recall follows the pointer: spill file, then worker transcript fallback", { timeout: 60_000 }, async () => {
 	const dir = await mkdtemp(path.join(tmpdir(), "botd-recall-full-"));
 	const { runtime, faux } = await openRuntime(dir);
 	try {
@@ -314,7 +314,7 @@ test("3. recall follows the pointer: spill file, then worker transcript fallback
 // 4. 落盘失败降级：内联前 4000 字 + 注记，绝不丢汇报
 // ---------------------------------------------------------------------------
 
-test("4. unwritable spill cwd degrades to 4000-char inline + note, never drops the report", { timeout: 30_000 }, async () => {
+test("4. unwritable spill cwd degrades to 4000-char inline + note, never drops the report", { timeout: 60_000 }, async () => {
 	// /proc/self/cmdline is a file: mkdir under it fails with ENOTDIR even for root.
 	const { runtime, faux } = await openRuntime("/proc/self/cmdline");
 	try {
@@ -366,7 +366,7 @@ test("4. unwritable spill cwd degrades to 4000-char inline + note, never drops t
 // 5. 单元边界：内容截断与 assistant 文本提取
 // ---------------------------------------------------------------------------
 
-test("5. capRecallContent caps at 24k with a pointer line; assistantEntryText extracts text blocks", () => {
+test("5. capRecallContent caps at 24k with a pointer line; assistantEntryText extracts text blocks", { timeout: 60_000 }, () => {
 	const node = { id: "w-1-1", kind: "worker" as const, title: "t", summary: "s", contentPreview: "p", relatedIds: [], createdAt: 0, spillPath: "/tmp/spill.md" };
 	const short = capRecallContent("hello", node);
 	assert.equal(short, "hello");

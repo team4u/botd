@@ -82,7 +82,7 @@ const persona = (botId: string, overrides: Partial<BotPersonaConfig> = {}): BotP
 // 1. thinkingLevel 与多模态 submitUserMessage
 // ---------------------------------------------------------------------------
 
-test('persona thinkingLevel lands on the router conversation agent; max clamps to xhigh', async () => {
+test('persona thinkingLevel lands on the router conversation agent; max clamps to xhigh', { timeout: 60_000 }, async () => {
   const { runtime } = await openRuntime();
   try {
     runtime.registerPersona(persona('thinker', { thinkingLevel: 'high' }));
@@ -98,7 +98,7 @@ test('persona thinkingLevel lands on the router conversation agent; max clamps t
   }
 });
 
-test('submitUserMessage with images records a user entry with text+image content blocks', { timeout: 30_000 }, async () => {
+test('submitUserMessage with images records a user entry with text+image content blocks', { timeout: 60_000 }, async () => {
   const { runtime, faux } = await openRuntime();
   try {
     runtime.registerPersona(persona('architect'));
@@ -138,7 +138,7 @@ test('submitUserMessage with images records a user entry with text+image content
 // 2. pi-durable 原生 fork / reset / compact
 // ---------------------------------------------------------------------------
 
-test('forkConversation inherits zero-copy context up to the fork entry only', { timeout: 30_000 }, async () => {
+test('forkConversation inherits zero-copy context up to the fork entry only', { timeout: 60_000 }, async () => {
   const { runtime, faux } = await openRuntime();
   try {
     runtime.registerPersona(persona('architect'));
@@ -178,7 +178,7 @@ test('forkConversation inherits zero-copy context up to the fork entry only', { 
   }
 });
 
-test('resetConversation appends pi.reset and restarts the context with the handoff', { timeout: 30_000 }, async () => {
+test('resetConversation appends pi.reset and restarts the context with the handoff', { timeout: 60_000 }, async () => {
   const { runtime, faux } = await openRuntime();
   try {
     runtime.registerPersona(persona('architect'));
@@ -280,7 +280,7 @@ async function hubFixture(t: TestContext): Promise<HubFixture> {
   return { base, cookie, hub, json };
 }
 
-test('GET /api/bots/:botId/commands serves skills from Hub SQLite with zero nodes online', { timeout: 30_000 }, async (t) => {
+test('GET /api/bots/:botId/commands serves skills from Hub SQLite with zero nodes online', { timeout: 60_000 }, async (t) => {
   const f = await hubFixture(t);
 
   // Skill 内容存 Hub SQLite（YAML frontmatter 携带 description）。
@@ -338,7 +338,7 @@ test('GET /api/bots/:botId/commands serves skills from Hub SQLite with zero node
 
 test(
   'HTTP routes wire native pi-durable fork (/api/sessions/:id/fork) and rewind (PUT /api/sessions/:id/messages/:messageId)',
-  { timeout: 30_000 },
+  { timeout: 60_000 },
   async (t) => {
     const dir = await mkdtemp(path.join(tmpdir(), 'botd-fork-rewind-route-'));
     const { runtime, faux } = await openRuntime();

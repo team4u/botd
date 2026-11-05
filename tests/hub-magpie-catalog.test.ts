@@ -13,7 +13,7 @@ const PASSWORD = 'hub-magpie-catalog-test';
  * - `.agent/models-store.json` 里的动态模型目录（含 thinkingLevelMap）完整暴露
  * - API key 本体绝不外泄
  */
-test('model catalog picks up .agent auth.json credentials and models-store.json models', async t => {
+test('model catalog picks up .agent auth.json credentials and models-store.json models', { timeout: 60_000 }, async t => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-magpie-catalog-'));
   t.after(async () => {
     await rm(dir, { recursive: true, force: true });

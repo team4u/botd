@@ -34,7 +34,7 @@ function command(args: string[], env: NodeJS.ProcessEnv) {
   return { child, done, output: () => output };
 }
 
-test('buildBotShellEnv injects botd session identity and bin dir into child env', async () => {
+test('buildBotShellEnv injects botd session identity and bin dir into child env', { timeout: 60_000 }, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-shellenv-test-'));
   try {
     const dataDir = path.join(dir, 'data');

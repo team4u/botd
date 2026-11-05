@@ -31,7 +31,7 @@ const repoRoot = path.resolve(__dirname, '..');
 // 1. 发布清单瘦身：仅 @botd/protocol -> @botd/node，@botd/models 转 private
 // ============================================================
 
-test('scripts/publish.ts: PUBLISH_PACKAGES 为且仅为 [@botd/protocol, @botd/node] 拓扑序', async () => {
+test('scripts/publish.ts: PUBLISH_PACKAGES 为且仅为 [@botd/protocol, @botd/node] 拓扑序', { timeout: 60_000 }, async () => {
   // scripts/publish.ts 顶层含发布副作用，仅在直接执行时跑 main()；
   // 这里经由工作区内的 tsx 按需转译导入，验证导出的发布清单
   const { execFileSync } = await import('node:child_process');
@@ -62,7 +62,7 @@ test('scripts/publish.ts: PUBLISH_PACKAGES 为且仅为 [@botd/protocol, @botd/n
   );
 });
 
-test('packages/models/package.json: 已标记 private 且不再出现在发布清单', async () => {
+test('packages/models/package.json: 已标记 private 且不再出现在发布清单', { timeout: 60_000 }, async () => {
   const modelsPkg = JSON.parse(readFileSync(path.join(repoRoot, 'packages/models/package.json'), 'utf-8'));
   assert.equal(modelsPkg.name, '@botd/models');
   assert.equal(modelsPkg.private, true, '@botd/models 应标记 "private": true 退出 npm 发布');

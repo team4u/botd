@@ -52,7 +52,7 @@ function coversNode20(range: string): boolean {
   return major < 20 || (major === 20 && minor === 0 && patch === 0);
 }
 
-test('runtime dependency engines of @botd/node cover Node 20.0.0', async () => {
+test('runtime dependency engines of @botd/node cover Node 20.0.0', { timeout: 60_000 }, async () => {
   const manifest = JSON.parse(await readFile(path.join(nodePkgDir, 'package.json'), 'utf8')) as {
     engines?: { node?: string };
     dependencies?: Record<string, string>;
@@ -74,7 +74,7 @@ test('runtime dependency engines of @botd/node cover Node 20.0.0', async () => {
   assert.deepEqual(offenders, [], `dependencies breaking the Node >=20.0.0 promise: ${offenders.join('; ')}`);
 });
 
-test('packaged dist passes Node 20 syntax check without import attributes', { timeout: 120_000 }, async () => {
+test('packaged dist passes Node 20 syntax check without import attributes', { timeout: 60_000 }, async () => {
   const distDir = path.join(nodePkgDir, 'dist');
   if (!existsSync(distDir)) {
     assert.ok(true, 'dist not built (plain install); behavior smoke only runs in the Node 20 CI job');
@@ -112,7 +112,7 @@ const realSmoke = Boolean(node20Bin && process.env.BOTD_PROTOCOL_TARBALL && proc
 
 test(
   'tarballs install and behave under real Node 20 (help/version, env io, exec, abort)',
-  { skip: realSmoke ? false : 'set BOTD_NODE20_BIN + tarball envs to run the real Node 20 smoke', timeout: 300_000 },
+  { skip: realSmoke ? false : 'set BOTD_NODE20_BIN + tarball envs to run the real Node 20 smoke', timeout: 60_000 },
   async t => {
     assert.ok(node20Bin && existsSync(node20Bin), `BOTD_NODE20_BIN must exist: ${node20Bin}`);
     const root = await mkdtemp(path.join(tmpdir(), 'botd-node20-smoke-'));

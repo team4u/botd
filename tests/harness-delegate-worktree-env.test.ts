@@ -106,7 +106,7 @@ const seedBot = (
 // 1. delegate_to_bot：完整 Worker 栈 + 完成回报
 // ---------------------------------------------------------------------------
 
-test('1. delegate_to_bot runs the full worker stack and reports back completed', { timeout: 30_000 }, async () => {
+test('1. delegate_to_bot runs the full worker stack and reports back completed', { timeout: 60_000 }, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-delegate-'));
   const faux = fauxProvider({ models: [{ id: 'main' }] });
   const models = createModels();
@@ -174,7 +174,7 @@ test('1. delegate_to_bot runs the full worker stack and reports back completed',
   }
 });
 
-test('Router keeps coding tools; spawn_worker runs the full worker stack and reports back completed', { timeout: 30_000 }, async () => {
+test('Router keeps coding tools; spawn_worker runs the full worker stack and reports back completed', { timeout: 60_000 }, async () => {
   const faux = fauxProvider({ models: [{ id: 'main' }] });
   const models = createModels();
   models.setProvider(faux.provider);
@@ -622,7 +622,7 @@ test('5. worker subagent isolation: worktree gets its own branch; default inheri
 // 6. SubagentWorkflow：parallel() 并发 worktree 隔离 + resume(label) 复用子会话
 // ---------------------------------------------------------------------------
 
-test('6. SubagentWorkflow parallel worktree steps get independent branches; resume reuses the labeled conversation', { timeout: 90_000 }, async (t) => {
+test('6. SubagentWorkflow parallel worktree steps get independent branches; resume reuses the labeled conversation', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-wf-worktree-'));
   t.after(async () => {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);

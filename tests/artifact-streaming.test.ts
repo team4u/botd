@@ -147,7 +147,7 @@ function requestOverSocket<T>(
   });
 }
 
-test('Binary stream upload with user Cookie & inline download', async (t) => {
+test('Binary stream upload with user Cookie & inline download', { timeout: 60_000 }, async (t) => {
   const ctx = await setupTestContext(t);
   const binaryPayload = randomBytes(64 * 1024); // 64KB
   const filename = '测试 报告 1.dat';
@@ -215,7 +215,7 @@ test('Binary stream upload with user Cookie & inline download', async (t) => {
   assert.deepEqual(downloadedBuf, binaryPayload, 'Downloaded bytes must match uploaded bytes');
 });
 
-test('Binary stream upload with x-botd-node-id & x-botd-node-token authentication', async (t) => {
+test('Binary stream upload with x-botd-node-id & x-botd-node-token authentication', { timeout: 60_000 }, async (t) => {
   const ctx = await setupTestContext(t);
   const binaryPayload = randomBytes(32 * 1024); // 32KB
   const filename = 'node-result.bin';
@@ -273,7 +273,7 @@ test('Binary stream upload with x-botd-node-id & x-botd-node-token authenticatio
   assert.deepEqual(downloadedBuf, binaryPayload);
 });
 
-test('Binary upload with query parameters fallback', async (t) => {
+test('Binary upload with query parameters fallback', { timeout: 60_000 }, async (t) => {
   const ctx = await setupTestContext(t);
   const binaryPayload = Buffer.from('binary-data-via-query-params');
 
@@ -300,7 +300,7 @@ test('Binary upload with query parameters fallback', async (t) => {
   assert.ok(msg);
 });
 
-test('Binary upload with custom Content-Type and x-artifact-filename', async (t) => {
+test('Binary upload with custom Content-Type and x-artifact-filename', { timeout: 60_000 }, async (t) => {
   const ctx = await setupTestContext(t);
   const imagePayload = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); // PNG header
 
@@ -323,7 +323,7 @@ test('Binary upload with custom Content-Type and x-artifact-filename', async (t)
   assert.equal(uploadJson.filename, 'image.png');
 });
 
-test('Binary upload validations and error handling', async (t) => {
+test('Binary upload validations and error handling', { timeout: 60_000 }, async (t) => {
   const ctx = await setupTestContext(t);
 
   // 1. Empty body (0 bytes)
@@ -439,7 +439,7 @@ test('Binary upload validations and error handling', async (t) => {
   assert.equal(forbiddenRes.status, 403);
 });
 
-test('Backwards compatible JSON Base64 upload', async (t) => {
+test('Backwards compatible JSON Base64 upload', { timeout: 60_000 }, async (t) => {
   const ctx = await setupTestContext(t);
   const content = 'Legacy json base64 uploaded text.';
   const contentBase64 = Buffer.from(content).toString('base64');
@@ -482,7 +482,7 @@ test('Backwards compatible JSON Base64 upload', async (t) => {
   assert.equal(dlText, content);
 });
 
-test('Node Local IPC binary stream upload (/artifact/put) & download (/artifact/pull)', async (t) => {
+test('Node Local IPC binary stream upload (/artifact/put) & download (/artifact/pull)', { timeout: 60_000 }, async (t) => {
   const ctx = await setupTestContext(t);
 
   const socketPath = getDaemonSocketPath(ctx.dir);

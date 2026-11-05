@@ -36,7 +36,7 @@ const subcommandNames = (program: ReturnType<typeof buildProgram>, name: string)
   return cmd ? cmd.commands.map((c) => c.name()) : [];
 };
 
-test('buildProgram registers the Super-agent command groups with their subcommands', () => {
+test('buildProgram registers the Super-agent command groups with their subcommands', { timeout: 60_000 }, () => {
   const program = buildProgram();
   const top = commandNames(program);
 
@@ -63,7 +63,7 @@ test('buildProgram registers the Super-agent command groups with their subcomman
   }
 });
 
-test('removed legacy commands are gone from the program', () => {
+test('removed legacy commands are gone from the program', { timeout: 60_000 }, () => {
   const program = buildProgram();
   const top = commandNames(program);
 
@@ -367,7 +367,7 @@ test('watchdog health returns structured diagnostics via CLI (--run-pass appends
 // 3. asks: pending human-interaction asks over the Hub GroupRouter
 // ---------------------------------------------------------------------------
 
-test('asks list/respond answers a pending ask via the Hub', { timeout: 30_000 }, async (t) => {
+test('asks list/respond answers a pending ask via the Hub', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-cli-asks-'));
   t.after(async () => {
     await rm(dir, { recursive: true, force: true });
@@ -449,7 +449,7 @@ test('asks list/respond answers a pending ask via the Hub', { timeout: 30_000 },
 // 4. Node-less global ergonomics: skills / extensions / providers without nodeId
 // ---------------------------------------------------------------------------
 
-test('skills/extensions/providers operate on global Hub routes with no nodeId', { timeout: 30_000 }, async (t) => {
+test('skills/extensions/providers operate on global Hub routes with no nodeId', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-cli-global-'));
   t.after(async () => {
     await rm(dir, { recursive: true, force: true });

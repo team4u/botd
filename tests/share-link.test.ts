@@ -90,7 +90,7 @@ async function setupTestContext() {
   };
 }
 
-test('Session share link: full lifecycle and authorization', async (t) => {
+test('Session share link: full lifecycle and authorization', { timeout: 60_000 }, async (t) => {
   const ctx = await setupTestContext();
   t.after(ctx.cleanup);
 
@@ -358,7 +358,7 @@ test('Session share link: full lifecycle and authorization', async (t) => {
   assert.equal(revokedArtifactRes.status, 404);
 });
 
-test('CLI: botd sessions share command supports create, regenerate, and revoke', async (t) => {
+test('CLI: botd sessions share command supports create, regenerate, and revoke', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-cli-share-test-'));
   const cliDir = path.join(dir, 'cli-data');
   const dbPath = path.join(dir, 'hub.sqlite');

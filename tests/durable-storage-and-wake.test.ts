@@ -133,7 +133,7 @@ const createHubFromEnv = async (
 // 1. 生产存储兜底：BOTD_DB_PATH + options.dbPath 缺省 → <db>.durable.sqlite 落盘
 // ---------------------------------------------------------------------------
 
-test('ensureDurableRuntime persists to ${BOTD_DB_PATH}.durable.sqlite and survives Hub restart', async (t: TestContext) => {
+test('ensureDurableRuntime persists to ${BOTD_DB_PATH}.durable.sqlite and survives Hub restart', { timeout: 60_000 }, async (t: TestContext) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-durable-storage-'));
   t.after(async () => {
     await rm(dir, { recursive: true, force: true });
@@ -208,7 +208,7 @@ test('ensureDurableRuntime persists to ${BOTD_DB_PATH}.durable.sqlite and surviv
 // 2. botd wake（requestWakeupTurn）走 Durable Router 会话
 // ---------------------------------------------------------------------------
 
-test('requestWakeupTurn routes the wake turn through the durable runtime (no runTurn RPC)', async (t: TestContext) => {
+test('requestWakeupTurn routes the wake turn through the durable runtime (no runTurn RPC)', { timeout: 60_000 }, async (t: TestContext) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-durable-wake-'));
   t.after(async () => {
     await rm(dir, { recursive: true, force: true });
@@ -354,7 +354,7 @@ test('requestWakeupTurn routes the wake turn through the durable runtime (no run
 // 3. hub.drain() 等待 Durable 运行时的活跃任务
 // ---------------------------------------------------------------------------
 
-test('hub.drain() waits for active durable runtime tasks', async (t: TestContext) => {
+test('hub.drain() waits for active durable runtime tasks', { timeout: 60_000 }, async (t: TestContext) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-durable-drain-'));
   await mkdir(dir, { recursive: true });
   t.after(async () => {

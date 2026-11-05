@@ -92,7 +92,7 @@ function routerAgentFor(persona: BotPersonaConfig) {
 	return persona; // registered through runtime; agent resolved by runtime defaults + configure below
 }
 
-test("1. multi-persona isolation: independent main sessions and personas", async () => {
+test("1. multi-persona isolation: independent main sessions and personas", { timeout: 60_000 }, async () => {
 	const { runtime, faux } = await openRuntime();
 	try {
 		const architect = await runtime.ensureBotMainSession("architect");
@@ -141,7 +141,7 @@ test("1. multi-persona isolation: independent main sessions and personas", async
 	}
 });
 
-test("2. full-duplex non-blocking spawn_worker with report-back", async () => {
+test("2. full-duplex non-blocking spawn_worker with report-back", { timeout: 60_000 }, async () => {
 	const { runtime, faux } = await openRuntime();
 	try {
 		const router = await runtime.ensureBotMainSession("architect");
@@ -223,7 +223,7 @@ test("2. full-duplex non-blocking spawn_worker with report-back", async () => {
 	}
 });
 
-test("3. cross-persona delegation via delegate_to_bot", async () => {
+test("3. cross-persona delegation via delegate_to_bot", { timeout: 60_000 }, async () => {
 	const { runtime, faux } = await openRuntime();
 	try {
 		const assistant = await runtime.ensureBotMainSession("assistant");
@@ -276,7 +276,7 @@ test("3. cross-persona delegation via delegate_to_bot", async () => {
 	}
 });
 
-test("4. steer_worker, stop_worker, and recall (Chain of Recall)", async () => {
+test("4. steer_worker, stop_worker, and recall (Chain of Recall)", { timeout: 60_000 }, async () => {
 	// A slow provider keeps the worker genuinely busy while we steer and stop it.
 	const faux = fauxProvider({ models: [{ id: "main" }], tokensPerSecond: 40 });
 	const models = createModels();
@@ -356,7 +356,7 @@ test("4. steer_worker, stop_worker, and recall (Chain of Recall)", async () => {
 	}
 });
 
-test("5. crash & resume: interrupted worker finishes and reports exactly once", async () => {
+test("5. crash & resume: interrupted worker finishes and reports exactly once", { timeout: 60_000 }, async () => {
 	const dir = await mkdtemp(path.join(tmpdir(), "botd-durable-test-"));
 	try {
 		const dbPath = path.join(dir, "hub.sqlite");
@@ -429,7 +429,7 @@ test("5. crash & resume: interrupted worker finishes and reports exactly once", 
 // 6. spawn_worker defaults to a clean (non-forked) worker context
 // ---------------------------------------------------------------------------
 
-test("6. spawn_worker defaults to forkContext: false; explicit true forks the router context", { timeout: 30_000 }, async () => {
+test("6. spawn_worker defaults to forkContext: false; explicit true forks the router context", { timeout: 60_000 }, async () => {
 	const { runtime, faux } = await openRuntime();
 	try {
 		const router = await runtime.ensureBotMainSession("architect");

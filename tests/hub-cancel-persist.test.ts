@@ -21,7 +21,7 @@ function createHarness() {
   return { db, events, sseHub };
 }
 
-test('cancelSession 后飞行中的 runTurn 返回 aborted=true：部分输出仍持久化', async () => {
+test('cancelSession 后飞行中的 runTurn 返回 aborted=true：部分输出仍持久化', { timeout: 60_000 }, async () => {
   const { db, events, sseHub } = createHarness();
   const router = new GroupRouter(db, {} as any, sseHub as any);
 

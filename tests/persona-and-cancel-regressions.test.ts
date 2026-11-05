@@ -72,7 +72,7 @@ const toolNames = (change: import('@earendil-works/pi-durable').AgentChange): st
 
 // ---------------------------------------------------------------------------
 
-test('1. dynamic extensions stay per-persona: no leak onto other personas, no CodingTools on Router', async (t) => {
+test('1. dynamic extensions stay per-persona: no leak onto other personas, no CodingTools on Router', { timeout: 60_000 }, async (t) => {
   const faux = fauxProvider({ models: [{ id: 'main' }] });
   const models = createModels();
   models.setProvider(faux.provider);
@@ -116,7 +116,7 @@ test('1. dynamic extensions stay per-persona: no leak onto other personas, no Co
   assert.ok(names(workerB.extensions).some((n) => n.includes('worker')));
 });
 
-test('2. toolScope readonly: write/edit/bash removed from BOTH tools and modelTools layers', async (t) => {
+test('2. toolScope readonly: write/edit/bash removed from BOTH tools and modelTools layers', { timeout: 60_000 }, async (t) => {
   const faux = fauxProvider({ models: [{ id: 'main' }] });
   const models = createModels();
   models.setProvider(faux.provider);
@@ -159,7 +159,7 @@ test('2. toolScope readonly: write/edit/bash removed from BOTH tools and modelTo
   assert.deepEqual(flatNames(customWorker.modelTools).sort(), ['read', 'write']);
 });
 
-test('3. syncPersonas hot-applies new config to existing router/worker conversations', async (t) => {
+test('3. syncPersonas hot-applies new config to existing router/worker conversations', { timeout: 60_000 }, async (t) => {
   const faux = fauxProvider({ models: [{ id: 'main' }] });
   const models = createModels();
   models.setProvider(faux.provider);
@@ -219,7 +219,7 @@ test('3. syncPersonas hot-applies new config to existing router/worker conversat
   assert.ok(!/Hot v1/.test(after_), 'old instructions must be gone after syncPersonas');
 });
 
-test('4. RemoteExecutionEnv.exec: context abort propagates envAbortExec and stops the remote command', async (t) => {
+test('4. RemoteExecutionEnv.exec: context abort propagates envAbortExec and stops the remote command', { timeout: 60_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-remote-cancel-'));
   t.after(async () => {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);

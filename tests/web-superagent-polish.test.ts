@@ -38,7 +38,7 @@ const webSrc = path.resolve(__dirname, '../apps/web/src');
 // 1. transcriptToTurnBlocks：Durable recall transcript → TurnBlock[]
 // ============================================================
 
-test('transcriptToTurnBlocks: 把 Durable worker recall transcript 精确转换为 TurnBlock[]', async () => {
+test('transcriptToTurnBlocks: 把 Durable worker recall transcript 精确转换为 TurnBlock[]', { timeout: 60_000 }, async () => {
   const { transcriptToTurnBlocks } = (await import('../apps/web/src/hooks/useSuperAgentWorkers.js' as any)) as {
     transcriptToTurnBlocks: (transcript: Array<{ id: string; kind: string; role?: string; text: string }>) => unknown[];
   };
@@ -69,7 +69,7 @@ test('transcriptToTurnBlocks: 把 Durable worker recall transcript 精确转换�
   assert.deepEqual(blocks[3], { type: 'text', text: '重构完成，共改动 3 个文件。' });
 });
 
-test('transcriptToTurnBlocks: 过滤空文本与未知 kind（system/reset/compaction 不进时间线）', async () => {
+test('transcriptToTurnBlocks: 过滤空文本与未知 kind（system/reset/compaction 不进时间线）', { timeout: 60_000 }, async () => {
   const { transcriptToTurnBlocks } = (await import('../apps/web/src/hooks/useSuperAgentWorkers.js' as any)) as {
     transcriptToTurnBlocks: (transcript: Array<{ id: string; kind: string; role?: string; text: string }>) => unknown[];
   };
@@ -95,7 +95,7 @@ test('transcriptToTurnBlocks: 过滤空文本与未知 kind（system/reset/compa
   assert.deepEqual(transcriptToTurnBlocks([]), []);
 });
 
-test('useSuperAgentWorkers 源码: 选中 worker 时请求 /recall 端点水合检视抽屉', () => {
+test('useSuperAgentWorkers 源码: 选中 worker 时请求 /recall 端点水合检视抽屉', { timeout: 60_000 }, () => {
   const source = readFileSync(path.join(webSrc, 'hooks/useSuperAgentWorkers.ts'), 'utf-8');
   assert.match(source, /workers\/\$\{encodeURIComponent\(selectedWorkerId\)\}\/recall/, '应请求 /workers/:workerId/recall');
   assert.match(source, /transcriptToTurnBlocks\(transcript\)/, 'recall transcript 应转换为 blocks');
@@ -176,7 +176,7 @@ test('BotListSection SSR: 节点离线时新建/设置/删除智能体按钮全�
   assert.doesNotMatch(html, /节点离线，无法删除/, '不应再有「节点离线，无法删除」提示');
 });
 
-test('ResourcePools SSR: 节点离线时技能/扩展新建与编辑入口可用', () => {
+test('ResourcePools SSR: 节点离线时技能/扩展新建与编辑入口可用', { timeout: 60_000 }, () => {
   const noop = () => {};
 
   const skillsHtml = ReactDOMServer.renderToStaticMarkup(
@@ -212,7 +212,7 @@ test('ResourcePools SSR: 节点离线时技能/扩展新建与编辑入口可用
 // 3. 跨节点技能同步彻底移除 + 零节点 Hub 直建入口
 // ============================================================
 
-test('syncSkillAcrossNodes 彻底移除: api/视图/资源池三处均无残留', () => {
+test('syncSkillAcrossNodes 彻底移除: api/视图/资源池三处均无残留', { timeout: 60_000 }, () => {
   const apiSource = readFileSync(path.join(webSrc, 'api.ts'), 'utf-8');
   assert.doesNotMatch(apiSource, /syncSkillAcrossNodes/, 'api.ts 不应再有 syncSkillAcrossNodes');
   assert.doesNotMatch(apiSource, /\/sync/, 'api.ts 不应再有 /skills/:skillId/sync 调用');
@@ -229,7 +229,7 @@ test('syncSkillAcrossNodes 彻底移除: api/视图/资源池三处均无残留'
   assert.doesNotMatch(poolsSource, /同步技能到其他节点/, '不应再有「同步技能到其他节点」文案');
 });
 
-test('NodesBotsView SSR: 零节点时提供「直接新建智能体 (Hub 本地)」入口', () => {
+test('NodesBotsView SSR: 零节点时提供「直接新建智能体 (Hub 本地)」入口', { timeout: 60_000 }, () => {
   const html = ReactDOMServer.renderToStaticMarkup(
     React.createElement(NodesBotsView as React.FC<Record<string, unknown>>, {
       nodes: [],
@@ -251,7 +251,7 @@ test('NodesBotsView SSR: 零节点时提供「直接新建智能体 (Hub 本地)
   assert.ok(!html.slice(btnStart, btnOpen).includes('disabled'), 'Hub 本地新建按钮不应 disabled');
 });
 
-test('api.ts: interactSubagent / stopSubagent 已随旧回退路径一并移除', () => {
+test('api.ts: interactSubagent / stopSubagent 已随旧回退路径一并移除', { timeout: 60_000 }, () => {
   const apiSource = readFileSync(path.join(webSrc, 'api.ts'), 'utf-8');
   assert.doesNotMatch(apiSource, /interactSubagent/, 'api.ts 不应再有 interactSubagent');
   assert.doesNotMatch(apiSource, /stopSubagent/, 'api.ts 不应再有 stopSubagent');

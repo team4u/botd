@@ -138,7 +138,7 @@ test('Test 1: SubagentWorkflow runs pipeline/parallel stages with gate + schema 
 	assert.deepEqual(workflowResult.reports, ['linux PASS 1.2.0', 'mac PASS 1.2.0']);
 });
 
-test('Test 2: SubagentWorkflow crash recovery — Stage 1 served from memo, Stage 2 completes', { timeout: 90_000 }, async (t) => {
+test('Test 2: SubagentWorkflow crash recovery — Stage 1 served from memo, Stage 2 completes', { timeout: 60_000 }, async (t) => {
 	const env = createFauxEnv();
 	const dir = await mkdtemp(path.join(tmpdir(), 'botd-wf-crash-'));
 	t.after(async () => await rm(dir, { recursive: true, force: true }));
@@ -296,7 +296,7 @@ test('Test 3: EventRouter pass-through — first event routes via Router, later 
 	assert.equal(afterUnsub.action, 'router', 'unsubscribed thread falls back to the slow path');
 });
 
-test('Test 4a: Inline & Spill with Chain of Recall', { timeout: 30_000 }, async (t) => {
+test('Test 4a: Inline & Spill with Chain of Recall', { timeout: 60_000 }, async (t) => {
 	const env = createFauxEnv();
 	const registry = createRegistry();
 	const harness = await HarnessType.open(new MemoryStorage(), { models: env.models, registry, env: () => new NodeExecutionEnv({ cwd: process.cwd() }) }, BACKGROUND_CONTEXT);
@@ -324,7 +324,7 @@ test('Test 4a: Inline & Spill with Chain of Recall', { timeout: 30_000 }, async 
 	assert.equal(spillDoc.fullContent, bigPayload);
 });
 
-test('Test 4b: speculative execution — unconfirmed is silently discarded, confirmed notifies the Router', { timeout: 30_000 }, async (t) => {
+test('Test 4b: speculative execution — unconfirmed is silently discarded, confirmed notifies the Router', { timeout: 60_000 }, async (t) => {
 	const env = createFauxEnv();
 	const registry = createRegistry();
 	const harness = await HarnessType.open(new MemoryStorage(), { models: env.models, registry, env: () => new NodeExecutionEnv({ cwd: process.cwd() }) }, BACKGROUND_CONTEXT);

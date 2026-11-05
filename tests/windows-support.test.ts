@@ -8,7 +8,7 @@ import { getDaemonSocketPath } from '../apps/node/src/storage.js';
 import { ensureBotdBinWrapper } from '../apps/node/src/runtime.js';
 import { resetWindowsShellCache, resolveWindowsBash, ensureWindowsShell } from '../apps/node/src/windows-shell.js';
 
-test('daemon control-plane address adapts to the platform', () => {
+test('daemon control-plane address adapts to the platform', { timeout: 60_000 }, () => {
   const socketPath = getDaemonSocketPath('/tmp/fake-data-dir');
   if (process.platform === 'win32') {
     assert.match(socketPath, /^\\\\\.\\pipe\\botd-agent-[0-9a-f]{16}$/);
@@ -21,7 +21,7 @@ test('daemon control-plane address adapts to the platform', () => {
   }
 });
 
-test('botd bin wrapper emits a POSIX script and a .cmd twin on Windows', async t => {
+test('botd bin wrapper emits a POSIX script and a .cmd twin on Windows', { timeout: 60_000 }, async t => {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'botd-wrapper-'));
   t.after(async () => {
     if (process.platform === 'win32') resetWindowsShellCache();
@@ -49,7 +49,7 @@ test('botd bin wrapper emits a POSIX script and a .cmd twin on Windows', async t
   await ensureBotdBinWrapper(dataDir);
 });
 
-test('windows bash resolution prefers BOTD_BASH_PATH and never auto-downloads when one exists', async t => {
+test('windows bash resolution prefers BOTD_BASH_PATH and never auto-downloads when one exists', { timeout: 60_000 }, async t => {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'botd-winbash-'));
   t.after(async () => {
     delete process.env.BOTD_BASH_PATH;
@@ -72,7 +72,7 @@ test('windows bash resolution prefers BOTD_BASH_PATH and never auto-downloads wh
   }
 });
 
-test('ensureWindowsShell downloads a portable MinGit when no bash exists (network stubbed via BOTD_MINGIT_URL)', { skip: process.platform !== 'win32' }, async t => {
+test('ensureWindowsShell downloads a portable MinGit when no bash exists (network stubbed via BOTD_MINGIT_URL)', { skip: process.platform !== 'win32', timeout: 60_000 }, async t => {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'botd-mingit-'));
   t.after(async () => {
     delete process.env.BOTD_MINGIT_URL;
@@ -92,7 +92,7 @@ test('ensureWindowsShell downloads a portable MinGit when no bash exists (networ
   assert.equal(result, undefined);
 });
 
-test('managed mingit marker short-circuits resolution', async t => {
+test('managed mingit marker short-circuits resolution', { timeout: 60_000 }, async t => {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'botd-mingit-marker-'));
   t.after(async () => {
     if (process.platform === 'win32') resetWindowsShellCache();
