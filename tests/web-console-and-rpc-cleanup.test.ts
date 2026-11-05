@@ -204,21 +204,21 @@ test('ChatView.tsx: 派发与巡检回调已接线到后台子任务抽屉', () 
   assert.doesNotMatch(source, /showWorkerToolsBar/, 'showWorkerToolsBar 状态应彻底清理');
 });
 
-test('ChatView.tsx: 顶栏 ⚡ 子任务角标与回执卡查看详情均已接线', () => {
+test('ChatView.tsx: 顶栏 ⚡ 子任务角标已接线，回执卡不再提供死链入口', () => {
   const source = readFileSync(path.join(webSrc, 'components/ChatView.tsx'), 'utf-8');
   // 顶栏 Zap 角标：零任务完全隐藏
   assert.match(source, /superAgent\.workers\.length > 0 && \(/, '零 worker 时 Zap 按钮应完全隐藏');
   assert.match(source, /aria-label=\{workersTitle\}/, 'Zap 按钮应带动态 aria-label');
   // 单 worker 直达详情水合
   assert.match(source, /superAgent\.setSelectedWorkerId\(workerId\);/, '单 worker 点击应水合 recall');
-  // 回执卡「查看详情」→ 打开抽屉并定位 worker
-  assert.match(source, /onOpenWorker=\{\(workerId\) => \{/, 'MessageTimeline 应接线 onOpenWorker');
+  // Worker 轨迹存在内存，历史会话不可回看：回执卡不提供「查看详情」死链
+  assert.doesNotMatch(source, /onOpenWorker/, '回执卡 onOpenWorker 接线应移除');
 });
 
-test('MessageItem.tsx: Worker 完成回执卡支持 onOpenWorker 直达详情', () => {
+test('MessageItem.tsx: Worker 完成回执卡是纯凭条（无链接、无截断摘要折叠）', () => {
   const source = readFileSync(path.join(webSrc, 'components/MessageItem.tsx'), 'utf-8');
-  assert.match(source, /onOpenWorker\?: \(workerId: string\) => void;/, 'MessageItem 应声明 onOpenWorker prop');
-  assert.match(source, /title === '后台任务完成' && onOpenWorker/, '仅 Worker 完成回执且提供回调时走 onOpenWorker');
-  assert.match(source, /查看详情 →/, 'Worker 回执应渲染「查看详情 →」链接');
-  assert.match(source, /workerReceiptId === null/, 'Worker 回执场景应省略截断摘要折叠区');
+  assert.doesNotMatch(source, /onOpenWorker/, 'MessageItem 不应再有 onOpenWorker prop');
+  assert.match(source, /const isWorkerReceipt = title === '后台任务完成';/, 'Worker 回执凭条判定');
+  assert.match(source, /!isWorkerReceipt && childSessionId/, 'Worker 回执不渲染子会话链接');
+  assert.match(source, /detailBody !== null && !isWorkerReceipt/, 'Worker 回执省略 200 字截断摘要折叠区');
 });

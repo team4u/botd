@@ -1318,10 +1318,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onInspectSubagentRun={(run) => {
           if (run) openWorkersDrawer(run.id);
         }}
-        onOpenWorker={(workerId) => {
-          superAgent.setSelectedWorkerId(workerId);
-          openWorkersDrawer(workerId);
-        }}
         editingMessage={editingMessage}
         canEdit={canEdit}
         hasEarlierMessages={hasEarlierMessages}

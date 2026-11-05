@@ -1516,8 +1516,6 @@ interface MessageItemProps {
   onForkMessage?: (messageId: string) => void | Promise<void>;
   /** 点击子代理运行记录打开右侧详情抽屉 */
   onInspectSubagentRun?: (run: SubagentRunRecord) => void;
-  /** Worker 完成回执「查看详情」：定位到对应后台子任务抽屉详情页 */
-  onOpenWorker?: (workerId: string) => void;
 }
 
 /** 按回调正文语义推导标题（后端已不再产生 📋 过程消息） */
@@ -1563,8 +1561,6 @@ interface CallbackMessageCardProps {
   childSessionId?: string;
   formattedTime: string;
   fullTime: string;
-  /** 点击「查看详情」定位到对应后台 Worker 详情（未提供时退化为子会话链接） */
-  onOpenWorker?: (workerId: string) => void;
 }
 
 /** 回调通知卡：语义化标题 + 长回执默认折叠（父 Bot 随后会汇总，全文不默认平铺） */
@@ -1574,16 +1570,15 @@ const CallbackMessageCard: React.FC<CallbackMessageCardProps> = ({
   childSessionId,
   formattedTime,
   fullTime,
-  onOpenWorker,
 }) => {
   const [expanded, setExpanded] = useState(false);
   const title = deriveCallbackTitle(content);
   const { headline, detailBody } = splitCallbackReceipt(content);
-  // Worker 完成回执：headline 为「workerId · 标题」，解析出 workerId 后直接定位详情；
-  // detailBody 是 200 字截断的残缺摘要，此时折叠区整体省略（完整时间线在抽屉里）
-  const workerReceiptId =
-    title === '后台任务完成' && onOpenWorker ? headline.split(' · ')[0].trim() || null : null;
-  const collapsible = detailBody !== null && workerReceiptId === null;
+  // Worker 完成回执：headline 为「workerId · 标题」，是纯粹的完成凭条（完整时间线走顶栏 ⚡
+  // 抽屉，且 Worker 轨迹存在内存，历史会话中不可回看，不提供死链）；detailBody 是 200 字
+  // 截断的残缺摘要，该场景折叠区整体省略
+  const isWorkerReceipt = title === '后台任务完成';
+  const collapsible = detailBody !== null && !isWorkerReceipt;
 
   return (
     <div data-message-id={messageId} className="flex justify-center my-3">
@@ -1594,23 +1589,13 @@ const CallbackMessageCard: React.FC<CallbackMessageCardProps> = ({
             <span>{title}</span>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {workerReceiptId ? (
-              <button
-                type="button"
-                onClick={() => onOpenWorker?.(workerReceiptId)}
-                className="text-[11px] font-medium text-amber-700 dark:text-amber-300 hover:underline cursor-pointer"
+            {!isWorkerReceipt && childSessionId && (
+              <a
+                href={`#?s=${childSessionId}`}
+                className="text-[11px] font-medium text-amber-700 dark:text-amber-300 hover:underline"
               >
-                查看详情 →
-              </button>
-            ) : (
-              childSessionId && (
-                <a
-                  href={`#?s=${childSessionId}`}
-                  className="text-[11px] font-medium text-amber-700 dark:text-amber-300 hover:underline"
-                >
-                  查看对话 / 追问 →
-                </a>
-              )
+                查看对话 / 追问 →
+              </a>
             )}
             <span className="text-[11px] text-amber-600/80 dark:text-amber-400/80 font-normal" title={fullTime}>
               {formattedTime}
@@ -1654,7 +1639,6 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   onStartEdit,
   onForkMessage,
   onInspectSubagentRun,
-  onOpenWorker,
 }) => {
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
@@ -1776,7 +1760,6 @@ export const MessageItem: React.FC<MessageItemProps> = ({
         childSessionId={callbackChildSessionId}
         formattedTime={formattedTime}
         fullTime={fullTime}
-        onOpenWorker={onOpenWorker}
       />
     );
   }
@@ -1895,8 +1878,7 @@ function areMessageItemPropsEqual(prev: MessageItemProps, next: MessageItemProps
     prev.isEditing !== next.isEditing ||
     prev.onStartEdit !== next.onStartEdit ||
     prev.onForkMessage !== next.onForkMessage ||
-    prev.onInspectSubagentRun !== next.onInspectSubagentRun ||
-    prev.onOpenWorker !== next.onOpenWorker
+    prev.onInspectSubagentRun !== next.onInspectSubagentRun
   ) {
     return false;
   }
