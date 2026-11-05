@@ -131,6 +131,8 @@ export interface EnvAcquireWorktreeInput {
   repoDir: string;
   workerId: string;
   branchPrefix?: string;
+  /** 新 worktree 分支的起点引用（commit/branch/tag），缺省为 HEAD。 */
+  baseRef?: string;
 }
 
 export interface EnvAcquireWorktreeResult {

@@ -9,12 +9,18 @@
  * - BYOM 离线韧性（DeepSeek §5.2）：操作开始时节点离线且提供了 `waitForNodeOnline`，
  *   则等待节点重连（尊重 Chord context 取消）后无缝执行。
  *
- * 说明：本文件的本地 RPC 类型是 `packages/protocol/src/env-rpc.ts` 的结构镜像
- * （协议包 index 未导出 env-rpc，跨包源引用会破坏 rootDir），
- * 由 tests/remote-env-worktree.test.ts 做结构一致性校验。
+ * 说明：本文件使用的 RPC 协议类型定义在 packages/protocol/src/env-rpc.ts，
+ * 经 @botd/protocol 引入并 re-export，避免手抄镜像产生字段漂移。
  */
 
 import { withoutAbortSignal, type Context } from '@earendil-works/chord/context';
+import type {
+  EnvExecOutputEvent,
+  NodeEnvRpcFunctions,
+  RpcEnvError,
+  RpcLineScan,
+  RpcResult,
+} from '@botd/protocol';
 import { withSecretEnv } from './secret-stash.js';
 import {
   ExecutionError,
@@ -35,113 +41,35 @@ import {
 } from '@earendil-works/pi-durable/env';
 
 // ---------------------------------------------------------------------------
-// 协议类型镜像（与 packages/protocol/src/env-rpc.ts 保持结构一致）
+// 协议类型（定义见 packages/protocol/src/env-rpc.ts）
 // ---------------------------------------------------------------------------
 
-type RpcFileKind = 'file' | 'directory' | 'symlink';
-type RpcErrorCode = string;
-
-interface RpcEnvError {
-  code: RpcErrorCode;
-  message: string;
-  spillPath?: string;
-}
-
-type RpcResult<T> = { ok: true; value: T } | { ok: false; error: RpcEnvError };
-
-interface RpcFileInfo {
-  name: string;
-  path: string;
-  kind: RpcFileKind;
-  size: number;
-  mtimeMs: number;
-}
-
-interface RpcTextLine {
-  text: string;
-  terminated: boolean;
-}
-
-interface RpcLineScan {
-  newlines: number;
-  start: number;
-  end: number;
-  firstLineEnd: number;
-  lastLineStart: number;
-  selectedBytes: number;
-  firstLineBytes: number;
-}
-
-interface EnvExecOutputEvent {
-  execId: string;
-  text: string;
-  stream: 'stdout' | 'stderr';
-  skipped?: { bytes: number; newlines: number; endsWithNewline: boolean };
-}
-
-interface EnvExecInput {
-  execId: string;
-  command: string | readonly string[];
-  cwd?: string;
-  env?: Record<string, string>;
-  inheritEnv?: boolean;
-  timeout?: number;
-  spill?: { afterBytes: number; afterLines: number };
-  window?: { maxBytes: number; maxLines: number; minIntervalMs: number; bytesPerSecond: number };
-}
-
-interface EnvExecOk {
-  exitCode: number;
-  spillPath?: string;
-}
-
-interface NodeEnvRpcFunctions {
-  envAbsolutePath(input: { path: string; cwd?: string }): Promise<RpcResult<string>>;
-  envJoinPath(input: { parts: string[]; cwd?: string }): Promise<RpcResult<string>>;
-  envReadTextFile(input: { path: string; cwd?: string }): Promise<RpcResult<string>>;
-  envReadTextLines(input: { path: string; maxLines?: number; cwd?: string }): Promise<RpcResult<string[]>>;
-  envReadBinaryFile(input: { path: string; cwd?: string }): Promise<RpcResult<{ base64: string }>>;
-  envWriteFile(input: { path: string; content: string; encoding?: 'utf8' | 'base64'; cwd?: string }): Promise<RpcResult<null>>;
-  envAppendFile(input: { path: string; content: string; encoding?: 'utf8' | 'base64'; cwd?: string }): Promise<RpcResult<null>>;
-  envTruncateFile(input: { path: string; size: number; cwd?: string }): Promise<RpcResult<null>>;
-  envRenameFile(input: { sourcePath: string; destinationPath: string; cwd?: string }): Promise<RpcResult<null>>;
-  envFileInfo(input: { path: string; cwd?: string }): Promise<RpcResult<RpcFileInfo>>;
-  envListDir(input: { path: string; cwd?: string }): Promise<RpcResult<RpcFileInfo[]>>;
-  envListFiles(input: { path: string; cwd?: string }): Promise<RpcResult<{ entries: { path: string; kind: RpcFileKind }[]; truncated: boolean }>>;
-  envCanonicalPath(input: { path: string; cwd?: string }): Promise<RpcResult<string>>;
-  envExists(input: { path: string; cwd?: string }): Promise<RpcResult<boolean>>;
-  envCreateDir(input: { path: string; recursive?: boolean; cwd?: string }): Promise<RpcResult<null>>;
-  envRemove(input: { path: string; recursive?: boolean; force?: boolean; cwd?: string }): Promise<RpcResult<null>>;
-  envCreateTempDir(input: { prefix?: string; cwd?: string }): Promise<RpcResult<string>>;
-  envCreateTempFile(input: { prefix?: string; suffix?: string; cwd?: string }): Promise<RpcResult<string>>;
-  envOpenTextLineReader(input: { path: string; cwd?: string }): Promise<RpcResult<{ readerId: string }>>;
-  envTextReaderRead(input: { readerId: string }): Promise<RpcResult<RpcTextLine | null>>;
-  envTextReaderClose(input: { readerId: string }): Promise<RpcResult<null>>;
-  envOpenBinaryReader(input: { path: string; noFollow?: boolean; cwd?: string }): Promise<RpcResult<{ readerId: string }>>;
-  envBinaryReaderInfo(input: { readerId: string }): Promise<RpcResult<RpcFileInfo>>;
-  envBinaryReaderRead(input: { readerId: string; offset: number; length: number }): Promise<RpcResult<{ base64: string; byteLength: number }>>;
-  envBinaryReaderScanLines(input: { readerId: string; startLine: number; endLine?: number }): Promise<RpcResult<RpcLineScan>>;
-  envBinaryReaderClose(input: { readerId: string }): Promise<RpcResult<null>>;
-  envOpenDirReader(input: { path: string; cwd?: string }): Promise<RpcResult<{ readerId: string }>>;
-  envDirReaderNext(input: { readerId: string; maxEntries: number }): Promise<RpcResult<{ entries: RpcFileInfo[]; done: boolean }>>;
-  envDirReaderClose(input: { readerId: string }): Promise<RpcResult<null>>;
-  envExec(input: EnvExecInput): Promise<RpcResult<EnvExecOk>>;
-  envAbortExec(execId: string): Promise<void>;
-  envCleanup(cwd?: string): Promise<void>;
-  /** Git Worktree 并发隔离：为 worker 在 <repoDir>/.botd-worktrees/<workerId> 下创建隔离工作树（非 git 仓库时降级返回 repoDir）。 */
-  envAcquireWorktree?(input: {
-    repoDir: string;
-    workerId: string;
-    baseRef?: string;
-  }): Promise<{ worktreePath: string; branchName: string; isGitRepo: boolean }>;
-  /** 释放并清理 worktree（--force 移除 + prune）；非 git 仓库时为幂等 no-op。 */
-  envReleaseWorktree?(input: {
-    repoDir: string;
-    worktreePath: string;
-    branchName?: string;
-    deleteBranch?: boolean;
-  }): Promise<{ ok: boolean }>;
-}
+export type {
+  ActiveWorkerSummary,
+  ChainOfRecallRef,
+  EnvAcquireWorktreeInput,
+  EnvAcquireWorktreeResult,
+  EnvExecInput,
+  EnvExecOk,
+  EnvExecOutputEvent,
+  EnvExecSpillOptions,
+  EnvExecWindowOptions,
+  EnvReleaseWorktreeInput,
+  EnvReleaseWorktreeResult,
+  HubEnvStreamFunctions,
+  NodeEnvRpcFunctions,
+  RpcBinaryReaderHandle,
+  RpcDirReaderHandle,
+  RpcEnvError,
+  RpcFileErrorCode,
+  RpcFileKind,
+  RpcFileInfo,
+  RpcLineScan,
+  RpcResult,
+  RpcTextLine,
+  RpcTextReaderHandle,
+  ThreadSubscriptionRecord,
+} from '@botd/protocol';
 
 // ---------------------------------------------------------------------------
 
