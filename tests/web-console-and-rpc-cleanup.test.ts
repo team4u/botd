@@ -63,19 +63,15 @@ function renderWorkersBar(extraProps: Record<string, unknown> = {}): string {
   );
 }
 
-test('ActiveWorkersBar SSR: 派发任务与巡检按钮随胶囊一起渲染', () => {
+test('ActiveWorkersBar SSR: 有 Worker 时整行只给胶囊，巡检/派发不再常驻（收进顶栏 ··· 菜单）', () => {
   const html = renderWorkersBar();
 
   // Worker 胶囊本尊
   assert.match(html, /修复鉴权模块/, 'worker 胶囊标题应渲染');
 
-  // 巡检按钮（title 提示 + 文案）
-  assert.match(html, /title="运行 Watchdog 巡检"/, '巡检按钮应带 title="运行 Watchdog 巡检"');
-  assert.match(html, /巡检/, '「巡检」按钮文案应渲染');
-
-  // 派发任务按钮（aria-label + 文案）
-  assert.match(html, /aria-label="派发后台 Worker"/, '派发按钮应带 aria-label="派发后台 Worker"');
-  assert.match(html, /派发任务/, '「+ 派发任务」按钮文案应渲染');
+  // 巡检/派发按钮不再随胶囊常驻（手机端顶栏不再被挤压；零 Worker 展开态与 ··· 菜单仍可入口）
+  assert.doesNotMatch(html, /title="运行 Watchdog 巡检"/, '有任务时不应常驻巡检按钮');
+  assert.doesNotMatch(html, /aria-label="派发后台 Worker"/, '有任务时不应常驻派发按钮');
 });
 
 test('ActiveWorkersBar SSR: 零 Worker 时仍可派发首个任务与巡检', () => {
