@@ -532,8 +532,11 @@ test('协议层权威校验原语（isSafeId, isValidBotEnvKey, isBotConfig）�
   assert.equal(isBotConfig({ ...baseConfig, nodeId: 'bad/node' }), false);
   assert.equal(isBotConfig({ ...baseConfig, name: '' }), false);
   assert.equal(isBotConfig({ ...baseConfig, name: '   ' }), false);
-  assert.equal(isBotConfig({ ...baseConfig, modelProvider: '' }), false);
-  assert.equal(isBotConfig({ ...baseConfig, modelId: '' }), false);
+  // 模型字段类型非法拒绝；但空字符串是合法的「待选型」态
+  //（未配置凭据的供应商绝不写入假模型，注销联动置空也依赖此语义）
+  assert.equal(isBotConfig({ ...baseConfig, modelProvider: 123 as any }), false);
+  assert.equal(isBotConfig({ ...baseConfig, modelId: null as any }), false);
+  assert.equal(isBotConfig({ ...baseConfig, modelProvider: '', modelId: '' }), true);
   assert.equal(isBotConfig({ ...baseConfig, enabledSkills: ['bad/skill'] }), false);
   assert.equal(isBotConfig({ ...baseConfig, enabledExtensions: ['bad/ext'] }), false);
   assert.equal(isBotConfig(null), false);

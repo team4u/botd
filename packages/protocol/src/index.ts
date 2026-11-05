@@ -890,10 +890,10 @@ export const isBotConfig = (value: unknown): value is BotConfig => {
     isSafeId(v.nodeId) &&
     typeof v.name === 'string' && v.name.trim().length > 0 &&
     typeof v.description === 'string' &&
+    // 模型允许为空字符串：未选型/注销供应商联动满空的 Bot 是合法的「待配置」态，
+    // 界面引导选型即可；非空时仍必须是字符串。
     typeof v.modelProvider === 'string' &&
-    v.modelProvider.trim().length > 0 &&
     typeof v.modelId === 'string' &&
-    v.modelId.trim().length > 0 &&
     (v.thinkingLevel === undefined || isThinkingLevel(v.thinkingLevel)) &&
     Array.isArray(v.enabledSkills) &&
     v.enabledSkills.every(isSafeId) &&

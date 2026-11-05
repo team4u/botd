@@ -32,6 +32,11 @@ pnpm dev:web
 
 `BOTD_PORT=3002` 必须带上；Vite 端口（3001）与代理目标（3002）已固化在 `apps/web/vite.config.ts`（`strictPort: true`，被占直接报错不漂移）。
 
+## 测试规范（防死锁）
+
+- 单元测试单个用例最长 60s：写新用例一律显式声明 `{ timeout: 60_000 }`（runner 为 `tsx --test`），避免 await 挂起导致死锁卡死整个测试进程。
+- 纯逻辑单测应在毫秒级完成；确需等待异步（真实子进程、SSE 流等）才允许逼近上限。
+
 ## 版本发布与分发规范
 
 - **触发事实源**：以 GitHub Release 作为唯一触发源，由 `scripts/release.ts` 驱动全流程（版本同步 → 质量检验 → 规范提交 → 创建 Release）。本地不手工打 Git 标签，禁止脱离发行流程直接 `npm publish`。
