@@ -7,7 +7,9 @@ import {
   clearDurableSessionContext,
   ensureRouterConversationId,
   forkDurableSession,
+  HUB_ROUTER_BOT_ID,
   resetDurableSession,
+  resolveHubRouterBotConfig,
 } from './workers.js';
 import type { HubDurableRuntime } from '../harness/hub-harness.js';
 import type { HubApp, HubContext } from './context.js';
@@ -36,6 +38,10 @@ function validateSessionMembers(
 ): MemberValidationResult {
   if (!isSafeId(leadBotIdInput)) {
     return { ok: false, error: 'Invalid lead BOT', status: 400 };
+  }
+  // 内置中枢总管：不落 SQLite bots 表，以虚拟配置参与会话（免 db.getBot 校验）。
+  if (leadBotIdInput === HUB_ROUTER_BOT_ID) {
+    return { ok: true, leadBotId: HUB_ROUTER_BOT_ID, leadBot: resolveHubRouterBotConfig(db) };
   }
   const leadBot = db.getBot(leadBotIdInput);
   if (!leadBot) {
