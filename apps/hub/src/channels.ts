@@ -1,7 +1,6 @@
 import type { Hono } from 'hono';
 import type { UserRecord } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
-import type { GroupRouter } from './group-router.js';
 import type { SseHub } from './sse.js';
 import { ensureChannelTables } from './channel-schema.js';
 import { createAskRespondHandler, resolveAskSecret, type AskRespondDurableHooks } from './ask-token.js';
@@ -23,14 +22,13 @@ import {
 export function registerChannelRoutes(
   app: Hono<{ Variables: { user: UserRecord } }>,
   db: HubDatabase,
-  router: GroupRouter,
   sseHub: SseHub,
   durable?: AskRespondDurableHooks
 ): () => void {
   ensureChannelTables(db);
   const askSecret = resolveAskSecret(db);
   const outbox = createOutboxDeliverer(db);
-  const handleAskRespond = createAskRespondHandler(router, askSecret, durable);
+  const handleAskRespond = createAskRespondHandler(askSecret, durable);
 
   // 公开免登录的 ask 一键确认回调（GET 浏览器跳转 / POST 表单）
   app.get('/api/public/asks/:askId/respond', handleAskRespond);

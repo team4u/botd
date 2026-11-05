@@ -7,7 +7,6 @@
  * `harness/session-bridge.ts`；本文件只做 HTTP 编排与鉴权。
  */
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { randomUUID } from 'node:crypto';
 import { requireAdmin, resolveOwnedSession } from '../http-helpers.js';
 import type { PendingAskRecord } from '@botd/protocol';
 import { stringToConversationId, type HubDurableRuntime } from '../harness/hub-harness.js';
@@ -23,6 +22,7 @@ import {
 import { diagnoseSystemHealth, runWatchdogPass } from '../harness/watchdog.js';
 import { HUB_ROUTER_BOT_ID as ROUTER_EXTENSION_HUB_ROUTER_BOT_ID } from '../harness/router-extension.js';
 import {
+  createDurableAsk,
   ensureRouterConversationId,
   findRouterConversationId,
   getDurablePendingAsks,
@@ -239,29 +239,26 @@ async function transcriptOf(conversation: NonNullable<Awaited<ReturnType<HubDura
 }
 
 export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
-  const { db, router, sseHub } = ctx;
+  const { db, sseHub } = ctx;
 
   /** 取 Durable 运行时：直接携带者优先，否则走懒加载单例；均缺失时 503。 */
   const runtime = async (): Promise<HubDurableRuntime | undefined> =>
     ctx.durableRuntime ?? (ctx.getDurableRuntime ? await ctx.getDurableRuntime() : undefined);
 
   // --- 会话 Ask（人机协同）路由 -------------------------------------------
-  // GroupRouter 路径：内存 + pending_asks 表（router.getPendingAsks/respondToAsk）。
-  // Durable 路径：ask_human 工具写入会话 Router/Worker 会话的 AskDoc，这里合并透出。
+  // 全部落在会话 Router/Worker 会话的 AskDoc（botd.asks）上：ask_human 工具、
+  // HTTP 手工创建与外部一键确认回调同源。
 
   app.get('/api/sessions/:id/asks', async (c) => {
     const id = c.req.param('id');
     const sRes = resolveOwnedSession(c, db, id);
     if (!sRes.ok) return sRes.response;
 
-    const asks = router.getPendingAsks(id);
     const rt = await runtime();
-    const durable = rt === undefined ? [] : await getDurablePendingAsks(rt, id, sRes.session.leadBotId);
-    const seen = new Set(asks.map((a) => a.id));
-    return c.json([...asks, ...durable.filter((a) => !seen.has(a.id))]);
+    return c.json(rt === undefined ? [] : await getDurablePendingAsks(rt, id, sRes.session.leadBotId));
   });
 
-  // 手工创建待确认 ask（UI / 外部集成入口）：落 pending_asks 并广播 SSE
+  // 手工创建待确认 ask（UI / 外部集成入口）：写入会话 Router 会话的 AskDoc 并广播 SSE
   app.post('/api/sessions/:id/asks', async (c) => {
     const id = c.req.param('id');
     const sRes = resolveOwnedSession(c, db, id);
@@ -278,21 +275,16 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
     if (!body || typeof body.prompt !== 'string' || !body.prompt.trim()) {
       return c.json({ error: 'prompt is required' }, 400);
     }
-    const timeoutSeconds = typeof body.timeoutSeconds === 'number' && body.timeoutSeconds >= 0 ? body.timeoutSeconds : 0;
-    const now = new Date();
-    const record: PendingAskRecord = {
-      id: `ask_${randomUUID()}`,
-      sessionId: id,
+    const rt = await runtime();
+    if (rt === undefined) return c.json({ error: 'Durable runtime unavailable' }, 503);
+
+    const record = await createDurableAsk(rt, id, {
       botId: session.leadBotId,
       prompt: body.prompt.trim(),
-      options: Array.isArray(body.options) ? body.options : [],
-      status: 'pending',
-      createdAt: now.toISOString(),
-      ...(timeoutSeconds > 0 ? { expiresAt: new Date(now.getTime() + timeoutSeconds * 1000).toISOString() } : {}),
+      ...(Array.isArray(body.options) ? { options: body.options } : {}),
       ...(body.previewType ? { previewType: body.previewType } : {}),
       ...(body.previewContent ? { previewContent: body.previewContent } : {}),
-    };
-    db.savePendingAsk(record);
+    });
     sseHub.broadcast(id, { type: 'interaction_request', sessionId: id, ask: record });
     return c.json(record, 201);
   });
@@ -308,13 +300,6 @@ export function registerWorkerRoutes(app: HubApp, ctx: HubContext): void {
       return c.json({ error: 'Missing answer' }, 400);
     }
 
-    const resolved = router.respondToAsk(id, askId, body.answer.trim());
-    if (resolved) {
-      return c.json({ ok: true, ask: resolved });
-    }
-
-    // Durable 路径：在会话的 Router/Worker 会话 AskDoc 里找这条 pending ask，
-    // 落 answered 并把答案作为用户消息 steer 回提问的会话（唤醒等待中的 agent）。
     const rt = await runtime();
     const durableResolved = rt === undefined
       ? null

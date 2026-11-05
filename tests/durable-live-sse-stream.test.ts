@@ -35,7 +35,7 @@ import {
   submitSessionMessageToDurable,
   type DurableSessionMirror,
 } from '../apps/hub/src/routes/workers.js';
-import { watchSubSessionCompletion } from '../apps/hub/src/subsession.js';
+import { watchSubSessionCompletion } from '../apps/hub/src/harness/session-bridge.js';
 
 /** 会话 SSE 事件订阅器：按会话收集事件 + 挂起的 Promise 唤醒。 */
 class EventRecorder {
@@ -281,7 +281,7 @@ test('3. watchSubSessionCompletion fires for a durable subsession after the assi
     parentSessionId: 'sess_parent',
     childSession: { id: child.id, title: child.title },
     botId: PERSONA.botId,
-    onSettled: (status) => {
+    onSettled: (status: 'idle' | 'failed') => {
       settled = status;
     },
   });

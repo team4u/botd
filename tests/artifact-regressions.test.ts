@@ -38,60 +38,6 @@ async function setupTestEnv() {
   };
 }
 
-test('Session reset pending table persists and cleans up with session/user deletion', { timeout: 60_000 }, async (t) => {
-  const env = await setupTestEnv();
-  t.after(env.cleanup);
-
-  const { db, dbPath } = env;
-
-  db.createUser({
-    id: 'user_1',
-    username: 'alice',
-    passwordHash: 'hash1',
-    role: 'member',
-  });
-
-  db.createSession({
-    id: 'sess_1',
-    title: 'Test Session',
-    leadBotId: 'bot_1',
-    ownerId: 'user_1',
-  });
-
-  assert.equal(db.hasPendingSessionReset('sess_1', 'bot_1'), false);
-
-  db.markSessionResetPending('sess_1', 'bot_1');
-  assert.equal(db.hasPendingSessionReset('sess_1', 'bot_1'), true);
-  assert.equal(db.hasPendingSessionReset('sess_1', 'bot_2'), false);
-
-  // Verify persistence across new DB instance on same file
-  const db2 = new HubDatabase({ dbPath });
-  assert.equal(db2.hasPendingSessionReset('sess_1', 'bot_1'), true);
-  db2.close();
-
-  // Clear pending reset
-  db.clearSessionResetPending('sess_1', 'bot_1');
-  assert.equal(db.hasPendingSessionReset('sess_1', 'bot_1'), false);
-
-  // Test cleanup on deleteSession
-  db.markSessionResetPending('sess_1', 'bot_1');
-  assert.equal(db.hasPendingSessionReset('sess_1', 'bot_1'), true);
-  db.deleteSession('sess_1');
-  assert.equal(db.hasPendingSessionReset('sess_1', 'bot_1'), false);
-
-  // Test cleanup on deleteUser
-  db.createSession({
-    id: 'sess_2',
-    title: 'Session 2',
-    leadBotId: 'bot_1',
-    ownerId: 'user_1',
-  });
-  db.markSessionResetPending('sess_2', 'bot_1');
-  assert.equal(db.hasPendingSessionReset('sess_2', 'bot_1'), true);
-  db.deleteUser('user_1');
-  assert.equal(db.hasPendingSessionReset('sess_2', 'bot_1'), false);
-});
-
 test('Database helper contracts: getSessionOwner and row mappings', { timeout: 60_000 }, async (t) => {
   const env = await setupTestEnv();
   t.after(env.cleanup);
@@ -530,9 +476,8 @@ test('NodeConnectionManager integrates with ArtifactService default and custom i
 
   const { db, auth, sseHub, service } = env;
 
-  const managerWithCustomService = new NodeConnectionManager(db, auth, sseHub, service);
-  assert.ok(managerWithCustomService);
-
-  const managerWithDefaultService = new NodeConnectionManager(db, auth, sseHub);
-  assert.ok(managerWithDefaultService);
+  // ArtifactService 注入入口随 WS 回退双轨删除而移除：管理器只维护连接与 envRpc
+  const manager = new NodeConnectionManager(db, auth, sseHub);
+  assert.ok(manager);
+  assert.ok(service);
 });

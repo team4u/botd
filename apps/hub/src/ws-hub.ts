@@ -1,6 +1,5 @@
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
-import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -11,89 +10,13 @@ import {
   isBotConfig,
   isSafeId,
   serializeRpcMessage,
-  validateUiSpec,
-  type ExtensionUiStreamPayload,
-  type SubagentRunRecord,
-  type SubagentSteerRecord,
-  type ToolCallRecord,
-  type TurnBlock,
+  type NodeEnvRpcFunctions,
 } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
 import type { AuthManager } from './auth.js';
 import type { SseHub } from './sse.js';
-import { ArtifactService } from './artifact-service.js';
 import { ExecOutputHub, RemoteExecutionEnv } from './harness/remote-env.js';
-import type { NodeEnvRpcFunctions } from '@botd/protocol';
 import type { Context } from '@earendil-works/chord/context';
-
-export interface GroupRouterDelegate {
-  handleWakeup(
-    sessionId: string,
-    botId: string,
-    wakeupMessage: string,
-    replyToBotId?: string,
-    options?: { noTurn?: boolean }
-  ): Promise<void>;
-  /**
-   * Durable 主线唤醒接管（可选）：返回 true 表示唤醒回合已提交给持久运行时，
-   * 调用方不再走 handleWakeup 的 runTurn 路径（节点已不再提供 runTurn RPC）。
-   */
-  handleDurableWakeup?(input: {
-    sessionId: string;
-    botId: string;
-    wakeupMessage: string;
-    replyToBotId?: string;
-    noTurn?: boolean;
-  }): Promise<boolean>;
-  getActiveBotId(sessionId: string): string | undefined;
-  isBotActiveInSession?(sessionId: string, botId: string): boolean;
-  canRunBot(sessionId: string, botId: string): boolean;
-  handleNativeSubagentStreamEvent(
-    sessionId: string,
-    parentBotId: string,
-    subEvent: {
-      id: string;
-      subagentId: string;
-      task: string;
-      status: 'running' | 'done' | 'error' | 'stopped';
-      result?: string;
-      error?: string;
-      durationMs?: number;
-      toolUses?: number;
-      currentTool?: string;
-      phase?: string;
-      childSessionId?: string;
-      startedAt?: string;
-      blocks?: TurnBlock[];
-      toolCalls?: ToolCallRecord[];
-      steers?: SubagentSteerRecord[];
-    }
-  ): SubagentRunRecord | undefined;
-  onNodeOnline?(nodeId: string): void;
-  requestHumanInput?(input: {
-    sessionId: string;
-    botId: string;
-    prompt: string;
-    options?: string[];
-    timeoutSeconds?: number;
-  }): Promise<{ answer: string }>;
-}
-
-export interface NodeConnection {
-  nodeId: string;
-  ws: WebSocket;
-  rpc: BirpcReturn<NodeRpcFunctions, HubRpcFunctions>;
-  /** 心跳标记：收到 pong 置 true，每轮 ping 前检查并重置 */
-  alive: boolean;
-  /** 连续未收到 pong 的轮数，达到阈值即判定死链 */
-  missedPongs: number;
-}
-
-/** 每个在线节点的等待者：节点上线（连接建立或 registerNode）时唤醒。 */
-interface NodeOnlineWaiter {
-  resolve: (rpc: NodeEnvRpcFunctions) => void;
-  detachAbortListener: () => void;
-}
 
 /** 语义化版本比较（忽略预发布后缀）：a > b 返回 1，相等 0，a < b 返回 -1。 */
 export function compareSemver(a: string, b: string): number {
@@ -122,6 +45,22 @@ function resolveHubVersion(): string {
   }
 }
 
+export interface NodeConnection {
+  nodeId: string;
+  ws: WebSocket;
+  rpc: BirpcReturn<NodeRpcFunctions, HubRpcFunctions>;
+  /** 心跳标记：收到 pong 置 true，每轮 ping 前检查并重置 */
+  alive: boolean;
+  /** 连续未收到 pong 的轮数，达到阈值即判定死链 */
+  missedPongs: number;
+}
+
+/** 每个在线节点的等待者：节点上线（连接建立或 registerNode）时唤醒。 */
+interface NodeOnlineWaiter {
+  resolve: (rpc: NodeEnvRpcFunctions) => void;
+  detachAbortListener: () => void;
+}
+
 export interface NodeConnectionManagerOptions {
   /** 节点注册后版本落后于 Hub 时自动下发 upgradeDaemon（默认 BOTD_AUTO_UPGRADE_NODES=1 才启用）。 */
   autoUpgradeNodes?: boolean;
@@ -135,8 +74,6 @@ export class NodeConnectionManager {
   private db: HubDatabase;
   private auth: AuthManager;
   private sseHub: SseHub;
-  private router?: GroupRouterDelegate;
-  private artifactService: ArtifactService;
   private heartbeatTimer?: NodeJS.Timeout;
   /** 节点版本落后于 Hub 时自动下发升级（默认关闭，npm 包未发布前不启用）。 */
   private autoUpgradeNodes: boolean;
@@ -151,20 +88,14 @@ export class NodeConnectionManager {
     db: HubDatabase,
     auth: AuthManager,
     sseHub: SseHub,
-    artifactService?: ArtifactService,
     options?: NodeConnectionManagerOptions
   ) {
     this.db = db;
     this.auth = auth;
     this.sseHub = sseHub;
-    this.artifactService = artifactService ?? new ArtifactService(db, sseHub);
     this.wss = new WebSocketServer({ noServer: true });
     this.autoUpgradeNodes = options?.autoUpgradeNodes ?? process.env.BOTD_AUTO_UPGRADE_NODES === '1';
     this.hubVersion = options?.hubVersion ?? resolveHubVersion();
-  }
-
-  setRouter(router: GroupRouterDelegate): void {
-    this.router = router;
   }
 
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -271,8 +202,6 @@ export class NodeConnectionManager {
           }
         });
 
-        this.router?.onNodeOnline?.(nodeId);
-
         // 广播节点上线通知（仅节点 owner 的全局 SSE 订阅者）
         const onlineOwner = this.db.getNodeOwner(nodeId);
         if (onlineOwner) {
@@ -303,169 +232,6 @@ export class NodeConnectionManager {
           throw new Error(`Forbidden: authenticated as node ${nodeId}, cannot heartbeat for ${calledNodeId}`);
         }
         this.db.updateNodeStatus(nodeId, 'online');
-      },
-
-      onSessionStream: (event) => {
-        // Enforce that the bot belongs to this authenticated node
-        const bot = this.db.getBot(event.botId);
-        if (!bot || bot.nodeId !== nodeId) {
-          return;
-        }
-
-        // Enforce session exists and bot is a member
-        const session = this.db.getSession(event.sessionId);
-        if (!session) {
-          return;
-        }
-
-        const isMember =
-          session.leadBotId === event.botId ||
-          Boolean(this.router?.canRunBot(event.sessionId, event.botId));
-        if (!isMember) {
-          return;
-        }
-
-        // Enforce that this session is currently running and this bot is an active bot.
-        // 例外：子代理事件（subagentEvent）允许回合结束后继续透传——后台子代理完成、抽屉内
-        // resume / stop 的状态更新都发生在主回合结束之后，不能当作杂散流丢弃。
-        const isActive = this.router?.isBotActiveInSession
-          ? this.router.isBotActiveInSession(event.sessionId, event.botId)
-          : this.router?.getActiveBotId(event.sessionId) === event.botId;
-        if (!isActive && !event.subagentEvent) {
-          // Suppress stray or cancelled streams
-          return;
-        }
-
-        if (event.deltaText !== undefined) {
-          this.sseHub.broadcast(event.sessionId, {
-            type: 'text_delta',
-            sessionId: event.sessionId,
-            botId: event.botId,
-            delta: event.deltaText,
-          });
-        }
-
-        if (event.thinkingDelta !== undefined || event.thinkingStatus !== undefined) {
-          this.sseHub.broadcast(event.sessionId, {
-            type: 'thinking_stream',
-            sessionId: event.sessionId,
-            botId: event.botId,
-            ...(event.thinkingDelta !== undefined ? { delta: event.thinkingDelta } : {}),
-            status: event.thinkingStatus ?? 'running',
-            ...(event.thinkingDurationMs !== undefined ? { durationMs: event.thinkingDurationMs } : {}),
-          });
-        }
-
-        if (event.toolName && event.toolStatus) {
-          // tool.view 插槽：扩展工具返回的 BotdUiSpec 先校验再透传（非法直接丢弃，不影响事件本身）
-          const toolUiValidation = event.toolUiSpec ? validateUiSpec(event.toolUiSpec) : undefined;
-          this.sseHub.broadcast(event.sessionId, {
-            type: 'tool_status',
-            sessionId: event.sessionId,
-            botId: event.botId,
-            ...(event.toolCallId ? { toolCallId: event.toolCallId } : {}),
-            toolName: event.toolName,
-            status: event.toolStatus,
-            ...(event.toolSummary ? { summary: event.toolSummary } : {}),
-            ...(event.toolArgs ? { args: event.toolArgs } : {}),
-            ...(event.toolOutput ? { outputPreview: event.toolOutput } : {}),
-            ...(event.toolDurationMs !== undefined ? { durationMs: event.toolDurationMs } : {}),
-            ...(event.toolIsError !== undefined ? { isError: event.toolIsError } : {}),
-            ...(toolUiValidation?.ok ? { uiSpec: toolUiValidation.spec } : {}),
-          });
-        }
-
-        // 扩展 UI 实时事件（notify / status / working_message / widget / editor_text）：
-        // kind 合法性 + widget.uiSpec 校验后广播给会话订阅者
-        if (event.extensionUiEvent) {
-          const uiEvent = event.extensionUiEvent as ExtensionUiStreamPayload;
-          const VALID_KINDS = new Set(['notify', 'status', 'working_message', 'widget', 'editor_text']);
-          if (VALID_KINDS.has(uiEvent.kind)) {
-            if (uiEvent.kind === 'widget' && uiEvent.uiSpec) {
-              const widgetValidation = validateUiSpec(uiEvent.uiSpec);
-              if (widgetValidation.ok) {
-                uiEvent.uiSpec = widgetValidation.spec;
-              } else {
-                delete uiEvent.uiSpec;
-              }
-            }
-            this.sseHub.broadcast(event.sessionId, {
-              type: 'extension_ui',
-              sessionId: event.sessionId,
-              botId: event.botId,
-              event: uiEvent,
-            });
-          }
-        }
-
-        if (event.subagentEvent && this.router) {
-          this.router.handleNativeSubagentStreamEvent(event.sessionId, event.botId, event.subagentEvent);
-        }
-      },
-
-      requestWakeupTurn: async (input) => {
-        this.assertNodeBotInSession(nodeId, input.botId, input.sessionId);
-
-        if (this.router) {
-          // 延时唤醒：在 Hub 上创建 once 触发器，到点再触发推理回合
-          if (typeof input.delaySeconds === 'number' && Number.isFinite(input.delaySeconds) && input.delaySeconds > 0) {
-            const ownerId = this.db.getSessionOwner(input.sessionId) ?? 'user_admin';
-            const runAt = new Date(Date.now() + Math.floor(input.delaySeconds) * 1000).toISOString();
-            const prompt =
-              input.replyToBotId && !input.wakeupMessage.includes(`@${input.replyToBotId}`)
-                ? `${input.wakeupMessage} (cc @${input.replyToBotId})`
-                : input.wakeupMessage;
-            const trigger = this.db.createTrigger({
-              id: `trg_${randomUUID()}`,
-              sessionId: input.sessionId,
-              botId: input.botId,
-              ownerId,
-              name: `延时唤醒 (${input.botId})`,
-              kind: 'once',
-              runAt,
-              prompt,
-              enabled: true,
-            });
-            return { ok: true as const, scheduledTriggerId: trigger.id };
-          }
-          // Durable 主线优先：唤醒回合提交给持久运行时（Hub 侧模型驱动），
-          // 只有未接管时才退回 GroupRouter 的节点 runTurn 路径。
-          if (!input.noTurn && this.router?.handleDurableWakeup) {
-            const handled = await this.router.handleDurableWakeup({
-              sessionId: input.sessionId,
-              botId: input.botId,
-              wakeupMessage: input.wakeupMessage,
-              ...(input.replyToBotId !== undefined ? { replyToBotId: input.replyToBotId } : {}),
-            });
-            if (handled) return { ok: true as const };
-          }
-          await this.router.handleWakeup(input.sessionId, input.botId, input.wakeupMessage, input.replyToBotId, {
-            noTurn: input.noTurn,
-          });
-          return { ok: true as const };
-        }
-      },
-
-      requestHumanInput: async (input) => {
-        this.assertNodeBotInSession(nodeId, input.botId, input.sessionId);
-
-        if (!this.router?.requestHumanInput) {
-          throw new Error('Interactive human input is not supported by router');
-        }
-
-        return await this.router.requestHumanInput(input);
-      },
-
-      uploadArtifact: async (input) => {
-        return this.artifactService.uploadArtifact({ type: 'node', nodeId }, input);
-      },
-
-      downloadArtifact: async (artifactId: string) => {
-        return this.artifactService.downloadArtifact({ type: 'node', nodeId }, artifactId);
-      },
-
-      listSessionArtifacts: async (sessionId: string) => {
-        return this.artifactService.listSessionArtifacts({ type: 'node', nodeId }, sessionId);
       },
 
       onEnvExecOutput: (event) => {
@@ -519,7 +285,7 @@ export class NodeConnectionManager {
 
   /**
    * 服务端协议层心跳：每 30s ping 一次，连续 2 轮无 pong 即 terminate，
-   * 触发 close 清理路径（节点置 offline），避免 NAT 静默失联后 runTurn RPC 挂死。
+   * 触发 close 清理路径（节点置 offline），避免 NAT 静默失联后 RPC 挂死。
    */
   private startHeartbeat(): void {
     if (this.heartbeatTimer) return;
@@ -547,22 +313,6 @@ export class NodeConnectionManager {
     this.heartbeatTimer.unref?.();
   }
 
-  private assertNodeBotInSession(nodeId: string, botId: string, sessionId: string): void {
-    const bot = this.db.getBot(botId);
-    if (!bot || bot.nodeId !== nodeId) {
-      throw new Error(`Forbidden: bot ${botId} does not belong to node ${nodeId}`);
-    }
-
-    const session = this.db.getSession(sessionId);
-    if (!session) {
-      throw new Error(`Session ${sessionId} not found`);
-    }
-
-    const isMember = session.leadBotId === botId;
-    if (!isMember) {
-      throw new Error(`Forbidden: bot ${botId} is not a member of session ${sessionId}`);
-    }
-  }
 
   getNodeRpc(nodeId: string): BirpcReturn<NodeRpcFunctions, HubRpcFunctions> | undefined {
     return this.connections.get(nodeId)?.rpc;
@@ -673,3 +423,4 @@ export class NodeConnectionManager {
     }
   }
 }
+

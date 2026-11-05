@@ -11,14 +11,12 @@ const ARTIFACT_BODY_LIMIT = Math.ceil(MAX_ARTIFACT_BYTES * 1.4) + 64 * 1024;
  * 注册顺序即执行顺序（health → bodyLimit → auth），勿调整。
  */
 export function registerCoreMiddleware(app: HubApp, ctx: HubContext): void {
-  const { db, auth, router } = ctx;
+  const { db, auth } = ctx;
 
   // Health check (public)
   app.get('/api/health', (c) =>
     c.json({
       ok: true,
-      draining: router.isDraining(),
-      activeTurns: router.getActiveTurnCount(),
     })
   );
 

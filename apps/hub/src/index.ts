@@ -11,7 +11,6 @@ import { HubDatabase } from './db.js';
 import { AuthManager } from './auth.js';
 import { SseHub } from './sse.js';
 import { NodeConnectionManager } from './ws-hub.js';
-import { GroupRouter } from './group-router.js';
 import { createStaticMiddleware } from './static.js';
 import { ArtifactService } from './artifact-service.js';
 import { HubDurableRuntime, SecretInjectingEnv, type BotPersonaConfig } from './harness/hub-harness.js';
@@ -31,11 +30,11 @@ import { registerBotRoutes } from './routes/bots.js';
 import { registerSessionRoutes } from './routes/sessions.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { registerEventRoutes } from './routes/events.js';
-import { registerWorkerRoutes, createDurableSessionMirror, submitSessionMessageToDurable, HUB_ROUTER_BOT_ID, resolveHubRouterBotConfig, type DurableSessionMirror } from './routes/workers.js';
+import { registerWorkerRoutes, createDurableSessionMirror, HUB_ROUTER_BOT_ID, resolveHubRouterBotConfig, type DurableSessionMirror } from './routes/workers.js';
 import { runWatchdogPass } from './harness/watchdog.js';
 import { acquireLocalWorktree } from './harness/worktree.js';
 import { seedBuiltinSkillInHub } from './builtin-skill-seed.js';
-import type { HubApp, HubContext } from './routes/context.js';
+import type { GroupRouter, HubApp, HubContext } from './routes/context.js';
 
 export interface HubOptions {
   dbPath?: string;
@@ -59,8 +58,9 @@ export interface HubInstance {
   app: HubApp;
   db: HubDatabase;
   connections: NodeConnectionManager;
-  router: GroupRouter;
   sseHub: SseHub;
+  /** 旧 GroupRouter 的最小兼容占位（trigger-service 并行重构期间保持签名稳定）。 */
+  router: GroupRouter;
   /** Super-agent 持久运行时；仅当通过 HubOptions 注入时存在。 */
   durableRuntime?: HubDurableRuntime;
   /** 取（或懒创建）Super-agent 持久运行时；同一 Hub 生命周期内复用同一实例。 */
@@ -100,16 +100,15 @@ export function createHub(options?: HubOptions): HubInstance {
     console.warn('==============================================================');
   }
 
-  // SSE / WS / GroupRouter 装配
+  // SSE / WS 装配
   // SessionRecord 未暴露 ownerId，读取归属；SseHub 借此把会话事件同步派发给 owner 的全局订阅者
   const getSessionOwnerId = (sessionId: string): string | undefined => {
     return db.getSessionOwner(sessionId);
   };
   const sseHub = new SseHub({ getSessionOwnerId });
   const artifacts = new ArtifactService(db, sseHub, { artifactsDir: options?.artifactsDir });
-  const connections = new NodeConnectionManager(db, auth, sseHub, artifacts);
-  const router = new GroupRouter(db, connections, sseHub);
-  connections.setRouter(router);
+  // WS 连接管理器：Durable 主线的唤醒/问答走 Hub HTTP；这里只维护节点连接与 envRpc。
+  const connections = new NodeConnectionManager(db, auth, sseHub);
 
   // HTTP 装配
   const app: HubApp = new Hono<{ Variables: { user: UserRecord; viaNode?: boolean } }>();
@@ -132,7 +131,6 @@ export function createHub(options?: HubOptions): HubInstance {
     db,
     auth,
     connections,
-    router,
     sseHub,
     artifacts,
     ...(durableRuntime ? { durableRuntime } : {}),
@@ -178,10 +176,9 @@ export function createHub(options?: HubOptions): HubInstance {
       durableRuntimeOpening = (async () => {
         const runtime = await HubDurableRuntime.open(
           {
-            // 与 HubDatabase 同源：只要主库落在磁盘（options.dbPath / BOTD_DB_PATH /
-            // 默认 ~/.botd/hub.sqlite），持久运行时同样落盘到 <主库>.durable.sqlite，
-            // 绝不静默退回 MemoryStorage 丢掉全部会话状态。
-            ...(db.dbPath && db.dbPath !== ':memory:' ? { dbPath: `${db.dbPath}.durable.sqlite` } : {}),
+            // 单库化：pi-durable 的 pi_* 表与业务表共用同一个 hub.sqlite（WAL 模式
+            // + busy timeout 并发安全），主库落盘即持久化，不再有第二个数据库文件。
+            ...(db.dbPath && db.dbPath !== ':memory:' ? { dbPath: db.dbPath, tablePrefix: 'pi_' } : {}),
             // 凭据来自 Hub SQLite（provider_credentials）+ `.agent/auth.json`；
             // magpie 等动态 provider 的缓存模型来自 `.agent/models-store.json`
             models: options?.durableModels ?? createDefaultModels(),
@@ -565,7 +562,20 @@ export function createHub(options?: HubOptions): HubInstance {
   });
   registerArtifactRoutes(app, artifacts);
   registerShareRoutes(app, db, getSessionOwnerId);
-  const triggerScheduler = registerTriggerRoutes(app, db, router, getSessionOwnerId, {
+  // 旧 GroupRouter 的最小兼容占位（trigger-service 重构期间保持签名稳定）：
+  // canRunBot 用真实成员判定；handleUserMessage/handleWakeup 无队列可入，静默空操作。
+  const routerCompat: GroupRouter = {
+    canRunBot: (sessionId, botId) => {
+      const session = db.getSession(sessionId);
+      if (!session) return false;
+      if (session.leadBotId === botId) return true;
+      const bot = db.getBot(botId);
+      return Boolean(bot?.parentBotId && bot.parentBotId === session.leadBotId);
+    },
+    handleUserMessage: () => {},
+    handleWakeup: async () => {},
+  };
+  const triggerScheduler = registerTriggerRoutes(app, db, routerCompat, getSessionOwnerId, {
     sseHub,
     artifacts,
     // 主线切流门槛与 messages.ts 一致：仅当 runtime 为显式注入，或 Hub 已配置
@@ -575,9 +585,9 @@ export function createHub(options?: HubOptions): HubInstance {
     getDurableRuntime: ensureDurableRuntime,
     getDurableMirror: () => durableMirror,
   });
-  const unsubscribeChannels = registerChannelRoutes(app, db, router, sseHub, {
-    sseHub,
+  const unsubscribeChannels = registerChannelRoutes(app, db, sseHub, {
     getDurableRuntime: () => durableRuntime,
+    sseHub,
   });
   registerWorkerRoutes(app, { ...ctx, getDurableRuntime: ensureDurableRuntime, ...(durableRuntime ? { durableRuntime } : {}) });
 
@@ -600,37 +610,6 @@ export function createHub(options?: HubOptions): HubInstance {
     });
   }
 
-  // 延时唤醒与静默唤醒（noTurn）仍走 GroupRouter（once 触发器 / 纯 callback 落库）；
-  // 真正需要推理回合的唤醒在 Durable 主线启用时改提交 Router 会话（见 handleDurableWakeup），
-  // 避免向已不再提供 runTurn 的节点下发 RPC。
-  ;(router as GroupRouter & { handleDurableWakeup?: (input: {
-    sessionId: string;
-    botId: string;
-    wakeupMessage: string;
-    replyToBotId?: string;
-    noTurn?: boolean;
-  }) => Promise<boolean> }).handleDurableWakeup = async (input): Promise<boolean> => {
-    if (input.noTurn === true) return false; // 静默唤醒：仅落 callback，由 handleWakeup 直接处理
-    // 主线切流门槛与 messages.ts 一致：runtime 显式注入，或已配置任一 Provider 凭据。
-    if (options?.durableRuntime === undefined && listEffectiveProviderCredentials(db).length === 0) {
-      return false;
-    }
-    // 1. 先以 noTurn 语义落库并广播 [Wake-up] callback 消息（保留原公屏行为）
-    await router.handleWakeup(input.sessionId, input.botId, input.wakeupMessage, input.replyToBotId, {
-      noTurn: true,
-    });
-    // 2. 唤醒正文提交给会话的 Durable Router 会话（whenBusy: steer），由 Hub 侧模型驱动回合
-    const rt = await ensureDurableRuntime();
-    await submitSessionMessageToDurable(
-      { db, sseHub, durableRuntime: rt, getDurableRuntime: ensureDurableRuntime },
-      input.sessionId,
-      input.botId,
-      `[Wake-up] ${input.wakeupMessage}`,
-      durableMirror,
-    );
-    return true;
-  };
-
   // 静态 Web 文件 & SPA fallback
   app.use('*', createStaticMiddleware(options?.webDir));
 
@@ -650,11 +629,9 @@ export function createHub(options?: HubOptions): HubInstance {
     }
   };
   const drain = async (timeoutMs = 30_000): Promise<{ drained: boolean; remaining: number }> => {
-    // 先让 GroupRouter 完成自身的排空准备（清空队列、置 draining 标记）
-    await router.drain(timeoutMs);
     const start = Date.now();
     for (;;) {
-      const remaining = router.getActiveTurnCount() + (await getActiveDurableTaskCount());
+      const remaining = await getActiveDurableTaskCount();
       if (remaining === 0) return { drained: true, remaining: 0 };
       if (Date.now() - start >= timeoutMs) return { drained: false, remaining };
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -666,7 +643,6 @@ export function createHub(options?: HubOptions): HubInstance {
     unsubscribeChannels();
     triggerScheduler.stop();
     durableMirror?.close();
-    router.close();
     connections.close();
     sseHub.close();
     // 懒创建的运行时随 Hub 一起关闭（含正在打开中的）；外部注入的运行时由注入方负责
@@ -682,7 +658,7 @@ export function createHub(options?: HubOptions): HubInstance {
     app,
     db,
     connections,
-    router,
+    router: routerCompat,
     sseHub,
     // 动态 getter：懒打开后 hub.durableRuntime 也能拿到实例（旧快照展开恒 undefined）。
     get durableRuntime() {
