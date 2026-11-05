@@ -15,7 +15,6 @@ export {
   getExtensionDir,
   listBots,
   readBot,
-  saveBot,
   deleteBot,
   listSkills,
   readSkill,
@@ -23,8 +22,4 @@ export {
   listExtensions,
   readExtension,
   writeExtension,
-  deleteResource,
-  readFileTarget,
-  writeFileTarget,
-  seedStorageIfEmpty,
 } from './storage.js';

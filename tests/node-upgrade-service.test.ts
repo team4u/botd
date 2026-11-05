@@ -12,11 +12,9 @@ import {
   performNodeUpgrade,
   readCurrentRelease,
   writeCurrentRelease,
-  readPreviousRelease,
   readBlockedRelease,
   writeBlockedRelease,
   clearBlockedRelease,
-  startAutoUpgradeLoop,
 } from '../apps/node/src/upgrader.js';
 import {
   generateServiceDescriptor,
@@ -221,29 +219,27 @@ describe('stageReleaseFromNpm', () => {
     assert.equal(cached.entryPath, staged.entryPath);
   });
 
-  test('stages release using BOTD_TEST_STAGE_ENTRY and BOTD_TEST_STAGE_FAIL', { timeout: 60_000 }, async () => {
-    process.env.BOTD_TEST_STAGE_ENTRY = '1';
-    process.env.BOTD_TEST_STAGE_FAIL = '1';
+  test('restages a cached release only when the .complete marker is stale', { timeout: 60_000 }, async () => {
+    // 预置一个 .complete 标记指向不存在的入口：必须重新拉取（extractor 被调用）
+    const releaseDir = path.join(tempDir, 'releases', '0.4.0');
+    await mkdir(releaseDir, { recursive: true });
+    await writeFile(path.join(releaseDir, '.complete'), JSON.stringify({
+      version: '0.4.0',
+      entryPath: path.join(releaseDir, 'gone.js'),
+    }), 'utf8');
 
-    try {
-      const staged = await stageReleaseFromNpm(tempDir, '0.4.0');
-      assert.equal(staged.version, '0.4.0');
-      const content = await readFile(staged.entryPath, 'utf8');
-      assert.match(content, /process\.exit\(1\)/);
-    } finally {
-      delete process.env.BOTD_TEST_STAGE_ENTRY;
-      delete process.env.BOTD_TEST_STAGE_FAIL;
-    }
-
-    process.env.BOTD_TEST_STAGE_ENTRY = '1';
-    try {
-      const staged2 = await stageReleaseFromNpm(tempDir, '0.4.1');
-      assert.equal(staged2.version, '0.4.1');
-      const content = await readFile(staged2.entryPath, 'utf8');
-      assert.match(content, /botd:daemon-ready/);
-    } finally {
-      delete process.env.BOTD_TEST_STAGE_ENTRY;
-    }
+    let extractorCalled = false;
+    const staged = await stageReleaseFromNpm(tempDir, '0.4.0', {
+      stageExtractor: async (stagingDir) => {
+        extractorCalled = true;
+        const entry = path.join(stagingDir, 'cli.js');
+        await writeFile(entry, '// restaged\n', 'utf8');
+        return 'cli.js';
+      },
+    });
+    assert.equal(extractorCalled, true);
+    assert.equal(staged.version, '0.4.0');
+    assert.equal(staged.entryPath, path.join(releaseDir, 'cli.js'));
   });
 });
 
@@ -321,11 +317,6 @@ describe('performNodeUpgrade Lifecycle', () => {
     const current = await readCurrentRelease(tempDir);
     assert.equal(current?.version, '0.2.0');
     assert.equal(current?.entryPath, path.join(tempDir, 'releases', '0.2.0', 'cli.js'));
-
-    // previous.json backed up
-    const previous = await readPreviousRelease(tempDir);
-    assert.equal(previous?.version, '0.1.0');
-    assert.equal(previous?.entryPath, '/old/cli.js');
 
     // blocked release cleared
     const blocked = await readBlockedRelease(tempDir);
@@ -635,8 +626,6 @@ describe('Local IPC Integration', () => {
       socketPath,
       startedAt: Date.now(),
       isHubConnected: () => true,
-      getHubRpc: () => null,
-      ipcToken: null,
       syncRegistrationWithHub: async () => {},
       handleShutdown: async () => {},
     });
@@ -658,10 +647,7 @@ describe('Local IPC Integration', () => {
     delete process.env.BOTD_VERSION_OVERRIDE;
   });
 
-  test('GET /upgrade/check and POST /upgrade over local socket', { timeout: 60_000 }, async () => {
-    let upgradeCalled = false;
-    let shutdownCalled = false;
-
+  test('GET /upgrade/check reports registry state over local socket', { timeout: 60_000 }, async () => {
     await writeCurrentRelease(tempDir, {
       version: '0.1.0',
       entryPath: '/dummy/cli.js',
@@ -678,49 +664,39 @@ describe('Local IPC Integration', () => {
       socketPath,
       startedAt: Date.now(),
       isHubConnected: () => true,
-      getHubRpc: () => null,
       syncRegistrationWithHub: async () => {},
-      handleShutdown: async () => {
-        shutdownCalled = true;
-      },
+      handleShutdown: async () => {},
     });
 
+    // mock registry：BOTD_NPM_REGISTRY 是 checkNodeUpgrade 认可的环境变量源
+    const mockServer = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ version: '0.3.0' }));
+    });
+    await new Promise<void>((resolve) => mockServer.listen(0, '127.0.0.1', resolve));
+    const port = (mockServer.address() as any).port;
+    process.env.BOTD_NPM_REGISTRY = `http://127.0.0.1:${port}`;
+
     await new Promise<void>((resolve) => server.listen(socketPath, resolve));
-
-    // Test GET /upgrade/check (with custom mock fetch in checkNodeUpgrade)
-    // Create an override or pre-staged file
-    process.env.BOTD_TEST_STAGE_ENTRY = '1';
-
-    // Test POST /upgrade
-    const postRes = await new Promise<{ status: number; body: any }>((resolve, reject) => {
-      const payload = JSON.stringify({ targetVersion: '0.2.0' });
-      const req = http.request(
-        {
-          socketPath,
-          path: '/upgrade',
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'content-length': Buffer.byteLength(payload),
-          },
-        },
-        (res) => {
+    try {
+      const res = await new Promise<{ status: number; body: any }>((resolve, reject) => {
+        const req = http.request({ socketPath, path: '/upgrade/check', method: 'GET' }, (res) => {
           let raw = '';
           res.on('data', (c) => { raw += c; });
           res.on('end', () => resolve({ status: res.statusCode || 0, body: JSON.parse(raw) }));
-        },
-      );
-      req.on('error', reject);
-      req.write(payload);
-      req.end();
-    });
+        });
+        req.on('error', reject);
+        req.end();
+      });
 
-    assert.equal(postRes.status, 200);
-    assert.equal(postRes.body.ok, true);
-    assert.equal(postRes.body.targetVersion, '0.2.0');
-    assert.equal(postRes.body.upgraded, true);
-
-    delete process.env.BOTD_TEST_STAGE_ENTRY;
+      assert.equal(res.status, 200);
+      assert.equal(res.body.currentVersion, '0.1.0');
+      assert.equal(res.body.latestVersion, '0.3.0');
+      assert.equal(res.body.updateAvailable, true);
+    } finally {
+      delete process.env.BOTD_NPM_REGISTRY;
+      await new Promise<void>((resolve) => mockServer.close(() => resolve()));
+    }
   });
 });
 
@@ -960,127 +936,6 @@ describe('CLI Commands: upgrade & service', () => {
     } finally {
       console.log = origLog;
       await new Promise<void>((resolve) => mockHub.close(() => resolve()));
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 5. startAutoUpgradeLoop
-// ---------------------------------------------------------------------------
-
-describe('startAutoUpgradeLoop', () => {
-  let tempDir: string;
-
-  beforeEach(async () => {
-    tempDir = await mkdtemp(path.join(tmpdir(), 'botd-auto-upgrade-'));
-  });
-
-  afterEach(async () => {
-    await rm(tempDir, { recursive: true, force: true });
-  });
-
-  test('disabled by default: returns inert handle without touching registry', { timeout: 60_000 }, () => {
-    const handle = startAutoUpgradeLoop(tempDir, { onScheduleShutdown: () => {} });
-    handle.stop();
-    // no timer created, nothing scheduled — absence of throw is the contract
-  });
-
-  test('tick runs upgrade pipeline and reports success', { timeout: 60_000 }, async () => {
-    await writeCurrentRelease(tempDir, {
-      version: '0.1.0',
-      entryPath: '/old/cli.js',
-      updatedAt: '2025-01-01T00:00:00Z',
-    });
-
-    const logs: string[] = [];
-    let calls = 0;
-    let shutdownScheduled = false;
-
-    const handle = startAutoUpgradeLoop(tempDir, {
-      enabled: true,
-      intervalMs: 60_000,
-      performUpgrade: async () => {
-        calls++;
-        return { ok: true, previousVersion: '0.1.0', targetVersion: '0.2.0', upgraded: true, pid: 123 };
-      },
-      onScheduleShutdown: () => {
-        shutdownScheduled = true;
-      },
-      log: (msg) => logs.push(msg),
-    });
-
-    try {
-      await handle.tick();
-      assert.equal(calls, 1);
-      assert.match(logs[0] ?? '', /0\.1\.0 -> 0\.2\.0 succeeded/);
-
-      // No newer version → no-op, nothing logged
-      const handle2 = startAutoUpgradeLoop(tempDir, {
-        enabled: true,
-        performUpgrade: async () => {
-          calls++;
-          return { ok: true, previousVersion: '0.2.0', targetVersion: '0.2.0', upgraded: false };
-        },
-        onScheduleShutdown: () => {},
-        log: (msg) => logs.push(msg),
-      });
-      await handle2.tick();
-      handle2.stop();
-      assert.equal(calls, 2);
-      assert.equal(logs.length, 1);
-    } finally {
-      handle.stop();
-    }
-  });
-
-  test('tick swallows upgrade failures (canary/network) for next-cycle retry', { timeout: 60_000 }, async () => {
-    const logs: string[] = [];
-    let calls = 0;
-
-    const handle = startAutoUpgradeLoop(tempDir, {
-      enabled: true,
-      performUpgrade: async () => {
-        calls++;
-        throw new Error('Upgrade to 0.2.0 failed canary check and was rolled back');
-      },
-      onScheduleShutdown: () => {},
-      log: (msg) => logs.push(msg),
-    });
-
-    try {
-      await handle.tick();
-      await handle.tick();
-      assert.equal(calls, 2);
-      assert.match(logs[0] ?? '', /failed canary check/);
-      assert.match(logs[1] ?? '', /failed canary check/);
-    } finally {
-      handle.stop();
-    }
-  });
-
-  test('tick is a no-op while shouldSkip returns true', { timeout: 60_000 }, async () => {
-    let calls = 0;
-    let skip = true;
-
-    const handle = startAutoUpgradeLoop(tempDir, {
-      enabled: true,
-      performUpgrade: async () => {
-        calls++;
-        return { ok: true, previousVersion: '0.1.0', targetVersion: '0.1.0', upgraded: false };
-      },
-      shouldSkip: () => skip,
-      onScheduleShutdown: () => {},
-      log: () => {},
-    });
-
-    try {
-      await handle.tick();
-      assert.equal(calls, 0);
-      skip = false;
-      await handle.tick();
-      assert.equal(calls, 1);
-    } finally {
-      handle.stop();
     }
   });
 });

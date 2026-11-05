@@ -65,12 +65,6 @@ export interface CurrentReleaseRecord {
   updatedAt: string;
 }
 
-export interface PreviousReleaseRecord {
-  version: string;
-  entryPath: string;
-  updatedAt: string;
-}
-
 export interface BlockedReleaseRecord {
   version: string;
   reason: string;
@@ -95,21 +89,6 @@ export async function writeCurrentRelease(dataDir: string, record: CurrentReleas
 export async function deleteCurrentRelease(dataDir: string): Promise<void> {
   const filePath = path.join(dataDir, 'current.json');
   await fsPromises.rm(filePath, { force: true });
-}
-
-export async function readPreviousRelease(dataDir: string): Promise<PreviousReleaseRecord | null> {
-  const filePath = path.join(dataDir, 'previous.json');
-  try {
-    const raw = await fsPromises.readFile(filePath, 'utf8');
-    return JSON.parse(raw) as PreviousReleaseRecord;
-  } catch {
-    return null;
-  }
-}
-
-export async function writePreviousRelease(dataDir: string, record: PreviousReleaseRecord): Promise<void> {
-  const filePath = path.join(dataDir, 'previous.json');
-  await writeSecureFile(filePath, JSON.stringify(record, null, 2));
 }
 
 export async function readBlockedRelease(dataDir: string): Promise<BlockedReleaseRecord | null> {
@@ -364,34 +343,6 @@ export async function stageReleaseFromNpm(
       } else {
         entryRelative = returnedEntry;
       }
-    } else if (process.env.BOTD_TEST_STAGE_ENTRY) {
-      const entryFile = path.join(stagingDir, 'cli.js');
-      if (process.env.BOTD_TEST_STAGE_FAIL === '1') {
-        await fsPromises.writeFile(
-          entryFile,
-          'console.error("Simulated canary startup crash"); process.exit(1);\n',
-          'utf8',
-        );
-      } else if (
-        process.env.BOTD_TEST_STAGE_ENTRY !== '1' &&
-        fs.existsSync(process.env.BOTD_TEST_STAGE_ENTRY)
-      ) {
-        const content = await fsPromises.readFile(process.env.BOTD_TEST_STAGE_ENTRY, 'utf8');
-        await fsPromises.writeFile(
-          entryFile,
-          `process.env.BOTD_VERSION_OVERRIDE = ${JSON.stringify(targetVersion)};\n` + content,
-          'utf8',
-        );
-      } else {
-        await fsPromises.writeFile(
-          entryFile,
-          `process.env.BOTD_VERSION_OVERRIDE = ${JSON.stringify(targetVersion)};\n` +
-            `if (typeof process.send === 'function') { process.send({ type: 'botd:daemon-ready', pid: process.pid }); }\n` +
-            `setInterval(() => {}, 60000);\n`,
-          'utf8',
-        );
-      }
-      entryRelative = 'cli.js';
     } else {
       const pkgName = process.env.BOTD_NPM_PACKAGE || '@botd/node';
       const rawRegistry =
@@ -561,9 +512,6 @@ export async function performNodeUpgrade(
 
   // Canary deployment and rollback protection
   const existingCurrent = await readCurrentRelease(dataDir);
-  if (existingCurrent) {
-    await writePreviousRelease(dataDir, existingCurrent);
-  }
 
   await writeCurrentRelease(dataDir, {
     version: targetVersion,
@@ -613,78 +561,5 @@ export async function performNodeUpgrade(
     targetVersion,
     upgraded: true,
     pid,
-  };
-}
-
-export interface AutoUpgradeLoopOptions {
-  /** Set to false (default) to never fire; the daemon gates this on
-   *  BOTD_AUTO_UPGRADE. */
-  enabled?: boolean;
-  /** Check interval; defaults to BOTD_AUTO_UPGRADE_INTERVAL_MS or 6h,
-   *  clamped to a 60s floor. */
-  intervalMs?: number;
-  /** Injectable for tests; defaults to performNodeUpgrade. */
-  performUpgrade?: typeof performNodeUpgrade;
-  /** Daemon asks the loop to skip a tick while stopping/restarting. */
-  shouldSkip?: () => boolean;
-  /** Invoked on successful upgrade, mirrors PerformNodeUpgradeOptions. */
-  onScheduleShutdown: () => void;
-  log?: (message: string) => void;
-}
-
-export interface AutoUpgradeLoopHandle {
-  stop: () => void;
-  /** Fire one check immediately (same guards as the interval tick); exposed
-   *  for tests and future manual triggers. */
-  tick: () => Promise<void>;
-}
-
-/** Periodic auto-upgrade: checks the registry every intervalMs and runs the
- *  full manual-upgrade pipeline (drain, canary, rollback, blocklist). A tick
- *  that finds no newer version is a no-op; failures are logged and retried
- *  next tick (a canary-failed version stays blocked for its cooldown). */
-export function startAutoUpgradeLoop(
-  dataDir: string,
-  options: AutoUpgradeLoopOptions,
-): AutoUpgradeLoopHandle {
-  if (!options.enabled) return { stop: () => {}, tick: async () => {} };
-
-  const intervalMs = (() => {
-    if (options.intervalMs !== undefined) return Math.max(60_000, options.intervalMs);
-    const raw = Number(process.env.BOTD_AUTO_UPGRADE_INTERVAL_MS);
-    return Number.isFinite(raw) && raw >= 60_000 ? raw : 6 * 60 * 60 * 1000;
-  })();
-
-  const perform = options.performUpgrade ?? performNodeUpgrade;
-  const log = options.log ?? ((message: string) => console.log(`[auto-upgrade] ${message}`));
-  let running = false;
-
-  const tick = async () => {
-    if (running || options.shouldSkip?.()) return;
-    running = true;
-    try {
-      const result = await perform(dataDir, { onScheduleShutdown: options.onScheduleShutdown });
-      if (result.upgraded) {
-        log(`${result.previousVersion} -> ${result.targetVersion} succeeded, restarting daemon`);
-      }
-    } catch (err: any) {
-      // Network hiccups and canary failures (already rolled back, target
-      // version blocked for the cooldown) wait for the next tick.
-      log(`failed: ${err?.message || String(err)}`);
-    } finally {
-      running = false;
-    }
-  };
-
-  const timer = setInterval(() => {
-    void tick();
-  }, intervalMs);
-  timer.unref();
-
-  return {
-    stop: () => {
-      clearInterval(timer);
-    },
-    tick,
   };
 }

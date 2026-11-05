@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { startHub } from '../apps/hub/src/index.js';
-import { ensureBotdBinWrapper, buildBotShellEnv } from '../apps/node/src/runtime.js';
+import { ensureBotdBinWrapper } from '../apps/node/src/runtime.js';
 import type { NodeWithBots, SessionRecord } from '../packages/protocol/src/index.js';
 
 const cli = path.resolve('apps/node/src/cli.ts');
@@ -34,25 +34,15 @@ function command(args: string[], env: NodeJS.ProcessEnv) {
   return { child, done, output: () => output };
 }
 
-test('buildBotShellEnv injects botd session identity and bin dir into child env', { timeout: 60_000 }, async () => {
+test('ensureBotdBinWrapper writes an executable wrapper and is idempotent', { timeout: 60_000 }, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-shellenv-test-'));
   try {
     const dataDir = path.join(dir, 'data');
     const binDir = await ensureBotdBinWrapper(dataDir);
-    const env = buildBotShellEnv(process.env, {
-      dataDir,
-      binDir,
-      sessionId: 'sess-shell',
-      botId: 'bot-shell',
-      botEnv: { CUSTOM_BOT_VAR: 'yes' },
-    });
-    assert.equal(env.BOTD_DATA_DIR, dataDir);
-    assert.equal(env.BOTD_SESSION_ID, 'sess-shell');
-    assert.equal(env.BOTD_BOT_ID, 'bot-shell');
-    assert.equal(env.CUSTOM_BOT_VAR, 'yes');
-    assert.ok(env.PATH?.startsWith(binDir), 'bin dir must be prepended to PATH');
-    // 纯函数约定：不污染全局 process.env
-    assert.equal(process.env.BOTD_SESSION_ID, undefined);
+    assert.equal(binDir, path.join(dataDir, 'bin'));
+    assert.equal(existsSync(path.join(binDir, 'botd')), true);
+    // 幂等：再次执行不报错
+    await ensureBotdBinWrapper(dataDir);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -94,8 +84,23 @@ test('real botd join/start/wake, file management and missing-key failure', { tim
   }
   const daemon = command(['start'], env);
   processes.push(daemon.child);
-  const nodes = await waitFor(() => api<NodeWithBots[]>('/api/nodes'), nodes => nodes[0]?.status === 'online' && nodes[0].bots.length > 0);
-  const bot = nodes[0].bots[0];
+  const nodes = await waitFor(() => api<NodeWithBots[]>('/api/nodes'), nodes => nodes[0]?.status === 'online');
+  // 无状态计算节点不再自动播种子默认 Bot：经 Hub API 显式创建，注册时同步进节点清单
+  const createdBot = await api<any>('/api/bots', 'POST', {
+    id: 'integration-assistant',
+    nodeId: identity.nodeId,
+    name: 'Integration Assistant',
+    description: 'Created via Hub API in the integration test',
+    modelProvider: 'mistral',
+    modelId: 'mistral-small-latest',
+    enabledSkills: [],
+    enabledExtensions: [],
+    systemMd: 'You are a helpful integration test assistant.',
+    updatedAt: new Date().toISOString(),
+  });
+  assert.equal(createdBot.nodeId, identity.nodeId);
+  const withBots = await waitFor(() => api<NodeWithBots[]>('/api/nodes'), nodes => nodes[0]?.bots.some((b: any) => b.id === 'integration-assistant'));
+  const bot = withBots[0].bots.find((b: any) => b.id === 'integration-assistant')!;
   assert.equal(bot.nodeId, identity.nodeId);
   // PartySocket must create a usable new RPC peer after the underlying socket is lost.
   for (const socket of hub.connections.wss.clients) socket.terminate();
@@ -154,8 +159,9 @@ test('real botd join/start/wake, file management and missing-key failure', { tim
   processes.push(wake.child);
   const woke = await wake.done;
   assert.equal(woke.code, 0, woke.output + daemon.output());
-  const messages = await waitFor(() => api<any[]>(`/api/sessions/${session.id}/messages`), messages => messages.some(message => message.role === 'callback'));
-  assert.match(messages.find(message => message.role === 'callback').content, /background job finished/);
+  // 唤醒经 Hub 会话消息面提交：正文落库为 user 消息，无凭据时回合失败并落系统消息
+  const messages = await waitFor(() => api<any[]>(`/api/sessions/${session.id}/messages`), messages => messages.some(message => message.role === 'user' && /background job finished/.test(message.content)));
+  assert.ok(messages.length > 0);
   await waitFor(() => api<SessionRecord[]>('/api/sessions'), sessions => sessions.find(s => s.id === session.id)?.status === 'failed');
   const history = await api<any[]>(`/api/sessions/${session.id}/messages`);
   assert.equal(history.filter(message => message.role === 'assistant').length, 0);
