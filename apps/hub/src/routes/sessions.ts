@@ -49,23 +49,27 @@ function validateSessionMembers(
 }
 
 export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
-  const { db, router, sseHub, artifacts } = ctx;
+  const { db, sseHub, artifacts } = ctx;
+
+  /** 统一的会话停止：Durable 侧停 Worker + 中止回合，SQL 侧置 idle 并广播。 */
+  const stopSession = async (sessionId: string): Promise<void> => {
+    const rt = ctx.durableRuntime ?? (ctx.getDurableRuntime ? await ctx.getDurableRuntime() : undefined);
+    if (rt) await cancelDurableSession(rt, sessionId);
+    db.updateSessionStatus(sessionId, 'idle', undefined);
+    sseHub.broadcast(sessionId, {
+      type: 'session_status',
+      sessionId,
+      status: 'idle',
+      activeBotId: undefined,
+      activeBotIds: [],
+      queuePlan: [],
+    });
+  };
 
   // Session management
   app.get('/api/sessions', (c) => {
     const sessions = db.getAllSessions(c.get('user').id);
-    return c.json(
-      sessions.map((s) => {
-        if (s.status === 'running') {
-          const activeBotIds = router.getActiveBotIds(s.id);
-          return {
-            ...s,
-            ...(activeBotIds.length > 0 ? { activeBotIds } : {}),
-          };
-        }
-        return s;
-      })
-    );
+    return c.json(sessions);
   });
 
   app.post('/api/sessions', async (c) => {
@@ -135,9 +139,9 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
     }
     const { leadBotId } = validation;
 
-    // 配置成员变更时统一失效旧队列，复用 cancelSession，防止 queued 任务绕过新配置
+    // 配置成员变更时先停止会话，防止 queued 任务绕过新配置
     if (touchesConfig) {
-      await router.cancelSession(id);
+      await stopSession(id);
     }
 
     const updated = db.updateSession(id, {
@@ -154,9 +158,7 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
     const sRes = resolveOwnedSession(c, db, id);
     if (!sRes.ok) return sRes.response;
 
-    await router.cancelSession(id);
-    // Durable 侧同步停止：running Worker 与 Router 会话自身的回合一并中止。
-    if (ctx.durableRuntime) await cancelDurableSession(ctx.durableRuntime, id);
+    await stopSession(id);
     return c.json({ ok: true });
   });
 
@@ -182,16 +184,18 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
 
     // Durable 侧同步零拷贝分叉：若源会话已有 Durable Router 会话，通过 pi-durable 原生
     // conv.fork(atEntryId) 在锚点消息对应的 Entry 处分叉并绑定到新会话。
-    if (ctx.durableRuntime) {
+    const rt = ctx.durableRuntime ?? (ctx.getDurableRuntime ? await ctx.getDurableRuntime() : undefined);
+    if (rt) {
       const forkedMessages = db.getMessages(forked.id);
       const anchorMsg = forkedMessages.at(-1);
       if (anchorMsg) {
-        await forkDurableSession(ctx.durableRuntime, {
+        await forkDurableSession(rt, {
           sourceSessionId: id,
           targetSessionId: forked.id,
           anchorMessage: anchorMsg,
           botId: forked.leadBotId,
           messagesUpToAnchor: forkedMessages,
+          db,
         }).catch((err) => {
           console.warn('[sessions] durable fork skipped:', err instanceof Error ? err.message : err);
         });
@@ -210,25 +214,30 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
       return c.json({ error: 'Stop the session before clearing messages' }, 409);
     }
 
-    // 验证后，使用 Router 统一失效旧队列，复用 cancelSession
-    await router.cancelSession(id);
-
-    // Durable 侧同步重置：默认停掉 running Worker / 中止 Router 回合，并清掉会话映射，
-    // 清空后的下一条消息重新懒建全新 Router 会话；`?keepWorkers=1`（/clear）则原地
-    // 清空上下文 —— 仅 pi.reset 边界，保留会话映射与正在运行的后台 Worker。
+    // keepWorkers（/clear）：仅中止 Router 前台回合并追加重置边界，运行中的后台
+    // Worker 与会话映射保持不变；否则全量停止（停 Worker + 清映射）。
     const keepWorkers = c.req.query('keepWorkers') === '1';
     const rt = ctx.durableRuntime ?? (ctx.getDurableRuntime ? await ctx.getDurableRuntime() : undefined);
     if (rt) {
       if (keepWorkers) {
         await clearDurableSessionContext(rt, id);
       } else {
+        await stopSession(id);
         await resetDurableSession(rt, id);
       }
+    } else {
+      db.updateSessionStatus(id, 'idle', undefined);
+      sseHub.broadcast(id, {
+        type: 'session_status',
+        sessionId: id,
+        status: 'idle',
+        activeBotId: undefined,
+        activeBotIds: [],
+        queuePlan: [],
+      });
     }
 
     db.clearSessionMessages(id);
-    // 同步清空各成员节点的本地会话记忆（best-effort，失败在方法内部吞掉）
-    await router.resetMemberSessions(id);
     return c.json({ ok: true });
   });
 
@@ -244,14 +253,13 @@ export function registerSessionRoutes(app: HubApp, ctx: HubContext): void {
       return c.json({ error: 'Stop the session before deleting it' }, 409);
     }
 
-    // 验证后，使用 Router 统一失效旧队列，复用 cancelSession
-    await router.cancelSession(id);
+    // 先停止会话（停 Worker + 中止回合 + 置 idle），再做 Durable 重置与产物清理
+    await stopSession(id);
 
     // Durable 侧同步重置（与清空消息同构）：停 Worker + 清会话映射。
-    if (ctx.durableRuntime) await resetDurableSession(ctx.durableRuntime, id);
+    const rt = ctx.durableRuntime ?? (ctx.getDurableRuntime ? await ctx.getDurableRuntime() : undefined);
+    if (rt) await resetDurableSession(rt, id);
 
-    // resetMemberSessions 内部要查会话成员，必须在 deleteSession 之前调用
-    await router.resetMemberSessions(id);
     artifacts.deleteSession(id);
     // 广播 idle 让子会话委派的 SSE 监听闭包自行清理，避免永久挂在 SseHub.listeners
     sseHub.broadcast(id, {

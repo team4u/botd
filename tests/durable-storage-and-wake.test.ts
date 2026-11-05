@@ -2,8 +2,8 @@
  * 生产 Durable 存储兜底 / botd wake 的 Durable 路由 / hub.drain 的 Durable 感知。
  *
  * 1. `createHub()` 在 `BOTD_DB_PATH` 指定且 `options.dbPath` 缺省（与生产 startHub
- *    相同）时，`ensureDurableRuntime()` 必须在磁盘上创建 `<db>.durable.sqlite`，
- *    且 Hub 重启后会话仍在；
+ *    相同）时，`ensureDurableRuntime()` 与业务表共用同一个 `hub.sqlite`
+ *    （pi_* 前缀表单库共存，无第二个数据库文件），且 Hub 重启后会话仍在；
  * 2. Durable 主线启用时 `requestWakeupTurn`（不带 noTurn）先落 `[Wake-up]` callback，
  *    再把唤醒回合提交给 Durable Router 会话，而不是向节点下发已废弃的 runTurn；
  * 3. `hub.drain()` 等待 Durable 运行时中的活跃任务排空。
@@ -130,16 +130,15 @@ const createHubFromEnv = async (
 };
 
 // ---------------------------------------------------------------------------
-// 1. 生产存储兜底：BOTD_DB_PATH + options.dbPath 缺省 → <db>.durable.sqlite 落盘
+// 1. 生产存储兜底：BOTD_DB_PATH + options.dbPath 缺省 → pi_* 表单库共存落盘
 // ---------------------------------------------------------------------------
 
-test('ensureDurableRuntime persists to ${BOTD_DB_PATH}.durable.sqlite and survives Hub restart', { timeout: 60_000 }, async (t: TestContext) => {
+test('ensureDurableRuntime shares hub.sqlite via pi_* tables and survives Hub restart', { timeout: 60_000 }, async (t: TestContext) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'botd-durable-storage-'));
   t.after(async () => {
     await rm(dir, { recursive: true, force: true });
   });
   const dbPath = path.join(dir, 'hub.sqlite');
-  const durablePath = `${dbPath}.durable.sqlite`;
   const faux = fauxProvider({ models: [{ id: 'main' }] });
 
   // 与生产完全一致：不传 options.dbPath，仅靠 BOTD_DB_PATH 环境变量。
@@ -149,8 +148,12 @@ test('ensureDurableRuntime persists to ${BOTD_DB_PATH}.durable.sqlite and surviv
     const seeded = seedSession(hub);
     assert.equal(seeded.sessionId, 'sess_architect_1');
     await hub.ensureDurableRuntime();
-    // 修复前：options?.dbPath 为 undefined → MemoryStorage，磁盘上不会有 durable 文件
-    assert.ok(existsSync(durablePath), `durable sqlite must exist at ${durablePath}`);
+    // 单库化：pi-durable 的 pi_* 表与业务表共用同一个 hub.sqlite，
+    // 不再有第二个 <db>.durable.sqlite 文件。
+    assert.ok(existsSync(dbPath), `hub sqlite must exist at ${dbPath}`);
+    assert.ok(!existsSync(`${dbPath}.durable.sqlite`), 'durable must share hub.sqlite (no sidecar file)');
+    const tables = (hub.db.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'pi_%'").all()) as { name: string }[];
+    assert.ok(tables.some((r) => r.name === 'pi_conversations'), `pi_* tables must live in hub.sqlite, got: ${JSON.stringify(tables.map((r) => r.name))}`);
 
     // 提交对话：会话上下文进入 durable 存储（faux 脚本多次，防重试耗尽）
     faux.setResponses(Array.from({ length: 8 }, () => fauxAssistantMessage('persisted reply')));

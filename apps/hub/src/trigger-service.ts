@@ -4,12 +4,12 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { cronMatches } from '@botd/protocol';
 import type { TriggerEventFilter, TriggerRecord } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
-import type { GroupRouter } from './group-router.js';
+import type { GroupRouter } from './routes/context.js'; // 旧 GroupRouter 已删；最小兼容占位（并行重构中）
 import type { SseHub } from './sse.js';
 import type { ArtifactService } from './artifact-service.js';
 import type { HubDurableRuntime } from './harness/hub-harness.js';
 import { submitSessionMessageToDurable, type DurableSessionMirror } from './routes/workers.js';
-import { watchSubSessionCompletion } from './subsession.js';
+import { watchSubSessionCompletion } from './harness/session-bridge.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { ThreadSubscriptionsDoc, threadKeyOf, type IncomingEvent } from './harness/event-router.js';
 

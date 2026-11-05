@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { MessageAttachment } from '@botd/protocol';
-import { extractMentions, parseSlashCommand } from '../group-router.js';
+import { extractMentions, parseSlashCommand } from '../message-commands.js';
 import { resolveOwnedSession } from '../http-helpers.js';
 import { ArtifactError, type ArtifactActor, type ArtifactService } from '../artifact-service.js';
 import type { HubDatabase } from '../db.js';
@@ -116,17 +116,39 @@ export function registerMessageRoutes(
     durableInjected?: boolean;
   },
 ): void {
-  const { db, router, sseHub, artifacts } = ctx;
+  const { db, sseHub, artifacts } = ctx;
   // 注意：不在此处固化 durableMirror —— 懒打开运行时在首条消息时才创建镜像器，
   // 处理器内动态读 ctx.durableMirror 才能拿到实例（旧闭包捕获恒 undefined）。
-  // 主线切流门槛：仅当 runtime 为显式注入，或 Hub 已配置任一 Provider 凭据时生效。
-  // 否则（如无凭据的测试 Hub）直接走 GroupRouter，避免提交给无凭据的 Durable 运行时阻塞。
   const durableCtx = () => ({
     ...ctx,
-    durableRuntime:
-      ctx.durableInjected || listEffectiveProviderCredentials(db).length > 0 ? ctx.durableRuntime : undefined,
     ...(ctx.getDurableRuntime ? { getDurableRuntime: ctx.getDurableRuntime } : {}),
   });
+  /** 会话的有效 Bot id 集合（斜杠命令 / @mention 目标校验）：主 Bot + 其子代理 + owner 可用 Bot。 */
+  const getValidBotIds = (session: { id: string; leadBotId: string }): Set<string> => {
+    const valid = new Set<string>([session.leadBotId]);
+    const ownerId = db.getSessionOwner(session.id);
+    const allBots = db.getAllBots();
+    for (const b of allBots) {
+      if (b.parentBotId && valid.has(b.parentBotId)) {
+        valid.add(b.id);
+      }
+      // owner 可用的其他 BOT/子代理也可被 @ 接力
+      if (ownerId && !b.parentBotId && db.canUserUseBot(b.id, ownerId)) {
+        valid.add(b.id);
+        for (const sub of allBots) {
+          if (sub.parentBotId === b.id) valid.add(sub.id);
+        }
+      }
+    }
+    return valid;
+  };
+  /** 取 Durable 运行时：未配置凭据且未注入 runtime 时返回 undefined（调用方 400）。 */
+  const durableRuntimeOrReject = async () => {
+    const eligible = ctx.durableInjected || listEffectiveProviderCredentials(db).length > 0;
+    if (!eligible) return undefined;
+    const dctx = durableCtx();
+    return dctx.getDurableRuntime ? await dctx.getDurableRuntime() : dctx.durableRuntime;
+  };
 
   app.get('/api/messages/search', (c) => {
     const q = (c.req.query('q') ?? '').trim();
@@ -191,10 +213,6 @@ export function registerMessageRoutes(
     if (!sRes.ok) return sRes.response;
     const session = sRes.session;
 
-    if (router.isDraining()) {
-      return c.json({ error: 'Hub is draining for upgrade, please retry shortly' }, 503);
-    }
-
     const body = (await c.req.json<{ content?: string; attachments?: MessageAttachment[] }>().catch(() => ({ content: '' }))) as {
       content?: string;
       attachments?: MessageAttachment[];
@@ -205,7 +223,7 @@ export function registerMessageRoutes(
     }
     const content = typeof body.content === 'string' ? body.content : '';
 
-    const validBots = router.getValidBotIds(session);
+    const validBots = getValidBotIds(session);
     const cmdResult = parseSlashCommand(content, validBots);
     if (cmdResult.error) {
       return c.json({ error: cmdResult.error }, 400);
@@ -257,18 +275,28 @@ export function registerMessageRoutes(
       message: msgResult.message,
     });
 
-    const credentials = listEffectiveProviderCredentials(db);
-    const durableMainlineEligible = ctx.durableInjected || credentials.length > 0;
-    const dctx = durableCtx();
-    const rt = durableMainlineEligible
-      ? (dctx.getDurableRuntime ? await dctx.getDurableRuntime() : dctx.durableRuntime)
-      : undefined;
+    // Durable 主线是唯一执行引擎：未配置凭据且未注入 runtime 时直接拒绝，
+    // 不再回退到已删除的节点 runTurn 路径。
+    const rt = await durableRuntimeOrReject();
+    if (rt === undefined) {
+      const bot = db.getBot(targetBotId);
+      const errorMsg = db.createMessage({
+        id: `msg_${randomUUID()}`,
+        sessionId: id,
+        role: 'system',
+        content: unconfiguredModelMessage(bot?.name || targetBotId, bot?.modelProvider ?? '', bot?.modelId ?? ''),
+      });
+      sseHub.broadcast(id, { type: 'message_created', message: errorMsg.message });
+      sseHub.broadcast(id, { type: 'session_status', sessionId: id, status: 'failed' });
+      db.updateSessionStatus(id, 'failed');
+      return c.json(msgResult.message, 202);
+    }
 
     // 校验实际会话模型，避免全局 Bot 的空配置挡住有效的会话覆盖。
-    // 节点自行执行的路径仍由节点管理凭据。
-    if (rt !== undefined && !ctx.durableInjected && targetBotId) {
+    if (!ctx.durableInjected && targetBotId) {
       const bot = db.getBot(targetBotId);
       if (bot) {
+        const credentials = listEffectiveProviderCredentials(db);
         const conversationId = await ensureRouterConversationId(rt, id, targetBotId, { workspaceDir: session.workspaceDir });
         const { effective } = await rt.getConversationModelConfig(conversationId);
         if (
@@ -291,36 +319,28 @@ export function registerMessageRoutes(
       }
     }
 
-    // 已配置 Durable 主线时提交到会话 Router，否则沿用节点路由。
-    if (rt !== undefined) {
-      try {
-        const submitted = await submitSessionMessageToDurable(
-          { db, sseHub, durableRuntime: rt },
-          id,
-          targetBotId,
-          content,
-          ctx.durableMirror,
-          {
-            attachments,
-            ...(cmdResult.isCommand && cmdResult.commandText ? { commandText: cmdResult.commandText } : {}),
-          },
-        );
-        if (submitted !== undefined) return c.json(msgResult.message, 202);
-      } catch (err: any) {
-        console.warn('[messages] durable submit failed, falling back to GroupRouter:', err?.message || err);
-      }
+    try {
+      await submitSessionMessageToDurable(
+        { db, sseHub, durableRuntime: rt },
+        id,
+        targetBotId,
+        content,
+        ctx.durableMirror,
+        {
+          attachments,
+          ...(cmdResult.isCommand && cmdResult.commandText ? { commandText: cmdResult.commandText } : {}),
+        },
+      );
+    } catch (err: any) {
+      console.error('[messages] durable submit failed:', err?.message || err);
+      sseHub.broadcast(id, { type: 'session_status', sessionId: id, status: 'failed' });
+      db.updateSessionStatus(id, 'failed');
     }
-
-    // TODO(后续在 formatIncrementalMessages 中消费 senderUsername)
-    router.handleUserMessage(id, msgResult.message.id, content, cmdResult.isCommand ? {
-      commandText: cmdResult.commandText!,
-      targetBotId: cmdResult.targetBotId,
-    } : undefined);
 
     return c.json(msgResult.message, 202);
   });
 
-  // 编辑用户消息：更新锚点内容，截断其后所有消息，重置游标与节点本地会话，再从锚点重新派发
+  // 编辑用户消息：更新锚点内容，截断其后所有消息，Durable 侧原生回滚后从锚点重新派发
   app.put('/api/sessions/:id/messages/:messageId', async (c) => {
     const id = c.req.param('id');
     const messageId = c.req.param('messageId');
@@ -349,7 +369,7 @@ export function registerMessageRoutes(
     }
 
     // 先校验斜杠命令，避免截断发生后才发现无法派发
-    const validBots = router.getValidBotIds(session);
+    const validBots = getValidBotIds(session);
     const cmdResult = parseSlashCommand(body.content, validBots);
     if (cmdResult.error) {
       return c.json({ error: cmdResult.error }, 400);
@@ -365,9 +385,6 @@ export function registerMessageRoutes(
       mentions.find((m) => db.getBot(m) !== undefined) ??
       session.leadBotId;
 
-    // 验证输入后，使用 Router 统一失效旧队列，复用 cancelSession
-    await router.cancelSession(id);
-
     const anchorRowid = found.rowid;
     // 记录锚点之前的历史消息（用于 pi-durable 原生 conv.fork(prevEntryId) 精确回滚上下文）
     const allBeforeTruncate = db.getMessages(id);
@@ -380,48 +397,42 @@ export function registerMessageRoutes(
     }
 
     db.deleteMessagesAfter(id, anchorRowid);
-    db.resetSessionCursors(id);
-    await router.resetMemberSessions(id);
     sseHub.broadcast(id, {
       type: 'messages_truncated',
       sessionId: id,
       anchorMessageId: messageId,
     });
 
-    const dctx = durableCtx();
-    if (dctx.durableRuntime !== undefined) {
-      try {
-        const rt = dctx.getDurableRuntime ? await dctx.getDurableRuntime() : dctx.durableRuntime;
-        if (rt !== undefined) {
-          await rewindDurableSessionBeforeMessage(rt, {
-            sessionId: id,
-            botId: targetBotId,
-            previousMessage: messagesBeforeEdited.at(-1),
-            messagesBeforeEdited,
-          });
-        }
-        const submitted = await submitSessionMessageToDurable(
-          dctx,
-          id,
-          targetBotId,
-          body.content,
-          ctx.durableMirror,
-          {
-            // 编辑重提保留原消息附件：SQL 侧未动附件，Durable 侧同样要带上图片块/[Attached Files]。
-            ...(updated.attachments?.length ? { attachments: updated.attachments } : {}),
-            ...(cmdResult.isCommand && cmdResult.commandText ? { commandText: cmdResult.commandText } : {}),
-          },
-        );
-        if (submitted !== undefined) return c.json(updated, 200);
-      } catch (err: any) {
-        console.warn('[messages] durable rewind/submit failed, falling back to GroupRouter:', err?.message || err);
-      }
+    const rt = await durableRuntimeOrReject();
+    if (rt === undefined) {
+      return c.json({ error: 'No model provider credentials configured for this hub' }, 400);
     }
 
-    router.handleUserMessage(id, messageId, body.content, cmdResult.isCommand ? {
-      commandText: cmdResult.commandText!,
-      targetBotId: cmdResult.targetBotId,
-    } : undefined);
+    try {
+      await rewindDurableSessionBeforeMessage(rt, {
+        sessionId: id,
+        botId: targetBotId,
+        previousMessage: messagesBeforeEdited.at(-1),
+        messagesBeforeEdited,
+        db,
+      });
+      await submitSessionMessageToDurable(
+        { db, sseHub, durableRuntime: rt },
+        id,
+        targetBotId,
+        body.content,
+        ctx.durableMirror,
+        {
+          // 编辑重提保留原消息附件：SQL 侧未动附件，Durable 侧同样要带上图片块/[Attached Files]。
+          ...(updated.attachments?.length ? { attachments: updated.attachments } : {}),
+          ...(cmdResult.isCommand && cmdResult.commandText ? { commandText: cmdResult.commandText } : {}),
+        },
+      );
+    } catch (err: any) {
+      console.error('[messages] durable rewind/submit failed:', err?.message || err);
+      sseHub.broadcast(id, { type: 'session_status', sessionId: id, status: 'failed' });
+      db.updateSessionStatus(id, 'failed');
+    }
 
     return c.json(updated, 200);
   });

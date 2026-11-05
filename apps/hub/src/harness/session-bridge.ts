@@ -9,14 +9,16 @@
  *
  * 所有写操作走 `HubDurableRuntime` 的文档事务，重启后状态原样恢复。
  */
-import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
+import { BACKGROUND_CONTEXT, type Context } from '@earendil-works/chord/context';
 import { configure, defineDocFamily, type LiveState } from '@earendil-works/pi-durable';
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import type { MessageAttachment, PendingAskRecord, ToolCallRecord, TurnBlock, TurnUsage } from '@botd/protocol';
 import { stringToConversationId, type HubDurableRuntime } from './hub-harness.js';
 import { AskDoc, type AskEntry, TargetDoc } from './docs.js';
 import { HUB_ROUTER_BOT_ID } from './router-extension.js';
 import { redactSecretAskAnswer } from './secret-stash.js';
+import { isSilentSkipReply } from '../message-commands.js';
 import type { HubDatabase } from '../db.js';
 import type { SseHub } from '../sse.js';
 
@@ -295,6 +297,62 @@ export async function respondToDurableAsk(input: {
   return null;
 }
 
+/**
+ * 在会话的 Router 会话 AskDoc 中直接写入一条待确认项（人机协同入口，供
+ * routes/workers.ts 的 POST /api/sessions/:id/asks 与 requestHumanInput 使用）。
+ * 写入后立即广播 interaction_request；回答经 respondToDurableAsk 落 answered 并
+ * steer 回提问的会话。
+ */
+export async function createDurableAsk(
+  rt: HubDurableRuntime,
+  sessionId: string,
+  input: {
+    id?: string;
+    botId: string;
+    prompt: string;
+    options?: string[];
+    previewType?: PendingAskRecord['previewType'];
+    previewContent?: string;
+  },
+  context: Context = BACKGROUND_CONTEXT,
+): Promise<PendingAskRecord> {
+  const routerId = await ensureRouterConversationId(rt, sessionId, input.botId, {
+    workspaceDir: undefined,
+    title: undefined,
+  });
+  const conversationId = stringToConversationId(routerId);
+  const askId = input.id ?? `ask_${randomUUID()}`;
+  const createdAt = Date.now();
+  // AskDoc 的 previewType 枚举无 'diff'（diff 融合进 text 渲染）：写入前归一。
+  const entryPreviewType =
+    input.previewType === undefined ? undefined
+    : input.previewType === 'diff' ? 'text' as const
+    : input.previewType;
+  await rt.harness.commit(async (tx) => {
+    const doc = await tx.doc(AskDoc, conversationId);
+    doc.asks[askId] = {
+      askId,
+      prompt: input.prompt,
+      options: input.options ?? [],
+      status: 'pending',
+      createdAt,
+      ...(entryPreviewType ? { previewType: entryPreviewType } : {}),
+      ...(input.previewContent ? { previewContent: input.previewContent } : {}),
+    };
+  }, context);
+  return {
+    id: askId,
+    sessionId,
+    botId: input.botId,
+    prompt: input.prompt,
+    options: input.options ?? [],
+    status: 'pending',
+    createdAt: new Date(createdAt).toISOString(),
+    ...(input.previewType ? { previewType: input.previewType } : {}),
+    ...(input.previewContent ? { previewContent: input.previewContent } : {}),
+  };
+}
+
 const messageText = (message: unknown): string => {
   if (message === null || typeof message !== 'object') return '';
   const content = (message as { content?: unknown }).content;
@@ -535,6 +593,13 @@ export function createDurableSessionMirror(
 
   const mirror = (sessionId: string, botId: string, entry: { id: unknown; kind: string; model?: readonly unknown[] }): void => {
     if (closed) return;
+    // 用户输入 entry：把最新未绑定的 user 消息显式绑定到该 entry id（durable_entry_id），
+    // 后续 fork/编辑回滚 O(1) 定位，不再依赖文本猜测。
+    if (entry.kind === 'pi.user') {
+      const unbound = db.getLatestUnboundUserMessage(sessionId);
+      if (unbound) db.updateMessageDurableEntryId(unbound.id, Number(entry.id));
+      return;
+    }
     // 群聊多分身：本会话最近被 @ 的分身优先于创建时固定的 lead bot。
     const session = db.getSession(sessionId);
     const activeBotId = lastActiveBotBySession.get(sessionId) ?? session?.leadBotId;
@@ -584,6 +649,8 @@ export function createDurableSessionMirror(
         senderBotId,
         ...(senderBotName !== senderBotId ? { senderBotName } : {}),
         content: text ?? '',
+        // assistant 镜像直接携带 durable entry 显式外键（id 本身就含 entryId）。
+        durableEntryId: Number(entry.id),
         ...(toolCalls ? { toolCalls } : {}),
         ...(blocks && blocks.length > 0 ? { blocks } : {}),
         ...(usage ? { usage } : {}),
@@ -1067,20 +1134,31 @@ function matchesDurableMessageText(durableText: string, sqlContent: string): boo
 }
 
 /**
- * 在 Durable Router 会话的 Entry 历史中定位某条 botd 消息对应的 EntryId：
- * 1. 若消息 id 为镜像生成的 `msg_dur_<sessionId>_<entryId>`，直接提取 `<entryId>`；
- * 2. 否则按升序遍历会话 Entry，按角色与文本序号匹配对应的 `pi.user` / `pi.assistant` 条目。
+ * 在 Durable Router 会话中定位某条 botd 消息对应的 EntryId：
+ * 1. 显式绑定优先（O(1)）：消息的 durable_entry_id 列，或镜像 id
+ *    `msg_dur_<sessionId>_<entryId>` 中的 entryId；
+ * 2. 极简兑底：未绑定的历史消息（绑定机制上线前的存量）按角色与已知改写形态
+ *    （[Attached Files] / [Slash Command]）做文本匹配定位。
  */
 async function resolveDurableEntryIdForMessage(
   rt: HubDurableRuntime,
   conversationId: string,
   anchorMessage: { id: string; role: string; content: string },
   messagesUpToAnchor?: ReadonlyArray<{ id: string; role: string; content: string }>,
+  db?: Pick<HubDatabase, 'getMessageById'>,
 ): Promise<import('@earendil-works/pi-durable').EntryId | undefined> {
   const mirroredMatch = /^msg_dur_.+_(\d+)$/.exec(anchorMessage.id);
   if (mirroredMatch) {
     return Number(mirroredMatch[1]) as import('@earendil-works/pi-durable').EntryId;
   }
+  // 显式外键（O(1)）：镜像扫描时回填的 durable_entry_id 列
+  if (db) {
+    const bound = db.getMessageById(anchorMessage.id)?.message as { durableEntryId?: number } | undefined;
+    if (bound?.durableEntryId !== undefined) {
+      return bound.durableEntryId as import('@earendil-works/pi-durable').EntryId;
+    }
+  }
+  // 兑底：未绑定的存量消息按文本匹配（仅历史数据会走到这里）
   const conv = await rt.conversation(conversationId, BACKGROUND_CONTEXT);
   if (!conv) return undefined;
   const page = await conv.entries({ order: 'ascending' }, 500, undefined, BACKGROUND_CONTEXT);
@@ -1122,6 +1200,8 @@ export async function forkDurableSession(
     anchorMessage: { id: string; role: string; content: string };
     botId: string;
     messagesUpToAnchor?: ReadonlyArray<{ id: string; role: string; content: string }>;
+    /** 提供时优先读消息的显式 durable_entry_id 绑定（O(1) 定位，免文本猜测）。 */
+    db?: Pick<HubDatabase, 'getMessageById'>;
   },
 ): Promise<string | undefined> {
   const sourceRouterId = await findRouterConversationId(rt, input.sourceSessionId);
@@ -1131,6 +1211,7 @@ export async function forkDurableSession(
     sourceRouterId,
     input.anchorMessage,
     input.messagesUpToAnchor,
+    input.db,
   );
   if (entryId === undefined) return undefined;
   const forkedConv = await rt.forkConversation(
@@ -1159,6 +1240,7 @@ export async function rewindDurableSessionBeforeMessage(
     botId: string;
     previousMessage?: { id: string; role: string; content: string };
     messagesBeforeEdited?: ReadonlyArray<{ id: string; role: string; content: string }>;
+    db?: Pick<HubDatabase, 'getMessageById'>;
   },
 ): Promise<string | undefined> {
   await cancelDurableSession(rt, input.sessionId);
@@ -1172,6 +1254,7 @@ export async function rewindDurableSessionBeforeMessage(
     anchorMessage: input.previousMessage,
     botId: input.botId,
     messagesUpToAnchor: input.messagesBeforeEdited,
+    ...(input.db ? { db: input.db } : {}),
   });
 }
 
@@ -1217,4 +1300,159 @@ export async function resetDurableSession(rt: HubDurableRuntime, sessionId: stri
       doc.conversationId = '';
     }, BACKGROUND_CONTEXT)
     .catch(() => undefined);
+}
+
+// --- 子会话完成回传（trigger subsession 分发等派生会话的父会话通知） ---------
+
+export interface WatchSubSessionOptions {
+  db: HubDatabase;
+  sseHub?: SseHub | null;
+  parentSessionId: string;
+  childSession: { id: string; title: string };
+  botId: string;
+  baselineArtifactIds?: Set<string>;
+  inheritedStoragePaths?: Set<string>;
+  emitParentCallback?: boolean;
+  /** 子会话以 [PASS]/[IGNORE] 结束且无新产出附件时，静默跳过父会话 callback 消息投递 */
+  suppressSkipCallback?: boolean;
+  onSettled?: (status: 'idle' | 'failed', triggerMsgId?: string) => void;
+}
+
+/**
+ * 订阅子会话完成/失败并向父会话回传：子会话执行期间新产出的交付物以零拷贝
+ * storagePath 引用复制回父会话（删除安全性依赖 artifact-service 的按引用计数
+ * 回收），完成后插入 ✅/❌ callback 消息；markSessionParentNotified 幂等防重。
+ */
+export function watchSubSessionCompletion(options: WatchSubSessionOptions): () => void {
+  const {
+    db,
+    sseHub,
+    parentSessionId,
+    childSession,
+    botId,
+    baselineArtifactIds,
+    inheritedStoragePaths,
+    emitParentCallback = true,
+    suppressSkipCallback = false,
+    onSettled,
+  } = options;
+
+  if (!sseHub) return () => {};
+
+  let unsubscribed = false;
+  let unsubscribe: (() => void) | undefined;
+  const cleanup = () => {
+    if (unsubscribed) return;
+    unsubscribed = true;
+    unsubscribe?.();
+  };
+
+  unsubscribe = sseHub.subscribe(childSession.id, (event) => {
+    if (event.type !== 'session_status') return;
+    if (event.status === 'idle') {
+      cleanup();
+      // 幂等防重：仅首个完成/失败回调可插入父会话消息/回传，跨 Hub 重启依然生效
+      if (!db.markSessionParentNotified(childSession.id)) return;
+
+      // 子 -> 父回传：把子会话执行期间新产出的交付物以零拷贝 storagePath 引用复制回父会话。
+      const returnedAttachments: MessageAttachment[] = [];
+      const childArtifacts = db.listSessionArtifacts(childSession.id);
+      for (const childArt of childArtifacts) {
+        if (baselineArtifactIds?.has(childArt.id)) continue;
+        const withPath = db.getArtifactWithStoragePath(childArt.id);
+        if (!withPath) continue;
+        if (inheritedStoragePaths?.has(withPath.storagePath)) {
+          continue; // 继承自父会话的产物不回传
+        }
+        const parentArtId = `art_${randomUUID()}`;
+        const parentArt = db.createArtifact({
+          id: parentArtId,
+          sessionId: parentSessionId,
+          filename: withPath.filename,
+          mimeType: withPath.mimeType,
+          sizeBytes: withPath.sizeBytes,
+          senderBotId: withPath.senderBotId,
+          storagePath: withPath.storagePath,
+        });
+        sseHub.broadcast(parentSessionId, {
+          type: 'artifact_created',
+          sessionId: parentSessionId,
+          artifact: parentArt,
+        });
+        returnedAttachments.push({
+          id: parentArtId,
+          filename: parentArt.filename,
+          mimeType: parentArt.mimeType,
+          sizeBytes: parentArt.sizeBytes,
+          url: `/api/artifacts/${parentArtId}`,
+        });
+      }
+
+      if (emitParentCallback) {
+        const messages = db.getMessages(childSession.id);
+        const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+        const summary = lastAssistant?.content?.trim() || '(无回复内容)';
+
+        // 静默跳过原语：子会话以 [PASS]/[IGNORE] 收敛且无新产出附件时，
+        // 不向父会话投递 callback（有产物则仍回传，避免丢失交付物引用）。
+        if (suppressSkipCallback && isSilentSkipReply(lastAssistant?.content) && returnedAttachments.length === 0) {
+          onSettled?.('idle');
+          return;
+        }
+
+        let callbackContent = `✅ 子会话「[${childSession.title}](#?s=${childSession.id})」已完成：\n\n${summary}`;
+
+        if (returnedAttachments.length > 0) {
+          const artifactLines = returnedAttachments
+            .map((a) => `- ${a.filename} (${a.url})`)
+            .join('\n');
+          callbackContent += `\n\n📦 产出交付物：\n${artifactLines}`;
+        }
+
+        const resultMsg = db.createMessage({
+          id: `msg_${randomUUID()}`,
+          sessionId: parentSessionId,
+          role: 'callback',
+          senderBotId: botId,
+          content: callbackContent,
+          mentions: [],
+          ...(returnedAttachments.length > 0 ? { attachments: returnedAttachments } : {}),
+        });
+        sseHub.broadcast(parentSessionId, {
+          type: 'message_created',
+          message: resultMsg.message,
+        });
+        onSettled?.('idle', resultMsg.message.id);
+      } else {
+        onSettled?.('idle');
+      }
+    } else if (event.status === 'failed') {
+      cleanup();
+      if (!db.markSessionParentNotified(childSession.id)) return;
+
+      if (emitParentCallback) {
+        const messages = db.getMessages(childSession.id);
+        const lastSys = [...messages].reverse().find((m) => m.role === 'system');
+        const errorDetail = lastSys?.content?.trim() || '(未知错误)';
+        const failContent = `❌ 子会话「[${childSession.title}](#?s=${childSession.id})」执行失败：\n\n${errorDetail}`;
+        const failMsg = db.createMessage({
+          id: `msg_${randomUUID()}`,
+          sessionId: parentSessionId,
+          role: 'callback',
+          senderBotId: botId,
+          content: failContent,
+          mentions: [],
+        });
+        sseHub.broadcast(parentSessionId, {
+          type: 'message_created',
+          message: failMsg.message,
+        });
+        onSettled?.('failed', failMsg.message.id);
+      } else {
+        onSettled?.('failed');
+      }
+    }
+  });
+
+  return cleanup;
 }

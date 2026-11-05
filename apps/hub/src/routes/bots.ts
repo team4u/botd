@@ -1,13 +1,12 @@
 import { isBotConfig, isValidBotEnvKey } from '@botd/protocol';
 import type { BotConfig, ChatCommand, SaveBotInput } from '@botd/protocol';
 import { ensureNodeOwned, resolveOwnedBot } from '../http-helpers.js';
-import type { BotFileKind } from '../db.js';
 import type { HubApp, HubContext } from './context.js';
 
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
-  const { db, connections } = ctx;
+  const { db } = ctx;
 
   const readBotEnv = (botId: string): Record<string, string> => {
     const raw = db.getBotFile(botId, 'env');
@@ -178,32 +177,6 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
     });
   }
 
-  // 节点维度别名（既有调用方兼容）：与 /api/bots/:botId/files/:kind 同一 Hub 存储
-  app.get('/api/nodes/:nodeId/bots/:botId/files/:kind', (c) => {
-    const { botId, kind } = c.req.param();
-    if (kind !== 'system' && kind !== 'memory') {
-      return c.json({ error: 'Invalid file kind' }, 400);
-    }
-    const botRes = resolveOwnedBot(c, db, botId);
-    if (!botRes.ok) return botRes.response;
-    return c.json({ content: db.getBotFile(botId, kind as 'system' | 'memory') });
-  });
-
-  app.put('/api/nodes/:nodeId/bots/:botId/files/:kind', async (c) => {
-    const { botId, kind } = c.req.param();
-    if (kind !== 'system' && kind !== 'memory') {
-      return c.json({ error: 'Invalid file kind' }, 400);
-    }
-    const botRes = resolveOwnedBot(c, db, botId);
-    if (!botRes.ok) return botRes.response;
-
-    const body = await c.req.json<{ content?: string }>().catch(() => null);
-    if (!body || typeof body.content !== 'string') return c.json({ error: 'Content must be a string' }, 400);
-    db.setBotFile(botId, kind as BotFileKind, body.content);
-    void ctx.refreshDurablePersonas?.();
-    return c.json({ ok: true });
-  });
-
   // --- Bot 环境变量：Hub 权威存储 ---
 
   app.get('/api/bots/:botId/env', (c) => {
@@ -253,7 +226,7 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
     return c.json({ ok: true, keys: Object.keys(saved), env: saved });
   });
 
-  // --- Bot 命令列表：Hub SQLite 直出（零节点在线可用），节点在线时追加其自定义命令 ---
+  // --- Bot 命令列表：Hub SQLite 直出（零节点在线可用） ---
   app.get('/api/bots/:botId/commands', async (c) => {
     const botId = c.req.param('botId');
     const botRes = resolveOwnedBot(c, db, botId);
@@ -273,15 +246,6 @@ export function registerBotRoutes(app: HubApp, ctx: HubContext): void {
     }));
     for (const extId of bot.enabledExtensions ?? []) {
       commands.push({ name: extId, description: `扩展 ${extId}`, source: 'extension' as const });
-    }
-
-    // 向后兼容：节点在线时追加其自定义命令（按名称去重）。
-    const rpc = connections.getNodeRpc(bot.nodeId);
-    if (rpc?.getCommands) {
-      const seen = new Set(commands.map((command) => command.name));
-      for (const command of await rpc.getCommands(botId).catch(() => [])) {
-        if (!seen.has(command.name)) commands.push(command);
-      }
     }
     return c.json(commands);
   });

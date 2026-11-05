@@ -5,8 +5,6 @@ import path from 'node:path';
 import os from 'node:os';
 import type {
   ArtifactRecord,
-  AskPreviewType,
-  AutomationEventRecord,
   BotConfig,
   MessageAttachment,
   MessageRecord,
@@ -14,22 +12,18 @@ import type {
   MessageSearchHit,
   NodeRecord,
   NodeWithBots,
-  OutboundTaskRecord,
-  OutboundTaskStatus,
-  PendingAskRecord,
   PlatformType,
   ResourceVisibility,
   SessionRecord,
   SessionStatus,
   SubagentColor,
   SubagentIsolation,
-  SubagentRunRecord,
   SubagentToolScope,
   ThinkingLevel,
   ToolCallRecord,
-  TurnBlock,
   TriggerKind,
   TriggerRecord,
+  TurnBlock,
   TurnUsage,
   UserRecord,
   UserRole,
@@ -51,7 +45,7 @@ export interface IncrementalMessageResult {
   rowid: number;
 }
 
-export const HUB_SCHEMA_VERSION = 7;
+export const HUB_SCHEMA_VERSION = 8;
 
 /** Bot 级文件种类：system/memory 为 Markdown，env 为 JSON 序列化的环境变量表 */
 export type BotFileKind = 'system' | 'memory' | 'env';
@@ -97,7 +91,7 @@ type MessageRow = {
   model_badge: string | null;
   content: string;
   mentions_json: string;
-  subagent_runs_json?: string | null;
+  durable_entry_id?: number | bigint | null;
   tool_calls_json: string | null;
   blocks_json?: string | null;
   usage_json: string | null;
@@ -111,7 +105,7 @@ const mapMessageRow = (row: MessageRow): MessageRecord => {
   const blocks = parseOptionalJson<TurnBlock[]>(row.blocks_json);
   const usage = parseOptionalJson<TurnUsage>(row.usage_json);
   const attachments = parseOptionalJson<MessageAttachment[]>(row.attachments_json);
-  const subagentRuns = parseOptionalJson<SubagentRunRecord[]>(row.subagent_runs_json);
+  const durableEntryId = row.durable_entry_id == null ? undefined : Number(row.durable_entry_id);
   return {
     id: row.id,
     sessionId: row.session_id,
@@ -122,18 +116,18 @@ const mapMessageRow = (row: MessageRow): MessageRecord => {
     modelBadge: row.model_badge ?? undefined,
     content: row.content,
     mentions: parseOptionalJson<string[]>(row.mentions_json) ?? [],
-    ...(subagentRuns && subagentRuns.length > 0 ? { subagentRuns } : {}),
     ...(toolCalls ? { toolCalls } : {}),
     ...(blocks && blocks.length > 0 ? { blocks } : {}),
     ...(usage ? { usage } : {}),
     ...(attachments ? { attachments } : {}),
     ...(row.aborted ? { aborted: true } : {}),
+    ...(durableEntryId !== undefined ? { durableEntryId } : {}),
     createdAt: row.created_at,
-  };
+  } as MessageRecord;
 };
 
 const MESSAGE_SELECT_COLUMNS =
-  'id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, aborted, created_at';
+  'id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, durable_entry_id, tool_calls_json, blocks_json, usage_json, attachments_json, aborted, created_at';
 
 const ARTIFACT_COLUMNS = 'id, session_id, filename, mime_type, size_bytes, sender_bot_id, created_at';
 
@@ -320,7 +314,7 @@ type AutomationEventRow = {
   created_at: string;
 };
 
-const mapAutomationEventRow = (row: AutomationEventRow): AutomationEventRecord => ({
+const mapAutomationEventRow = (row: AutomationEventRow): AutomationEventRecordLike => ({
   id: row.id,
   triggerId: row.trigger_id,
   sessionId: row.session_id,
@@ -332,6 +326,8 @@ const mapAutomationEventRow = (row: AutomationEventRow): AutomationEventRecord =
   ...(row.payload_artifact_id ? { payloadArtifactId: row.payload_artifact_id } : {}),
   createdAt: row.created_at,
 });
+
+type AutomationEventRecordLike = import('@botd/protocol').AutomationEventRecord;
 
 export class HubDatabase {
   public db: DatabaseSync;
@@ -395,42 +391,24 @@ export class HubDatabase {
   public resetStaleMetadata(): void {
     this.db.exec(`UPDATE nodes SET status = 'offline' WHERE status = 'online'`);
 
-    // 会话状态处置（启动时进程内队列已丢失，磁盘是唯一事实）：
-    // - 有未过期的 queued_offline 待发任务 → 保持 queued（节点重连后 onNodeOnline 补发）；
-    // - running 且无待发任务：
-    //   - 启用 pi-durable 持久恢复（磁盘存在 <dbPath>.durable.sqlite）时保持 running，
-    //     Router 会话与中断回合一并落盘，重启后由 Durable 运行时接管，不得强制 failed；
-    //   - 否则 Hub 在回合运行期间重启（无持久化可恢复），诚实标记 failed 并交代原因；
-    // - queued 且无待发任务 → 内存队列已随重启丢失，回到 idle。
+    // 会话状态处置（启动时内存队列已丢失，磁盘是唯一事实）：
+    // - 库内存在 pi_conversations 表（pi-durable 与业务表同库共存）或同目录残留
+    //   .durable.sqlite 旧文件时，running 会话保持原状，交由 pi-durable 恢复接管；
+    // - 其余 running 孤儿（无持久化可恢复）：诚实标记 failed 并交代原因；
+    // - queued 会话：内存队列已随重启丢失，统一归位 idle。
     const now = new Date().toISOString();
     const durableRecovery =
-      this.dbPath !== ':memory:' && fs.existsSync(`${this.dbPath}.durable.sqlite`);
+      this.hasTable('pi_conversations') ||
+      (this.dbPath !== ':memory:' && fs.existsSync(`${this.dbPath}.durable.sqlite`));
     const staleSessions = this.db.prepare(
       "SELECT id, status FROM sessions WHERE status IN ('running', 'queued') AND archived = 0"
     ).all() as { id: string; status: string }[];
 
     for (const session of staleSessions) {
-      const hasQueuedTask = Boolean(
-        this.db
-          .prepare(
-            "SELECT 1 FROM outbound_task_queue WHERE session_id = ? AND status = 'queued_offline' AND expires_at > ? LIMIT 1"
-          )
-          .get(session.id, now)
-      );
-      if (hasQueuedTask) {
-        // 保留排队状态：节点重连后由 onNodeOnline 消费待发任务自动恢复
-        this.db
-          .prepare("UPDATE sessions SET status = 'queued', active_bot_id = NULL, updated_at = ? WHERE id = ?")
-          .run(now, session.id);
+      if (session.status === 'running' && durableRecovery) {
         continue;
       }
       if (session.status === 'running') {
-        if (durableRecovery) {
-          // Durable 持久恢复在场：中断回合由 pi-durable 重启接管（scheduler 把
-          // 存活任务重新排队），此时强制 failed + 插入虚假报错消息只会污染时间线。
-          continue;
-        }
-        // Hub 在回合运行期间重启：已产生的工作区变更仍在节点上，向用户诚实交代中断
         this.db
           .prepare("UPDATE sessions SET status = 'failed', active_bot_id = NULL, updated_at = ? WHERE id = ?")
           .run(now, session.id);
@@ -446,7 +424,6 @@ export class HubDatabase {
             now
           );
       } else {
-        // queued 无待发任务：内存队列已丢，回 idle
         this.db
           .prepare("UPDATE sessions SET status = 'idle', active_bot_id = NULL, updated_at = ? WHERE id = ?")
           .run(now, session.id);
@@ -472,7 +449,7 @@ export class HubDatabase {
         this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'nodes'").get()
       );
       const currentUserVersion = this.getSchemaVersion();
-      if (hasNodesTable && currentUserVersion < HUB_SCHEMA_VERSION) {
+      if (hasNodesTable && currentUserVersion > 0 && currentUserVersion < HUB_SCHEMA_VERSION) {
         this.backupDatabase(`${path.resolve(this.dbPath)}.bak-v${currentUserVersion}`);
       }
     }
@@ -500,7 +477,8 @@ export class HubDatabase {
         created_at TEXT NOT NULL,
         pid INTEGER,
         started_at TEXT,
-        version TEXT
+        version TEXT,
+        owner_id TEXT
       );
 
       CREATE TABLE IF NOT EXISTS bots (
@@ -514,19 +492,28 @@ export class HubDatabase {
         enabled_skills_json TEXT NOT NULL DEFAULT '[]',
         enabled_extensions_json TEXT NOT NULL DEFAULT '[]',
         visibility TEXT NOT NULL DEFAULT 'private',
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        parent_bot_id TEXT,
+        inherit_model INTEGER NOT NULL DEFAULT 0,
+        inherit_skills INTEGER NOT NULL DEFAULT 0,
+        color TEXT,
+        tool_scope TEXT,
+        custom_tools_json TEXT,
+        isolation TEXT,
+        workspace_dir TEXT
       );
 
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
         lead_bot_id TEXT NOT NULL,
-        cursor_map_json TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL DEFAULT 'idle',
         active_bot_id TEXT,
         archived INTEGER NOT NULL DEFAULT 0,
         parent_session_id TEXT,
         parent_notified INTEGER NOT NULL DEFAULT 0,
+        owner_id TEXT,
+        workspace_dir TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -541,6 +528,7 @@ export class HubDatabase {
         model_badge TEXT,
         content TEXT NOT NULL,
         mentions_json TEXT NOT NULL DEFAULT '[]',
+        durable_entry_id INTEGER,
         tool_calls_json TEXT,
         blocks_json TEXT,
         usage_json TEXT,
@@ -549,6 +537,7 @@ export class HubDatabase {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_messages_durable_entry ON messages(session_id, durable_entry_id);
 
       CREATE TABLE IF NOT EXISTS artifacts (
         id TEXT PRIMARY KEY,
@@ -575,6 +564,9 @@ export class HubDatabase {
         run_at TEXT,
         prompt TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1,
+        dispatch_mode TEXT NOT NULL DEFAULT 'append',
+        skill_id TEXT,
+        event_filter_json TEXT,
         last_triggered_at TEXT,
         created_at TEXT NOT NULL
       );
@@ -595,14 +587,6 @@ export class HubDatabase {
       CREATE INDEX IF NOT EXISTS idx_automation_events_session ON automation_events(session_id, created_at);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_events_dedup ON automation_events(trigger_id, dedup_key) WHERE dedup_key IS NOT NULL;
 
-      CREATE TABLE IF NOT EXISTS session_resets_pending (
-        session_id TEXT NOT NULL,
-        bot_id TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY (session_id, bot_id)
-      );
-      CREATE INDEX IF NOT EXISTS idx_session_resets_pending_session ON session_resets_pending(session_id);
-
       CREATE TABLE IF NOT EXISTS artifact_cleanup_pending (
         storage_path TEXT PRIMARY KEY,
         error TEXT NOT NULL,
@@ -614,34 +598,6 @@ export class HubDatabase {
         value_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
-
-      CREATE TABLE IF NOT EXISTS pending_asks (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        bot_id TEXT NOT NULL,
-        prompt TEXT NOT NULL,
-        options_json TEXT NOT NULL DEFAULT '[]',
-        status TEXT NOT NULL DEFAULT 'pending',
-        answer TEXT,
-        preview_type TEXT,
-        preview_content TEXT,
-        created_at TEXT NOT NULL,
-        expires_at TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_pending_asks_session ON pending_asks(session_id, status);
-
-      CREATE TABLE IF NOT EXISTS outbound_task_queue (
-        id TEXT PRIMARY KEY,
-        node_id TEXT NOT NULL,
-        bot_id TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        task_type TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'queued_offline',
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_outbound_task_queue_node ON outbound_task_queue(node_id, status);
 
       CREATE TABLE IF NOT EXISTS bot_files (
         bot_id TEXT NOT NULL,
@@ -660,88 +616,34 @@ export class HubDatabase {
       );
     `);
 
-    const migrations = [
-      `ALTER TABLE nodes ADD COLUMN extensions_json TEXT NOT NULL DEFAULT '[]'`,
-      `ALTER TABLE bots ADD COLUMN enabled_extensions_json TEXT NOT NULL DEFAULT '[]'`,
-      `ALTER TABLE nodes ADD COLUMN pid INTEGER`,
-      `ALTER TABLE nodes ADD COLUMN started_at TEXT`,
-      `ALTER TABLE nodes ADD COLUMN version TEXT`,
-      `ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`,
-      `ALTER TABLE nodes ADD COLUMN owner_id TEXT`,
-      `ALTER TABLE sessions ADD COLUMN owner_id TEXT`,
-      `ALTER TABLE messages ADD COLUMN tool_calls_json TEXT`,
-      `ALTER TABLE messages ADD COLUMN usage_json TEXT`,
-      `ALTER TABLE messages ADD COLUMN attachments_json TEXT`,
-      `ALTER TABLE triggers ADD COLUMN run_at TEXT`,
-      `ALTER TABLE sessions ADD COLUMN parent_session_id TEXT`,
-      `ALTER TABLE nodes ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`,
-      `ALTER TABLE bots ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`,
-      `ALTER TABLE pending_asks ADD COLUMN preview_type TEXT`,
-      `ALTER TABLE pending_asks ADD COLUMN preview_content TEXT`,
-      `ALTER TABLE messages ADD COLUMN sender_user_id TEXT`,
-      `ALTER TABLE messages ADD COLUMN sender_username TEXT`,
-      `ALTER TABLE users ADD COLUMN token_epoch INTEGER NOT NULL DEFAULT 0`,
-      `ALTER TABLE bots ADD COLUMN parent_bot_id TEXT`,
-      `ALTER TABLE bots ADD COLUMN inherit_model INTEGER NOT NULL DEFAULT 0`,
-      `ALTER TABLE bots ADD COLUMN inherit_skills INTEGER NOT NULL DEFAULT 0`,
-      `ALTER TABLE bots ADD COLUMN color TEXT`,
-      `ALTER TABLE bots ADD COLUMN tool_scope TEXT`,
-      `ALTER TABLE bots ADD COLUMN custom_tools_json TEXT`,
-      `ALTER TABLE bots ADD COLUMN isolation TEXT`,
-      `ALTER TABLE messages ADD COLUMN subagent_runs_json TEXT`,
-      `ALTER TABLE messages ADD COLUMN blocks_json TEXT`,
-      `ALTER TABLE messages ADD COLUMN aborted INTEGER NOT NULL DEFAULT 0`,
-      `ALTER TABLE triggers ADD COLUMN dispatch_mode TEXT NOT NULL DEFAULT 'append'`,
-      `ALTER TABLE triggers ADD COLUMN skill_id TEXT`,
-      `ALTER TABLE triggers ADD COLUMN event_filter_json TEXT`,
-      `ALTER TABLE triggers ADD COLUMN secret TEXT`,
-      `ALTER TABLE sessions ADD COLUMN parent_notified INTEGER NOT NULL DEFAULT 0`,
-      `ALTER TABLE bots ADD COLUMN workspace_dir TEXT`,
-      `ALTER TABLE sessions ADD COLUMN workspace_dir TEXT`,
-    ];
-
-    for (const sql of migrations) {
-      try {
-        this.db.exec(sql);
-      } catch (err: any) {
-        // 仅忽略幂等迁移的正常冲突（列已存在）；其余错误必须终止启动，防止带隐患运行
-        if (!String(err?.message || '').includes('duplicate column name')) {
-          throw err;
-        }
-      }
-    }
-
-    // Skills/Extensions 已迁移到文件系统包目录，SQLite 中的旧内容表一并清除
+    // 历史包袱清理：旧队列/游标/ask 表在重构后已无任何读取方，直接物理删除。
+    this.db.exec('DROP TABLE IF EXISTS outbound_task_queue');
+    this.db.exec('DROP TABLE IF EXISTS session_resets_pending');
+    this.db.exec('DROP TABLE IF EXISTS pending_asks');
     this.db.exec('DROP TABLE IF EXISTS hub_skills');
     this.db.exec('DROP TABLE IF EXISTS hub_extensions');
+    // 旧列清理（bare ALTER 时代的历史遗留；新装库的 CREATE TABLE 已是最新结构）。
+    this.dropColumnIfPresent('sessions', 'cursor_map_json');
+    this.dropColumnIfPresent('messages', 'subagent_runs_json');
 
     // 自举管理员固定 id 为 user_admin：存量 nodes/sessions 归属回填
     this.db.exec(`UPDATE nodes SET owner_id = 'user_admin' WHERE owner_id IS NULL`);
     this.db.exec(`UPDATE sessions SET owner_id = 'user_admin' WHERE owner_id IS NULL`);
 
-    // 全部建表/迁移/回填成功后才提升 schema 版本号
     this.db.exec(`PRAGMA user_version = ${HUB_SCHEMA_VERSION}`);
   }
 
-  // --- Session Resets Pending ---
-  markSessionResetPending(sessionId: string, botId: string): void {
-    const now = new Date().toISOString();
-    const stmt = this.db.prepare(`
-      INSERT INTO session_resets_pending (session_id, bot_id, created_at)
-      VALUES (?, ?, ?)
-      ON CONFLICT(session_id, bot_id) DO UPDATE SET created_at = excluded.created_at
-    `);
-    stmt.run(sessionId, botId, now);
-  }
-
-  hasPendingSessionReset(sessionId: string, botId: string): boolean {
-    const stmt = this.db.prepare('SELECT 1 FROM session_resets_pending WHERE session_id = ? AND bot_id = ? LIMIT 1');
-    return stmt.get(sessionId, botId) !== undefined;
-  }
-
-  clearSessionResetPending(sessionId: string, botId: string): void {
-    const stmt = this.db.prepare('DELETE FROM session_resets_pending WHERE session_id = ? AND bot_id = ?');
-    stmt.run(sessionId, botId);
+  /** SQLite 无 DROP COLUMN 兜底（老版本 node）：列存在时重建表剔除，失败静默跳过。 */
+  private dropColumnIfPresent(table: string, column: string): void {
+    try {
+      const exists = this.db.prepare(
+        `SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`
+      ).get(column);
+      if (!exists) return;
+      this.db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+    } catch {
+      // DROP COLUMN 不可用时保留该列：读取路径已不再引用，无功能影响。
+    }
   }
 
   // --- Artifact Cleanup Pending ---
@@ -790,93 +692,6 @@ export class HubDatabase {
     `);
     stmt.run(key, valueJson, now);
   }
-
-  // --- Pending Asks ---
-  savePendingAsk(ask: PendingAskRecord): void {
-    const stmt = this.db.prepare(`
-      INSERT INTO pending_asks (id, session_id, bot_id, prompt, options_json, status, answer, preview_type, preview_content, created_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        session_id = excluded.session_id,
-        bot_id = excluded.bot_id,
-        prompt = excluded.prompt,
-        options_json = excluded.options_json,
-        status = excluded.status,
-        answer = excluded.answer,
-        preview_type = excluded.preview_type,
-        preview_content = excluded.preview_content,
-        created_at = excluded.created_at,
-        expires_at = excluded.expires_at
-    `);
-    stmt.run(
-      ask.id,
-      ask.sessionId,
-      ask.botId,
-      ask.prompt,
-      JSON.stringify(ask.options ?? []),
-      ask.status,
-      ask.answer ?? null,
-      ask.previewType ?? null,
-      ask.previewContent ?? null,
-      ask.createdAt,
-      ask.expiresAt ?? null
-    );
-  }
-
-  updatePendingAskStatus(askId: string, status: 'pending' | 'answered' | 'expired', answer?: string): void {
-    if (answer !== undefined) {
-      const stmt = this.db.prepare('UPDATE pending_asks SET status = ?, answer = ? WHERE id = ?');
-      stmt.run(status, answer, askId);
-    } else {
-      const stmt = this.db.prepare('UPDATE pending_asks SET status = ? WHERE id = ?');
-      stmt.run(status, askId);
-    }
-  }
-
-  getPendingAsksForSession(sessionId: string): PendingAskRecord[] {
-    const now = new Date().toISOString();
-    this.db.prepare(`
-      UPDATE pending_asks
-      SET status = 'expired'
-      WHERE session_id = ? AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?
-    `).run(sessionId, now);
-
-    const stmt = this.db.prepare(`
-      SELECT id, session_id, bot_id, prompt, options_json, status, answer, preview_type, preview_content, created_at, expires_at
-      FROM pending_asks
-      WHERE session_id = ? AND status = 'pending'
-      ORDER BY created_at ASC
-    `);
-    const rows = stmt.all(sessionId) as {
-      id: string;
-      session_id: string;
-      bot_id: string;
-      prompt: string;
-      options_json: string;
-      status: string;
-      answer: string | null;
-      preview_type: string | null;
-      preview_content: string | null;
-      created_at: string;
-      expires_at: string | null;
-    }[];
-
-    return rows.map((row) => ({
-      id: row.id,
-      sessionId: row.session_id,
-      botId: row.bot_id,
-      prompt: row.prompt,
-      options: parseOptionalJson<string[]>(row.options_json) ?? [],
-      status: row.status as 'pending' | 'answered' | 'expired',
-      ...(row.answer !== null && row.answer !== undefined ? { answer: row.answer } : {}),
-      ...(row.preview_type ? { previewType: row.preview_type as AskPreviewType } : {}),
-      ...(row.preview_content ? { previewContent: row.preview_content } : {}),
-      createdAt: row.created_at,
-      ...(row.expires_at !== null && row.expires_at !== undefined ? { expiresAt: row.expires_at } : {}),
-    }));
-  }
-
-
 
   // --- Users ---
   /** 若 users 表为空，插入自举管理员（固定 id: user_admin / username: admin / role: admin）；若已存在且传入 override，更新管理员密码 */
@@ -989,13 +804,10 @@ export class HubDatabase {
       );
       if (sessionIds.length > 0) {
         const placeholders = sessionIds.map(() => '?').join(', ');
-        this.db.prepare(`DELETE FROM session_resets_pending WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM triggers WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM automation_events WHERE session_id IN (${placeholders})`).run(...sessionIds);
         this.db.prepare(`DELETE FROM artifacts WHERE session_id IN (${placeholders})`).run(...sessionIds);
-        this.db.prepare(`DELETE FROM pending_asks WHERE session_id IN (${placeholders})`).run(...sessionIds);
-        this.db.prepare(`DELETE FROM outbound_task_queue WHERE session_id IN (${placeholders})`).run(...sessionIds);
       }
       this.db.prepare('DELETE FROM sessions WHERE owner_id = ?').run(id);
       this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
@@ -1468,8 +1280,8 @@ export class HubDatabase {
   }): SessionRecord {
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
-      INSERT INTO sessions (id, title, lead_bot_id, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id, workspace_dir)
-      VALUES (?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?, ?)
+      INSERT INTO sessions (id, title, lead_bot_id, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id, workspace_dir)
+      VALUES (?, ?, ?, 'idle', NULL, ?, ?, ?, ?, ?)
     `);
     const leadBotId = input.leadBotId;
     const workspaceDir = input.workspaceDir?.trim() ? input.workspaceDir.trim() : null;
@@ -1496,13 +1308,12 @@ export class HubDatabase {
     };
   }
 
-  getSession(id: string): (SessionRecord & { cursorMap: Record<string, number> }) | undefined {
-    const stmt = this.db.prepare('SELECT id, title, lead_bot_id, cursor_map_json, status, active_bot_id, archived, parent_session_id, owner_id, workspace_dir, created_at, updated_at FROM sessions WHERE id = ?');
+  getSession(id: string): SessionRecord | undefined {
+    const stmt = this.db.prepare('SELECT id, title, lead_bot_id, status, active_bot_id, archived, parent_session_id, owner_id, workspace_dir, created_at, updated_at FROM sessions WHERE id = ?');
     const row = stmt.get(id) as {
       id: string;
       title: string;
       lead_bot_id: string;
-      cursor_map_json: string;
       status: string;
       active_bot_id: string | null;
       archived: number;
@@ -1517,7 +1328,6 @@ export class HubDatabase {
       id: row.id,
       title: row.title,
       leadBotId: row.lead_bot_id,
-      cursorMap: JSON.parse(row.cursor_map_json || '{}'),
       status: row.status as SessionStatus,
       activeBotId: row.active_bot_id ?? undefined,
       archived: Boolean(row.archived),
@@ -1592,8 +1402,6 @@ export class HubDatabase {
     return this.inTransaction(() => {
       const session = this.getSession(id);
       if (!session) return false;
-      const deletePending = this.db.prepare('DELETE FROM session_resets_pending WHERE session_id = ?');
-      deletePending.run(id);
       const deleteMessages = this.db.prepare('DELETE FROM messages WHERE session_id = ?');
       deleteMessages.run(id);
       const deleteTriggers = this.db.prepare('DELETE FROM triggers WHERE session_id = ?');
@@ -1602,9 +1410,6 @@ export class HubDatabase {
       deleteAutomationEvents.run(id);
       const deleteArtifacts = this.db.prepare('DELETE FROM artifacts WHERE session_id = ?');
       deleteArtifacts.run(id);
-      const deletePendingAsks = this.db.prepare('DELETE FROM pending_asks WHERE session_id = ?');
-      deletePendingAsks.run(id);
-      this.db.prepare('DELETE FROM outbound_task_queue WHERE session_id = ?').run(id);
       // session_shares / notification_channels 由 share.ts / channels.ts 路由注册时自建，
       // 未注册过这些路由的部署（如纯 DB 使用方）里表不存在，跳过即可
       if (this.hasTable('session_shares')) {
@@ -1657,166 +1462,19 @@ export class HubDatabase {
     return false;
   }
 
-  // --- Outbound Task Queue (Offline Store-and-Forward) ---
-  enqueueOutboundTask(input: {
-    id?: string;
-    nodeId: string;
-    botId: string;
-    sessionId: string;
-    taskType: string;
-    payload?: unknown;
-    ttlHours?: number;
-  }): OutboundTaskRecord {
-    const id = input.id ?? `task_${randomUUID()}`;
-    const now = new Date();
-    const ttl = input.ttlHours ?? 72;
-    const expiresAt = new Date(now.getTime() + ttl * 3600 * 1000).toISOString();
-    const payloadJson = typeof input.payload === 'string' ? input.payload : JSON.stringify(input.payload ?? {});
-
-    const existing = this.db.prepare(`
-      SELECT id FROM outbound_task_queue
-      WHERE session_id = ? AND bot_id = ? AND status = 'queued_offline'
-      LIMIT 1
-    `).get(input.sessionId, input.botId) as { id: string } | undefined;
-
-    if (existing) {
-      this.db.prepare(`
-        UPDATE outbound_task_queue
-        SET payload_json = ?, expires_at = ?
-        WHERE id = ?
-      `).run(payloadJson, expiresAt, existing.id);
-      return this.getOutboundTask(existing.id)!;
-    }
-
-    const stmt = this.db.prepare(`
-      INSERT INTO outbound_task_queue (id, node_id, bot_id, session_id, task_type, payload_json, status, created_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'queued_offline', ?, ?)
-    `);
-    const createdAt = now.toISOString();
-    stmt.run(id, input.nodeId, input.botId, input.sessionId, input.taskType, payloadJson, createdAt, expiresAt);
-    return {
-      id,
-      nodeId: input.nodeId,
-      botId: input.botId,
-      sessionId: input.sessionId,
-      taskType: input.taskType,
-      payloadJson,
-      status: 'queued_offline',
-      createdAt,
-      expiresAt,
-    };
-  }
-
-  getOutboundTask(id: string): OutboundTaskRecord | undefined {
-    const stmt = this.db.prepare(`
-      SELECT id, node_id, bot_id, session_id, task_type, payload_json, status, created_at, expires_at
-      FROM outbound_task_queue
-      WHERE id = ?
-    `);
-    const row = stmt.get(id) as {
-      id: string;
-      node_id: string;
-      bot_id: string;
-      session_id: string;
-      task_type: string;
-      payload_json: string;
-      status: string;
-      created_at: string;
-      expires_at: string;
-    } | undefined;
-    if (!row) return undefined;
-    return {
-      id: row.id,
-      nodeId: row.node_id,
-      botId: row.bot_id,
-      sessionId: row.session_id,
-      taskType: row.task_type,
-      payloadJson: row.payload_json,
-      status: row.status as OutboundTaskStatus,
-      createdAt: row.created_at,
-      expiresAt: row.expires_at,
-    };
-  }
-
-  listPendingOutboundTasks(nodeId: string): OutboundTaskRecord[] {
-    const now = new Date().toISOString();
-    this.db.prepare(`
-      UPDATE outbound_task_queue
-      SET status = 'expired'
-      WHERE status = 'queued_offline' AND expires_at <= ?
-    `).run(now);
-
-    const stmt = this.db.prepare(`
-      SELECT id, node_id, bot_id, session_id, task_type, payload_json, status, created_at, expires_at
-      FROM outbound_task_queue
-      WHERE node_id = ? AND status = 'queued_offline' AND expires_at > ?
-      ORDER BY created_at ASC
-    `);
-    const rows = stmt.all(nodeId, now) as {
-      id: string;
-      node_id: string;
-      bot_id: string;
-      session_id: string;
-      task_type: string;
-      payload_json: string;
-      status: string;
-      created_at: string;
-      expires_at: string;
-    }[];
-    return rows.map((r) => ({
-      id: r.id,
-      nodeId: r.node_id,
-      botId: r.bot_id,
-      sessionId: r.session_id,
-      taskType: r.task_type,
-      payloadJson: r.payload_json,
-      status: r.status as OutboundTaskStatus,
-      createdAt: r.created_at,
-      expiresAt: r.expires_at,
-    }));
-  }
-
-  markOutboundTaskDispatched(id: string): void {
-    this.db.prepare(`
-      UPDATE outbound_task_queue
-      SET status = 'dispatched'
-      WHERE id = ?
-    `).run(id);
-  }
-
-  /** Cancel all still-queued store-and-forward tasks of a session (clear/edit/cancel paths). */
-  invalidateOutboundTasksForSession(sessionId: string): void {
-    this.db.prepare(`
-      UPDATE outbound_task_queue
-      SET status = 'failed'
-      WHERE session_id = ? AND status = 'queued_offline'
-    `).run(sessionId);
-  }
-
   clearSessionMessages(id: string): boolean {
     return this.inTransaction(() => {
       const session = this.getSession(id);
       if (!session) return false;
       const deleteMessages = this.db.prepare('DELETE FROM messages WHERE session_id = ?');
       deleteMessages.run(id);
-      this.resetCursorMap(id);
       return true;
     });
   }
 
-  /** 将会话的 cursor_map_json 重置为 '{}'（各 bot 的增量游标全部归零） */
-  resetSessionCursors(sessionId: string): void {
-    this.resetCursorMap(sessionId);
-  }
-
-  private resetCursorMap(sessionId: string): void {
-    const stmt = this.db.prepare("UPDATE sessions SET cursor_map_json = '{}' WHERE id = ?");
-    stmt.run(sessionId);
-  }
-
   /**
    * 会话分叉：以锚点消息为界复制出新会话（含锚点及其之前的全部消息）。
-   * 只读源会话、只写新会话；新会话 cursor_map 为空，各 bot 首回合将全量重建上下文。
+   * 只读源会话、只写新会话；新会话首回合将全量重建上下文。
    * 源会话或锚点消息不存在（锚点必须属于源会话）时返回 undefined。
    */
   forkSession(sourceSessionId: string, anchorMessageId: string): SessionRecord | undefined {
@@ -1836,12 +1494,12 @@ export class HubDatabase {
     const now = new Date().toISOString();
     const newSessionId = `sess_${randomUUID()}`;
     const insertSession = this.db.prepare(`
-      INSERT INTO sessions (id, title, lead_bot_id, cursor_map_json, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id, workspace_dir)
-      VALUES (?, ?, ?, '{}', 'idle', NULL, ?, ?, ?, ?, ?)
+      INSERT INTO sessions (id, title, lead_bot_id, status, active_bot_id, created_at, updated_at, owner_id, parent_session_id, workspace_dir)
+      VALUES (?, ?, ?, 'idle', NULL, ?, ?, ?, ?, ?)
     `);
 
     const rows = this.db.prepare(`
-      SELECT role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, created_at
+      SELECT role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, durable_entry_id, tool_calls_json, blocks_json, usage_json, attachments_json, created_at
       FROM messages
       WHERE session_id = ? AND rowid <= ?
       ORDER BY rowid ASC
@@ -1853,7 +1511,7 @@ export class HubDatabase {
       model_badge: string | null;
       content: string;
       mentions_json: string;
-      subagent_runs_json?: string | null;
+      durable_entry_id: number | null;
       tool_calls_json: string | null;
       blocks_json?: string | null;
       usage_json: string | null;
@@ -1862,7 +1520,7 @@ export class HubDatabase {
     }[];
     // 逐行 INSERT（新 msg id、新 session_id），created_at 保留原值以保真时间线
     const insertMessage = this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, created_at)
+      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, durable_entry_id, tool_calls_json, blocks_json, usage_json, attachments_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertArtifact = this.db.prepare(`
@@ -1935,7 +1593,7 @@ export class HubDatabase {
           row.model_badge,
           row.content,
           row.mentions_json,
-          row.subagent_runs_json ?? null,
+          row.durable_entry_id,
           row.tool_calls_json,
           row.blocks_json ?? null,
           row.usage_json,
@@ -2027,14 +1685,6 @@ export class HubDatabase {
     return Number(result.changes) > 0;
   }
 
-  updateSessionCursor(sessionId: string, botId: string, rowid: number): void {
-    const session = this.getSession(sessionId);
-    if (!session) return;
-    const cursorMap = { ...session.cursorMap, [botId]: rowid };
-    const stmt = this.db.prepare('UPDATE sessions SET cursor_map_json = ? WHERE id = ?');
-    stmt.run(JSON.stringify(cursorMap), sessionId);
-  }
-
   // --- Messages ---
   /** 取会话里最近一条镜像自 durable 的 assistant 消息（含 blocks/toolCalls），供工具返回值回填。 */
   getLastDurableAssistantMessage(sessionId: string): { id: string; blocks?: TurnBlock[]; toolCalls?: ToolCallRecord[] } | undefined {
@@ -2067,10 +1717,11 @@ export class HubDatabase {
     senderBotId?: string;
     senderUserId?: string;
     senderUsername?: string;
+    senderBotName?: string;
     modelBadge?: string;
     content: string;
     mentions?: string[];
-    subagentRuns?: SubagentRunRecord[];
+    durableEntryId?: number;
     toolCalls?: ToolCallRecord[];
     blocks?: TurnBlock[];
     usage?: TurnUsage;
@@ -2083,9 +1734,8 @@ export class HubDatabase {
     const blocksJson = msg.blocks && msg.blocks.length > 0 ? JSON.stringify(msg.blocks) : null;
     const usageJson = msg.usage ? JSON.stringify(msg.usage) : null;
     const attachmentsJson = msg.attachments ? JSON.stringify(msg.attachments) : null;
-    const subagentRunsJson = msg.subagentRuns && msg.subagentRuns.length > 0 ? JSON.stringify(msg.subagentRuns) : null;
     const stmt = this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, subagent_runs_json, tool_calls_json, blocks_json, usage_json, attachments_json, aborted, created_at)
+      INSERT INTO messages (id, session_id, role, sender_bot_id, sender_user_id, sender_username, model_badge, content, mentions_json, durable_entry_id, tool_calls_json, blocks_json, usage_json, attachments_json, aborted, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
@@ -2098,7 +1748,7 @@ export class HubDatabase {
       msg.modelBadge ?? null,
       msg.content,
       JSON.stringify(msg.mentions || []),
-      subagentRunsJson,
+      msg.durableEntryId ?? null,
       toolCallsJson,
       blocksJson,
       usageJson,
@@ -2119,22 +1769,34 @@ export class HubDatabase {
         modelBadge: msg.modelBadge ?? undefined,
         content: msg.content,
         mentions: msg.mentions || [],
-        ...(msg.subagentRuns && msg.subagentRuns.length > 0 ? { subagentRuns: msg.subagentRuns } : {}),
         ...(msg.senderUserId ? { senderUserId: msg.senderUserId } : {}),
         ...(msg.senderUsername ? { senderUsername: msg.senderUsername } : {}),
+        ...(msg.durableEntryId !== undefined ? { durableEntryId: msg.durableEntryId } : {}),
         ...(msg.toolCalls ? { toolCalls: msg.toolCalls } : {}),
         ...(msg.blocks && msg.blocks.length > 0 ? { blocks: msg.blocks } : {}),
         ...(msg.usage ? { usage: msg.usage } : {}),
         ...(msg.aborted ? { aborted: true } : {}),
         ...(msg.attachments ? { attachments: msg.attachments } : {}),
         createdAt: now,
-      },
+      } as MessageRecord,
     };
   }
 
-  updateMessageSubagentRuns(messageId: string, subagentRuns: SubagentRunRecord[]): void {
-    const stmt = this.db.prepare('UPDATE messages SET subagent_runs_json = ? WHERE id = ?');
-    stmt.run(JSON.stringify(subagentRuns), messageId);
+  /** 显式绑定消息与其对应的 durable entry（`pi.user` / `pi.assistant` entry id）。 */
+  updateMessageDurableEntryId(messageId: string, durableEntryId: number): void {
+    this.db
+      .prepare('UPDATE messages SET durable_entry_id = ? WHERE id = ?')
+      .run(durableEntryId, messageId);
+  }
+
+  /** 会话内最新一条尚未绑定 durable entry 的 user 消息（镜像扫描时回填绑定用）；无则 undefined。 */
+  getLatestUnboundUserMessage(sessionId: string): { id: string; content: string } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT id, content FROM messages WHERE session_id = ? AND role = 'user' AND durable_entry_id IS NULL ORDER BY rowid DESC LIMIT 1`
+      )
+      .get(sessionId) as { id: string; content: string } | undefined;
+    return row ?? undefined;
   }
 
   getMessages(sessionId: string): MessageRecord[] {
@@ -2205,26 +1867,6 @@ export class HubDatabase {
       ? this.db.prepare('SELECT 1 FROM messages WHERE session_id = ? AND rowid < ? LIMIT 1').get(sessionId, oldestRowid) !== undefined
       : false;
     return { messages: rows.reverse().map(row => mapMessageRow(row)), hasMore };
-  }
-
-  getIncrementalMessages(sessionId: string, afterRowid: number): IncrementalMessageResult[] {
-    const stmt = this.db.prepare(`
-      SELECT rowid, ${MESSAGE_SELECT_COLUMNS}
-      FROM messages
-      WHERE session_id = ? AND rowid > ?
-      ORDER BY rowid ASC
-    `);
-    const rows = stmt.all(sessionId, afterRowid) as (MessageRow & { rowid: number | bigint })[];
-    return rows.map((row) => ({
-      rowid: Number(row.rowid),
-      message: mapMessageRow(row),
-    }));
-  }
-
-  getMaxMessageRowid(sessionId: string): number {
-    const stmt = this.db.prepare('SELECT MAX(rowid) as max_rowid FROM messages WHERE session_id = ?');
-    const row = stmt.get(sessionId) as { max_rowid: number | bigint | null } | undefined;
-    return row && row.max_rowid ? Number(row.max_rowid) : 0;
   }
 
   /** 更新消息内容与 mentions；消息不存在时返回 undefined */
@@ -2565,7 +2207,7 @@ export class HubDatabase {
     summary: string;
     payloadArtifactId?: string;
     createdAt?: string;
-  }): AutomationEventRecord | undefined {
+  }): AutomationEventRecordLike | undefined {
     const now = input.createdAt ?? new Date().toISOString();
     const stmt = this.db.prepare(`
       INSERT INTO automation_events (${AUTOMATION_EVENT_COLUMNS})
@@ -2603,7 +2245,7 @@ export class HubDatabase {
     };
   }
 
-  getAutomationEvent(id: string): AutomationEventRecord | undefined {
+  getAutomationEvent(id: string): AutomationEventRecordLike | undefined {
     const stmt = this.db.prepare(`
       SELECT ${AUTOMATION_EVENT_COLUMNS}
       FROM automation_events
@@ -2638,7 +2280,7 @@ export class HubDatabase {
   }
 
   /** 会话关联事件列表（按 created_at 倒序，默认 100 条）：含该会话派生子会话的事件 */
-  listSessionAutomationEvents(sessionId: string, limit = 100): AutomationEventRecord[] {
+  listSessionAutomationEvents(sessionId: string, limit = 100): AutomationEventRecordLike[] {
     const capped = Math.max(1, Math.min(Math.floor(limit) || 100, 500));
     const stmt = this.db.prepare(`
       SELECT ${AUTOMATION_EVENT_COLUMNS}

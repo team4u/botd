@@ -38,11 +38,7 @@ export function registerNodeRoutes(app: HubApp, ctx: HubContext): void {
       if (c.req.query('force') !== '1') {
         return c.json({ error: `Node still hosts ${hostedBots.length} bot(s); delete them first or force=1` }, 409);
       }
-      // 强制移除（节点可能永久丢失）：清除 Hub 记录；节点恰好在线时尽力清理其本地目录
-      const rpc = connections.getNodeRpc(nodeId);
-      if (rpc) {
-        await Promise.allSettled(hostedBots.map((bot) => rpc.deleteBot(bot.id)));
-      }
+      // 强制移除（节点可能永久丢失）：直接清除 Hub 权威记录。
       db.deleteBotsForNode(nodeId);
     }
 

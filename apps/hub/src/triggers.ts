@@ -4,7 +4,7 @@ import type { Hono } from 'hono';
 import { isValidCronExpr, parseDelayDuration } from '@botd/protocol';
 import type { SessionRecord, TriggerEventFilter, TriggerKind, UserRecord } from '@botd/protocol';
 import type { HubDatabase } from './db.js';
-import type { GroupRouter } from './group-router.js';
+import type { GroupRouter } from './routes/context.js'; // 旧 GroupRouter 已删；最小兼容占位（并行重构中）
 import { TriggerService, type OwnedTrigger, type TriggerSchedulerHandle, type TriggerServiceOptions } from './trigger-service.js';
 import { resolveOwnedSession, type AuthContext } from './http-helpers.js';
 

@@ -1,6 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Context } from 'hono';
-import type { GroupRouter } from './group-router.js';
 import type { HubDatabase } from './db.js';
 import type { SseHub } from './sse.js';
 import type { HubDurableRuntime } from './harness/hub-harness.js';
@@ -40,7 +39,7 @@ export function verifyAskToken(sessionId: string, askId: string, token: string, 
 }
 
 export interface AskRespondDurableHooks {
-  /** 取 Durable 运行时（可能懒加载）；缺失时仅走 GroupRouter 路径。 */
+  /** 取 Durable 运行时（可能懒加载）；缺失时回调直接 404。 */
   getDurableRuntime?: () => Promise<HubDurableRuntime | undefined> | HubDurableRuntime | undefined;
   /** Durable 路径的会话广播（interaction_resolved 需要）。 */
   sseHub?: SseHub;
@@ -48,7 +47,6 @@ export interface AskRespondDurableHooks {
 
 /** 公开免登录的 botd ask 外部一键确认回调（GET 跳转页 + POST 表单/JSON 同构） */
 export function createAskRespondHandler(
-  router: GroupRouter,
   askSecret: string,
   hooks?: AskRespondDurableHooks,
 ) {
@@ -93,57 +91,40 @@ export function createAskRespondHandler(
     }
 
     // 选项非空时强制答案在选项内，防止伪造 token 后提交任意文本。
-    // GroupRouter 的 pending_asks 优先；未命中时查 Durable AskDoc（Super-agent 会话）。
-    const pendingAsk = router.getPendingAsks(sessionId).find((a) => a.id === askId);
-    if (!pendingAsk || pendingAsk.status !== 'pending') {
-      const rt = hooks?.getDurableRuntime ? await hooks.getDurableRuntime() : undefined;
-      if (rt !== undefined && hooks?.sseHub !== undefined) {
-        const durableAsk = (await getDurablePendingAsks(rt, sessionId)).find((a) => a.id === askId);
-        if (
-          durableAsk &&
-          durableAsk.status === 'pending' &&
-          durableAsk.options.length > 0 &&
-          !durableAsk.options.includes(trimmedAnswer)
-        ) {
-          if (wantsHtml) {
-            return c.html(renderErrorHtml('无效选项', '答案不在可选项列表中'), 400);
-          }
-          return c.json({ error: 'Answer must be one of the ask options' }, 400);
-        }
+    const rt = hooks?.getDurableRuntime ? await hooks.getDurableRuntime() : undefined;
+    if (rt === undefined || hooks?.sseHub === undefined) {
+      if (wantsHtml) {
+        return c.html(renderErrorHtml('请求失效', '该确认请求不存在、已超时或已被其他用户处理'), 404);
       }
-    } else if (pendingAsk.status === 'pending' && pendingAsk.options.length > 0
-      && !pendingAsk.options.includes(trimmedAnswer)) {
+      return c.json({ error: 'Ask not found or already answered' }, 404);
+    }
+    const durableAsk = (await getDurablePendingAsks(rt, sessionId)).find((a) => a.id === askId);
+    if (durableAsk === undefined) {
+      if (wantsHtml) {
+        return c.html(renderErrorHtml('请求失效', '该确认请求不存在、已超时或已被其他用户处理'), 404);
+      }
+      return c.json({ error: 'Ask not found or already answered' }, 404);
+    }
+    if (durableAsk.options.length > 0 && !durableAsk.options.includes(trimmedAnswer)) {
       if (wantsHtml) {
         return c.html(renderErrorHtml('无效选项', '答案不在可选项列表中'), 400);
       }
       return c.json({ error: 'Answer must be one of the ask options' }, 400);
     }
 
-    // 解析优先级：GroupRouter 路径先答；未命中且 Durable 运行时可用时，
-    // 到会话的 Router/Worker 会话 AskDoc 里找这条 pending ask 并回答。
-    const resolved = router.respondToAsk(sessionId, askId, trimmedAnswer);
-    if (resolved) {
+    // 到会话的 Router/Worker 会话 AskDoc 里落 answered，并把答案 steer 回提问的会话。
+    const durableResolved = await respondToDurableAsk({
+      rt,
+      sseHub: hooks.sseHub,
+      sessionId,
+      askId,
+      answer: trimmedAnswer,
+    });
+    if (durableResolved) {
       if (wantsHtml) {
         return c.html(renderResponseHtml(trimmedAnswer));
       }
-      return c.json({ ok: true, ask: resolved });
-    }
-
-    const rt = hooks?.getDurableRuntime ? await hooks.getDurableRuntime() : undefined;
-    if (rt !== undefined && hooks?.sseHub !== undefined) {
-      const durableResolved = await respondToDurableAsk({
-        rt,
-        sseHub: hooks.sseHub,
-        sessionId,
-        askId,
-        answer: trimmedAnswer,
-      });
-      if (durableResolved) {
-        if (wantsHtml) {
-          return c.html(renderResponseHtml(trimmedAnswer));
-        }
-        return c.json({ ok: true, ask: durableResolved });
-      }
+      return c.json({ ok: true, ask: durableResolved });
     }
 
     if (wantsHtml) {
