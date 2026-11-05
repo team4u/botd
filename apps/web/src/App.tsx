@@ -434,6 +434,9 @@ export const App: React.FC = () => {
             onSelectSession={(id) => navigate({ sessionId: id, view: 'chat', messageId: null })}
             onSetArchived={sessionActions.handleSetArchived}
             onCreateParallelTopic={sessionActions.handleCreateParallelTopic}
+            onSessionUpdated={(updated) =>
+              setSessions((prev) => prev.map((s) => (s.id === updated.id ? { ...s, ...updated } : s)))
+            }
             cancelling={chat.cancelling}
             pendingAsks={chat.pendingAsks}
             hasEarlierMessages={chat.hasEarlierMessages}
@@ -582,6 +585,7 @@ export const App: React.FC = () => {
         isOpen={openModal === 'create'}
         bots={allBots}
         nodeMap={nodeMap}
+        sessions={sessions}
         onClose={() => navigate({ modal: null })}
         onCreateSession={sessionActions.handleCreateSession}
       />
@@ -590,6 +594,23 @@ export const App: React.FC = () => {
         isOpen={openModal === 'settings'}
         nodes={nodes}
         onClose={() => navigate({ modal: null })}
+        onCredentialsChanged={async () => {
+          // 凭据登录/注销后刷新节点与分身列表（后端可能已联动清空 Bot 模型）
+          try {
+            const [fetchedNodes, fetchedSessions] = await Promise.all([
+              api.getNodes(),
+              api.getSessions(),
+            ]);
+            if (!isMountedRef.current) return;
+            setNodes(fetchedNodes);
+            setSessions((prev) => {
+              const byId = new Map(fetchedSessions.map((s) => [s.id, s] as const));
+              return prev.map((s) => byId.get(s.id) ?? s);
+            });
+          } catch {
+            // 刷新失败不影响设置弹窗内的操作反馈
+          }
+        }}
       />
 
       {currentUser?.role === 'admin' && (

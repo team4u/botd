@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { X, Bot, Loader2, FolderGit2 } from 'lucide-react';
 import type { BotConfig, CreateSessionInput } from '@botd/protocol';
 import { orderBotsAsTree } from '../utils/bots.js';
@@ -135,6 +135,8 @@ interface CreateSessionModalProps {
   nodeMap: Map<string, { name: string; status: 'online' | 'offline' }>;
   onClose: () => void;
   onCreateSession: (input: CreateSessionInput) => Promise<void>;
+  /** 已有会话列表：提取已绑定的 workspaceDir 作为快捷选择芯片 */
+  sessions?: Array<{ workspaceDir?: string }>;
 }
 
 export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
@@ -143,6 +145,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
   nodeMap,
   onClose,
   onCreateSession,
+  sessions,
 }) => {
   const [title, setTitle] = useState<string>('');
   const [leadBotId, setLeadBotId] = useState<string>('');
@@ -232,7 +235,23 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
     }
   };
 
-  /** 快选某个扫描到的项目 Space：填入目录；若标题仍是默认 Bot 名则智能改为项目名 */
+  /** 已用项目空间去重列表：从已有会话提取非空 workspaceDir（含尾部斜杠规范化） */
+  const usedWorkspaceDirs = useMemo((): Array<{ path: string; name: string; branch?: string; isGitRepo: boolean }> => {
+    const dirs = new Map<string, { path: string; name: string; isGitRepo: boolean }>(); // dir -> 展示名
+    for (const s of sessions || []) {
+      const raw = (s as { workspaceDir?: string }).workspaceDir;
+      const dir = typeof raw === 'string' ? raw.trim().replace(/\/+$/, '') : '';
+      if (dir) dirs.set(dir, { path: dir, name: dir.split('/').filter(Boolean).pop() || dir, isGitRepo: false });
+    }
+    for (const b of bots) {
+      const raw = (b as { workspaceDir?: string }).workspaceDir;
+      const dir = typeof raw === 'string' ? raw.trim().replace(/\/+$/, '') : '';
+      if (dir) dirs.set(dir, { path: dir, name: dir.split('/').filter(Boolean).pop() || dir, isGitRepo: false });
+    }
+    return [...dirs.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [sessions, bots]);
+
+  /** 快选某个项目 Space：填入目录；若标题仍是默认 Bot 名则智能改为项目名 */
   const handlePickSpace = (space: NodeSpaceEntry) => {
     setWorkspaceDir(space.path);
     const selectedBot = bots.find((b) => b.id === leadBotId);
@@ -341,9 +360,11 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
                   placeholder="绑定真实项目目录，如 /root/code/botd"
                   className="w-full h-8 px-2.5 text-xs bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg font-mono text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:bg-white dark:focus:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
-                {nodeSpaces.length > 0 && (
+                {(nodeSpaces.length > 0 || usedWorkspaceDirs.length > 0) && (
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
-                    {nodeSpaces.map((space) => {
+                    {[...nodeSpaces, ...usedWorkspaceDirs]
+                      .filter((space, idx, all) => all.findIndex((s) => s.path === space.path) === idx)
+                      .map((space) => {
                       const selected = workspaceDir.trim() === space.path;
                       return (
                         <button

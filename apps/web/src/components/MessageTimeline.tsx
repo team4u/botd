@@ -26,6 +26,24 @@ import {
 import { AssistantTurnContent } from './MessageItem';
 import type { StreamingAssistantState } from '../types';
 
+/** 等待首条输出时的思考占位：TypingDots + 实时读秒，缓解长等待焦虑 */
+const ThinkingPlaceholder: React.FC<{ botId: string }> = ({ botId }) => {
+  const [elapsedSec, setElapsedSec] = useState(0);
+  useEffect(() => {
+    setElapsedSec(0);
+    const timer = window.setInterval(() => setElapsedSec((s) => s + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [botId]);
+  return (
+    <div className="flex items-center gap-2 py-2">
+      <TypingDots />
+      <span className="text-xs text-zinc-400 dark:text-zinc-500">
+        正在思考如何回应… ({elapsedSec}s)
+      </span>
+    </div>
+  );
+};
+
 /**
  * 会话消息时间线（ChatView 主对话与 Worker 检视抽屉共用的唯一渲染器）。
  *
@@ -301,10 +319,7 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({
             content={state.delta}
           />
         ) : (
-          <div className="flex items-center gap-2 py-2">
-            <TypingDots />
-            <span className="text-xs text-zinc-400 dark:text-zinc-500">正在思考如何回应…</span>
-          </div>
+          <ThinkingPlaceholder botId={state.botId} />
         )}
       </div>
     );

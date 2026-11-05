@@ -267,19 +267,19 @@ export function buildSpaceGroups(
 /** 主分身通讯录条目：微信/Telegram 式置顶联系人卡片的数据源 */
 export interface AssistantEntry {
   bot: BotConfig;
-  /** 该分身当前的默认单聊会话（由 pickCurrentDirectSession 选出） */
+  /** 该分身当前的默认单聊会话（未绑定 Space 的最新主会话） */
   currentSession?: SessionRecord;
   /** 归属该分身且未绑定 Space 的未归档主会话列表（按活跃时间倒序） */
   directSessions: SessionRecord[];
-  /** 该分身关联的所有未归档主会话（含 Space 内会话，用于计算运行态） */
+  /** 该分身关联的所有未归档主会话（含 Space 内会话，用于计算未读/注意力） */
   allActiveSessions: SessionRecord[];
   /** 汇总最高注意力级别 */
   topAttention: SessionAttentionLevel;
   /** 汇总未读消息数 */
   unreadCount: number;
-  /** 最新消息预览 */
+  /** 最新消息预览（仅统计未绑定 Space 的纯个人助理单聊，绝不与项目空间重复） */
   lastMessagePreview?: string;
-  /** 最新活跃时间戳（ms） */
+  /** 最新活跃时间戳（ms，仅统计纯个人助理单聊） */
   lastActivityAt: number;
   /** 麾下子代理数量 */
   subagentCount: number;
@@ -288,8 +288,9 @@ export interface AssistantEntry {
 /**
  * 把每个主分身聚合为一条 AssistantEntry（纯函数）：
  * - directSessions 只收未归档、无 parentSessionId、未绑定 Space 的主会话；
- * - allActiveSessions 额外含 Space 内会话（运行态判断用）；
- * - 未读数与注意力级别为直连会话汇总（Space 内未读计入 unreadCount）。
+ * - currentSession / lastMessagePreview / lastActivityAt 严格来自 directSessions，
+ *   保证绑定了项目目录的会话 100% 只归属项目空间，绝不在助理列表重复预览；
+ * - 未读数与注意力级别为全部活跃会话汇总（含 Space 内未读，保证通知不遗漏）。
  */
 export function buildAssistantEntries(
   sessions: SessionRecord[],
@@ -307,7 +308,6 @@ export function buildAssistantEntries(
   }
 
   const entries: AssistantEntry[] = primaryBots.map((bot) => {
-    const currentSession = pickCurrentDirectSession(sessions, bot.id);
     const directSessions: SessionRecord[] = [];
     const allActiveSessions: SessionRecord[] = [];
     for (const s of sessions) {
@@ -318,24 +318,25 @@ export function buildAssistantEntries(
       if (!dir) directSessions.push(s);
     }
     directSessions.sort((a, b) => activityTimeOf(b) - activityTimeOf(a));
+    // 当前单聊与预览/活跃时间严格来自纯个人助理会话（directSessions 已按活跃时间倒序）
+    const currentSession = directSessions[0];
 
     let topAttention: SessionAttentionLevel = 'idle';
     let unreadCount = 0;
-    let lastPreview: string | undefined;
-    let lastActivityAt = new Date(bot.updatedAt).getTime() || 0;
-    let latestSession: SessionRecord | undefined;
     for (const s of allActiveSessions) {
       const unread = unreadCounts[s.id] ?? 0;
       unreadCount += unread;
       const level = getSessionAttention(s, unread);
       if (ATTENTION_PRIORITY[level] > ATTENTION_PRIORITY[topAttention]) topAttention = level;
-      const time = activityTimeOf(s);
-      if (time > lastActivityAt) {
-        lastActivityAt = time;
-        latestSession = s;
-      }
     }
-    if (latestSession?.lastMessagePreview) lastPreview = latestSession.lastMessagePreview;
+    const latestDirect = directSessions.reduce<SessionRecord | undefined>(
+      (acc, s) => (acc === undefined || activityTimeOf(s) > activityTimeOf(acc) ? s : acc),
+      undefined,
+    );
+    const lastActivityAt = Math.max(
+      new Date(bot.updatedAt).getTime() || 0,
+      latestDirect ? activityTimeOf(latestDirect) : 0,
+    );
 
     return {
       bot,
@@ -344,7 +345,7 @@ export function buildAssistantEntries(
       allActiveSessions,
       topAttention,
       unreadCount,
-      lastMessagePreview: lastPreview,
+      lastMessagePreview: latestDirect?.lastMessagePreview,
       lastActivityAt,
       subagentCount: subagentCountByParent.get(bot.id) ?? 0,
     };
@@ -956,6 +957,20 @@ const SearchHitsBlock: React.FC<{
 );
 
 const SIDEBAR_COLLAPSED_KEY = 'botd-sidebar-collapsed';
+const SIDEBAR_MODE_KEY = 'botd-sidebar-mode';
+
+/** 侧边栏场景模式：助理（纯通讯录）/ 编程（Spaces+雷达）/ 中枢（全局任务流） */
+export type SidebarMode = 'assistant' | 'coding' | 'pulse';
+
+const readSidebarMode = (): SidebarMode => {
+  try {
+    const stored = localStorage.getItem(SIDEBAR_MODE_KEY);
+    if (stored === 'assistant' || stored === 'coding' || stored === 'pulse') return stored;
+  } catch {
+    // localStorage 不可用时用默认值
+  }
+  return 'assistant';
+};
 
 export const Sidebar: React.FC<SidebarProps> = ({
   sessions,
@@ -1000,6 +1015,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
   };
   // 活跃雷达排序模式：priority（优先级）/ grouped（按容器分组）
   const [pulseSortMode, setPulseSortMode] = useState<'priority' | 'grouped'>('priority');
+  // 场景模式（持久化）：assistant 纯通讯录 / coding 编程工作台 / pulse 全局脉冲
+  const [sidebarMode, setSidebarMode] = useState<SidebarMode>(readSidebarMode);
+  const changeSidebarMode = (mode: SidebarMode) => {
+    setSidebarMode(mode);
+    try {
+      localStorage.setItem(SIDEBAR_MODE_KEY, mode);
+    } catch {
+      // localStorage 不可用时静默忽略
+    }
+  };
   // 批量管理（归档区）：multiSelectOn 后整行切换勾选，配合批量删除栏
   const [multiSelectOn, setMultiSelectOn] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -1507,6 +1532,34 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
 
+        {/* 场景正交切换器：三段式（助理 / 编程 / 中枢），持久化到 localStorage */}
+        <div className="px-3 pt-2.5 shrink-0">
+          <div className="flex items-center gap-0.5 p-0.5 bg-zinc-200/60 dark:bg-zinc-800/60 rounded-lg" role="tablist" aria-label="侧边栏场景模式">
+            {([
+              { mode: 'assistant', label: '助理', title: '个人助理通讯录：纯净日常对话，零工程噪音', icon: <MessageSquare className="w-3 h-3" /> },
+              { mode: 'coding', label: '编程', title: '编程工作台：项目空间 + 智能体实时状态', icon: <FolderGit2 className="w-3 h-3" /> },
+              { mode: 'pulse', label: '中枢', title: '全局脉冲：跨项目活跃任务流与归档管理', icon: <Zap className="w-3 h-3" /> },
+            ] as const).map(({ mode, label, title, icon }) => (
+              <button
+                key={mode}
+                type="button"
+                role="tab"
+                aria-selected={sidebarMode === mode}
+                title={title}
+                onClick={() => changeSidebarMode(mode)}
+                className={`flex-1 h-7 inline-flex items-center justify-center gap-1 text-[11px] font-medium rounded-md transition-all cursor-pointer ${
+                  sidebarMode === mode
+                    ? 'bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 shadow-xs'
+                    : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200'
+                }`}
+              >
+                {icon}
+                <span>{label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* 搜索：本地过滤 + 全局消息搜索（>= 2 字触发） */}
         <div className="px-3 pt-2.5 pb-2 shrink-0">
           <div className="relative">
@@ -1548,8 +1601,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
             />
           )}
 
-          {/* ===== 1. 活跃雷达（ACTIVE）：动态注意力脉冲，无活跃自动消失 ===== */}
-          {activePulseEntries.length > 0 && (
+          {/* ===== 1. 活跃雷达（ACTIVE）：编程模式下常驻下半区；中枢模式主体展示 ===== */}
+          {(sidebarMode === 'coding' || sidebarMode === 'pulse') && activePulseEntries.length > 0 && (
             <section className="mb-2 shrink-0">
               <div className="flex items-center gap-1.5 px-2 py-1.5">
                 <Zap className="w-3.5 h-3.5 text-amber-500 animate-pulse shrink-0" />
@@ -1582,8 +1635,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       {/* 第 1 行：状态灯 + 容器 · 会话标题 + 状态胶囊 + 未读 */}
                       <span className="flex items-center gap-1.5 min-w-0">
                         <AttentionDot level={entry.attention} />
-                        <span className="shrink-0 text-[10px] font-mono text-zinc-400 dark:text-zinc-500 truncate max-w-[80px]">
-                          {entry.containerLabel}
+                        <span
+                          className="shrink-0 text-[10px] text-zinc-400 dark:text-zinc-500 truncate max-w-[80px]"
+                          title={entry.leadBot ? `${entry.leadBot.name}${entry.spaceName ? ` · ${entry.spaceName}` : ''}` : entry.containerLabel}
+                        >
+                          {entry.spaceName || entry.leadBot?.name || '会话'}
                         </span>
                         <span className="truncate text-xs font-semibold text-zinc-800 dark:text-zinc-200 flex-1">
                           {sessionDisplayTitle(entry.session, botsById)}
@@ -1602,7 +1658,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </section>
           )}
 
-          {/* ===== 2. 项目空间（SPACES）：双锚点导航之一 ===== */}
+          {/* ===== 2. 项目空间（SPACES）：编程/中枢模式展示，助理模式隐藏 ===== */}
+          {(sidebarMode === 'coding' || sidebarMode === 'pulse') && (
           <section className="mb-2 shrink-0">
             <div className="flex items-center gap-1.5 px-2 py-1.5">
               <FolderGit2 className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 shrink-0" />
@@ -1725,8 +1782,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </div>
             )}
           </section>
+          )}{/* /项目空间（仅编程/中枢模式） */}
 
-          {/* ===== 3. 个人助理（ASSISTANTS）：双锚点导航之二，零会话平铺 ===== */}
+          {/* ===== 3. 个人助理（ASSISTANTS）：助理模式主体；编程模式隐藏纯闲聊 ===== */}
+          {sidebarMode !== 'coding' && (
           <section className="mb-2 shrink-0">
             <div className="flex items-center gap-1.5 px-2 py-1.5">
               <MessageSquare className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 shrink-0" />
@@ -1870,8 +1929,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </div>
             )}
           </section>
+          )}{/* /个人助理（助理/中枢模式） */}
 
-          {/* ===== 4. 安静折叠区：子代理任务 + 已归档 ===== */}
+          {/* ===== 4. 安静折叠区：子代理任务（全模式）+ 已归档（中枢模式管理） ===== */}
           {childSessions.length > 0 && (
             <QuietSection
               icon={<Bot className="w-3.5 h-3.5" />}
@@ -1937,16 +1997,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </QuietSection>
           )}
 
-          {/* 全空态 */}
+          {/* 全空态：按当前模式给出对应引导 */}
           {!query &&
-            spaceGroups.length === 0 &&
-            assistantEntries.length === 0 &&
+            (sidebarMode !== 'coding' || spaceGroups.length === 0) &&
+            (sidebarMode === 'coding' || assistantEntries.length === 0) &&
             childSessions.length === 0 &&
             archivedSessions.length === 0 && (
               <div className="py-8 px-4 text-center">
                 <MessageSquare className="w-8 h-8 text-zinc-300 dark:text-zinc-600 mx-auto mb-2" />
                 <p className="text-xs text-zinc-400 dark:text-zinc-500">
-                  暂无会话，点击上方分身即可开始
+                  {sidebarMode === 'coding'
+                    ? '暂无项目空间，新建会话时绑定项目目录即可归入此处'
+                    : '暂无会话，点击上方分身即可开始'}
                 </p>
               </div>
             )}

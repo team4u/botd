@@ -14,6 +14,7 @@ import { requireAdmin, resolveOwnedSession } from '../http-helpers.js';
 import type { MessageAttachment, PendingAskRecord, ToolCallRecord, TurnBlock, TurnUsage } from '@botd/protocol';
 import { stringToConversationId, type HubDurableRuntime } from '../harness/hub-harness.js';
 import { AskDoc, type AskEntry } from '../harness/docs.js';
+import { LiveDoc } from '@earendil-works/pi-durable';
 import { RecallIndexDoc, TargetDoc, WorkerRegistryDoc, type WorkerEntry } from '../harness/docs.js';
 import { redactSecretAskAnswer } from '../harness/secret-stash.js';
 import {
@@ -1040,7 +1041,24 @@ export function createDurableSessionMirror(
   const backfillToolResult = makeToolResultBackfiller(db);
   /** 已广播过 interaction_request 的 askId（按会话去重，重启后由 GET /asks 兜底）。 */
   const broadcastAskIds = new Map<string, Set<string>>();
+  /** 已广播过失败系统消息的 runFailure 标识（按会话去重，防止重放重复报错）。 */
+  const broadcastFailureKeys = new Map<string, Set<string>>();
+  /** 已广播过的流式内容长度（按会话+块类型），只广播新增增量，避免重发全量尾部 */
+  const streamedLengths = new Map<string, { thinking: number; text: number }>();
   let closed = false;
+
+  /** 回合结束联动：置 idle 并广播（与提交时的 running 广播配对）。 */
+  const markIdle = (sessionId: string): void => {
+    if (closed) return;
+    db.updateSessionStatus(sessionId, 'idle');
+    sseHub.broadcast(sessionId, {
+      type: 'session_status',
+      sessionId,
+      status: 'idle',
+      activeBotId: undefined,
+      activeBotIds: [],
+    });
+  };
 
   const mirror = (sessionId: string, botId: string, entry: { id: unknown; kind: string; model?: readonly unknown[] }): void => {
     if (closed) return;
@@ -1101,6 +1119,8 @@ export function createDurableSessionMirror(
       return; // 主键冲突：重启重放，该条已落库
     }
     sseHub.broadcast(sessionId, { type: 'message_created', message: message.message });
+    // 回合落定：联动置 idle 并广播（含文本的最终 assistant 回复即回合结束信号）
+    if (text !== undefined) markIdle(sessionId);
   };
 
   /** 新 pending ask 广播：同一 askId 只广播一次 interaction_request。 */
@@ -1142,6 +1162,96 @@ export function createDurableSessionMirror(
     }
   };
 
+  /**
+   * LiveDoc 监控：检测模型失败（runFailure）并广播流式生成（generation.message）。
+   * - runFailure：写入系统错误消息 + 广播 failed（同一失败标识只广播一次）；
+   * - generation：把正在生成的 thinking/text 增量广播为 thinking_stream / text_delta。
+   */
+  const monitorLiveDoc = async (sessionId: string, botId: string, conversationId: string): Promise<void> => {
+    const rt = ctx.durableRuntime;
+    if (rt === undefined || closed) return;
+    const numeric = Number(conversationId);
+    if (!Number.isInteger(numeric)) return;
+    try {
+      const live = await rt.harness.snapshot(
+        LiveDoc,
+        numeric as import('@earendil-works/pi-durable').ConversationId,
+        BACKGROUND_CONTEXT,
+      );
+      if (!live) return;
+      // 1) 失败检测：去重后写入系统错误消息并广播 failed
+      const failure = (live as { runFailure?: { reason?: string; detail?: string } }).runFailure;
+      if (failure) {
+        const reason = failure.reason || 'unknown';
+        const detail = failure.detail || '';
+        const failureKey = `${reason}:${detail}`;
+        const seen = broadcastFailureKeys.get(sessionId) ?? new Set<string>();
+        if (!seen.has(failureKey)) {
+          seen.add(failureKey);
+          broadcastFailureKeys.set(sessionId, seen);
+          const description = detail ? `${reason}: ${String(detail).slice(0, 300)}` : reason;
+          const errorMsg = db.createMessage({
+            id: `msg_durfail_${sessionId}_${Date.now()}`,
+            sessionId,
+            role: 'system',
+            content: `⚠️ 模型执行异常（${description}）：请检查模型服务商凭据、配额或网络连接后重试。`,
+          });
+          sseHub.broadcast(sessionId, { type: 'message_created', message: errorMsg.message });
+          sseHub.broadcast(sessionId, { type: 'session_status', sessionId, status: 'failed' });
+          db.updateSessionStatus(sessionId, 'failed');
+        }
+      }
+      // 2) 流式生成：把正在生成的 thinking/text 新增增量广播给前端（只发新增部分，避免重复）
+      const activeBotId = lastActiveBotBySession.get(sessionId) ?? botId;
+      const message = (live as { generation?: { message?: { content?: unknown } } }).generation?.message;
+      if (message && Array.isArray(message.content)) {
+        let thinkingTotal = 0;
+        let textTotal = 0;
+        for (const block of message.content as Array<Record<string, unknown>>) {
+          if (!block || typeof block !== 'object') continue;
+          if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking) {
+            thinkingTotal += block.thinking.length;
+          } else if (block.type === 'text' && typeof block.text === 'string' && block.text) {
+            textTotal += block.text.length;
+          }
+        }
+        const prev = streamedLengths.get(sessionId) ?? { thinking: 0, text: 0 };
+        const next = { thinking: Math.max(prev.thinking, thinkingTotal), text: Math.max(prev.text, textTotal) };
+        // 回合重置（长度回退）时不回放，只向前推进
+        if (thinkingTotal >= prev.thinking && textTotal >= prev.text) {
+          for (const block of message.content as Array<Record<string, unknown>>) {
+            if (!block || typeof block !== 'object') continue;
+            if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking) {
+              if (block.thinking.length > prev.thinking) {
+                sseHub.broadcast(sessionId, {
+                  type: 'thinking_stream',
+                  sessionId,
+                  botId: activeBotId,
+                  delta: block.thinking.slice(prev.thinking),
+                  status: 'running',
+                });
+              }
+            } else if (block.type === 'text' && typeof block.text === 'string' && block.text) {
+              if (block.text.length > prev.text) {
+                sseHub.broadcast(sessionId, {
+                  type: 'text_delta',
+                  sessionId,
+                  botId: activeBotId,
+                  delta: block.text.slice(prev.text),
+                });
+              }
+            }
+          }
+          streamedLengths.set(sessionId, next);
+        } else {
+          streamedLengths.set(sessionId, next);
+        }
+      }
+    } catch {
+      // 快照失败：静默跳过，下一次 watch 回调重试
+    }
+  };
+
   const attach = async (sessionId: string, conversationId: string): Promise<void> => {
     if (closed || watches.has(conversationId)) return;
     const botId = db.getSession(sessionId)?.leadBotId;
@@ -1163,6 +1273,7 @@ export function createDurableSessionMirror(
           mirror(sessionId, botId, entry);
         }
         void broadcastNewAsks(sessionId, botId, conversationId);
+        void monitorLiveDoc(sessionId, botId, conversationId);
       });
       if (closed) {
         watches.delete(conversationId);
@@ -1253,6 +1364,24 @@ function extractImageAttachments(
 const lastActiveBotBySession = new Map<string, string>();
 
 /**
+ * Durable 回合结束回调：置 idle 并广播。镜像器在 assistant 消息落库/回合结束时调用，
+ * 与 submitSessionMessageToDurable 开头的 running 广播配对，保证会话状态不会永久卡在 running。
+ */
+function markDurableSessionIdle(
+  ctx: Pick<HubContext, 'db' | 'sseHub'>,
+  sessionId: string,
+): void {
+  ctx.db.updateSessionStatus(sessionId, 'idle');
+  ctx.sseHub.broadcast(sessionId, {
+    type: 'session_status',
+    sessionId,
+    status: 'idle',
+    activeBotId: undefined,
+    activeBotIds: [],
+  });
+}
+
+/**
  * 附件上下文块：把磁盘产物清单（文件名 / 类型 / 大小 / 绝对路径）拼进用户消息，
  * 让模型知道用户附了什么文件、能从哪里读到它（read / CLI 工具均可消费该路径）。
  */
@@ -1300,6 +1429,16 @@ export async function submitSessionMessageToDurable(
   const rt = ctx.getDurableRuntime ? await ctx.getDurableRuntime() : ctx.durableRuntime;
   if (rt === undefined) return undefined;
   lastActiveBotBySession.set(sessionId, botId);
+  // 立即置为 running 并广播：前端在首条流式事件前就能亮起「正在思考」占位态，
+  // 杜绝发送后长时间石沉大海的焦虑。
+  ctx.db.updateSessionStatus(sessionId, 'running', botId);
+  ctx.sseHub.broadcast(sessionId, {
+    type: 'session_status',
+    sessionId,
+    status: 'running',
+    activeBotId: botId,
+    activeBotIds: [botId],
+  });
   const routerId = await ensureRouterConversationId(rt, sessionId, botId, {
     workspaceDir: ctx.db.getSession(sessionId)?.workspaceDir,
   });
@@ -1310,6 +1449,7 @@ export async function submitSessionMessageToDurable(
   if (compactMatch) {
     const instructions = compactMatch[1]?.trim() || undefined;
     await rt.compactConversation(stringToConversationId(routerId), instructions, BACKGROUND_CONTEXT);
+    markDurableSessionIdle(ctx, sessionId);
     return routerId;
   }
 
@@ -1317,6 +1457,7 @@ export async function submitSessionMessageToDurable(
   if (newMatch) {
     const handoff = newMatch[1]?.trim() || undefined;
     await rt.resetConversation(stringToConversationId(routerId), handoff, BACKGROUND_CONTEXT);
+    markDurableSessionIdle(ctx, sessionId);
     return routerId;
   }
 

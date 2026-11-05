@@ -116,6 +116,8 @@ interface ChatViewProps {
     workspaceDir?: string;
     title?: string;
   }) => Promise<void> | void;
+  /** 会话被服务端更新（如绑定/解绑项目目录）后回调，供父层同步全局列表 */
+  onSessionUpdated?: (updated: SessionRecord) => void;
 }
 
 export const ChatView: React.FC<ChatViewProps> = ({
@@ -154,6 +156,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onSelectSession,
   onSetArchived,
   onCreateParallelTopic,
+  onSessionUpdated,
 }) => {
   const keyboardInset = useKeyboardInset();
 
@@ -541,7 +544,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
     if (spaceBusy) return;
     setSpaceBusy(true);
     try {
-      await api.updateSession(session.id, { workspaceDir: dir } as never);
+      const updated = await api.updateSession(session.id, { workspaceDir: dir } as never);
+      onSessionUpdated?.(updated);
       onAddToast?.('success', dir ? `已绑定项目目录 ${dir}` : '已解绑项目目录');
       setSpaceMenuOpen(false);
     } catch (err: unknown) {
@@ -556,6 +560,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const currentSpaceName = sessionWorkspaceDir
     ? sessionWorkspaceDir.split('/').filter(Boolean).pop() || sessionWorkspaceDir
     : '';
+
+  // 已用项目空间去重列表：从全部会话与分身中提取非空 workspaceDir，供绑定浮层快选
+  const usedWorkspaceDirs = useMemo(() => {
+    const dirs = new Set<string>();
+    const add = (raw: unknown) => {
+      if (typeof raw !== 'string') return;
+      const dir = raw.trim().replace(/\/+$/, '');
+      if (dir) dirs.add(dir);
+    };
+    for (const s of sessionListProp || []) add((s as { workspaceDir?: string }).workspaceDir);
+    for (const b of botMap.values()) add((b as { workspaceDir?: string }).workspaceDir);
+    return [...dirs].sort((a, b) => a.localeCompare(b));
+  }, [sessionListProp, botMap]);
+
+  // 纯个人助理单聊：未绑定任何项目目录。此场景收敛工程噪音（后台任务角标、
+  // 并行话题标签页等工程入口），让普通用户拥有零心智负担的纯净对话界面。
+  const isPureAssistantChat = !sessionWorkspaceDir.trim();
 
   // ===== 顶栏 Context Tab Bar（Herdr 风格水平多标签工作台）=====
   // 当前会话所属容器（Space 或个人助理）与平级未归档主会话 Tabs；
@@ -863,8 +884,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
             <MessageSquarePlus className="w-4 h-4" />
           </button>
 
-          {/* 后台子任务：有任务才占位（桌面端零任务也完全隐藏），徽章展示活跃/失败/总数 */}
-          {superAgent.workers.length > 0 && (
+          {/* 后台子任务：有任务才占位（桌面端零任务也完全隐藏）；纯助理单聊收敛工程入口 */}
+          {!isPureAssistantChat && superAgent.workers.length > 0 && (
             <button
               onClick={openWorkersFromBadge}
               className="relative w-9 h-9 inline-flex items-center justify-center rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
@@ -975,7 +996,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <span className="whitespace-nowrap">派发后台任务 / 巡检</span>
                 </button>
 
-                {onCreateParallelTopic && (
+                {onCreateParallelTopic && !isPureAssistantChat && (
                   <button
                     role="menuitem"
                     onClick={() => {
@@ -1232,6 +1253,31 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 aria-label="项目工作目录"
                 className="w-full px-2 py-1.5 text-xs font-mono bg-white dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-700 rounded-lg text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-blue-500 dark:focus:border-blue-400"
               />
+              {/* 已有项目空间快选芯片：点击直接填入，免去手打长路径 */}
+              {usedWorkspaceDirs.length > 0 && (
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {usedWorkspaceDirs.map((dir) => {
+                    const name = dir.split('/').filter(Boolean).pop() || dir;
+                    const selected = spaceInput.trim().replace(/\/+$/, '') === dir;
+                    return (
+                      <button
+                        key={dir}
+                        type="button"
+                        onClick={() => setSpaceInput(dir)}
+                        title={dir}
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-full border transition-colors cursor-pointer ${
+                          selected
+                            ? 'bg-blue-50 dark:bg-blue-950/60 border-blue-300 dark:border-blue-800 text-blue-700 dark:text-blue-300'
+                            : 'bg-zinc-50 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                        }`}
+                      >
+                        <FolderGit2 className="w-3 h-3" />
+                        <span>{name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
               <div className="flex items-center justify-end gap-1.5 mt-2">
                 <button
                   type="button"

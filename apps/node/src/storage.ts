@@ -653,8 +653,9 @@ This node executes tasks using local CLI tools.
       nodeId,
       name: '默认助手',
       description: 'Default personal assistant for this node',
-      modelProvider: 'anthropic',
-      modelId: 'claude-sonnet-4-5',
+      // 不预填任何模型：等用户在已配置凭据的服务商中选型，避免「未配置却在用」的假象
+      modelProvider: '',
+      modelId: '',
       thinkingLevel: 'medium',
       enabledSkills: ['cli-helper'],
       enabledExtensions: [],
